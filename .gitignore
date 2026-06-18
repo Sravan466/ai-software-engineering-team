@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data / local stores
+backend/data/
+data/
+*.db
+*.sqlite3
+chroma/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-error.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Claude Code local config (machine-specific permissions, absolute paths)
+.claude/
+
+# Personal/global Claude skill library (not part of this project)
+claude/

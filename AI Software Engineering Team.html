@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<!--
+  AI Software Engineering Team — Direction A · Blueprint
+  Self-contained, runnable build of the Claude Design export.
+  Source preserved at: design/claude-design-export/
+    · pipeline-engine.jsx  → shared 8-phase state machine + model router
+    · fd-blueprint.jsx     → the Blueprint board (this screen)
+    · fd-styles.css        → token system + .bp-* styles (inlined below)
+  Runs by double-click: React 18 + Babel-standalone from CDN, everything else inlined.
+-->
+<html lang="en" data-theme="dark" data-palette="rgb" data-font="brut" data-density="comfy" data-grain="on" data-scan="on" data-cursor="off">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI Software Engineering Team — Blueprint</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=Space+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+/* ===========================================================================
+   fd-styles.css — token system + Direction A (Blueprint) — inlined verbatim
+   Driven by data-attrs on <html>: data-theme, data-palette, data-font,
+   data-density, data-grain, data-scan, data-cursor
+   =========================================================================== */
+:root{
+  /* ground — dark default */
+  --bg:#08080c; --bg-2:#0e0e16; --bg-3:#16161f;
+  --ink:#f3eee0; --ink-2:#b4afa0; --ink-3:#807b6c; --ink-4:#544f40;
+  --line:rgba(243,238,224,.09); --line-2:rgba(243,238,224,.17); --line-3:rgba(243,238,224,.34);
+  /* accents */
+  --a1:#FF2E4D; --a2:#1FE07A; --a3:#3D6BFF; --accent:var(--a1);
+  /* type */
+  --sans:'Bricolage Grotesque',system-ui,sans-serif;
+  --serif:'Instrument Serif',Georgia,serif;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  /* metrics */
+  --pad:28px; --fs:15px; --radius:16px;
+}
+html[data-theme="light"]{
+  --bg:#f4f1e7; --bg-2:#ece8da; --bg-3:#ded9c8;
+  --ink:#14130d; --ink-2:#45423a; --ink-3:#6f6c5f; --ink-4:#a39f8f;
+  --line:rgba(20,19,13,.11); --line-2:rgba(20,19,13,.20); --line-3:rgba(20,19,13,.36);
+}
+html[data-palette="cmyk"]{ --a1:#E5077D; --a2:#0094A8; --a3:#D99000; }
+html[data-palette="mono"]{ --a1:var(--ink); --a2:var(--ink-2); --a3:var(--ink-3); }
+html[data-font="editorial"]{ --sans:'Archivo',sans-serif; --serif:'Newsreader',serif; --mono:'IBM Plex Mono',monospace; }
+html[data-font="mech"]{ --sans:'Space Grotesk',sans-serif; --serif:'Spectral',serif; --mono:'Spline Sans Mono',monospace; }
+html[data-density="compact"]{ --pad:18px; --fs:14px; }
+html[data-density="comfy"]{ --pad:38px; --fs:16px; }
+
+/* ---------- direction shell ---------- */
+.dir{
+  position:relative; width:100%; height:100%;
+  background:var(--bg); color:var(--ink);
+  font-family:var(--sans); font-size:var(--fs); line-height:1.5;
+  overflow:hidden; -webkit-font-smoothing:antialiased;
+  --tr:.28s cubic-bezier(.2,.8,.2,1);
+}
+.dir *{ box-sizing:border-box; }
+.dir button{ font-family:inherit; cursor:pointer; }
+html[data-cursor="on"] .fx-skin, html[data-cursor="on"] .fx-skin *{ cursor:crosshair; }
+
+/* effects overlays, scoped per artboard */
+.fx-skin::after, .fx-skin::before{ content:none; }
+html[data-grain="on"] .fx-skin::after{
+  content:''; position:absolute; inset:0; z-index:90; pointer-events:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 220 220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  opacity:.06; mix-blend-mode:overlay;
+}
+html[data-scan="on"] .fx-skin::before{
+  content:''; position:absolute; inset:0; z-index:91; pointer-events:none;
+  background:repeating-linear-gradient(to bottom,transparent 0 3px,rgba(0,0,0,.10) 3px 4px);
+  opacity:.5; mix-blend-mode:multiply;
+}
+html[data-theme="light"][data-scan="on"] .fx-skin::before{ opacity:.22; }
+
+.mono-k{ font-family:var(--mono); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); }
+
+/* ===========================================================================
+   DIRECTION A — BLUEPRINT
+   =========================================================================== */
+.dir-blueprint{ padding:0; }
+.bp-grid{ display:grid; grid-template-columns:1.04fr .96fr; height:100%; }
+.bp-left{ padding:var(--pad) calc(var(--pad) + 6px); display:flex; flex-direction:column; border-right:1px solid var(--line); }
+.bp-right{ padding:var(--pad); display:flex; flex-direction:column; min-height:0; background:
+   linear-gradient(180deg, color-mix(in oklab,var(--bg-2) 70%,transparent), transparent 40%); }
+
+.bp-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:auto; }
+.bp-wm{ display:flex; align-items:center; gap:10px; }
+.bp-wm-mark{ width:14px; height:14px; background:var(--accent); border-radius:3px;
+   box-shadow:3px 0 0 -1px var(--a3), -3px 0 0 -1px var(--a2); }
+.bp-wm-text{ font-weight:800; letter-spacing:-.02em; font-size:15px; font-variation-settings:"wdth" 75; }
+.bp-wm-thin{ color:var(--ink-3); font-weight:500; margin-left:4px; }
+.bp-head-meta{ display:flex; align-items:center; gap:10px; }
+.bp-head-dot{ width:7px; height:7px; border-radius:99px; background:var(--ink-4); transition:var(--tr); }
+.bp-head-dot[data-on="true"]{ background:var(--a2); box-shadow:0 0 10px var(--a2); animation:bpPulse 1.4s infinite; }
+@keyframes bpPulse{ 50%{ opacity:.35; } }
+
+.bp-hero{ margin:30px 0 26px; }
+.bp-h1{ font-size:clamp(34px,4vw,52px); line-height:.98; letter-spacing:-.035em; font-weight:700; margin:0; }
+.bp-h1-em{ font-family:var(--serif); font-style:italic; font-weight:400; color:var(--accent); letter-spacing:-.01em; }
+.bp-sub{ margin:18px 0 0; max-width:46ch; color:var(--ink-2); font-size:14.5px; line-height:1.55; text-wrap:pretty; }
+
+.bp-prompt{ margin-top:auto; }
+.bp-prompt-head{ display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+.bp-prompt-rule{ flex:1; height:1px; background:var(--line); }
+.bp-shuffle{ font-family:var(--mono); font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); background:none; border:none; }
+.bp-shuffle:hover:not(:disabled){ color:var(--a2); }
+.bp-shuffle:disabled{ opacity:.3; }
+.bp-prompt-field{ display:flex; gap:12px; align-items:flex-start; padding:16px 18px; background:var(--bg-2);
+   border:1px solid var(--line-2); border-radius:12px; }
+.bp-caret{ font-family:var(--mono); color:var(--accent); font-size:20px; line-height:1.2; }
+.bp-prompt-field textarea{ flex:1; background:none; border:none; outline:none; resize:none;
+   font-family:var(--serif); font-size:22px; line-height:1.25; color:var(--ink); }
+
+.bp-controls{ display:flex; align-items:center; gap:14px; margin-top:16px; flex-wrap:wrap; }
+.bp-seg{ display:flex; align-items:center; gap:4px; padding:4px; background:var(--bg-2); border:1px solid var(--line); border-radius:999px; }
+.bp-seg-k{ font-family:var(--mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-4); padding:0 8px 0 6px; }
+.bp-seg-btn{ font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase; padding:6px 12px;
+   border:none; background:none; color:var(--ink-3); border-radius:999px; transition:var(--tr); }
+.bp-seg-btn.on{ background:var(--ink); color:var(--bg); }
+.bp-seg-btn:disabled{ opacity:.5; }
+.bp-approve-toggle{ display:inline-flex; align-items:center; gap:9px; font-family:var(--mono); font-size:11px;
+   letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); background:none; border:none; }
+.bp-toggle-box{ width:16px; height:16px; border:1px solid var(--line-3); border-radius:5px; display:inline-block; transition:var(--tr); }
+.bp-approve-toggle.on{ color:var(--ink); }
+.bp-approve-toggle.on .bp-toggle-box{ background:var(--accent); border-color:var(--accent);
+   box-shadow:inset 0 0 0 3px var(--bg); }
+
+.bp-cta{ display:flex; align-items:center; gap:22px; margin-top:22px; flex-wrap:wrap; }
+.bp-run{ display:inline-flex; align-items:center; gap:12px; padding:16px 26px; font-weight:700; font-size:16px;
+   letter-spacing:-.01em; color:var(--bg); background:var(--ink); border:none; border-radius:999px; transition:var(--tr); }
+.bp-run:hover{ background:var(--accent); color:#fff; transform:translateY(-1px); }
+.bp-run-arrow{ transition:var(--tr); }
+.bp-run:hover .bp-run-arrow{ transform:translateX(4px); }
+.bp-run-reset{ background:transparent; color:var(--ink-2); border:1px solid var(--line-2); }
+.bp-run-reset:hover{ background:transparent; color:var(--accent); border-color:var(--accent); }
+.bp-meter{ display:flex; gap:18px; }
+.bp-meter-row{ display:flex; flex-direction:column; gap:2px; }
+.bp-meter-v{ font-family:var(--mono); font-size:15px; color:var(--ink); letter-spacing:.02em; }
+.bp-meter-row .mono-k, .bp-meter-row span:first-child{ }
+
+/* pipeline */
+.bp-right-head{ display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+.bp-pipe{ position:relative; flex:1; min-height:0; overflow-y:auto; padding-right:6px; }
+.bp-pipe::-webkit-scrollbar{ width:5px; } .bp-pipe::-webkit-scrollbar-thumb{ background:var(--line-2); border-radius:9px; }
+.bp-pipe::before{ content:''; position:absolute; left:5.5px; top:6px; bottom:26px; width:1px; background:var(--line-2); }
+.bp-node{ display:grid; grid-template-columns:24px 1fr; padding:8px 0; }
+.bp-node-spine{ position:relative; }
+.bp-node-dot{ position:absolute; left:0; top:5px; width:12px; height:12px; border-radius:99px;
+   background:var(--bg); border:1px solid var(--line-3); transition:var(--tr); }
+.bp-node-body{ min-width:0; }
+.bp-node-top{ display:flex; align-items:center; gap:10px; }
+.bp-node-n{ font-family:var(--mono); font-size:11px; color:var(--ink-4); }
+.bp-node-name{ font-weight:600; font-size:14px; letter-spacing:-.01em; }
+.bp-node-role{ font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); }
+.bp-node-badge{ font-family:var(--mono); font-size:8.5px; letter-spacing:.12em; text-transform:uppercase; color:var(--a3);
+   border:1px solid var(--a3); border-radius:99px; padding:1px 7px; }
+.bp-node-status{ margin-left:auto; font-family:var(--mono); font-size:10px; letter-spacing:.08em; color:var(--ink-3); }
+.bp-node-prog{ height:2px; margin-top:9px; background:var(--line); border-radius:2px; overflow:hidden; }
+.bp-node-prog span{ display:block; height:100%; width:40%; background:linear-gradient(90deg,var(--a1),var(--a2),var(--a3));
+   animation:bpScan 1.1s ease-in-out infinite; }
+@keyframes bpScan{ 0%{ transform:translateX(-100%);} 100%{ transform:translateX(350%);} }
+.bp-node-out{ margin-top:7px; display:flex; flex-direction:column; gap:3px; animation:bpReveal .4s ease both; }
+.bp-node-deliver{ font-family:var(--mono); font-size:10.5px; color:var(--a2); letter-spacing:.04em; }
+.bp-node-outtext{ font-size:12.5px; color:var(--ink-2); line-height:1.4; }
+@keyframes bpReveal{ from{ opacity:0; transform:translateY(-3px);} to{ opacity:1; } }
+
+.bp-active .bp-node-dot{ border-color:var(--accent); background:var(--accent); box-shadow:0 0 0 4px color-mix(in oklab,var(--accent) 22%,transparent); animation:bpPulse 1s infinite; }
+.bp-active .bp-node-name, .bp-redo .bp-node-name{ color:var(--accent); }
+.bp-redo .bp-node-dot{ border-color:var(--a3); background:var(--a3); }
+.bp-done .bp-node-dot{ border-color:var(--a2); background:var(--a2); }
+.bp-gate .bp-node-dot{ border-color:var(--accent); background:var(--bg); box-shadow:0 0 0 4px color-mix(in oklab,var(--accent) 22%,transparent); }
+.bp-pending .bp-node-name{ color:var(--ink-3); }
+
+.bp-gate{ margin-top:10px; padding:14px; border:1px solid var(--accent); border-radius:10px;
+   background:color-mix(in oklab,var(--accent) 8%,var(--bg)); animation:bpReveal .35s ease both; }
+.bp-debate{ display:flex; flex-direction:column; gap:2px; padding-bottom:9px; margin-bottom:9px; border-bottom:1px dashed var(--line-2); }
+.bp-debate-k{ font-family:var(--mono); font-size:9.5px; letter-spacing:.12em; text-transform:uppercase; color:var(--a3); }
+.bp-debate-v{ font-size:12.5px; color:var(--ink); }
+.bp-gate-text{ font-size:13px; color:var(--ink); line-height:1.45; }
+.bp-gate-actions{ display:flex; gap:8px; margin-top:12px; }
+.bp-btn{ font-family:var(--mono); font-size:11px; letter-spacing:.08em; padding:9px 14px; border-radius:7px; border:1px solid var(--line-2); background:none; color:var(--ink-2); transition:var(--tr); }
+.bp-btn-ok{ background:var(--ink); color:var(--bg); border-color:var(--ink); }
+.bp-btn-ok:hover{ background:var(--a2); border-color:var(--a2); color:#04140b; }
+.bp-btn-no:hover{ border-color:var(--a1); color:var(--a1); }
+.bp-end{ display:flex; align-items:center; gap:12px; padding:10px 0 0 0; position:relative; font-family:var(--mono);
+   font-size:11px; letter-spacing:.06em; color:var(--ink-4); }
+.bp-end .bp-node-dot{ position:relative; top:0; left:0; }
+.bp-end.on{ color:var(--ink); } .bp-end.on .bp-node-dot{ background:var(--a2); border-color:var(--a2); }
+
+/* ---------- page shell (makes the Blueprint board fill the viewport) ---------- */
+html,body{ margin:0; padding:0; height:100%; }
+body{ background:var(--bg,#08080c); }
+#app{ position:fixed; inset:0; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<!-- ===== pipeline-engine.jsx — shared product model + run state machine (verbatim) ===== -->
+<script type="text/babel">
+const PHASES = [
+  { key:'pm',       n:'01', name:'Product Manager',  role:'Scope & PRD',
+    out:'PRD drafted — 6 user stories, 3 core flows, MVP cut line drawn.',
+    deliver:'product-spec.md', tok:1840, heavy:false },
+  { key:'design',   n:'02', name:'System Design',    role:'Architecture',
+    out:'Service split + data model — Postgres, 11 REST endpoints, auth boundary.',
+    deliver:'architecture.md', tok:2210, heavy:true },
+  { key:'backend',  n:'03', name:'Backend Engineer', role:'APIs & data', debate:true,
+    out:'FastAPI services — SQLAlchemy models, streak + reminder logic, JWT auth.',
+    deliver:'backend/', tok:3120, heavy:true },
+  { key:'frontend', n:'04', name:'Frontend Engineer',role:'Interface',
+    out:'Next.js client — 9 routes, streak ring, reminder scheduler, settings.',
+    deliver:'frontend/', tok:2680, heavy:false },
+  { key:'qa',       n:'05', name:'QA Engineer',      role:'Tests',
+    out:'42 unit + 8 e2e — 87% coverage, 2 edge cases flagged for review.',
+    deliver:'tests/', tok:1560, heavy:false },
+  { key:'sec',      n:'06', name:'Security Engineer',role:'Threat model',
+    out:'STRIDE pass — rate limiting + token rotation, 1 medium finding patched.',
+    deliver:'security-review.md', tok:1980, heavy:true },
+  { key:'devops',   n:'07', name:'DevOps Engineer',  role:'CI / CD',
+    out:'Dockerfile + GH Actions + compose — health checks and rollback wired.',
+    deliver:'.github/ + Dockerfile', tok:1340, heavy:false },
+  { key:'cost',     n:'08', name:'Cost Estimation',  role:'Budget',
+    out:'Run cost $0.041 — projected infra $18/mo, 86% of tokens ran local.',
+    deliver:'cost-report.md', tok:720, heavy:false },
+];
+
+const DEBATE = {
+  topic:'Database & persistence',
+  parties:[
+    { who:'System Design', stance:'Postgres — relational integrity for streak history.' },
+    { who:'Backend',       stance:'SQLite for MVP — zero ops, ship faster.' },
+    { who:'Security',      stance:'Whatever it is, encryption at rest is non-negotiable.' },
+  ],
+  verdict:'Postgres + pgcrypto. SQLite revisit deferred to post-MVP.',
+};
+
+const EXAMPLES = [
+  'A habit-tracking app with streaks and smart reminders',
+  'A self-hosted read-it-later service with full-text search',
+  'A Slack bot that summarizes channel threads on demand',
+  'An invoicing tool for freelancers with Stripe payouts',
+];
+
+function fmtCost(n){ return n === 0 ? '$0.00' : '$' + n.toFixed(3); }
+function fmtTok(n){ return n >= 1000 ? (n/1000).toFixed(1) + 'k' : String(n); }
+
+function resolveModel(phase, mode){
+  if (mode === 'local')  return 'qwen2.5:7b';
+  if (mode === 'manual') return 'claude-sonnet';
+  return phase.heavy ? 'claude-sonnet' : 'qwen2.5:7b';   // auto
+}
+function costFor(phase, model){
+  return model.startsWith('qwen') ? 0 : +((phase.tok / 1000) * 0.009).toFixed(3);
+}
+
+function usePipeline(initialIdea){
+  const R = React;
+  const [idea, setIdea]         = R.useState(initialIdea);
+  const [mode, setMode]         = R.useState('auto');     // auto | local | manual
+  const [approvals, setApprovals] = R.useState(true);
+  const [status, setStatus]     = R.useState('idle');     // idle|thinking|gate|redo|done
+  const [current, setCurrent]   = R.useState(-1);
+  const [results, setResults]   = R.useState([]);         // {idx,model,cost,status}
+  const timer = R.useRef(null);
+
+  R.useEffect(() => {
+    if (status !== 'thinking') return;
+    timer.current = setTimeout(() => {
+      const phase = PHASES[current];
+      if (approvals) { setStatus('gate'); }
+      else {
+        const model = resolveModel(phase, mode);
+        commitAndAdvance({ idx: current, model, cost: costFor(phase, model), status: 'auto' });
+      }
+    }, 1000 + Math.random() * 600);
+    return () => clearTimeout(timer.current);
+    // eslint-disable-next-line
+  }, [status, current, approvals, mode]);
+
+  function commitAndAdvance(result){
+    setResults(r => [...r, result]);
+    const next = current + 1;
+    if (next >= PHASES.length){ setCurrent(PHASES.length); setStatus('done'); }
+    else { setCurrent(next); setStatus('thinking'); }
+  }
+
+  function run(){
+    clearTimeout(timer.current);
+    setResults([]); setCurrent(0); setStatus('thinking');
+  }
+  function approve(){
+    if (status !== 'gate') return;
+    const phase = PHASES[current];
+    const model = resolveModel(phase, mode);
+    commitAndAdvance({ idx: current, model, cost: costFor(phase, model), status: 'approved' });
+  }
+  function reject(){
+    if (status !== 'gate') return;
+    setStatus('redo');
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setStatus('gate'), 1300);
+  }
+  function reset(){
+    clearTimeout(timer.current);
+    setResults([]); setCurrent(-1); setStatus('idle');
+  }
+
+  const totalTok  = results.reduce((s,r) => s + PHASES[r.idx].tok, 0);
+  const totalCost = results.reduce((s,r) => s + r.cost, 0);
+  const localPct  = results.length ? Math.round(results.filter(r => PHASES[r.idx]) .filter(r => r.model.startsWith('qwen')).length / results.length * 100) : 0;
+  const progress  = results.length / PHASES.length;
+
+  return {
+    PHASES, idea, setIdea, mode, setMode, approvals, setApprovals,
+    status, current, results, run, approve, reject, reset,
+    totals:{ tok: totalTok, cost: totalCost, localPct, progress },
+  };
+}
+
+Object.assign(window, { PHASES, DEBATE, EXAMPLES, usePipeline, fmtCost, fmtTok });
+</script>
+
+<!-- ===== fd-blueprint.jsx — Direction A: Blueprint (verbatim) ===== -->
+<script type="text/babel">
+function BlueprintNode({ phase, state, result, gate, onApprove, onReject, mode }){
+  // state: 'pending' | 'active' | 'gate' | 'redo' | 'done'
+  return (
+    <div className={'bp-node bp-' + state}>
+      <div className="bp-node-spine">
+        <span className="bp-node-dot"></span>
+      </div>
+      <div className="bp-node-body">
+        <div className="bp-node-top">
+          <span className="bp-node-n">{phase.n}</span>
+          <span className="bp-node-name">{phase.name}</span>
+          <span className="bp-node-role">{phase.role}</span>
+          {phase.debate && <span className="bp-node-badge">debate</span>}
+          <span className="bp-node-status">
+            {state === 'pending' && 'queued'}
+            {state === 'active'  && 'running…'}
+            {state === 'redo'    && 're-running'}
+            {state === 'gate'    && 'awaiting approval'}
+            {state === 'done'    && (result ? result.model : 'done')}
+          </span>
+        </div>
+        {(state === 'active' || state === 'redo') && (
+          <div className="bp-node-prog"><span></span></div>
+        )}
+        {state === 'done' && (
+          <div className="bp-node-out">
+            <span className="bp-node-deliver">{phase.deliver}</span>
+            <span className="bp-node-outtext">{phase.out}</span>
+          </div>
+        )}
+        {state === 'gate' && (
+          <div className="bp-gate">
+            {phase.debate && (
+              <div className="bp-debate">
+                <span className="bp-debate-k">agent debate · {window.DEBATE.topic}</span>
+                <span className="bp-debate-v">→ {window.DEBATE.verdict}</span>
+              </div>
+            )}
+            <div className="bp-gate-text">{phase.out}</div>
+            <div className="bp-gate-actions">
+              <button className="bp-btn bp-btn-ok" onClick={onApprove}>Approve →</button>
+              <button className="bp-btn bp-btn-no" onClick={onReject}>Reject & regenerate</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Blueprint(){
+  const p = window.usePipeline(window.EXAMPLES[0]);
+  const stateFor = (i) => {
+    if (p.results.find(r => r.idx === i)) return 'done';
+    if (i === p.current && p.status === 'thinking') return 'active';
+    if (i === p.current && p.status === 'redo') return 'redo';
+    if (i === p.current && p.status === 'gate') return 'gate';
+    return 'pending';
+  };
+  const running = p.status !== 'idle';
+
+  return (
+    <div className="dir dir-blueprint fx-skin">
+      <div className="bp-grid">
+        {/* LEFT */}
+        <div className="bp-left">
+          <header className="bp-head">
+            <div className="bp-wm">
+              <span className="bp-wm-mark"></span>
+              <span className="bp-wm-text">AI<span className="bp-wm-thin">SWE TEAM</span></span>
+            </div>
+            <div className="bp-head-meta">
+              <span className="bp-mono-k mono-k">v4 · blueprint</span>
+              <span className="bp-head-dot" data-on={running}></span>
+              <span className="bp-mono-k mono-k">{running ? 'pipeline live' : 'idle'}</span>
+            </div>
+          </header>
+
+          <div className="bp-hero">
+            <h1 className="bp-h1">Ship the whole<br/>engineering team.<br/><span className="bp-h1-em">Not just a tool.</span></h1>
+            <p className="bp-sub">Eight specialist agents take one idea to production-ready software — product, design, backend, frontend, QA, security, ops, cost — and pause for your approval at every phase.</p>
+          </div>
+
+          <div className="bp-prompt">
+            <div className="bp-prompt-head">
+              <span className="bp-mono-k mono-k">project idea</span>
+              <span className="bp-prompt-rule"></span>
+              <button className="bp-shuffle" onClick={() => p.setIdea(window.EXAMPLES[Math.floor(Math.random()*window.EXAMPLES.length)])} disabled={running}>shuffle</button>
+            </div>
+            <div className="bp-prompt-field">
+              <span className="bp-caret">›</span>
+              <textarea value={p.idea} disabled={running}
+                onChange={(e) => p.setIdea(e.target.value)} rows={2} />
+            </div>
+          </div>
+
+          <div className="bp-controls">
+            <div className="bp-seg">
+              <span className="bp-seg-k">routing</span>
+              {['auto','local','manual'].map(m => (
+                <button key={m} className={'bp-seg-btn' + (p.mode===m?' on':'')}
+                  disabled={running} onClick={() => p.setMode(m)}>{m}</button>
+              ))}
+            </div>
+            <button className={'bp-approve-toggle' + (p.approvals?' on':'')}
+              disabled={running} onClick={() => p.setApprovals(a => !a)}>
+              <span className="bp-toggle-box"></span>
+              approval gates
+            </button>
+          </div>
+
+          <div className="bp-cta">
+            {!running && <button className="bp-run" onClick={p.run}>Run the pipeline <span className="bp-run-arrow">→</span></button>}
+            {running && <button className="bp-run bp-run-reset" onClick={p.reset}>Reset</button>}
+            <div className="bp-meter">
+              <div className="bp-meter-row">
+                <span className="bp-mono-k mono-k">tokens</span><span className="bp-meter-v">{window.fmtTok(p.totals.tok)}</span>
+              </div>
+              <div className="bp-meter-row">
+                <span className="bp-mono-k mono-k">cost</span><span className="bp-meter-v">{window.fmtCost(p.totals.cost)}</span>
+              </div>
+              <div className="bp-meter-row">
+                <span className="bp-mono-k mono-k">on local</span><span className="bp-meter-v">{p.totals.localPct}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT — pipeline */}
+        <div className="bp-right">
+          <div className="bp-right-head">
+            <span className="bp-mono-k mono-k">pipeline</span>
+            <span className="bp-prompt-rule"></span>
+            <span className="bp-mono-k mono-k">{p.results.length}/8 phases</span>
+          </div>
+          <div className="bp-pipe">
+            {p.PHASES.map((ph, i) => (
+              <BlueprintNode key={ph.key} phase={ph} state={stateFor(i)} mode={p.mode}
+                result={p.results.find(r => r.idx === i)}
+                onApprove={p.approve} onReject={p.reject} />
+            ))}
+            <div className={'bp-end' + (p.status==='done'?' on':'')}>
+              <span className="bp-node-dot"></span>
+              <span>{p.status==='done' ? 'Build complete — deliverables stored, summary written to memory.' : 'END'}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+window.Blueprint = Blueprint;
+</script>
+
+<!-- ===== bootstrap — render the Blueprint board full-bleed ===== -->
+<script type="text/babel">
+ReactDOM.createRoot(document.getElementById('app')).render(<Blueprint />);
+</script>
+</body>
+</html>

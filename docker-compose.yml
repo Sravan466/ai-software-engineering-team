@@ -1,0 +1,56 @@
+# Local stack: Ollama (local models) + backend + frontend.
+# Postgres is included but optional — SQLite is the default; uncomment DATABASE_URL to use it.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # After first start, pull models:
+    #   docker compose exec ollama ollama pull qwen2.5:7b
+    #   docker compose exec ollama ollama pull nomic-embed-text
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Reach the Ollama service by its compose hostname.
+      OLLAMA_BASE_URL: http://ollama:11434
+      CORS_ORIGINS: http://localhost:3000
+      # DATABASE_URL: postgresql+psycopg://aiteam:aiteam@postgres:5432/aiteam
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      - ollama
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
+    depends_on:
+      - backend
+
+  # Optional Postgres — switch DATABASE_URL on the backend to use it.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aiteam
+      POSTGRES_PASSWORD: aiteam
+      POSTGRES_DB: aiteam
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg:/var/lib/postgresql/data
+    profiles:
+      - postgres
+
+volumes:
+  ollama:
+  backend_data:
+  pg:

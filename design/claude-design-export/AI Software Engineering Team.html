@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-palette="rgb" data-font="brut" data-density="regular" data-grain="on" data-scan="on" data-cursor="off">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI Software Engineering Team — Landing Directions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=Space+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="fd-styles.css" />
+<style>
+  html,body{ margin:0; padding:0; }
+  body{ background:var(--bg, #08080c); }
+</style>
+</head>
+<body>
+<template id="__bundler_thumbnail">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+    <rect width="100" height="100" fill="#08080c"/>
+    <rect x="30" y="30" width="40" height="40" rx="6" fill="#FF2E4D"/>
+    <rect x="36" y="30" width="40" height="40" rx="6" fill="#1FE07A" opacity="0.6" style="mix-blend-mode:screen"/>
+    <rect x="24" y="30" width="40" height="40" rx="6" fill="#3D6BFF" opacity="0.6" style="mix-blend-mode:screen"/>
+  </svg>
+</template>
+
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="pipeline-engine.jsx"></script>
+<script type="text/babel" src="fd-blueprint.jsx"></script>
+<script type="text/babel" src="fd-console.jsx"></script>
+<script type="text/babel" src="fd-manifesto.jsx"></script>
+
+<script type="text/babel">
+const { useEffect } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "palette": "rgb",
+  "theme": "dark",
+  "font": "brut · grotesque",
+  "density": "comfy",
+  "grain": true,
+  "scan": true,
+  "cursor": false
+}/*EDITMODE-END*/;
+
+function App(){
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+  useEffect(() => {
+    const r = document.documentElement;
+    r.setAttribute('data-palette', t.palette);
+    r.setAttribute('data-theme', t.theme);
+    r.setAttribute('data-font', String(t.font).split(' ')[0]);
+    r.setAttribute('data-density', t.density);
+    r.setAttribute('data-grain', t.grain ? 'on' : 'off');
+    r.setAttribute('data-scan', t.scan ? 'on' : 'off');
+    r.setAttribute('data-cursor', t.cursor ? 'on' : 'off');
+  }, [t]);
+
+  const W = 1180, H = 820;
+
+  return (
+    <React.Fragment>
+      <DesignCanvas>
+        <DCSection id="dirs" title="AI Software Engineering Team — Landing Directions"
+          subtitle="Three takes on the same product · type an idea, run the 8-agent pipeline, approve each phase · open any board fullscreen (↔ Esc)">
+          <DCArtboard id="blueprint" label="A · Blueprint — structured / technical" width={W} height={H}>
+            <Blueprint />
+          </DCArtboard>
+          <DCArtboard id="console" label="B · Console — developer-native ops stream" width={W} height={H}>
+            <ConsoleDir />
+          </DCArtboard>
+          <DCArtboard id="manifesto" label="C · Manifesto — editorial / minimal" width={W} height={H}>
+            <Manifesto />
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel>
+        <TweakSection label="Palette" />
+        <TweakRadio label="Accents" value={t.palette}
+          options={['rgb','cmyk','mono']} onChange={(v)=>setTweak('palette', v)} />
+        <TweakRadio label="Ground" value={t.theme}
+          options={['dark','light']} onChange={(v)=>setTweak('theme', v)} />
+
+        <TweakSection label="Typography" />
+        <TweakSelect label="Pairing" value={t.font}
+          options={['brut · grotesque','editorial · serif','mech · geometric']}
+          onChange={(v)=>setTweak('font', v)} />
+
+        <TweakSection label="Layout" />
+        <TweakRadio label="Density" value={t.density}
+          options={['compact','regular','comfy']} onChange={(v)=>setTweak('density', v)} />
+
+        <TweakSection label="Film effects" />
+        <TweakToggle label="Grain" value={t.grain} onChange={(v)=>setTweak('grain', v)} />
+        <TweakToggle label="Scanlines" value={t.scan} onChange={(v)=>setTweak('scan', v)} />
+        <TweakToggle label="Crosshair cursor" value={t.cursor} onChange={(v)=>setTweak('cursor', v)} />
+      </TweaksPanel>
+    </React.Fragment>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

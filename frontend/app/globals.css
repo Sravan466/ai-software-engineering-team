@@ -1,0 +1,110 @@
+/* Google fonts must be imported before any other statement. */
+@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================================================================
+   Shared "Blueprint" design system — the same tokens the /landing board uses,
+   promoted app-wide so every page matches it.
+   =========================================================================== */
+:root {
+  color-scheme: dark;
+  --bg: #08080c; --bg-2: #0e0e16; --bg-3: #16161f;
+  --ink: #f3eee0; --ink-2: #b4afa0; --ink-3: #807b6c; --ink-4: #544f40;
+  --line: rgba(243, 238, 224, 0.09);
+  --line-2: rgba(243, 238, 224, 0.17);
+  --line-3: rgba(243, 238, 224, 0.34);
+  --a1: #ff2e4d; --a2: #1fe07a; --a3: #3d6bff; --accent: var(--a1);
+  --sans: "Bricolage Grotesque", system-ui, sans-serif;
+  --serif: "Instrument Serif", Georgia, serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --tr: 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── typography ── */
+.fd-mono { font-family: var(--mono); }
+.fd-kicker { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-3); }
+.fd-title { font-family: var(--sans); font-weight: 700; letter-spacing: -0.02em; color: var(--ink); }
+.fd-em { font-family: var(--serif); font-style: italic; font-weight: 400; color: var(--accent); }
+.fd-muted { color: var(--ink-2); }
+.fd-dim { color: var(--ink-3); }
+
+/* ── surfaces ── */
+.fd-card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+.fd-card-accent { border-color: color-mix(in oklab, var(--accent) 55%, transparent); background: color-mix(in oklab, var(--accent) 7%, var(--bg-2)); }
+.fd-divider { height: 1px; background: var(--line); border: 0; }
+.fd-rule { flex: 1; height: 1px; background: var(--line); }
+
+/* ── brand ── */
+.fd-logo-mark { width: 14px; height: 14px; background: var(--accent); border-radius: 3px; box-shadow: 3px 0 0 -1px var(--a3), -3px 0 0 -1px var(--a2); display: inline-block; }
+.fd-wordmark { font-family: var(--sans); font-weight: 800; letter-spacing: -0.02em; font-size: 15px; color: var(--ink); }
+.fd-wordmark span { color: var(--ink-3); font-weight: 500; margin-left: 5px; }
+
+/* ── nav + links ── */
+.fd-nav-link { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3); text-decoration: none; transition: var(--tr); }
+.fd-nav-link:hover { color: var(--accent); }
+.fd-link { color: var(--accent); text-decoration: none; }
+.fd-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* ── buttons ── */
+.fd-btn { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 10px 18px; border-radius: 999px; border: 1px solid var(--line-2); background: none; color: var(--ink-2); transition: var(--tr); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+.fd-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.fd-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.fd-btn-primary { background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 600; }
+.fd-btn-primary:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
+.fd-btn-accent { background: var(--accent); color: #fff; border-color: var(--accent); }
+.fd-btn-accent:hover:not(:disabled) { filter: brightness(1.08); }
+.fd-btn-sm { padding: 7px 13px; }
+
+/* ── form controls ── */
+.fd-input, .fd-textarea, .fd-select { background: var(--bg); border: 1px solid var(--line-2); border-radius: 10px; padding: 11px 14px; color: var(--ink); font-family: var(--sans); font-size: 14px; outline: none; transition: var(--tr); }
+.fd-input::placeholder, .fd-textarea::placeholder { color: var(--ink-4); }
+.fd-input:focus, .fd-textarea:focus, .fd-select:focus { border-color: var(--accent); }
+.fd-textarea { resize: vertical; line-height: 1.5; }
+
+/* ── badges ── */
+.fd-badge { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--ink-3); white-space: nowrap; }
+.fd-badge-ok { color: var(--a2); border-color: color-mix(in oklab, var(--a2) 45%, transparent); background: color-mix(in oklab, var(--a2) 10%, transparent); }
+.fd-badge-accent { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 50%, transparent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
+.fd-badge-info { color: var(--a3); border-color: color-mix(in oklab, var(--a3) 50%, transparent); background: color-mix(in oklab, var(--a3) 10%, transparent); }
+.fd-badge-warn { color: #f0a93a; border-color: color-mix(in oklab, #f0a93a 45%, transparent); background: color-mix(in oklab, #f0a93a 10%, transparent); }
+.fd-badge-muted { color: var(--ink-4); border-color: var(--line); }
+
+/* ── tabs ── */
+.fd-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+.fd-tab { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 10px 16px; color: var(--ink-3); background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; transition: var(--tr); margin-bottom: -1px; }
+.fd-tab:hover { color: var(--ink); }
+.fd-tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+
+/* ── file tree ── */
+.fd-filerow { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border-radius: 8px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); background: none; border: none; cursor: pointer; text-align: left; transition: var(--tr); }
+.fd-filerow:hover { background: var(--bg-3); color: var(--ink); }
+.fd-filerow.active { background: color-mix(in oklab, var(--accent) 14%, transparent); color: var(--ink); }
+
+/* ── misc ── */
+.fd-dot { width: 7px; height: 7px; border-radius: 99px; background: var(--ink-4); display: inline-block; }
+.fd-dot-ok { background: var(--a2); box-shadow: 0 0 8px var(--a2); }
+.fd-dot-accent { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.fd-pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
+
+/* ===========================================================================
+   Legacy aliases — old class names remapped to the Blueprint look so any
+   un-migrated markup still matches.
+   =========================================================================== */
+.card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+.btn { border-radius: 999px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 10px 18px; transition: var(--tr); }
+.btn-primary { background: var(--ink); color: var(--bg); border: 1px solid var(--ink); }
+.btn-primary:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn-ghost { background: none; border: 1px solid var(--line-2); color: var(--ink-2); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+.badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 10px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
