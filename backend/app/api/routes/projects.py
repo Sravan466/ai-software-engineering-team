@@ -142,7 +142,11 @@ def run_pipeline(
             message="First phase complete — awaiting your approval to continue.",
         )
 
-    # No approvals: run the whole pipeline in the background.
+    # No approvals: run the whole pipeline in the background. Commit RUNNING first so
+    # the client's immediate reload sees a running pipeline (not a stale `created`) and
+    # starts polling for progress.
+    project.status = PipelineStatus.RUNNING.value
+    db.commit()
     background.add_task(_run_full_pipeline, project.id)
     return RunResponse(
         project_id=project.id,

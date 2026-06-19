@@ -47,27 +47,41 @@ def _initial_state(project: Project) -> PipelineState:
 
 class PipelineRunner:
     # ── lifecycle ─────────────────────────────────────────────────────────────
-    def start(self, db: Session, project: Project) -> Project:
-        """Kick off the pipeline (runs the first phase, then pauses for approval)."""
+    def start(self, db: Session, project: Project, *, pause: bool = True) -> Project:
+        """Kick off the pipeline (runs the first phase). Pauses for approval unless
+        ``pause`` is False (auto-run keeps the project RUNNING instead)."""
         project.status = PipelineStatus.RUNNING.value
         db.commit()
         with _lock:
             state = graph.invoke(_initial_state(project), _config(project.id))
-        self._persist_step(db, project, state)
+        self._persist_step(db, project, state, pause=pause)
         return project
 
-    def advance(self, db: Session, project: Project) -> Project:
-        """Resume after an approval — run the next phase, then pause for approval."""
+    def advance(self, db: Session, project: Project, *, pause: bool = True) -> Project:
+        """Resume after an approval — run the next phase. Pauses for approval unless
+        ``pause`` is False (auto-run keeps the project RUNNING instead)."""
         with _lock:
             state = graph.invoke(None, _config(project.id))
-        self._persist_step(db, project, state)
+        self._persist_step(db, project, state, pause=pause)
         return project
 
     def run_to_completion(self, db: Session, project: Project) -> Project:
-        """Used when approvals are disabled: auto-approve every phase to the end."""
-        self.start(db, project)
-        while project.status == PipelineStatus.AWAITING_APPROVAL.value:
-            self.approve(db, project)
+        """Used when approvals are disabled: auto-approve every phase to the end.
+
+        The project stays RUNNING (never AWAITING_APPROVAL) for the whole background
+        run, so the UI shows a live pipeline rather than a phantom approval gate it
+        would then fail to approve. Driven by phase position, not status.
+        """
+        self.start(db, project, pause=False)
+        while project.current_phase and project.current_phase != PHASE_ORDER[-1].value:
+            prev = project.current_phase
+            self._mark_latest(db, project, PhaseStatus.APPROVED.value)
+            self.advance(db, project, pause=False)
+            if project.current_phase == prev:
+                break  # graph produced no new phase — avoid spinning
+        # Approve the final phase and finalise -> COMPLETED.
+        self._mark_latest(db, project, PhaseStatus.APPROVED.value)
+        self._finalize(db, project)
         return project
 
     # ── approvals ───────────────────────────────────────────────────────────
@@ -126,9 +140,13 @@ class PipelineRunner:
         return project
 
     # ── persistence helpers ───────────────────────────────────────────────────
-    def _persist_step(self, db: Session, project: Project, state: dict) -> None:
-        """Persist the phase the graph just produced; it then awaits human approval.
+    def _persist_step(
+        self, db: Session, project: Project, state: dict, *, pause: bool = True
+    ) -> None:
+        """Persist the phase the graph just produced.
 
+        When ``pause`` is True it then awaits human approval; when False (auto-run) the
+        project stays RUNNING so the UI never sees a between-phase approval gate.
         Completion is NOT inferred from the graph being exhausted — every phase, including
         the last, must be explicitly approved (see `approve` -> `_finalize`).
         """
@@ -141,7 +159,9 @@ class PipelineRunner:
             project.current_phase = last_result["phase"]
 
         self._persist_new_debates(db, project, state.get("debates", []))
-        project.status = PipelineStatus.AWAITING_APPROVAL.value
+        project.status = (
+            PipelineStatus.AWAITING_APPROVAL.value if pause else PipelineStatus.RUNNING.value
+        )
         db.commit()
 
     def _finalize(self, db: Session, project: Project) -> None:

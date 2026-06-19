@@ -46,7 +46,12 @@ def _fake_complete(messages, **kwargs) -> LLMResponse:
 
 
 @pytest.fixture
-def client(monkeypatch):
+def stub_router(monkeypatch):
+    """Replace the LLM router with the deterministic fake (no Ollama / cloud keys)."""
     monkeypatch.setattr(model_router, "complete", _fake_complete)
+
+
+@pytest.fixture
+def client(stub_router):
     with TestClient(app) as c:
         yield c

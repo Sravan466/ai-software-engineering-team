@@ -66,10 +66,13 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     setError("");
     try {
       await fn();
-      await load();
     } catch (e: any) {
       setError(e.message);
     } finally {
+      // Always re-sync with the backend afterwards — on failure this clears any stale
+      // approval gate (e.g. a 400 because the run already completed) instead of leaving
+      // the user stuck clicking a button the backend has moved past.
+      await load();
       setBusy(false);
     }
   }
