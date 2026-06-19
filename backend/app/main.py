@@ -42,9 +42,17 @@ app.add_middleware(
 )
 
 # Routers (imported here so DB/graph modules initialise after settings are loaded).
-from app.api.routes import analytics, models, projects, rag, settings as settings_routes  # noqa: E402
+from app.api.routes import (  # noqa: E402
+    analytics,
+    models,
+    preview,
+    projects,
+    rag,
+    settings as settings_routes,
+)
 
 app.include_router(projects.router)
+app.include_router(preview.router)
 app.include_router(models.router)
 app.include_router(rag.router)
 app.include_router(analytics.router)
