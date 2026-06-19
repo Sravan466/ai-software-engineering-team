@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, LocalStatus, ProviderSetting } from "@/lib/api";
+import { useChrome } from "@/components/shell/ShellChrome";
 
 const PROVIDERS: { key: string; label: string; placeholder: string }[] = [
   { key: "anthropic", label: "Anthropic — Claude", placeholder: "sk-ant-..." },
@@ -10,18 +11,21 @@ const PROVIDERS: { key: string; label: string; placeholder: string }[] = [
 ];
 
 export default function SettingsPage() {
+  useChrome({ sub: "settings" }, []);
   return (
-    <div className="space-y-6">
-      <div>
-        <p className="fd-kicker mb-1">configuration</p>
-        <h1 className="fd-title text-2xl">Settings</h1>
-        <p className="mt-1 text-sm fd-muted">
-          Configure the local model and your own cloud API keys. Keys are stored on this backend
-          only (gitignored) and never sent to the browser.
-        </p>
+    <div className="build-wrap" style={{ maxWidth: 880 }}>
+      <h1 className="nb-h1" style={{ fontSize: "clamp(28px, 3vw, 38px)" }}>
+        Settings. <span className="em">Your models, your keys.</span>
+      </h1>
+      <p className="nb-lede" style={{ marginBottom: 8 }}>
+        Run fully local with Ollama, or add your own cloud keys to let the router reach for stronger
+        models when a task needs them. Keys are stored on this backend only (gitignored) and never
+        sent to the browser.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 18, marginTop: 24 }}>
+        <LocalModelCard />
+        <ApiKeysCard />
       </div>
-      <LocalModelCard />
-      <ApiKeysCard />
     </div>
   );
 }
