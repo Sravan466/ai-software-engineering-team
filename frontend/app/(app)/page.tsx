@@ -20,15 +20,22 @@ export default function HomePage() {
   const [mode, setMode] = useState("local_only");
   const [requireApproval, setRequireApproval] = useState(true);
   const [routerStatus, setRouterStatus] = useState<any>(null);
+  const [statusError, setStatusError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   async function refresh() {
+    // Fetch independently so one failure doesn't leave the other stuck loading.
     try {
       setProjects(await api.listProjects());
-      setRouterStatus(await api.routerStatus());
     } catch (e: any) {
       setError(e.message);
+    }
+    try {
+      setStatusError("");
+      setRouterStatus(await api.routerStatus());
+    } catch (e: any) {
+      setStatusError(e.message);
     }
   }
 
@@ -146,7 +153,14 @@ export default function HomePage() {
             <h2 className="fd-kicker">model providers</h2>
             <span className="fd-rule" />
           </div>
-          {!routerStatus ? (
+          {statusError ? (
+            <div className="text-sm">
+              <p style={{ color: "var(--accent)" }}>Couldn&apos;t reach the backend.</p>
+              <button className="fd-btn fd-btn-sm mt-2" onClick={refresh}>
+                Retry
+              </button>
+            </div>
+          ) : !routerStatus ? (
             <p className="text-sm fd-dim">Loading…</p>
           ) : (
             <ul className="space-y-2.5 text-sm">
@@ -163,7 +177,7 @@ export default function HomePage() {
               ))}
             </ul>
           )}
-          {routerStatus && (
+          {routerStatus && !statusError && (
             <p className="mt-3 text-xs fd-dim">
               Default mode: {routerStatus.default_mode} · Fallback:{" "}
               {routerStatus.fallback_chain.join(" → ")}
