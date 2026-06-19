@@ -75,6 +75,18 @@ export const api = {
   getArtifacts: (id: string) => req<Artifacts>(`/api/projects/${id}/artifacts`),
   downloadUrl: (id: string) => `${BASE}/api/projects/${id}/download`,
 
+  // ── Visual preview (render + select-to-edit) ──
+  getPreview: (id: string) => req<PreviewState>(`/api/projects/${id}/preview`),
+  generatePreview: (id: string) =>
+    req<PreviewState>(`/api/projects/${id}/preview/generate`, { method: "POST" }),
+  editPreviewSection: (id: string, section_id: string, instruction: string) =>
+    req<PreviewState>(`/api/projects/${id}/preview/edit`, {
+      method: "POST",
+      body: JSON.stringify({ section_id, instruction }),
+    }),
+  undoPreview: (id: string) =>
+    req<PreviewState>(`/api/projects/${id}/preview/undo`, { method: "POST" }),
+
   // ── Settings: cloud API keys + local model ──
   getProviders: () =>
     req<{ providers: Record<string, ProviderSetting>; default_mode: string }>(
@@ -145,6 +157,24 @@ export type PullProgress = {
   total?: number;
   completed?: number;
   error?: string;
+};
+
+export type PreviewSection = { id: string; label: string };
+export type PreviewRevision = {
+  id: string;
+  source: string;
+  section_id: string | null;
+  instruction: string | null;
+  model_used: string | null;
+  provider_used: string | null;
+  created_at: string;
+};
+export type PreviewState = {
+  project_id: string;
+  html: string | null;
+  sections: PreviewSection[];
+  revisions: PreviewRevision[];
+  has_frontend: boolean;
 };
 
 export type GenFile = { path: string; content: string; language: string; phase: string };

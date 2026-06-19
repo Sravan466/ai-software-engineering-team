@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Artifacts, Project } from "@/lib/api";
+import VisualPreview from "@/components/preview/VisualPreview";
 
 const PHASE_LABELS: Record<string, string> = {
   product_manager: "Product Requirements",
@@ -269,8 +270,53 @@ function BuildTab({
   );
 }
 
-// ── Preview tab (file browser) ───────────────────────────────────────────────
+// ── Preview tab (visual mockup / code / live) ────────────────────────────────
+type PreviewMode = "visual" | "code" | "live";
+
 function PreviewTab({ id }: { id: string }) {
+  const [mode, setMode] = useState<PreviewMode>("visual");
+  const modes: { key: PreviewMode; label: string }[] = [
+    { key: "visual", label: "Visual" },
+    { key: "code", label: "Code" },
+    { key: "live", label: "Live (beta)" },
+  ];
+  return (
+    <div className="space-y-4">
+      <div className="fd-tabs">
+        {modes.map((m) => (
+          <button
+            key={m.key}
+            className={`fd-tab ${mode === m.key ? "active" : ""}`}
+            onClick={() => setMode(m.key)}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+      {mode === "visual" && <VisualPreview id={id} />}
+      {mode === "code" && <CodePreview id={id} />}
+      {mode === "live" && <LivePreviewStub />}
+    </div>
+  );
+}
+
+// Approach B placeholder — the seam for a future in-browser bundler (Sandpack/WebContainers)
+// that runs the actual generated React files. Structured now so it can drop in without rework.
+function LivePreviewStub() {
+  return (
+    <div className="fd-card space-y-2">
+      <p className="fd-kicker">live react preview · coming soon</p>
+      <p className="text-sm fd-muted">
+        This tab will bundle and run your actual generated components in-browser for
+        pixel-accurate fidelity. For now, use <span className="fd-mono">Visual</span> for an
+        editable mockup and <span className="fd-mono">Code</span> to read the generated files.
+      </p>
+    </div>
+  );
+}
+
+// ── Code view (file browser) ─────────────────────────────────────────────────
+function CodePreview({ id }: { id: string }) {
   const [art, setArt] = useState<Artifacts | null>(null);
   const [error, setError] = useState("");
   const [sel, setSel] = useState(0);

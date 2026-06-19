@@ -43,6 +43,11 @@ class Project(Base):
     phases: Mapped[list["PhaseResult"]] = relationship(
         back_populates="project", cascade="all, delete-orphan", order_by="PhaseResult.created_at"
     )
+    preview_revisions: Mapped[list["PreviewRevision"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="PreviewRevision.created_at",
+    )
 
 
 class PhaseResult(Base):
@@ -71,6 +76,36 @@ class PhaseResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="phases")
+
+
+class PreviewRevision(Base):
+    """One version of the project's visual HTML preview (a self-contained mockup).
+
+    Revisions form an append-only history per project: the newest row is the live
+    preview, and `undo` simply drops the latest row. `source` records how it came to be
+    (a full regenerate vs a single-section edit); `section_id`/`instruction` capture which
+    section a user edited and what they asked for.
+    """
+
+    __tablename__ = "preview_revisions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+
+    html: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(16), default="generated")  # generated | edited
+
+    # Set only for single-section edits.
+    section_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    instruction: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Which model produced this revision (after routing/fallback).
+    model_used: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    provider_used: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    project: Mapped["Project"] = relationship(back_populates="preview_revisions")
 
 
 class DebateRecord(Base):
