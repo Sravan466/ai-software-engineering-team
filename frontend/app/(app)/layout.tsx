@@ -1,7 +1,7 @@
 import Link from "next/link";
 
-// Chrome for the application pages (dashboard, project detail, settings).
-// Styled to match the /landing Blueprint board so the whole app feels like one piece.
+// Chrome for the inner application pages (project detail, settings).
+// Styled to match the merged home's Blueprint board so the whole app feels like one piece.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <>
@@ -15,10 +15,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </Link>
           <nav className="flex items-center gap-5">
             <Link href="/" className="fd-nav-link">
-              projects
+              home
             </Link>
-            <Link href="/landing" className="fd-nav-link">
-              landing
+            <Link href="/?tab=chats" className="fd-nav-link">
+              chats
             </Link>
             <Link href="/settings" className="fd-nav-link">
               settings

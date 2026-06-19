@@ -7,7 +7,7 @@ export const metadata: Metadata = {
 };
 
 // Bare root layout. Page chrome (header + centered main) lives in the (app)
-// route group so full-bleed routes like /landing can opt out of it.
+// route group so the full-bleed merged home (/) can opt out of it.
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
