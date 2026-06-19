@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Artifacts, Project } from "@/lib/api";
 import VisualPreview from "@/components/preview/VisualPreview";
+import CodeBlock from "@/components/preview/CodeBlock";
 
 const PHASE_LABELS: Record<string, string> = {
   product_manager: "Product Requirements",
@@ -373,9 +374,7 @@ function CodePreview({ id }: { id: string }) {
           </span>
           <span className="fd-badge fd-badge-muted">{current.tag}</span>
         </div>
-        <pre className="fd-pre" style={{ margin: 0, padding: 16, maxHeight: 560, overflow: "auto" }}>
-          {current.content}
-        </pre>
+        <CodeBlock code={current.content} path={current.path} tag={current.tag} />
       </div>
     </div>
   );
