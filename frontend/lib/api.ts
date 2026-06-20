@@ -34,11 +34,21 @@ export type Project = {
   phases: PhaseResult[];
 };
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  // Abort after 15s so a hung/restarting backend surfaces an error instead of an
-  // infinite "Loading…" — fetch has no default timeout.
+// Fast CRUD calls should fail fast so a hung/restarting backend surfaces an error
+// instead of an infinite "Loading…". LLM-driven endpoints (run / generate / edit a
+// preview) drive a local Ollama model that can take far longer than 15s, so they
+// pass the longer cap below.
+const DEFAULT_TIMEOUT_MS = 15000;
+const LLM_TIMEOUT_MS = 300000; // 5 min — local generation on CPU is slow
+
+async function req<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<T> {
+  // fetch has no default timeout; abort manually so callers never hang forever.
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), 15000);
+  const timeout = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${BASE}${path}`, {
       ...init,
@@ -54,7 +64,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     return res.json();
   } catch (e: any) {
     if (e?.name === "AbortError") {
-      throw new Error("Request timed out — is the backend running on :8000?");
+      throw new Error(
+        `Request timed out after ${Math.round(timeoutMs / 1000)}s — the backend ` +
+          `may be down (:8000) or a local model is still generating.`
+      );
     }
     throw e;
   } finally {
@@ -73,14 +86,23 @@ export const api = {
     require_approval?: boolean;
   }) => req<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   run: (id: string) =>
-    req<{ message: string; status: string }>(`/api/projects/${id}/run`, { method: "POST" }),
+    req<{ message: string; status: string }>(
+      `/api/projects/${id}/run`,
+      { method: "POST" },
+      LLM_TIMEOUT_MS
+    ),
   approve: (id: string) =>
-    req<{ message: string; status: string }>(`/api/projects/${id}/approve`, { method: "POST" }),
+    req<{ message: string; status: string }>(
+      `/api/projects/${id}/approve`,
+      { method: "POST" },
+      LLM_TIMEOUT_MS
+    ),
   reject: (id: string, feedback: string) =>
-    req<{ message: string; status: string }>(`/api/projects/${id}/reject`, {
-      method: "POST",
-      body: JSON.stringify({ feedback }),
-    }),
+    req<{ message: string; status: string }>(
+      `/api/projects/${id}/reject`,
+      { method: "POST", body: JSON.stringify({ feedback }) },
+      LLM_TIMEOUT_MS
+    ),
   routerStatus: () => req<any>("/api/models/status"),
   pipelineShape: () => req<{ phases: Phase[]; mermaid: string }>("/api/models/pipeline"),
   analytics: (id: string) => req<any>(`/api/analytics/projects/${id}`),
@@ -92,12 +114,17 @@ export const api = {
   // ── Visual preview (render + select-to-edit) ──
   getPreview: (id: string) => req<PreviewState>(`/api/projects/${id}/preview`),
   generatePreview: (id: string) =>
-    req<PreviewState>(`/api/projects/${id}/preview/generate`, { method: "POST" }),
+    req<PreviewState>(
+      `/api/projects/${id}/preview/generate`,
+      { method: "POST" },
+      LLM_TIMEOUT_MS
+    ),
   editPreviewSection: (id: string, section_id: string, instruction: string) =>
-    req<PreviewState>(`/api/projects/${id}/preview/edit`, {
-      method: "POST",
-      body: JSON.stringify({ section_id, instruction }),
-    }),
+    req<PreviewState>(
+      `/api/projects/${id}/preview/edit`,
+      { method: "POST", body: JSON.stringify({ section_id, instruction }) },
+      LLM_TIMEOUT_MS
+    ),
   undoPreview: (id: string) =>
     req<PreviewState>(`/api/projects/${id}/preview/undo`, { method: "POST" }),
 
