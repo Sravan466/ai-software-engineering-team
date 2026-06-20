@@ -44,6 +44,7 @@ app.add_middleware(
 # Routers (imported here so DB/graph modules initialise after settings are loaded).
 from app.api.routes import (  # noqa: E402
     analytics,
+    github,
     models,
     preview,
     projects,
@@ -57,6 +58,7 @@ app.include_router(models.router)
 app.include_router(rag.router)
 app.include_router(analytics.router)
 app.include_router(settings_routes.router)
+app.include_router(github.router)
 
 
 @app.get("/health", tags=["health"])

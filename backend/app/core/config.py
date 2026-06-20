@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = None
     gemini_default_model: str = "gemini-1.5-pro"
 
+    # ── GitHub publishing (OAuth "Connect" flow) ──
+    # Register a free OAuth App at https://github.com/settings/developers and set
+    # these. Leave blank to disable the "Push to GitHub" button gracefully.
+    github_client_id: Optional[str] = None
+    github_client_secret: Optional[str] = None
+    # "repo" lets users create private repos too; "public_repo" = public only.
+    github_scope: str = "repo"
+    # Public URLs used to build the OAuth redirect + return targets. The callback
+    # URL (backend + /api/github/oauth/callback) must match the OAuth App exactly.
+    backend_public_url: str = "http://localhost:8000"
+    frontend_base_url: str = "http://localhost:3000"
+
     # ── Vector store ──
     chroma_persist_dir: str = "./data/chroma"
     embedding_model: str = "nomic-embed-text"
