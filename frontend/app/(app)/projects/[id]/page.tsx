@@ -6,6 +6,7 @@ import { PHASES } from "@/components/shell/phases";
 import { useChrome } from "@/components/shell/ShellChrome";
 import VisualPreview from "@/components/preview/VisualPreview";
 import CodeBlock from "@/components/preview/CodeBlock";
+import GithubPublish from "@/components/github/GithubPublish";
 
 type Tab = "build" | "preview" | "summary";
 type NodeState = "done" | "active" | "gate" | "redo" | "pending";
@@ -94,6 +95,12 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     load();
   }, [load]);
 
+  // Returning from the GitHub OAuth round-trip? Land on Summary where the
+  // publish controls live (GithubPublish reads the ?github= param itself).
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("github")) setTab("summary");
+  }, []);
+
   // Poll while the pipeline is actively running.
   useEffect(() => {
     if (project?.status === "running") {
@@ -166,9 +173,14 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
           </div>
         </div>
         {completed && (
-          <a className="fd-btn fd-btn-primary" href={api.downloadUrl(id)} download>
-            Download .zip ↓
-          </a>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <button className="fd-btn" onClick={() => setTab("summary")}>
+              Publish to GitHub →
+            </button>
+            <a className="fd-btn fd-btn-primary" href={api.downloadUrl(id)} download>
+              Download .zip ↓
+            </a>
+          </div>
         )}
       </div>
 
@@ -582,6 +594,8 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
           <Stat v={analytics ? `$${Number(analytics.total_cost_usd || 0).toFixed(4)}` : "—"} l="Cost" />
         </div>
       </div>
+
+      <GithubPublish id={id} defaultName={art.name || art.idea} disabled={!hasOutput} />
 
       <div className="fd-card">
         <div className="sec-head">

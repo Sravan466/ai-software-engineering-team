@@ -54,6 +54,8 @@ async function req<T>(
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
       cache: "no-store",
+      // Send/receive the GitHub session cookie (same-site localhost:3000↔:8000).
+      credentials: "include",
       signal: ctrl.signal,
     });
     if (!res.ok) {
@@ -142,6 +144,23 @@ export const api = {
       body: JSON.stringify(body),
     }),
   getLocalModel: () => req<LocalStatus>("/api/settings/local"),
+
+  // ── GitHub publishing (OAuth "Connect" → push to the user's own account) ──
+  githubStatus: () => req<GithubStatus>("/api/github/status"),
+  // Full-page redirect into GitHub's login; returns here with ?github=connected.
+  githubConnectUrl: (returnTo: string) =>
+    `${BASE}/api/github/oauth/start?return_to=${encodeURIComponent(returnTo)}`,
+  githubDisconnect: () =>
+    req<{ connected: boolean }>("/api/github/disconnect", { method: "POST" }),
+  pushToGithub: (
+    id: string,
+    body: { name?: string; private?: boolean; description?: string }
+  ) =>
+    req<GithubPushResult>(
+      `/api/github/push/${id}`,
+      { method: "POST", body: JSON.stringify(body) },
+      LLM_TIMEOUT_MS
+    ),
   // Streams NDJSON pull progress; calls onLine for each parsed object.
   pullLocalModel: async (
     model: string,
@@ -176,6 +195,22 @@ export const api = {
       }
     }
   },
+};
+
+export type GithubStatus = {
+  configured: boolean;
+  connected: boolean;
+  login: string | null;
+  name: string | null;
+  avatar: string | null;
+};
+
+export type GithubPushResult = {
+  html_url: string;
+  full_name: string;
+  branch: string;
+  private: boolean;
+  files: number;
 };
 
 export type ProviderSetting = {
