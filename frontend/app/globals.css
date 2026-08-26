@@ -545,11 +545,13 @@ h1, h2, h3, h4 {
 .md { color: var(--ink-2); font-size: var(--t-md); line-height: 1.65; max-width: 72ch; }
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
-.md h1, .md h2, .md h3, .md h4 { margin: 1.6em 0 0.5em; color: var(--ink); line-height: 1.3; }
-.md h1 { font-size: var(--t-xl); }
-.md h2 { font-size: var(--t-lg); }
-.md h3 { font-size: var(--t-md); }
-.md h4 { font-size: var(--t-base); color: var(--ink-2); }
+/* Headings here start at h2: the renderer demotes agent markdown by one level so
+   it nests under the page's own h1. */
+.md h2, .md h3, .md h4, .md h5 { margin: 1.6em 0 0.5em; color: var(--ink); line-height: 1.3; }
+.md h2 { font-size: var(--t-xl); }
+.md h3 { font-size: var(--t-lg); }
+.md h4 { font-size: var(--t-md); }
+.md h5 { font-size: var(--t-base); color: var(--ink-2); }
 .md p { margin: 0 0 0.9em; }
 .md ul, .md ol { margin: 0 0 0.9em; padding-left: 1.35em; }
 .md ul { list-style: disc; }

@@ -110,8 +110,11 @@ export default function Markdown({ children }: { children: string }) {
     // heading
     const h = line.match(/^\s*(#{1,6})\s+(.*)$/);
     if (h) {
-      const level = Math.min(h[1].length, 4);
-      const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4";
+      // Agent documents routinely open with `# Title`, but this renders inside a
+      // page that already has its own <h1>. Demote by one level so the document
+      // outline nests correctly instead of growing a second top-level heading.
+      const level = Math.min(h[1].length + 1, 5);
+      const Tag = `h${level}` as "h2" | "h3" | "h4" | "h5";
       out.push(<Tag key={k()}>{inline(h[2].trim(), `h${i}`)}</Tag>);
       i++;
       continue;

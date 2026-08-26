@@ -189,6 +189,23 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     { key: "summary", label: "Deliver" },
   ];
 
+  // Arrow keys move between tabs and focus follows selection, per the ARIA
+  // tabs pattern the roles above promise.
+  function onTabKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    e.preventDefault();
+    const at = tabs.findIndex((t) => t.key === tab);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? tabs.length - 1
+          : (at + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    setTab(tabs[next].key);
+    document.getElementById(`tab-${tabs[next].key}`)?.focus();
+  }
+
   return (
     <div className="build-wrap">
       <div className="build-head">
@@ -267,13 +284,23 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      <div className="tabs" role="tablist" style={{ marginTop: 22 }}>
+      <div
+        className="tabs"
+        role="tablist"
+        aria-label="Build views"
+        style={{ marginTop: 22 }}
+        onKeyDown={onTabKeyDown}
+      >
         {tabs.map((t) => (
           <button
             key={t.key}
+            id={`tab-${t.key}`}
             role="tab"
             className="tab"
             aria-selected={tab === t.key}
+            aria-controls={`panel-${t.key}`}
+            // Roving tabindex: one stop for the whole strip, arrows move within it.
+            tabIndex={tab === t.key ? 0 : -1}
             onClick={() => setTab(t.key)}
           >
             {t.label}
@@ -281,7 +308,13 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         ))}
       </div>
 
-      <div style={{ marginTop: 20 }}>
+      <div
+        id={`panel-${tab}`}
+        role="tabpanel"
+        aria-labelledby={`tab-${tab}`}
+        tabIndex={0}
+        style={{ marginTop: 20 }}
+      >
         {tab === "build" && (
           <BuildTab project={project} analytics={analytics} busy={busy} act={act} id={id} />
         )}
