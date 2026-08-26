@@ -1,6 +1,6 @@
 /* ===========================================================================
    agents.css — the crew: pixel sprites, per-character motion, roster, and the
-   pipeline relay.
+   room they work in.
 
    Motion thesis
    -------------
@@ -13,22 +13,34 @@
    Only the ACTIVE agent animates; idle crew are static, so a full roster costs
    nothing. Every keyframe here has a reduced-motion path at the bottom of the
    file — movement is removed, but the state each animation communicates is kept.
+
+   Depth thesis
+   ------------
+   The floor is a room, not a panel with a grid on it. Six tiers, back to front:
+   sky, wall, ground plane, back set, the crew, near set. Distance costs
+   brightness and saturation; proximity buys size and a heavier shadow. That one
+   rule is what stops eight sprites from looking pasted onto a background.
    =========================================================================== */
 
 /* ── sprite shell ──
    Parts are `sprite-*`; motion signatures are `motion-*`. Keeping them in
    separate namespaces matters: an agent whose signature is "scan" would
    otherwise match the `.sprite-scan` visor overlay and inherit its positioning.
+   Size arrives as --sprite-size rather than a width attribute, so a breakpoint
+   can shrink the whole crew without the component knowing about breakpoints.
    ── */
 .sprite {
   position: relative;
   display: inline-block;
   flex: none;
+  width: var(--sprite-size, 48px);
+  height: var(--sprite-size, 48px);
   line-height: 0;
   image-rendering: pixelated;
-  transform-origin: 50% 85%;
+  transform-origin: 50% 92%;
 }
 .sprite svg {
+  position: relative;
   display: block;
   overflow: visible;
   /* Opt out of the global 16px icon floor — the shell owns the size here. */
@@ -37,20 +49,54 @@
 }
 
 /* Queued crew are dimmed and desaturated — present, not yet involved. */
-.sprite.is-queued { filter: saturate(0.25) brightness(0.62); }
+.sprite.is-queued { filter: saturate(0.66) brightness(0.74); }
 .sprite.is-done { filter: none; }
 .sprite.is-rejected { filter: saturate(0.85); }
 
-/* The visor scanline, only while an agent is actually working. */
+/* ── contact shadow ──
+   A figure with nothing under it floats. This is an ellipse at the feet,
+   carrying a little of the agent's own colour so the light in the room has a
+   source, and it widens when they are working — the same read as a spotlight
+   coming up. Offset below the boots and softly blurred, never a halo. */
+.sprite-ground {
+  position: absolute;
+  left: 16%;
+  right: 16%;
+  bottom: -2%;
+  height: 9%;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    rgba(0, 0, 0, 0.85) 0%,
+    rgba(0, 0, 0, 0.5) 46%,
+    transparent 74%
+  );
+  filter: blur(1.5px);
+  transition: opacity var(--tr), transform var(--tr);
+}
+.sprite.grounded.is-queued .sprite-ground { opacity: 0.55; }
+.sprite.grounded.is-working .sprite-ground,
+.sprite.grounded.is-gate .sprite-ground {
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    color-mix(in srgb, var(--agent) 45%, rgba(0, 0, 0, 0.85)) 0%,
+    rgba(0, 0, 0, 0.55) 48%,
+    transparent 76%
+  );
+  transform: scaleX(1.22);
+}
+
+/* The visor scanline, only while an agent is actually working. Inset tracks the
+   visor band of the 24x24 grid: rows 7–9, columns 8–15. */
 .sprite-scan {
   position: absolute;
-  inset: 25% 18% 56% 18%;
+  inset: 28% 32% 57% 32%;
   pointer-events: none;
   opacity: 0;
   background: linear-gradient(
     to bottom,
     transparent 0%,
-    color-mix(in srgb, var(--agent) 70%, transparent) 45%,
+    color-mix(in srgb, var(--agent) 75%, transparent) 45%,
     transparent 55%
   );
 }
@@ -62,7 +108,7 @@
 /* A glow that belongs to whichever character is lit. */
 .sprite.is-working,
 .sprite.is-gate {
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--agent) 55%, transparent));
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--agent) 55%, transparent));
 }
 
 /* ── the eight motion signatures ───────────────────────────────────────────
@@ -341,37 +387,6 @@
 @keyframes caret { 50% { opacity: 0; } }
 
 /* ===========================================================================
-   REDUCED MOTION
-   Movement is removed; the meaning each animation carried is kept as a static
-   or colour-only signal, so the interface still says who is working.
-   =========================================================================== */
-@media (prefers-reduced-motion: reduce) {
-  .sprite,
-  .sprite.is-working.motion-nod,
-  .sprite.is-working.motion-drift,
-  .sprite.is-working.motion-thrum,
-  .sprite.is-working.motion-flicker,
-  .sprite.is-working.motion-scan,
-  .sprite.is-working.motion-guard,
-  .sprite.is-working.motion-launch,
-  .sprite.is-working.motion-tally,
-  .sprite.is-gate,
-  .sprite.is-done,
-  .agent-card:hover .sprite {
-    animation: none !important;
-    transform: none !important;
-  }
-  /* The working agent stays identifiable without moving. */
-  .sprite.is-working { outline: 2px solid var(--agent); outline-offset: 2px; }
-  .sprite.is-gate { outline: 2px dashed var(--agent); outline-offset: 2px; }
-  .sprite-scan { display: none; }
-  .relay-step.working .relay-bar::after { animation: none; width: 100%; }
-  .relay-step.gate .relay-bar::after { animation: none; }
-  .agent-say.live::after { animation: none; }
-  .agent-card:hover { transform: none; }
-}
-
-/* ===========================================================================
    THE GATE, in the agent's colour
    The character that produced the work owns the panel that asks about it.
    =========================================================================== */
@@ -399,7 +414,7 @@
    CREW FLOOR — a console window you can poke at
 
    Structure borrowed from the arcade-console idiom: a chunky bordered window
-   with a title bar, a lit floor inside it, an inspector down the right, and a
+   with a title bar, a lit room inside it, an inspector down the right, and a
    scenario bar along the bottom. Square corners and hard 2px borders — the
    pixel world doesn't do soft radii.
    =========================================================================== */
@@ -448,85 +463,258 @@
   color: var(--ink-3);
 }
 
-.floor-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 288px; }
+.floor-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 296px; }
 
-/* ── the floor ── */
 /* ── the room ───────────────────────────────────────────────────────────────
-   Not a panel with a grid on it: a back wall carrying the status board and two
-   windows, a floor that recedes under it in perspective, and the crew standing
-   on the seam. The depth comes from a rotated grid plane rather than a flat
-   repeat, which is the whole difference between "a room" and "a background". */
+   Six tiers, back to front. The horizon lives at 54% from the bottom and every
+   tier agrees with it: the wall stops there, the ground plane starts there, the
+   back set stands just in front of it, the crew stand well clear of it, and the
+   near set is cropped by the frame — which is the cue that says "this is closer
+   to you than the picture is". */
 .floor {
+  --horizon: 46%;
   position: relative;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  height: 384px;
-  padding: 0 18px 22px;
-  background: linear-gradient(to bottom, #0a0c12 0%, #0d1018 44%, #070810 45%, #05060b 100%);
+  height: 100%;
+  min-height: 548px;
+  padding: 0 16px 28px;
   border-right: 2px solid var(--line-3);
   overflow: hidden;
+  isolation: isolate;
 }
 
-/* ── back wall ── */
-.wall { position: absolute; inset: 0 0 56% 0; overflow: hidden; }
+/* ── tier 0: ambient ── */
+.sky {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 66% at 50% 0%, rgba(74, 104, 156, 0.15), transparent 60%),
+    linear-gradient(to bottom, #0a0d15 0%, #0c1119 40%, #0a0e17 56%, #0c1119 78%, #090d15 100%);
+}
+
+/* ── tier 1: the back wall ── */
+.wall { position: absolute; inset: 0 0 var(--horizon) 0; overflow: hidden; }
+.wall-panels {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(to right, rgba(160, 190, 240, 0.035) 0 1px, transparent 1px 68px),
+    linear-gradient(to bottom, #0f141f 0%, #0c1119 74%, #080c13 100%);
+  box-shadow: inset 0 -2px 0 #04060b;
+}
 .wall-glow {
   position: absolute;
   inset: 0;
-  background: radial-gradient(70% 120% at 50% 100%, rgba(90, 120, 170, 0.16), transparent 70%);
+  background: radial-gradient(64% 120% at 50% 108%, rgba(96, 130, 186, 0.22), transparent 68%);
 }
+/* Skirting. The one line that tells you the wall stops and the floor starts. */
+.wall::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 8px;
+  background: linear-gradient(
+    to bottom,
+    #232c3d 0 1px,
+    #161d2a 1px 4px,
+    #0d1219 4px 7px,
+    #05070c 7px
+  );
+}
+
+/* Windows onto a night city. The skyline is drawn with hard-edged stops, not a
+   blur, because everything else in this room has hard edges too. */
 .window {
   position: absolute;
-  top: 26px;
-  width: 74px;
-  height: 52px;
-  border: 2px solid #161d2b;
+  top: 13%;
+  width: 116px;
+  height: 92px;
+  border: 2px solid #1a2231;
   background:
-    radial-gradient(1px 1px at 18% 30%, #cfe3ff 99%, transparent),
-    radial-gradient(1px 1px at 62% 18%, #9fb8dd 99%, transparent),
-    radial-gradient(1px 1px at 78% 62%, #cfe3ff 99%, transparent),
-    radial-gradient(1px 1px at 36% 72%, #8fa8cc 99%, transparent),
-    linear-gradient(to bottom, #0c1524, #0a1020);
-  box-shadow: inset 0 0 0 1px #0a0e18;
+    radial-gradient(1px 1px at 18% 18%, #d6e8ff 99%, transparent),
+    radial-gradient(1px 1px at 64% 12%, #a4bce0 99%, transparent),
+    radial-gradient(1px 1px at 82% 30%, #d6e8ff 99%, transparent),
+    radial-gradient(1px 1px at 38% 34%, #93abcf 99%, transparent),
+    linear-gradient(
+      to right,
+      transparent 0 6%, #060b16 6% 19%, transparent 19% 25%,
+      #060b16 25% 44%, transparent 44% 51%,
+      #060b16 51% 63%, transparent 63% 72%,
+      #060b16 72% 94%, transparent 94%
+    ) bottom / 100% 46% no-repeat,
+    linear-gradient(to bottom, #0a1424, #101d33);
+  box-shadow: inset 0 0 0 1px #070b13, 0 0 18px -6px rgba(120, 165, 230, 0.4);
 }
 /* Mullion bars, so it reads as a window and not a dark rectangle. */
-.window::before,
+.window::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to right, transparent calc(50% - 1px), #1a2231 calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    linear-gradient(to bottom, transparent calc(50% - 1px), #1a2231 calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px));
+}
+/* Lit windows in the towers below. */
 .window::after {
   content: "";
   position: absolute;
-  background: #161d2b;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 46%;
+  background:
+    repeating-linear-gradient(to right, rgba(246, 196, 118, 0.6) 0 1px, transparent 1px 9px),
+    repeating-linear-gradient(to bottom, rgba(246, 196, 118, 0.6) 0 2px, transparent 2px 13px);
+  opacity: 0.16;
 }
-.window::before { left: 50%; top: 0; bottom: 0; width: 2px; margin-left: -1px; }
-.window::after { top: 50%; left: 0; right: 0; height: 2px; margin-top: -1px; }
-.w-left { left: 34px; }
-.w-right { right: 34px; }
+.w-left { left: 4%; }
+.w-right { right: 4%; }
 
-/* Cable run along the ceiling. */
+/* Pipe run and conduit along the ceiling. */
+.pipes {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 9px;
+  height: 7px;
+  background:
+    linear-gradient(to bottom, #05070c 0 1px, #232c3d 1px 2px, #141b27 2px 4px, #05070c 4px 5px, transparent 5px),
+    linear-gradient(to bottom, transparent 5px, #0e131c 5px 7px);
+}
 .cables {
   position: absolute;
   left: 0;
   right: 0;
-  top: 12px;
-  height: 3px;
-  background:
-    linear-gradient(to bottom, #11161f 0 1px, transparent 1px),
-    linear-gradient(to bottom, transparent 2px, #0e131c 2px 3px);
+  top: 20px;
+  height: 2px;
+  background: repeating-linear-gradient(to right, #101620 0 26px, #0a0e16 26px 30px);
+  opacity: 0.85;
 }
+
+/* Extraction grilles. A wall this size needs to look like it is part of a
+   building, not a backdrop. */
+.gantry {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 55%;
+  height: 11px;
+  background: linear-gradient(
+    to bottom,
+    #2a3448 0 2px,
+    #19212f 2px 6px,
+    #0d1219 6px 9px,
+    #05070c 9px
+  );
+}
+/* Brackets hanging off it, at a pitch you can count. */
+.gantry::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 11px;
+  height: 16px;
+  background: repeating-linear-gradient(
+    to right,
+    #141b27 0 3px,
+    transparent 3px 96px
+  );
+}
+
+/* Hazard striping above the skirting — the one warm note in a cool room. */
+.hazard {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  height: 5px;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(245, 165, 36, 0.1) 0 5px,
+    rgba(10, 14, 21, 0.86) 5px 10px
+  );
+}
+
+.vent {
+  position: absolute;
+  top: 66%;
+  width: 58px;
+  height: 40px;
+  border: 2px solid #161d2a;
+  background:
+    repeating-linear-gradient(to bottom, #1a2231 0 2px, #090d14 2px 5px),
+    #0a0e15;
+  box-shadow: inset 0 0 0 1px #05070c, 0 2px 6px -2px rgba(0, 0, 0, 0.9);
+}
+.v-left { left: 13%; }
+.v-right { right: 13%; }
+
+/* A cable tray running the width of the room, with drops. */
+.tray {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 62%;
+  height: 6px;
+  background: linear-gradient(to bottom, #1a2230 0 2px, #0e131c 2px 5px, #05070c 5px);
+}
+.tray::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 6px;
+  height: 13px;
+  background: repeating-linear-gradient(to right, #0d121b 0 2px, transparent 2px 58px);
+}
+
+/* Bay signage. The room labels itself the way a real floor does. */
+.bay {
+  position: absolute;
+  bottom: 13%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid #1b2331;
+  background: rgba(8, 12, 19, 0.9);
+  font-family: var(--pixel);
+  font-size: 7px;
+  letter-spacing: 0.14em;
+  color: #55607a;
+}
+.bay i {
+  width: 5px;
+  height: 5px;
+  background: var(--run);
+  box-shadow: 0 0 6px -1px var(--run);
+}
+.bay-left { left: 5%; }
+.bay-right { right: 5%; }
 
 /* ── the status board everyone reads ── */
 .board {
   position: absolute;
   left: 50%;
-  top: 22px;
+  top: 16%;
+  z-index: 2;
   transform: translateX(-50%);
-  width: min(340px, 52%);
+  width: min(376px, 46%);
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  border: 2px solid #1d2534;
-  background: linear-gradient(to bottom, #0b1220, #080d17);
-  box-shadow: 0 0 0 3px #0a0e17, 0 10px 26px -10px rgba(0, 0, 0, 0.9);
+  border: 2px solid #202939;
+  background: linear-gradient(to bottom, #0b1220, #070c15);
+  box-shadow:
+    0 0 0 3px #090d16,
+    0 12px 30px -12px rgba(0, 0, 0, 0.95),
+    inset 0 1px 0 rgba(150, 180, 230, 0.09);
 }
 .board-row {
   display: flex;
@@ -545,61 +733,175 @@
   flex: 1;
   height: 5px;
   background: #1b2331;
-  transition: background var(--tr);
+  transition: background var(--tr), box-shadow var(--tr);
 }
 .board-tick.done { background: var(--ok); }
-.board-tick.working { background: var(--run); }
-.board-tick.gate { background: var(--warn); }
+.board-tick.working { background: var(--run); box-shadow: 0 0 7px -1px var(--run); }
+.board-tick.gate { background: var(--warn); box-shadow: 0 0 7px -1px var(--warn); }
 .board-tick.rejected { background: var(--bad); }
 
-/* ── the floor plane ── */
-.floor-plane {
-  position: absolute;
-  left: -60%;
-  right: -60%;
-  bottom: 0;
-  height: 62%;
-  transform: perspective(360px) rotateX(64deg);
-  transform-origin: bottom center;
-  background:
-    repeating-linear-gradient(to right, rgba(120, 150, 200, 0.09) 0 1px, transparent 1px 46px),
-    repeating-linear-gradient(to bottom, rgba(120, 150, 200, 0.09) 0 1px, transparent 1px 46px);
-}
-/* Fade the grid into the distance so it doesn't tile visibly to the horizon. */
-.floor::after {
-  content: "";
+/* ── tier 2: the ground ──
+   A real plane in perspective, not a flat repeat. The rotation is what supplies
+   the vanishing point; the haze on top of it is what stops the grid tiling
+   visibly all the way to the horizon. */
+/* The band the ground occupies, and the thing that crops it at the horizon. */
+.ground {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 56%;
-  pointer-events: none;
-  background: linear-gradient(to bottom, #05060b 0%, rgba(5, 6, 11, 0.65) 22%, transparent 60%);
+  height: var(--horizon);
+  overflow: hidden;
 }
 
-/* ── props ── */
-.props { position: absolute; bottom: 56%; opacity: 0.9; pointer-events: none; }
-.props-left { left: 30px; }
-.props-right { right: 34px; }
+.floor-plane {
+  position: absolute;
+  left: -90%;
+  right: -90%;
+  bottom: 0;
+  height: 560%;
+  transform: perspective(760px) rotateX(60deg);
+  transform-origin: bottom center;
+  background:
+    repeating-linear-gradient(to right, rgba(138, 174, 228, 0.16) 0 1px, transparent 1px 44px),
+    repeating-linear-gradient(to bottom, rgba(138, 174, 228, 0.13) 0 1px, transparent 1px 44px),
+    linear-gradient(to bottom, #05080f, #0b1119);
+}
+/* A walkway painted on the floor, sharing the plane's transform so it lies
+   down with it rather than sitting on top of it. */
+.floor-marks {
+  position: absolute;
+  left: -90%;
+  right: -90%;
+  bottom: 0;
+  height: 560%;
+  transform: perspective(760px) rotateX(60deg);
+  transform-origin: bottom center;
+  pointer-events: none;
+  background:
+    linear-gradient(
+      to right,
+      transparent 0 43.6%,
+      rgba(245, 165, 36, 0.16) 43.6% 43.9%,
+      transparent 43.9% 56.1%,
+      rgba(245, 165, 36, 0.16) 56.1% 56.4%,
+      transparent 56.4%
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(245, 165, 36, 0.1) 0 14px,
+      transparent 14px 46px
+    );
+  -webkit-mask-image: linear-gradient(to right, transparent 44%, #000 47%, #000 53%, transparent 56%);
+  mask-image: linear-gradient(to right, transparent 44%, #000 47%, #000 53%, transparent 56%);
+}
 
-.floor-row {
+.floor-haze {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(13, 18, 28, 0.96) 0%,
+    rgba(11, 15, 24, 0.7) 14%,
+    rgba(8, 11, 18, 0.3) 40%,
+    transparent 78%
+  );
+}
+
+/* ── set dressing ──
+   Distance costs light. The back tier is knocked down and desaturated so it
+   sits behind the crew without competing; the near tier keeps its colour and
+   gains a shadow, and is deliberately cropped by the frame. */
+.set { position: absolute; inset: 0; pointer-events: none; }
+.prop { position: absolute; display: block; line-height: 0; }
+.set-back .prop { filter: brightness(0.66) saturate(0.68) contrast(0.96); }
+.set-back .prop::after,
+.set-near .prop::after {
+  content: "";
+  position: absolute;
+  left: 4%;
+  right: 4%;
+  bottom: -4px;
+  height: 8px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 50%, rgba(0, 0, 0, 0.85) 0%, transparent 74%);
+}
+.set-near .prop::after { bottom: -6px; height: 12px; }
+/* The tier between the wall and the crew — lit between the two. */
+.set-mid { z-index: 2; }
+.set-mid .prop { filter: brightness(0.82) saturate(0.84); }
+.set-mid .prop::after {
+  content: "";
+  position: absolute;
+  left: 4%;
+  right: 4%;
+  bottom: -4px;
+  height: 9px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 50%, rgba(0, 0, 0, 0.85) 0%, transparent 74%);
+}
+.p-cooler  { left: 8%;  bottom: calc(var(--horizon) - 74px); }
+.p-plant-2 { right: 9%; bottom: calc(var(--horizon) - 82px); }
+
+.set-near { z-index: 4; }
+.set-near .prop {
+  filter: brightness(1) saturate(1) drop-shadow(0 10px 12px rgba(0, 0, 0, 0.85));
+}
+
+.p-board    { left: 2%;  bottom: calc(var(--horizon) - 4px); filter: brightness(0.34) saturate(0.4); }
+.p-rack     { left: 17%; bottom: calc(var(--horizon) - 6px); }
+.p-monitors { right: 17%; bottom: calc(var(--horizon) - 6px); }
+.p-plant    { right: 3%; bottom: calc(var(--horizon) - 8px); }
+.p-crates   { left: 40%; bottom: calc(var(--horizon) - 5px); }
+.p-rack-2   { left: 27%; bottom: calc(var(--horizon) - 6px); }
+
+.p-crate { left: -20px; bottom: 2px; }
+.p-spool { right: -18px; bottom: -6px; }
+.p-mug   { left: 6px;   bottom: 65px; }
+
+/* RELAY's courier drone: the one thing in the room that is not standing still,
+   and the only reason to look up. */
+.p-drone {
+  right: 12%;
+  top: 27%;
+  z-index: 2;
+  filter: brightness(1.05) drop-shadow(0 8px 12px rgba(0, 0, 0, 0.75));
+  animation: drone-hover 5.5s ease-in-out infinite;
+}
+@keyframes drone-hover {
+  0%, 100% { transform: translate(0, 0); }
+  30%      { transform: translate(-7px, -4px); }
+  62%      { transform: translate(5px, 3px); }
+}
+
+/* ── the crew ──
+   A plan, not a rank. Each station is placed by (--x, --depth) from the page,
+   and depth buys three things at once here: it lifts the feet toward the
+   horizon, shrinks the figure, and drops it behind its nearer neighbours.
+   Labels deliberately do NOT scale — the figures are scenery, the names are
+   interface, and interface does not get smaller because it is further away. */
+.floor-plan {
   position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 4px;
-  min-width: max-content;
+  z-index: 3;
+  height: 268px;
+  width: 100%;
 }
 
 .station {
-  position: relative;
+  position: absolute;
+  left: var(--x, 50%);
+  bottom: calc(var(--depth, 0) * 122px);
+  transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 0;
-  padding: 26px 6px 10px;
-  min-width: 92px;
+  padding: 26px 4px 8px;
+  width: 104px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   background: none;
@@ -608,38 +910,260 @@
   cursor: pointer;
   transition: background var(--tr), border-color var(--tr);
 }
-.station:hover { background: color-mix(in srgb, var(--agent) 9%, transparent); }
-.station.on {
-  border-color: color-mix(in srgb, var(--agent) 60%, transparent);
-  background: color-mix(in srgb, var(--agent) 12%, transparent);
+
+/* Only the figure and its cabin take the depth scale. */
+.figure {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform: scale(calc(1 - var(--depth, 0) * 0.42));
+  transform-origin: 50% 100%;
+}
+.figure .sprite,
+.figure .desk { position: relative; z-index: 1; }
+
+/* ── the cabin ─────────────────────────────────────────────────────────────
+   A booth, built the way a pixel-art box is built: three visible faces, three
+   different values. That is the whole trick, and the first pass missed it —
+   one flat panel behind each agent never reads as an enclosure no matter how
+   it is coloured.
+
+     • the top cap is the lightest face — it faces the ceiling
+     • the back panel is the mid face
+     • the returns splay toward you and take the two remaining values: the left
+       one lit, the right one in shadow, because the light is up and to the left
+
+   The returns are clipped trapezoids, not rectangles. Both their top and bottom
+   edges fall as they come forward, which is what a waist-high wall does when
+   the camera sits above it — and it is the difference between a booth and two
+   grey bars. Everything scales off --depth with its occupant, so a cabin at the
+   back of the room is a smaller cabin rather than a smaller picture of one.
+   ── */
+.cabin {
+  position: absolute;
+  left: 50%;
+  bottom: 11px;
+  width: 122px;
+  height: 58px;
+  transform: translateX(-50%);
+  z-index: 0;
+  pointer-events: none;
 }
 
-/* The console each agent works at. Its screen carries their colour, so the row
-   of desks reads as eight different jobs even before you read a name. */
-.console {
-  position: relative;
-  width: 68px;
-  height: 16px;
-  margin-top: -2px;
-  border: 2px solid #141b27;
-  background: linear-gradient(to bottom, #171e2c, #0d1220);
-  box-shadow: 0 10px 16px -8px rgba(0, 0, 0, 0.95);
+/* the back panel — the mid face */
+.cabin-back {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--agent) 9%, #202a38) 0%,
+    #18202d 54%,
+    #0f1621 100%
+  );
+  box-shadow: inset 0 0 0 1px #05070c;
 }
-.console-screen {
+/* upholstery, not paint */
+.cabin-back::after {
+  content: "";
+  position: absolute;
+  inset: 7px 1px 1px 1px;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(190, 214, 255, 0.04) 0 1px,
+    transparent 1px 3px
+  );
+}
+
+/* the top cap — the lightest face, and the only part wearing the agent's colour */
+.cabin-cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 7px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--agent) 70%, #4d5a74) 0 2px,
+    #46536c 2px 4px,
+    #2a3446 4px 6px,
+    #05070c 6px
+  );
+}
+
+/* the returns — lit on the left, shadowed on the right */
+.cabin-side {
+  position: absolute;
+  top: 2px;
+  bottom: -13px;
+  width: 24px;
+}
+.cabin-side-l {
+  left: 0;
+  clip-path: polygon(100% 0, 100% 76%, 0 100%, 0 24%);
+  background: linear-gradient(to right, #313d53, #212b3c);
+}
+.cabin-side-r {
+  right: 0;
+  clip-path: polygon(0 0, 0 76%, 100% 100%, 100% 24%);
+  background: linear-gradient(to left, #10161f, #171f2e);
+}
+/* their leading edges catch the cap light */
+.cabin-side-l::before,
+.cabin-side-r::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 30%;
+  background: linear-gradient(to bottom, #55648134 0%, transparent 100%);
+}
+
+/* Everyone pins something to the partition. */
+.cabin-pin {
+  position: absolute;
+  left: 7px;
+  top: 13px;
+  width: 16px;
+  height: 12px;
+  background: #c3cbdb;
+  box-shadow: 0 0 0 1px #05070c, inset 0 3px 0 #8b95ab;
+}
+/* And everyone has a second screen they are not looking at. */
+.cabin-screen {
+  position: absolute;
+  right: 6px;
+  top: 12px;
+  width: 26px;
+  height: 17px;
+  background: color-mix(in srgb, var(--agent) 34%, #0a1019);
+  box-shadow:
+    0 0 0 2px #0b1120,
+    0 0 12px -3px color-mix(in srgb, var(--agent) 65%, transparent);
+  transition: background var(--tr), box-shadow var(--tr);
+}
+.station.on .cabin-screen { background: color-mix(in srgb, var(--agent) 62%, #0a1019); }
+
+/* The object that makes the cabin theirs rather than a cabin. */
+.cabin-prop {
+  position: absolute;
+  left: 6px;
+  bottom: 1px;
+  line-height: 0;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.85));
+}
+
+/* Atmospheric perspective: distance costs a little light and a little colour. */
+.station .sprite { filter: brightness(calc(1 - var(--depth, 0) * 0.34)) saturate(calc(1 - var(--depth, 0) * 0.26)); }
+.station.on .sprite,
+.station:hover .sprite { filter: none; }
+.station:focus-visible {
+  outline: 2px solid var(--agent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+/* Selection is a light on the floor under them, not a box drawn around them —
+   the one keeps the room, the other turns it back into a form. */
+.station::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 44px;
+  width: 92px;
+  height: 22px;
+  transform: translateX(-50%) scale(calc(1 - var(--depth, 0) * 0.42));
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    color-mix(in srgb, var(--agent) 46%, transparent) 0%,
+    color-mix(in srgb, var(--agent) 14%, transparent) 46%,
+    transparent 72%
+  );
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--tr);
+}
+.station:hover::before { opacity: 0.5; }
+.station.on::before { opacity: 1; }
+
+/* The console each agent works at. Its screen carries their colour, so the row
+   of desks reads as eight different jobs even before you read a name — and it
+   spills a pool of that colour onto the floor, which is where the light in this
+   room is supposed to be coming from. */
+.desk {
+  position: relative;
+  width: 98px;
+  height: 14px;
+  margin-top: 0;
+  background: linear-gradient(to bottom, #1b2434 0 1px, #131b28 1px, #0b111a 100%);
+  box-shadow: inset 0 0 0 1px #05070c, 0 10px 16px -8px rgba(0, 0, 0, 0.95);
+}
+/* The desktop: the face the ceiling light actually hits, splayed wider at the
+   front edge so it lies down rather than standing up. */
+.desk::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  bottom: 100%;
+  height: 7px;
+  clip-path: polygon(4% 0, 96% 0, 100% 100%, 0 100%);
+  background: linear-gradient(to bottom, #4d5a74, #2b3548);
+}
+/* Desk legs, so it stands on the floor rather than hovering over it. */
+.desk::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  top: 100%;
+  height: 9px;
+  background: repeating-linear-gradient(to right, #0e141f 0 3px, transparent 3px 72px);
+}
+.desk-screen {
   position: absolute;
   left: 6px;
   right: 6px;
   top: 3px;
   height: 6px;
-  background: color-mix(in srgb, var(--agent) 26%, #0a0f1a);
-  box-shadow: 0 0 8px -1px color-mix(in srgb, var(--agent) 45%, transparent);
+  background: color-mix(in srgb, var(--agent) 42%, #0a0f1a);
+  box-shadow: 0 0 10px -1px color-mix(in srgb, var(--agent) 60%, transparent);
   transition: background var(--tr), box-shadow var(--tr);
 }
-.station.on .console { border-color: color-mix(in srgb, var(--agent) 55%, #141b27); }
-.station.on .console-screen,
-.station .sprite.is-working ~ .console .console-screen {
-  background: color-mix(in srgb, var(--agent) 62%, #0a0f1a);
+.desk-spill {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 150%;
+  height: 22px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at 50% 0%,
+    color-mix(in srgb, var(--agent) 28%, transparent),
+    transparent 68%
+  );
+  opacity: 0.45;
+  transition: opacity var(--tr);
 }
+.station.on .desk { border-color: color-mix(in srgb, var(--agent) 55%, #1d2634); }
+.station.on .desk-screen,
+.station .sprite.is-working ~ .desk .desk-screen {
+  background: color-mix(in srgb, var(--agent) 66%, #0a0f1a);
+}
+.station.on .desk-spill,
+.station .sprite.is-working ~ .desk .desk-spill { opacity: 0.9; }
+
+.station .plate,
+.station .plate-state { opacity: calc(1 - var(--depth, 0) * 0.3); }
+.station.on .plate,
+.station.on .plate-state,
+.station:hover .plate,
+.station:hover .plate-state { opacity: 1; }
 
 .plate {
   margin-top: 7px;
@@ -656,6 +1180,7 @@
   padding: 1px 6px;
   border: 1px solid var(--line-2);
   border-radius: 2px;
+  background: rgba(6, 8, 14, 0.72);
   font-family: var(--pixel);
   font-size: 7px;
   letter-spacing: 0.08em;
@@ -670,10 +1195,10 @@
 /* Only whoever is actually working speaks. */
 .bubble {
   position: absolute;
-  bottom: calc(100% - 22px);
+  bottom: calc(100% - 6px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2;
+  z-index: 5;
   max-width: 168px;
   padding: 5px 9px;
   border: 1px solid var(--agent);
@@ -703,27 +1228,69 @@
   to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
+/* ── the glass you are looking through ──
+   Scanlines sit under the crew and over the room, so the set reads as a screen
+   without touching the legibility of any label. The vignette closes the box. */
+.scanlines {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.34) 0 1px, transparent 1px 5px);
+  opacity: 0.4;
+}
+.vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: radial-gradient(126% 96% at 50% 48%, transparent 46%, rgba(2, 3, 7, 0.55) 100%);
+}
+
 .floor-hint {
-  margin: 16px 0 0;
+  position: relative;
+  z-index: 6;
+  margin: 14px 0 0;
   font-family: var(--pixel);
-  font-size: 8px;
+  font-size: 9px;
   letter-spacing: 0.12em;
-  color: var(--ink-3);
+  color: var(--ink-2);
   text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
 }
 
 /* ── inspector ── */
-.inspect { padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.inspect { padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .inspect-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .inspect-portrait {
+  position: relative;
   display: grid;
   place-items: center;
-  padding: 14px;
+  padding: 12px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
+  overflow: hidden;
   background:
-    radial-gradient(70% 70% at 50% 40%, color-mix(in srgb, var(--agent) 16%, transparent), transparent 70%),
+    radial-gradient(70% 70% at 50% 38%, color-mix(in srgb, var(--agent) 18%, transparent), transparent 70%),
     var(--bg-sunken);
+}
+/* A studio floor for the portrait, so it stands somewhere too. */
+.inspect-portrait::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  width: 84px;
+  height: 9px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    color-mix(in srgb, var(--agent) 34%, rgba(0, 0, 0, 0.8)) 0%,
+    rgba(0, 0, 0, 0.4) 50%,
+    transparent 76%
+  );
+  filter: blur(2px);
 }
 .inspect-name {
   font-family: var(--pixel);
@@ -740,13 +1307,13 @@
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 7px 0;
+  padding: 5px 0;
   border-bottom: 1px dotted var(--line-2);
 }
 .row:last-child { border-bottom: 0; }
 .row dt {
   flex: none;
-  width: 46px;
+  width: 52px;
   font-family: var(--pixel);
   font-size: 8px;
   letter-spacing: 0.08em;
@@ -766,17 +1333,21 @@
   line-height: 1.55;
   font-style: italic;
 }
-.inspect-grid { display: flex; flex-direction: column; gap: 7px; margin-top: 2px; }
+.inspect-grid { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.inspect-grid-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* The three tones the character is actually built from — base, highlight,
+   shadow — shown as the ramp they are. */
+.ramp { display: inline-flex; border: 1px solid var(--line-2); border-radius: 2px; overflow: hidden; }
+.ramp i { width: 15px; height: 9px; }
 .pixel-grid {
   display: grid;
-  grid-template-columns: repeat(16, 8px);
-  grid-template-rows: repeat(16, 8px);
   gap: 1px;
-  padding: 6px;
+  width: 132px;
+  aspect-ratio: 1;
+  padding: 5px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--bg-sunken);
-  align-self: flex-start;
 }
 
 /* ── scenario bar ── */
@@ -815,11 +1386,80 @@
   .floor-wrap { grid-template-columns: 1fr; }
   .floor { border-right: 0; border-bottom: 2px solid var(--line-3); }
 }
+
+/* Eight stations do not fit across a phone, and a horizontally scrolling room
+   is not a room. Below this width the floor becomes two ranks of four — still
+   one space, still in perspective, still readable. */
+/* A plan needs room to be a plan. On a narrow screen there isn't any, so the
+   floor falls back to two honest ranks of four — still a room, still in
+   perspective, and every target still comfortably tappable. */
+@media (max-width: 860px) {
+  .floor { height: 468px; padding-bottom: 22px; }
+  .floor-plan {
+    height: auto;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px 2px;
+  }
+  .station {
+    position: relative;
+    left: auto;
+    bottom: auto;
+    transform: none;
+    width: auto;
+    min-width: 0;
+    z-index: auto !important;
+    padding: 22px 2px 8px;
+  }
+  /* Rank one stands behind rank two. */
+  .station:nth-child(-n + 4) { --depth: 0.42; }
+  .station:nth-child(n + 5) { --depth: 0.02; }
+  .station .sprite { --sprite-size: 54px; }
+  .desk { width: 100%; max-width: 72px; }
+  .cabin { width: 88px; height: 52px; }
+  /* Two ranks of four leave no room for set dressing behind them. */
+  .p-board, .p-monitors, .bay, .p-cooler, .p-plant-2 { display: none; }
+  .p-mug { left: 8px; bottom: 6px; }
+}
 @media (max-width: 640px) {
   .crew-page { padding: 18px 16px 64px; }
-  .bubble { white-space: normal; max-width: 132px; }
+  .bubble { white-space: normal; max-width: 128px; }
+  .station .sprite { --sprite-size: 46px; }
+  .desk { max-width: 58px; }
+  .cabin { width: 74px; height: 46px; }
 }
 
+/* ===========================================================================
+   REDUCED MOTION
+   Movement is removed; the meaning each animation carried is kept as a static
+   or colour-only signal, so the interface still says who is working.
+   =========================================================================== */
 @media (prefers-reduced-motion: reduce) {
+  .sprite,
+  .sprite.is-working.motion-nod,
+  .sprite.is-working.motion-drift,
+  .sprite.is-working.motion-thrum,
+  .sprite.is-working.motion-flicker,
+  .sprite.is-working.motion-scan,
+  .sprite.is-working.motion-guard,
+  .sprite.is-working.motion-launch,
+  .sprite.is-working.motion-tally,
+  .sprite.is-gate,
+  .sprite.is-done,
+  .agent-card:hover .sprite {
+    animation: none !important;
+    transform: none !important;
+  }
+  /* The working agent stays identifiable without moving. */
+  .sprite.is-working { outline: 2px solid var(--agent); outline-offset: 2px; }
+  .sprite.is-gate { outline: 2px dashed var(--agent); outline-offset: 2px; }
+  .sprite-scan { display: none; }
+  .sprite.grounded.is-working .sprite-ground,
+  .sprite.grounded.is-gate .sprite-ground { transform: none; }
+  .p-drone { animation: none; }
+  .relay-step.working .relay-bar::after { animation: none; width: 100%; }
+  .relay-step.gate .relay-bar::after { animation: none; }
+  .agent-say.live::after { animation: none; }
+  .agent-card:hover { transform: none; }
   .bubble { animation: none; }
 }

@@ -3,11 +3,32 @@
  *
  * Each pipeline phase is run by a named character rather than an anonymous job
  * title, because watching eight specialists hand work to each other is the thing
- * this product actually does. A persona carries: a codename, a colour that is
- * only ever theirs, a 16x16 sprite, a motion signature, and a voice — short
+ * this product actually does. A persona carries: a codename, a colour ramp that
+ * is only ever theirs, a 24x24 sprite, a motion signature, and a voice — short
  * status lines written the way that character would write them.
  *
  * `key` matches the backend phase key in app/agents/*.
+ *
+ * ── How the sprites are drawn ──────────────────────────────────────────────
+ * Two rules from pixel-art practice do the heavy lifting here, and both were
+ * missing from the first pass:
+ *
+ *   1. SILHOUETTE FIRST. A sprite has to be identifiable with every colour
+ *      knocked out. So no two crew members share an outline: SCOPE has a cap
+ *      brim, ATLAS a survey spire, FORGE a raised welding shield, PRISM a pair
+ *      of ear cups, SIEVE a loupe held up beside the head, WARDEN a crest and a
+ *      slab shield, RELAY a pair of thruster fins, LEDGER a tally column. Colour
+ *      is then confirmation, not the only signal — which is also what makes the
+ *      roster survive colour blindness and a 30px render.
+ *
+ *   2. HUE-SHIFTED RAMPS, not brightness ramps. Every agent carries three tones:
+ *      `accent` (base), `accentLit` (highlight, rotated warm) and `accentDim`
+ *      (shadow, rotated cool). Darkening a single hue reads as flat plastic;
+ *      rotating it as the value drops is what makes a 24px figure look lit.
+ *
+ * The grid grew 16 → 24 because eight distinguishable professions do not fit in
+ * 16 rows once you spend nine of them on a head. 24 is still cheap: rows are
+ * run-length merged into rects at render time.
  */
 
 export type AgentMotion =
@@ -30,29 +51,69 @@ export type Persona = {
   trait: string;
   tagline: string;
   motion: AgentMotion;
-  /** Signature colour. Used for this agent and nothing else. */
+  /** What you can pick this character out by with the colour turned off. */
+  silhouette: string;
+  /** Signature colour ramp. Used for this agent and nothing else. */
   accent: string;
+  /** Highlight — the base hue rotated warm, not just lightened. */
+  accentLit: string;
+  /** Shadow — the base hue rotated cool, not just darkened. */
   accentDim: string;
   /** Voice: short status lines, in character, per state. */
   lines: { queued: string; working: string; done: string; rejected: string };
   debate?: boolean;
-  /** 16x16 sprite. Keys index PALETTE below; "." is transparent. */
+  /** 24x24 sprite. Keys index PALETTE below; "." is transparent. */
   sprite: string[];
+  /**
+   * The thing on their desk. 14x12, drawn from DESK_PALETTE plus the agent's
+   * own A/H/B ramp — a cabin with a generic monitor in it belongs to nobody.
+   */
+  deskProp: string[];
 };
 
-// Shared sprite palette. Per-agent colours are substituted at render time:
-//   A → accent, B → accentDim. Everything else is common to the crew.
+/**
+ * Shared sprite palette — the materials every crew member is made of.
+ * Per-agent colours are substituted at render time:
+ *   A → accent, H → accentLit, B → accentDim.
+ * Each material is a ramp, not a flat fill, and every ramp is hue-shifted:
+ * shadows drift blue, highlights drift warm.
+ */
 export const PALETTE: Record<string, string> = {
-  o: "#07080c", // outline
-  V: "#141a2b", // visor glass
-  E: "#eafcff", // eye light
-  W: "#e9ecf2", // panel white
-  X: "#5b6479", // panel detail
+  o: "#05060c", // outline — near-black, blue-cast so it sits in the room
+  V: "#0d1428", // visor glass, deep
+  v: "#1e2f57", // visor glass, lit
+  E: "#dcfbff", // eye light
+  M: "#49536a", // metal, base
+  m: "#7e8ca8", // metal, highlight
+  N: "#242b3c", // metal, shadow
+  W: "#dfe4ee", // panel, lit
+  X: "#8b95ab", // panel, mid
+  K: "#141926", // undersuit
 };
 
-// Every sprite shares one silhouette — same helmet, same visor, same stance — so
-// the crew reads as a crew. Identity lives in the colour, the chest device and
-// the way each one moves.
+/**
+ * Materials for the object on each agent's desk. The agent's own three tones
+ * are mixed in at render time as A / H / B, so the prop is unmistakably theirs
+ * without needing a second colour system.
+ */
+export const DESK_PALETTE: Record<string, string> = {
+  o: "#05060c", // outline
+  W: "#dfe4ee", // paper / casing
+  X: "#8b95ab", // paper, shaded
+  M: "#49536a", // metal
+  m: "#7e8ca8", // metal, lit
+  N: "#242b3c", // metal, shadow
+  S: "#0d1424", // screen
+  L: "#22d3ee", // exhaust / indicator
+};
+
+/** Build the render palette for one agent's desk prop. */
+export function deskPaletteFor(a: Persona): Record<string, string> {
+  return { ...DESK_PALETTE, A: a.accent, H: a.accentLit, B: a.accentDim };
+}
+
+// Rows 7–13 (head), 19–23 (stance) are common to the crew, so eight very
+// different silhouettes still read as one team wearing one uniform.
 export const AGENTS: Persona[] = [
   {
     key: "product_manager",
@@ -64,8 +125,10 @@ export const AGENTS: Persona[] = [
     trait: "Ruthless",
     tagline: "Cuts the idea down to the part that ships.",
     motion: "nod",
+    silhouette: "Flat cap brim, clipboard up",
     accent: "#ffb627",
-    accentDim: "#8a5f10",
+    accentLit: "#ffdd8a",
+    accentDim: "#8c520c",
     lines: {
       queued: "Waiting for the brief",
       working: "Cutting scope",
@@ -73,22 +136,44 @@ export const AGENTS: Persona[] = [
       rejected: "Rethinking scope",
     },
     sprite: [
-      "........o.......",
-      ".....ooooooo....",
-      "....oAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBBWWWWWWBBo..",
-      "..oBBWXXXXWBBo..",
-      "..oBBWWWWWWBBo..",
-      "..oBBBBBBBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      "........................",
+      "........................",
+      "......oooooooooooo......",
+      ".....oAHHHHHHHHHHAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "...oBBBBBBBBBBBBBBBBo...",
+      "....oooooooooooooooo....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAVEEvvEEVAAo.....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "......oAAAAAAAAAAo......",
+      ".......ooAAAAAAoo...oooo",
+      "........oKKKKKKo....oWWo",
+      "....oooBBBBBBBBBBoo.oXXo",
+      "...oBBBWWWWWWWWWWBo.oWWo",
+      "...oBBBWXooXXooXWBo.oXXo",
+      "...oBBBWXXooooXXWBo.oWWo",
+      "...oBBBWWWWWWWWWWBo.oooo",
+      "....oooBBBBBBBBBBoo.....",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      ".....oMMMMo..oMMMMo.....",
+      ".....oooooo..oooooo.....",
+    ],
+    deskProp: [
+      "...oooooooo...",
+      "..oXXoooXXo...",
+      "..oWWWWWWWWo..",
+      "..oWoooooWWo..",
+      "..oWWWWWWWWo..",
+      "..oWoooooWWo..",
+      "..oWWWWWWWWo..",
+      "..oWAAAAoWWo..",
+      "..oWWWWWWWWo..",
+      "..oWAAAAAAWo..",
+      "..oWWWWWWWWo..",
+      "..oooooooooo..",
     ],
   },
   {
@@ -101,8 +186,10 @@ export const AGENTS: Persona[] = [
     trait: "Deliberate",
     tagline: "Draws the shape everything else has to fit.",
     motion: "drift",
+    silhouette: "Survey spire, arms out to the rule",
     accent: "#4d9de0",
-    accentDim: "#1d4a70",
+    accentLit: "#a5d8ff",
+    accentDim: "#1e3f75",
     lines: {
       queued: "Waiting on scope",
       working: "Drawing the shape",
@@ -110,22 +197,44 @@ export const AGENTS: Persona[] = [
       rejected: "Redrawing",
     },
     sprite: [
-      "................",
-      "...ooooooooo....",
-      "...oAAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBBXoXoXoBBo..",
-      "..oBBoXoXoXBBo..",
-      "..oBBXoXoXoBBo..",
-      "..oBBBBBBBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      "...........oo...........",
+      "..........oHHo..........",
+      "..........oAAo..........",
+      "......oooooAAooooo......",
+      ".....oAHHHHHHHHHHAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "....oooooooooooooooo....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAVEEvvEEVAAo.....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "......oAAAAAAAAAAo......",
+      ".......ooAAAAAAoo.......",
+      "........oKKKKKKo........",
+      "....oooBBBBBBBBBBooo....",
+      "...oBBBWWWWWWWWWWBBBo...",
+      ".ooBBBBWXoXoXoXWBBBBoo..",
+      ".oMmoBBWXoXoXoXWBBomMo..",
+      "..oooBBWWWWWWWWWWBooo...",
+      "....oooBBBBBBBBBBooo....",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      ".....oMMMMo..oMMMMo.....",
+      ".....oooooo..oooooo.....",
+    ],
+    deskProp: [
+      "..oooooooooo..",
+      "..oSSSSSSSSo..",
+      "..oSAoSoAoSo..",
+      "..oSoSoSoSSo..",
+      "..oSSAoAoSSo..",
+      "..oSoSoSoSSo..",
+      "..oSAoSoAoSo..",
+      "..oSSSSSSSSo..",
+      "..oSoAAoASSo..",
+      "..oSSSSSSSSo..",
+      "..oooooooooo..",
+      "....o....o....",
     ],
   },
   {
@@ -140,7 +249,9 @@ export const AGENTS: Persona[] = [
     motion: "thrum",
     debate: true,
     accent: "#3dd68c",
-    accentDim: "#146b41",
+    accentLit: "#9bf5c4",
+    accentDim: "#126044",
+    silhouette: "Flat welding shield up, heaviest build",
     lines: {
       queued: "Waiting on the design",
       working: "Laying pipe",
@@ -148,22 +259,44 @@ export const AGENTS: Persona[] = [
       rejected: "Tearing it out",
     },
     sprite: [
-      "................",
-      "....oooooooo....",
-      "...oAAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBWWWWWWWWBo..",
-      "..oBWXoooooWBo..",
-      "..oBWXoooooWBo..",
-      "..oBBBBBBBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      "........................",
+      "....oooooooooooooooo....",
+      "....oNmMMMMMMMMMMmNo....",
+      "....oNMMMMMMMMMMMMNo....",
+      "....oooooooooooooooo....",
+      ".....oAHHHHHHHHHHAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAVEEvvEEVAAo.....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "......oAAAAAAAAAAo......",
+      ".......ooAAAAAAoo.......",
+      "........oKKKKKKo........",
+      "..ooooooBBBBBBBBBBoooooo",
+      "..oBBBBBWWWWWWWWWWBBBBBo",
+      "..oBBBBBWoooooooWBBBBBBo",
+      "..oBBBBBWXXXXXXXWBBBBBBo",
+      "..oooBBBWWWWWWWWWWBBBooo",
+      "....oooBBBBBBBBBBooo....",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      "....ooMMMMo..oMMMMoo....",
+      "....oooooo....oooooo....",
+    ],
+    deskProp: [
+      "....oooo......",
+      "...oAHHAo.....",
+      "..oAHooHAo....",
+      "..oAHooHAo....",
+      "...oAHHAo.....",
+      "....oAAo......",
+      "..ooooAAoooo..",
+      ".oMmmmAAmmmMo.",
+      ".oMooooooooMo.",
+      ".oMmmmmmmmmMo.",
+      ".oooooooooooo.",
+      "...o......o...",
     ],
   },
   {
@@ -177,7 +310,9 @@ export const AGENTS: Persona[] = [
     tagline: "Makes the thing people actually touch.",
     motion: "flicker",
     accent: "#ff5da2",
-    accentDim: "#8d1f52",
+    accentLit: "#ffb3d1",
+    accentDim: "#8a1c5c",
+    silhouette: "Ear cups either side of the head",
     lines: {
       queued: "Waiting on the API",
       working: "Pushing pixels",
@@ -185,22 +320,44 @@ export const AGENTS: Persona[] = [
       rejected: "Starting the layout over",
     },
     sprite: [
-      "................",
-      "....oooooooo....",
-      "...oAAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBWWWWWWWWBo..",
-      "..oBWXXAAXXWBo..",
-      "..oBWWWWWWWWBo..",
-      "..oBBBBBBBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      "........................",
+      "........................",
+      "....oooooooooooooooo....",
+      "....oHHHHHHHHHHHHHHo....",
+      ".....oAAAAAAAAAAAAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "..ooooAAAAAAAAAAAAoooo..",
+      "..oHHoAAVVVVVVVVAAoHHo..",
+      "..oHHoAAVEEvvEEVAAoHHo..",
+      "..oAAoAAVVVVVVVVAAoAAo..",
+      "..ooooAAAAAAAAAAAAoooo..",
+      "......oAAAAAAAAAAo......",
+      ".......ooAAAAAAoo.......",
+      "........oKKKKKKo........",
+      "....oooBBBBBBBBBBooo....",
+      "...oBBBWWWWWWWWWWBBBo...",
+      "...oBBBWHHAAAAHHWBBBo...",
+      "...oBBBWXXWWWWXXWBBBo...",
+      "...oBBBWWWWWWWWWWBBBo...",
+      "....oooBBBBBBBBBBooo....",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      ".....oMMMMo..oMMMMo.....",
+      ".....oooooo..oooooo.....",
+    ],
+    deskProp: [
+      "..............",
+      "...oooooooo...",
+      "..oHHHHHHHHo..",
+      "..oAAAAAAAAo..",
+      "..oBBBBBBBBo..",
+      "..oWWWWWWWWo..",
+      "..oXXXXXXXXo..",
+      "..oooooooooo..",
+      "....oo..oo....",
+      "....oo..oo....",
+      "..............",
+      "..............",
     ],
   },
   {
@@ -214,7 +371,9 @@ export const AGENTS: Persona[] = [
     tagline: "Assumes it is broken until it proves otherwise.",
     motion: "scan",
     accent: "#ff8a3d",
-    accentDim: "#8f4210",
+    accentLit: "#ffc294",
+    accentDim: "#8a3a10",
+    silhouette: "Loupe held up beside the head",
     lines: {
       queued: "Waiting for something to break",
       working: "Hunting edge cases",
@@ -222,22 +381,44 @@ export const AGENTS: Persona[] = [
       rejected: "Re-testing",
     },
     sprite: [
-      "..o..........o..",
-      "...ooooooooo....",
-      "...oAAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBBWWWWWWBBo..",
-      "..oBBWXooXWBBo..",
-      "..oBBWWWWWWBBo..",
-      "..oBBBBBBBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      "........................",
+      "........................",
+      ".........oooooo.........",
+      ".......ooAAAAAAoo.......",
+      "......oAHHHHHHHHAo......",
+      ".....oAAAAAAAAAAAAo.....",
+      "....oooooooooooooooo....",
+      ".ooo.oAAVVVVVVVVAAo.....",
+      "oAHAooAAVEEvvEEVAAo.....",
+      "oHEHooAAVVVVVVVVAAo.....",
+      "oAHAooAAAAAAAAAAAAo.....",
+      ".oMo..oAAAAAAAAAAo......",
+      "..oMo..ooAAAAAAoo.......",
+      "...oMo..oKKKKKKo........",
+      "....oooBBBBBBBBBBooo....",
+      "...oBBBWWWWWWWWWWBBBo...",
+      "...oBBBWXooXXooXWBBBo...",
+      "...oBBBWXXooooXXWBBBo...",
+      "...oBBBWWWWWWWWWWBBBo...",
+      "....oooBBBBBBBBBBooo....",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      ".....oMMMMo..oMMMMo.....",
+      ".....oooooo..oooooo.....",
+    ],
+    deskProp: [
+      "....oooo......",
+      "...oXXXXo.....",
+      "..oooooooooo..",
+      "..oWSSSSSSWo..",
+      "..oWSoAAoSWo..",
+      "..oWSAAAASWo..",
+      "..oWSoAAoSWo..",
+      "..oWSSSSSSWo..",
+      "..oWSSSSSSWo..",
+      "..oooooooooo..",
+      "..............",
+      "..............",
     ],
   },
   {
@@ -251,7 +432,9 @@ export const AGENTS: Persona[] = [
     tagline: "Reads every feature as an attack surface.",
     motion: "guard",
     accent: "#ff4d6d",
-    accentDim: "#8d1a2f",
+    accentLit: "#ffa0b1",
+    accentDim: "#7d1830",
+    silhouette: "Crested helmet, slab shield on the left",
     lines: {
       queued: "Watching",
       working: "Modelling threats",
@@ -259,22 +442,44 @@ export const AGENTS: Persona[] = [
       rejected: "Re-auditing",
     },
     sprite: [
-      "................",
-      "....oooooooo....",
-      "...oAAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBBWWWWWWBBo..",
-      "..oBBWXXXXWBBo..",
-      "..oBBBWXXWBBBo..",
-      "..oBBBBWWBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      "...........oo...........",
+      "..........oHHo..........",
+      ".........oHHHHo.........",
+      "......oooHHHHHHooo......",
+      ".....oAHHHHHHHHHHAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "....oooooooooooooooo....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAVEEvvEEVAAo.....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "......oAAAAAAAAAAo......",
+      ".oooo..ooAAAAAAoo.......",
+      "oMmmMo..oKKKKKKo........",
+      "oMHHMooBBBBBBBBBBooo....",
+      "oMHHMoBWWWWWWWWWWBBBo...",
+      "oMmHmoBWXooXXooXWBBBo...",
+      "oMmmmoBWXXooooXXWBBBo...",
+      ".oMMo.BWWWWWWWWWWBBBo...",
+      "..oo..oBBBBBBBBBBooo....",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      ".....oMMMMo..oMMMMo.....",
+      ".....oooooo..oooooo.....",
+    ],
+    deskProp: [
+      "..............",
+      ".....oooo.....",
+      "....oAAAAo....",
+      "...oAAooAAo...",
+      "...oAo..oAo...",
+      "..oooooooooo..",
+      "..oBBBBBBBBo..",
+      "..oBBBooBBBo..",
+      "..oBBBooBBBo..",
+      "..oBBBBBBBBo..",
+      "..oooooooooo..",
+      "..............",
     ],
   },
   {
@@ -288,7 +493,9 @@ export const AGENTS: Persona[] = [
     tagline: "Gets it off this machine and into the world.",
     motion: "launch",
     accent: "#22d3ee",
-    accentDim: "#0b6a7c",
+    accentLit: "#9df0fb",
+    accentDim: "#0a5b73",
+    silhouette: "Thruster fins flared behind the shoulders",
     lines: {
       queued: "On the pad",
       working: "Wiring the pipeline",
@@ -296,22 +503,44 @@ export const AGENTS: Persona[] = [
       rejected: "Rebuilding the pipeline",
     },
     sprite: [
-      "................",
-      "....oooooooo....",
-      "...oAAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBWoWoWoWoBo..",
-      "..oBWWWWWWWWBo..",
-      "..oBWoWoWoWoBo..",
-      "..oBBBBBBBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      ".................o......",
+      "................oHo.....",
+      "......ooooooooooooo.....",
+      ".....oAHHHHHHHHHHAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "....oooooooooooooooo....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAVEEvvEEVAAo.....",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "......oAAAAAAAAAAo......",
+      ".......ooAAAAAAoo.......",
+      "........oKKKKKKo........",
+      ".oM.oooBBBBBBBBBBooo.Mo.",
+      "oMm.oBBBWWWWWWWWBBBo.mMo",
+      "oMm.oBBBWXXooXXWBBBo.mMo",
+      "oMm.oBBBWXoXXoXWBBBo.mMo",
+      "oMm.oBBBWWWWWWWWBBBo.mMo",
+      ".oM.oooBBBBBBBBBBooo.Mo.",
+      "..o..ooBBBBBBBBBBoo..o..",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      ".....oMMMMo..oMMMMo.....",
+      ".....oooooo..oooooo.....",
+    ],
+    deskProp: [
+      "......oo......",
+      ".....oHHo.....",
+      ".....oAAo.....",
+      "....oAAAAo....",
+      "....oAAAAo....",
+      "...oMAAAAMo...",
+      "...oMAAAAMo...",
+      "...ooAAAAoo...",
+      "....oLLLLo....",
+      ".....oLLo.....",
+      "..oooooooooo..",
+      "..............",
     ],
   },
   {
@@ -325,7 +554,9 @@ export const AGENTS: Persona[] = [
     tagline: "Tells you what this will actually cost to run.",
     motion: "tally",
     accent: "#c6f135",
-    accentDim: "#5f7a10",
+    accentLit: "#eafda0",
+    accentDim: "#566f0e",
+    silhouette: "Narrow eyeshade, tally column at the side",
     lines: {
       queued: "Nothing to count yet",
       working: "Running the numbers",
@@ -333,22 +564,44 @@ export const AGENTS: Persona[] = [
       rejected: "Recounting",
     },
     sprite: [
-      "................",
-      "....oooooooo....",
-      "...oAAAAAAAAo...",
-      "...oAAAAAAAAo...",
-      "...oAVVVVVVAo...",
-      "...oAVEVVEVAo...",
-      "...oAVVVVVVAo...",
-      "...oAAAAAAAAo...",
-      "....oo.AA.oo....",
-      "...oBBBBBBBBo...",
-      "..oBBBWWWWBBBo..",
-      "..oBBWXXXXWBBo..",
-      "..oBBBWWWWBBBo..",
-      "..oBBBBBBBBBBo..",
-      "...oo.oo.oo.....",
-      "................",
+      "........................",
+      "........................",
+      "........................",
+      "......oooooooooooo......",
+      ".....oAHHHHHHHHHHAo.....",
+      ".....oAAAAAAAAAAAAo.....",
+      "...ooHHHHHHHHHHHHHHoo...",
+      ".....oAAVVVVVVVVAAo.....",
+      ".....oAAVEEvvEEVAAo.ooo.",
+      ".....oAAVVVVVVVVAAo.oWo.",
+      ".....oAAAAAAAAAAAAo.oXo.",
+      "......oAAAAAAAAAAo..oWo.",
+      ".......ooAAAAAAoo...oXo.",
+      "........oKKKKKKo....oWo.",
+      "....oooBBBBBBBBBBoo.oXo.",
+      "...oBBBWWWWWWWWWWBo.oWo.",
+      "...oBBBWXXoXXoXXWBo.oXo.",
+      "...oBBBWXXoXXoXXWBo.oWo.",
+      "...oBBBWWWWWWWWWWBo.ooo.",
+      "....oooBBBBBBBBBBoo.....",
+      "......oBBBo..oBBBo......",
+      "......oBBBo..oBBBo......",
+      ".....oMMMMo..oMMMMo.....",
+      ".....oooooo..oooooo.....",
+    ],
+    deskProp: [
+      "..oooooooooo..",
+      "..oWWWWWWWWo..",
+      "..oWAAoAAAWo..",
+      "..oWWWWWWWWo..",
+      "..oWAoAAAAWo..",
+      "..oWWWWWWWWo..",
+      "..oWAAAoAAWo..",
+      "..oWWWWWWWWo..",
+      "..oWoAAAAAWo..",
+      "..oWWWWWWWWo..",
+      "..oooooooooo..",
+      "..............",
     ],
   },
 ];

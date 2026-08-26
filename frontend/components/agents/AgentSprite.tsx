@@ -3,27 +3,41 @@ import { PALETTE, type Persona } from "./personas";
 export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
 
 /**
- * Renders a 16x16 persona sprite as SVG rects — one element per opaque pixel,
+ * Renders a persona sprite as SVG rects — one element per run of opaque pixels,
  * no image assets, sharp at any size.
  *
- * Motion is deliberately NOT inline: each persona carries a `motion` signature
- * that agents.css owns, so a character always moves the same way wherever it
- * appears, and every one of those keyframes has a reduced-motion path.
+ * Three things are deliberately not inline here:
+ *
+ *   • Motion. Each persona carries a `motion` signature that agents.css owns, so
+ *     a character always moves the same way wherever it appears, and every one
+ *     of those keyframes has a reduced-motion path.
+ *   • Grid size. It is read off the sprite rather than hardcoded, so a character
+ *     can be redrawn at a different resolution without touching this file.
+ *   • The contact shadow. A figure with nothing under it floats; `ground` opts
+ *     into an ellipse tinted with the agent's own colour, which is what makes
+ *     the crew read as standing on the floor rather than pasted over it.
  */
 export default function AgentSprite({
   agent,
   size = 48,
   state = "queued",
+  ground = false,
   className = "",
 }: {
   agent: Persona;
   size?: number;
   state?: SpriteState;
+  /** Draw a contact shadow beneath the figure. On for anyone standing in a room. */
+  ground?: boolean;
   className?: string;
 }) {
+  const cols = Math.max(...agent.sprite.map((r) => r.length));
+  const rows = agent.sprite.length;
+
   const colorFor = (ch: string): string | null => {
     if (ch === ".") return null;
     if (ch === "A") return agent.accent;
+    if (ch === "H") return agent.accentLit;
     if (ch === "B") return agent.accentDim;
     return PALETTE[ch] ?? null;
   };
@@ -52,12 +66,16 @@ export default function AgentSprite({
 
   return (
     <span
-      className={`sprite motion-${agent.motion} is-${state} ${className}`}
-      style={{ width: size, height: size, ["--agent" as string]: agent.accent }}
+      className={`sprite motion-${agent.motion} is-${state}${ground ? " grounded" : ""} ${className}`}
+      style={{
+        ["--sprite-size" as string]: `${size}px`,
+        ["--agent" as string]: agent.accent,
+      }}
       data-agent={agent.codename}
     >
+      {ground && <span className="sprite-ground" aria-hidden="true" />}
       <svg
-        viewBox="0 0 16 16"
+        viewBox={`0 0 ${cols} ${rows}`}
         width={size}
         height={size}
         shapeRendering="crispEdges"
