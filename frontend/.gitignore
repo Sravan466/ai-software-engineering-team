@@ -3,3 +3,6 @@ node_modules/
 out/
 next-env.d.ts
 .env*.local
+
+# Build artifact — regenerated on every tsc run, and it churns the diff.
+tsconfig.tsbuildinfo

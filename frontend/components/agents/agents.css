@@ -1090,10 +1090,10 @@
 .station:hover::before { opacity: 0.5; }
 .station.on::before { opacity: 1; }
 
-/* The console each agent works at. Its screen carries their colour, so the row
-   of desks reads as eight different jobs even before you read a name — and it
-   spills a pool of that colour onto the floor, which is where the light in this
-   room is supposed to be coming from. */
+/* The desk in front of each cabin. Its screen carries the occupant's colour and
+   spills a pool of it onto the floor, which is where the light in this room is
+   supposed to be coming from — and it is what makes eight booths read as eight
+   different jobs before you read a single nameplate. */
 .desk {
   position: relative;
   width: 78px;
@@ -1159,7 +1159,7 @@
 .station .sprite.is-working ~ .desk .desk-spill { opacity: 0.9; }
 
 .station .plate,
-.station .plate-state { opacity: calc(1 - var(--depth, 0) * 0.3); }
+.station .plate-state { opacity: calc(1 - var(--depth, 0) * 0.15); }
 .station.on .plate,
 .station.on .plate-state,
 .station:hover .plate,
@@ -1170,7 +1170,7 @@
   font-family: var(--pixel);
   font-size: 9px;
   letter-spacing: 0.05em;
-  color: var(--ink-3);
+  color: var(--ink-2);
   white-space: nowrap;
 }
 .station.on .plate { color: var(--agent); }
