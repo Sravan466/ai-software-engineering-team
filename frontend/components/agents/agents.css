@@ -166,6 +166,9 @@
   grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
   gap: 10px;
 }
+/* Always interactive: these are links to the crew floor, and the hover lift
+   below is their affordance. Link colour and underline are reset explicitly
+   rather than leaning on Tailwind's preflight. */
 .agent-card {
   position: relative;
   display: flex;
@@ -176,6 +179,9 @@
   background: var(--bg-panel);
   overflow: hidden;
   text-align: left;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
   transition: border-color var(--tr), background var(--tr), transform var(--tr);
 }
 /* The character's own colour bleeds in only on hover — the roster stays calm
