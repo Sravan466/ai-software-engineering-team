@@ -70,8 +70,13 @@
   /* ── type ── */
   --sans: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   --mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
-  /* Pixel face: codenames, agent plates, the display headline. Never body copy. */
-  --pixel: var(--font-pixel), var(--font-mono), monospace;
+  /* Pixel face: codenames, agent plates, the display headline. Never body copy.
+     The named fallback is load-bearing: `var(--font-pixel)` with no fallback is
+     invalid at computed-value time if next/font ever fails to define it, which
+     collapses the whole token and silently renders every codename in the body
+     sans. Degrading to a typewriter face keeps the crew's voice recognisably
+     not-the-UI-font. */
+  --pixel: var(--font-pixel, "Courier New"), var(--font-mono), ui-monospace, monospace;
 
   /* fixed scale, ~1.2 ratio — product UI reads at a consistent size */
   --t-xs:   0.75rem;   /* 12 — meta, badges */

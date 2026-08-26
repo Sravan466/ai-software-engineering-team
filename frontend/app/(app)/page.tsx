@@ -158,7 +158,7 @@ export default function NewBuildPage() {
               style={{ ["--agent" as string]: a.accent }}
               title={`Meet ${a.codename} on the crew floor`}
             >
-              <AgentSprite agent={a} size={46} state="done" />
+              <AgentSprite agent={a} size={48} state="done" />
               <div className="agent-card-body">
                 <span className="agent-num">{a.n}</span>
                 <h3 className="agent-codename">{a.codename}</h3>

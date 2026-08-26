@@ -278,7 +278,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                   onClick={() => setTab("build")}
                   title={`${agent.codename} · ${agent.role} — ${NODE_STATUS[ns]}`}
                 >
-                  <AgentSprite agent={agent} size={34} state={SPRITE_STATE[ns]} />
+                  <AgentSprite agent={agent} size={36} state={SPRITE_STATE[ns]} />
                   <span className="relay-name">{agent.codename}</span>
                   <span className="relay-bar" />
                 </button>
@@ -502,7 +502,7 @@ function PhaseList({
               aria-expanded={hasDoc ? isOpen : undefined}
               onClick={() => hasDoc && setOpen((o) => ({ ...o, [ph.key]: !isOpen }))}
             >
-              <AgentSprite agent={agent} size={38} state={SPRITE_STATE[ns]} />
+              <AgentSprite agent={agent} size={40} state={SPRITE_STATE[ns]} />
 
               <span className="phase-main">
                 <span className="phase-line agent-line">
@@ -547,7 +547,7 @@ function PhaseList({
               <div className="phase-body" style={{ paddingTop: 0 }}>
                 <div className="gate agent-gate">
                   <div className="gate-head">
-                    <AgentSprite agent={agent} size={30} state="gate" />
+                    <AgentSprite agent={agent} size={32} state="gate" />
                     <span className="gate-head-title">
                       <b className="agent-line-name">{agent.codename}</b> hands you {ph.deliver}
                     </span>

@@ -1,10 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AGENTS, PALETTE, type Persona } from "@/components/agents/personas";
+import {
+  AGENTS,
+  PALETTE,
+  deskPaletteFor,
+  type Persona,
+} from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import PixelArt from "@/components/agents/PixelArt";
-import { PLANT, RACK, PROP_PALETTE } from "@/components/agents/props";
+import {
+  PLANT,
+  RACK,
+  BOARD_PROP,
+  MONITORS,
+  COOLER,
+  DRONE,
+  CRATE,
+  SPOOL,
+  MUG,
+  PROP_PALETTE,
+} from "@/components/agents/props";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 
@@ -15,6 +31,15 @@ import { Icon } from "@/components/shell/icons";
  * stations, you pick a scenario, and the floor plays it. Click anyone to inspect
  * them. It doubles as the honest way to review this work — every state each
  * character can be in, on one screen, with no waiting on a model.
+ *
+ * The room is built in depth tiers rather than as a decorated panel, because a
+ * flat backdrop with sprites pasted on it never reads as a place:
+ *
+ *   sky → back wall → floor plane → back set → the crew → foreground set
+ *
+ * Each tier further from the camera is dimmer and less saturated, each nearer
+ * tier is larger and darker in outline, and the crew get contact shadows so
+ * they stand on the floor instead of hovering over it.
  */
 
 type Scenario = {
@@ -56,6 +81,31 @@ const SCENARIOS: Scenario[] = [
     hint: "All eight phases approved.",
     state: () => "done",
   },
+];
+
+/**
+ * Where each agent actually stands.
+ *
+ * `x` is across the room, `depth` is how far back (0 = the near edge of the
+ * floor, 1 = against the wall). Neither is evenly spaced, deliberately: eight
+ * figures at identical distance on a uniform pitch reads as a police lineup,
+ * not as a place where people work. So they cluster in pairs the way people
+ * standing at shared desks do, and every one of them is at a different distance
+ * from you.
+ *
+ * Depth then pays for itself three ways, which is what sells it: further back
+ * is smaller, dimmer, and behind — the nearer figure occludes the further one,
+ * and occlusion is the strongest depth cue there is.
+ */
+const FLOOR_PLAN: { x: number; depth: number }[] = [
+  { x: 7,    depth: 0.46 }, // SCOPE
+  { x: 18.5, depth: 0.74 }, // ATLAS  — back, at the whiteboard
+  { x: 30.5, depth: 0.10 }, // FORGE  — nearest, front left
+  { x: 43,   depth: 0.38 }, // PRISM
+  { x: 55,   depth: 0.62 }, // SIEVE
+  { x: 67,   depth: 0.18 }, // WARDEN — front
+  { x: 79.5, depth: 0.54 }, // RELAY
+  { x: 92,   depth: 0.06 }, // LEDGER — nearest, front right
 ];
 
 const VOICE_FOR: Record<SpriteState, keyof Persona["lines"]> = {
@@ -138,6 +188,7 @@ export default function CrewPage() {
     (_, i) => stateOf(i) === "working" || stateOf(i) === "gate",
   );
   const doneCount = AGENTS.filter((_, i) => stateOf(i) === "done").length;
+  const spriteCols = Math.max(...agent.sprite.map((r) => r.length));
 
   return (
     <div className="crew-page">
@@ -167,14 +218,32 @@ export default function CrewPage() {
         </div>
 
         <div className="floor-wrap">
-          {/* The room: back wall with the status board, a floor receding under
-              it, and the crew at their consoles on the seam between them. */}
+          {/* The room, built back to front. */}
           <div className="floor">
+            {/* ── far: night sky through the glazing ── */}
+            <span className="sky" aria-hidden="true" />
+
+            {/* ── mid: the back wall ── */}
             <div className="wall" aria-hidden="true">
+              <span className="wall-panels" />
               <span className="wall-glow" />
-              {/* Windows onto a night outside. */}
               <span className="window w-left" />
               <span className="window w-right" />
+              <span className="pipes" />
+              <span className="vent v-left" />
+              <span className="vent v-right" />
+              <span className="tray" />
+              <span className="gantry" />
+              <span className="hazard" />
+              <span className="bay bay-left">
+                <i />
+                BAY A · BUILD
+              </span>
+              <span className="bay bay-right">
+                <i />
+                BAY B · REVIEW
+              </span>
+
               {/* The board the whole room reads. */}
               <div className="board">
                 <span className="board-row">
@@ -188,34 +257,83 @@ export default function CrewPage() {
                 </span>
                 <span className="board-row board-row-dim">
                   <span>{doneCount} OF 8 APPROVED</span>
-                  <span>{activeIndex >= 0 ? `${AGENTS[activeIndex].codename} ON DECK` : "ALL HANDS"}</span>
+                  <span>
+                    {activeIndex >= 0 ? `${AGENTS[activeIndex].codename} ON DECK` : "ALL HANDS"}
+                  </span>
                 </span>
               </div>
-              {/* Cable run along the top of the wall. */}
               <span className="cables" />
             </div>
 
-            <div className="floor-plane" aria-hidden="true" />
+            {/* ── the ground ──
+                The plane deliberately overshoots the horizon and `.ground`
+                crops it there, which is what stops a black band opening up
+                between the wall and the floor at any room height. */}
+            <span className="ground" aria-hidden="true">
+              <span className="floor-plane" />
+              <span className="floor-marks" />
+              <span className="floor-haze" />
+            </span>
 
-            <div className="props props-left" aria-hidden="true">
-              <PixelArt grid={RACK} palette={PROP_PALETTE} width={44} />
-            </div>
-            <div className="props props-right" aria-hidden="true">
-              <PixelArt grid={PLANT} palette={PROP_PALETTE} width={52} />
+            {/* ── back set: stands against the wall, dimmed by distance ── */}
+            <div className="set set-back" aria-hidden="true">
+              <span className="prop p-board">
+                <PixelArt grid={BOARD_PROP} palette={PROP_PALETTE} width={72} />
+              </span>
+              <span className="prop p-rack">
+                <PixelArt grid={RACK} palette={PROP_PALETTE} width={34} />
+              </span>
+              <span className="prop p-monitors">
+                <PixelArt grid={MONITORS} palette={PROP_PALETTE} width={62} />
+              </span>
+              <span className="prop p-rack-2">
+                <PixelArt grid={RACK} palette={PROP_PALETTE} width={30} />
+              </span>
+              <span className="prop p-crates">
+                <PixelArt grid={CRATE} palette={PROP_PALETTE} width={38} />
+              </span>
+              <span className="prop p-plant">
+                <PixelArt grid={PLANT} palette={PROP_PALETTE} width={42} />
+              </span>
             </div>
 
-            <div className="floor-row">
+            {/* ── mid tier: the band of floor between the wall and the crew,
+                which is otherwise the one place in the room where nothing
+                happens ── */}
+            <div className="set set-mid" aria-hidden="true">
+              <span className="prop p-cooler">
+                <PixelArt grid={COOLER} palette={PROP_PALETTE} width={30} />
+              </span>
+              <span className="prop p-plant-2">
+                <PixelArt grid={PLANT} palette={PROP_PALETTE} width={46} />
+              </span>
+            </div>
+
+            {/* ── mid air: RELAY's courier, permanently mid-errand ── */}
+            <span className="prop p-drone" aria-hidden="true">
+              <PixelArt grid={DRONE} palette={PROP_PALETTE} width={38} />
+            </span>
+
+            <div className="floor-plan">
               {AGENTS.map((a, i) => {
                 const st = stateOf(i);
                 const live = st === "working" || st === "gate" || st === "rejected";
+                const { x, depth } = FLOOR_PLAN[i];
                 return (
                   <button
                     key={a.key}
                     className={"station" + (i === selected ? " on" : "")}
-                    style={{ ["--agent" as string]: a.accent }}
+                    style={{
+                      ["--agent" as string]: a.accent,
+                      ["--x" as string]: `${x}%`,
+                      ["--depth" as string]: depth,
+                      // Nearer stands in front of further. Occlusion does more
+                      // for depth here than the scale or the dimming do.
+                      zIndex: Math.round((1 - depth) * 40) + 2,
+                    }}
                     aria-pressed={i === selected}
+                    aria-label={`${a.codename}, ${a.role} — ${STATE_LABEL[st]}`}
                     onClick={() => setSelected(i)}
-                    title={`${a.codename} — ${STATE_LABEL[st]}`}
                   >
                     {/* Only whoever is actually doing something speaks — including
                         an agent that was sent back and is running again. */}
@@ -225,9 +343,33 @@ export default function CrewPage() {
                         <i aria-hidden="true" />
                       </span>
                     )}
-                    <AgentSprite agent={a} size={54} state={st} />
-                    <span className="console" aria-hidden="true">
-                      <span className="console-screen" />
+                    <span className="figure">
+                      {/* Each agent gets a cabin: a partition behind them with
+                          their colour on the rail, a pinned card, a monitor,
+                          and a desk in front. Eight people on open floor is a
+                          group photo; eight people at their own stations is a
+                          place of work. */}
+                      <span className="cabin" aria-hidden="true">
+                        <span className="cabin-side cabin-side-l" />
+                        <span className="cabin-side cabin-side-r" />
+                        <span className="cabin-back">
+                          <span className="cabin-cap" />
+                          <span className="cabin-pin" />
+                          <span className="cabin-screen" />
+                          <span className="cabin-prop">
+                            <PixelArt
+                              grid={a.deskProp}
+                              palette={deskPaletteFor(a)}
+                              width={26}
+                            />
+                          </span>
+                        </span>
+                      </span>
+                      <AgentSprite agent={a} size={72} state={st} ground />
+                      <span className="desk" aria-hidden="true">
+                        <span className="desk-screen" />
+                        <span className="desk-spill" />
+                      </span>
                     </span>
                     <span className="plate">{a.codename}</span>
                     <span className={"plate-state s-" + st}>{STATE_LABEL[st]}</span>
@@ -235,6 +377,22 @@ export default function CrewPage() {
                 );
               })}
             </div>
+
+            {/* ── near set: between you and the crew ── */}
+            <div className="set set-near" aria-hidden="true">
+              <span className="prop p-spool">
+                <PixelArt grid={SPOOL} palette={PROP_PALETTE} width={76} />
+              </span>
+              <span className="prop p-crate">
+                <PixelArt grid={CRATE} palette={PROP_PALETTE} width={78} />
+              </span>
+              <span className="prop p-mug">
+                <PixelArt grid={MUG} palette={PROP_PALETTE} width={24} />
+              </span>
+            </div>
+
+            <span className="scanlines" aria-hidden="true" />
+            <span className="vignette" aria-hidden="true" />
             <p className="floor-hint">Click an agent to inspect them</p>
           </div>
 
@@ -266,6 +424,10 @@ export default function CrewPage() {
                 <dd style={{ color: "var(--agent)" }}>{agent.trait}</dd>
               </div>
               <div className="row">
+                <dt>Spot by</dt>
+                <dd>{agent.silhouette}</dd>
+              </div>
+              <div className="row">
                 <dt>Moves</dt>
                 <dd>{MOTION_NOTE[agent.motion]}</dd>
               </div>
@@ -280,8 +442,24 @@ export default function CrewPage() {
             <p className="inspect-tagline">{agent.tagline}</p>
 
             <div className="inspect-grid">
-              <span className="win-title">SPRITE 16×16</span>
-              <div className="pixel-grid" aria-hidden="true">
+              <div className="inspect-grid-head">
+                <span className="win-title">
+                  SPRITE {spriteCols}×{agent.sprite.length}
+                </span>
+                <span className="ramp" aria-hidden="true">
+                  <i style={{ background: agent.accentLit }} />
+                  <i style={{ background: agent.accent }} />
+                  <i style={{ background: agent.accentDim }} />
+                </span>
+              </div>
+              <div
+                className="pixel-grid"
+                style={{
+                  gridTemplateColumns: `repeat(${spriteCols}, 1fr)`,
+                  gridTemplateRows: `repeat(${agent.sprite.length}, 1fr)`,
+                }}
+                aria-hidden="true"
+              >
                 {agent.sprite.map((row, y) =>
                   row.split("").map((ch, x) => (
                     <span
@@ -292,9 +470,11 @@ export default function CrewPage() {
                             ? "transparent"
                             : ch === "A"
                               ? agent.accent
-                              : ch === "B"
-                                ? agent.accentDim
-                                : PALETTE[ch],
+                              : ch === "H"
+                                ? agent.accentLit
+                                : ch === "B"
+                                  ? agent.accentDim
+                                  : PALETTE[ch],
                       }}
                     />
                   )),
