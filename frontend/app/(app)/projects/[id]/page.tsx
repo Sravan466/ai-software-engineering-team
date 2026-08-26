@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type Artifacts, type PhaseResult, type Project } from "@/lib/api";
 import { PHASES } from "@/components/shell/phases";
+import { AGENT_BY_KEY, type Persona } from "@/components/agents/personas";
+import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import Markdown from "@/components/ui/Markdown";
@@ -69,6 +71,25 @@ function nodeStateFor(project: Project, key: string): NodeState {
   if (row) return "done";
   return "pending";
 }
+
+// Which of an agent's voice lines fits the state it's in. A phase waiting at a
+// gate has finished its work, so it speaks its "done" line.
+const VOICE_FOR: Record<NodeState, keyof Persona["lines"]> = {
+  pending: "queued",
+  running: "working",
+  gate: "done",
+  done: "done",
+  redo: "rejected",
+};
+
+// The build view and the sprite share one idea of what an agent is doing.
+const SPRITE_STATE: Record<NodeState, SpriteState> = {
+  done: "done",
+  running: "working",
+  gate: "gate",
+  redo: "rejected",
+  pending: "queued",
+};
 
 const NODE_STATUS: Record<NodeState, string> = {
   pending: "Queued",
@@ -232,42 +253,35 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         )}
       </div>
 
-      {/* pipeline tracker */}
+      {/* The relay: who has the work, who is next. */}
       <div className="card" style={{ marginTop: 20 }}>
         <div className="sec-head">
-          <h2 className="label">Pipeline</h2>
+          <h2 className="label">Relay</h2>
           <span className="rule" />
           <span className="label mono">{doneCount}/8</span>
         </div>
         <ol
-          className="tracker"
+          className="relay"
           aria-label={`Pipeline progress: ${doneCount} of 8 phases complete`}
-          style={{ listStyle: "none", margin: 0, padding: "0 0 4px" }}
+          style={{ listStyle: "none", margin: 0, padding: "4px 0 8px" }}
         >
           {PHASES.map((ph) => {
             const ns = nodeStateFor(project, ph.key);
-            const cls =
-              ns === "done"
-                ? "done"
-                : ns === "gate"
-                  ? "current"
-                  : ns === "running"
-                    ? "running"
-                    : ns === "redo"
-                      ? "rejected"
-                      : "";
+            const agent = AGENT_BY_KEY[ph.key];
+            const live = ns === "running" || ns === "gate";
             return (
-              <li key={ph.key} className={"trk " + cls}>
-                <span className="trk-bar" />
-                <span className="trk-label">
-                  <span className="trk-n">{ph.n}</span>
-                  <span className="trk-name" title={ph.label}>
-                    {ph.label}
-                  </span>
-                  <span className="trk-mark">
-                    {ns === "done" ? Icon.check : ns === "gate" ? Icon.dot : ns === "running" ? Icon.dot : ns === "redo" ? Icon.rotate : null}
-                  </span>
-                </span>
+              <li key={ph.key} style={{ display: "flex", flex: "1 1 auto", minWidth: 0 }}>
+                <button
+                  className={`relay-step ${ns}`}
+                  style={{ ["--agent" as string]: agent.accent }}
+                  aria-current={live ? "step" : undefined}
+                  onClick={() => setTab("build")}
+                  title={`${agent.codename} · ${agent.role} — ${NODE_STATUS[ns]}`}
+                >
+                  <AgentSprite agent={agent} size={34} state={SPRITE_STATE[ns]} />
+                  <span className="relay-name">{agent.codename}</span>
+                  <span className="relay-bar" />
+                </button>
               </li>
             );
           })}
@@ -474,32 +488,39 @@ function PhaseList({
         const isGate = ns === "gate";
         const hasDoc = Boolean(row?.content_md);
         const isOpen = open[ph.key] ?? isGate;
+        const agent = AGENT_BY_KEY[ph.key];
 
         return (
-          <div key={ph.key} className={`phase ${ns}` + (isOpen && hasDoc ? " open" : "")}>
+          <div
+            key={ph.key}
+            className={`phase ${ns}` + (isOpen && hasDoc ? " open" : "")}
+            style={{ ["--agent" as string]: agent.accent }}
+          >
             <button
               className="phase-sum"
               disabled={!hasDoc}
               aria-expanded={hasDoc ? isOpen : undefined}
               onClick={() => hasDoc && setOpen((o) => ({ ...o, [ph.key]: !isOpen }))}
             >
-              <span className="phase-mark" aria-hidden="true">
-                {ns === "done" ? Icon.check : ns === "redo" ? Icon.rotate : Icon.dot}
-              </span>
+              <AgentSprite agent={agent} size={38} state={SPRITE_STATE[ns]} />
 
               <span className="phase-main">
-                <span className="phase-line">
+                <span className="phase-line agent-line">
                   <span className="phase-n">{ph.n}</span>
-                  <span className="phase-name">{ph.name}</span>
-                  <span className="phase-role">{ph.role}</span>
+                  <span className="agent-line-name">{agent.codename}</span>
+                  <span className="phase-role">{agent.role}</span>
                   {ph.debate && <span className="badge badge-run">Debated</span>}
                   {isGate && <span className="badge badge-warn">Needs your approval</span>}
                 </span>
-                {hasDoc ? (
-                  <span className="phase-deliver">{ph.deliver}</span>
-                ) : (
-                  <span className="phase-role">{NODE_STATUS[ns]}</span>
-                )}
+                {/* The agent's own status line, in their voice. */}
+                <span className={"agent-say" + (ns === "running" ? " live" : "")}>
+                  {agent.lines[VOICE_FOR[ns]]}
+                  {hasDoc && (
+                    <span className="phase-deliver" style={{ marginLeft: 8 }}>
+                      {ph.deliver}
+                    </span>
+                  )}
+                </span>
                 {ns === "running" && (
                   <span className="phase-progress" aria-hidden="true">
                     <span />
@@ -524,12 +545,14 @@ function PhaseList({
             {/* The decision, with the document it is about directly above it. */}
             {isGate && row && (
               <div className="phase-body" style={{ paddingTop: 0 }}>
-                <div className="gate">
+                <div className="gate agent-gate">
                   <div className="gate-head">
-                    {Icon.alert}
-                    <span className="gate-head-title">Review {ph.name.toLowerCase()} output</span>
+                    <AgentSprite agent={agent} size={30} state="gate" />
+                    <span className="gate-head-title">
+                      <b className="agent-line-name">{agent.codename}</b> hands you {ph.deliver}
+                    </span>
                     <span className="rule" />
-                    <span className="badge badge-mono">{ph.deliver}</span>
+                    <span className="badge badge-warn">Waiting on you</span>
                   </div>
                   <div className="gate-doc">
                     <Markdown>{row.content_md}</Markdown>
