@@ -901,7 +901,7 @@
   align-items: center;
   gap: 0;
   padding: 26px 4px 8px;
-  width: 104px;
+  width: 96px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   background: none;
@@ -944,7 +944,7 @@
   position: absolute;
   left: 50%;
   bottom: 11px;
-  width: 122px;
+  width: 96px;
   height: 58px;
   transform: translateX(-50%);
   z-index: 0;
@@ -954,8 +954,8 @@
 /* the back panel — the mid face */
 .cabin-back {
   position: absolute;
-  left: 20px;
-  right: 20px;
+  left: 17px;
+  right: 17px;
   top: 0;
   bottom: 0;
   background: linear-gradient(
@@ -999,7 +999,7 @@
   position: absolute;
   top: 2px;
   bottom: -13px;
-  width: 24px;
+  width: 20px;
 }
 .cabin-side-l {
   left: 0;
@@ -1026,10 +1026,10 @@
 /* Everyone pins something to the partition. */
 .cabin-pin {
   position: absolute;
-  left: 7px;
-  top: 13px;
-  width: 16px;
-  height: 12px;
+  left: 5px;
+  top: 12px;
+  width: 13px;
+  height: 10px;
   background: #c3cbdb;
   box-shadow: 0 0 0 1px #05070c, inset 0 3px 0 #8b95ab;
 }
@@ -1038,8 +1038,8 @@
   position: absolute;
   right: 6px;
   top: 12px;
-  width: 26px;
-  height: 17px;
+  width: 22px;
+  height: 15px;
   background: color-mix(in srgb, var(--agent) 34%, #0a1019);
   box-shadow:
     0 0 0 2px #0b1120,
@@ -1051,7 +1051,7 @@
 /* The object that makes the cabin theirs rather than a cabin. */
 .cabin-prop {
   position: absolute;
-  left: 6px;
+  left: 4px;
   bottom: 1px;
   line-height: 0;
   filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.85));
@@ -1096,7 +1096,7 @@
    room is supposed to be coming from. */
 .desk {
   position: relative;
-  width: 98px;
+  width: 78px;
   height: 14px;
   margin-top: 0;
   background: linear-gradient(to bottom, #1b2434 0 1px, #131b28 1px, #0b111a 100%);
@@ -1415,8 +1415,8 @@
   .station:nth-child(-n + 4) { --depth: 0.42; }
   .station:nth-child(n + 5) { --depth: 0.02; }
   .station .sprite { --sprite-size: 54px; }
-  .desk { width: 100%; max-width: 72px; }
-  .cabin { width: 88px; height: 52px; }
+  .desk { width: 100%; max-width: 66px; }
+  .cabin { width: 82px; height: 52px; }
   /* Two ranks of four leave no room for set dressing behind them. */
   .p-board, .p-monitors, .bay, .p-cooler, .p-plant-2 { display: none; }
   .p-mug { left: 8px; bottom: 6px; }
@@ -1425,8 +1425,8 @@
   .crew-page { padding: 18px 16px 64px; }
   .bubble { white-space: normal; max-width: 128px; }
   .station .sprite { --sprite-size: 46px; }
-  .desk { max-width: 58px; }
-  .cabin { width: 74px; height: 46px; }
+  .desk { max-width: 54px; }
+  .cabin { width: 68px; height: 46px; }
 }
 
 /* ===========================================================================

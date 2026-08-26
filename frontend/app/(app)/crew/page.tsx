@@ -98,14 +98,14 @@ const SCENARIOS: Scenario[] = [
  * and occlusion is the strongest depth cue there is.
  */
 const FLOOR_PLAN: { x: number; depth: number }[] = [
-  { x: 8,  depth: 0.46 }, // SCOPE
-  { x: 19, depth: 0.74 }, // ATLAS  — back, at the whiteboard
-  { x: 32, depth: 0.10 }, // FORGE  — nearest, front left
-  { x: 42, depth: 0.38 }, // PRISM
-  { x: 56, depth: 0.62 }, // SIEVE
-  { x: 66, depth: 0.18 }, // WARDEN — front
-  { x: 79, depth: 0.54 }, // RELAY
-  { x: 91, depth: 0.06 }, // LEDGER — nearest, front right
+  { x: 7,    depth: 0.46 }, // SCOPE
+  { x: 18.5, depth: 0.74 }, // ATLAS  — back, at the whiteboard
+  { x: 30.5, depth: 0.10 }, // FORGE  — nearest, front left
+  { x: 43,   depth: 0.38 }, // PRISM
+  { x: 55,   depth: 0.62 }, // SIEVE
+  { x: 67,   depth: 0.18 }, // WARDEN — front
+  { x: 79.5, depth: 0.54 }, // RELAY
+  { x: 92,   depth: 0.06 }, // LEDGER — nearest, front right
 ];
 
 const VOICE_FOR: Record<SpriteState, keyof Persona["lines"]> = {
