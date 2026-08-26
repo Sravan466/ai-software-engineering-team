@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { EXAMPLES, ROUTING_MODES } from "@/components/shell/phases";
@@ -144,13 +145,18 @@ export default function NewBuildPage() {
         <div className="sec-head">
           <h2 className="label">The crew · runs in this order</h2>
           <span className="rule" />
+          <Link className="link" href="/crew" style={{ fontSize: "var(--t-xs)" }}>
+            Visit the floor
+          </Link>
         </div>
         <div className="roster">
           {AGENTS.map((a) => (
-            <article
+            <Link
               key={a.key}
+              href="/crew"
               className="agent-card"
               style={{ ["--agent" as string]: a.accent }}
+              title={`Meet ${a.codename} on the crew floor`}
             >
               <AgentSprite agent={a} size={46} state="done" />
               <div className="agent-card-body">
@@ -160,7 +166,7 @@ export default function NewBuildPage() {
                 <p className="agent-tagline">{a.tagline}</p>
                 <span className="agent-trait">{a.trait}</span>
               </div>
-            </article>
+            </Link>
           ))}
         </div>
       </section>

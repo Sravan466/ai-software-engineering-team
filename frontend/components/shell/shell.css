@@ -268,32 +268,6 @@
 }
 .example:hover { border-color: var(--line-3); background: var(--bg-raised); color: var(--ink); }
 
-.pipeline-legend { margin-top: 36px; padding-top: 22px; border-top: 1px solid var(--line); }
-.pipeline-legend-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-.pipeline-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 7px;
-  padding: 5px 10px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--line);
-  background: var(--bg-panel);
-  font-size: var(--t-sm);
-  color: var(--ink-2);
-}
-.pipeline-chip b { font-weight: 500; color: var(--ink-2); }
-.pipeline-chip i {
-  font-style: normal;
-  font-family: var(--mono);
-  font-size: var(--t-xs);
-  color: var(--ink-4);
-}
-
 /* ===========================================================================
    BUILD VIEW
    =========================================================================== */
@@ -331,29 +305,11 @@
 .phase-sum[disabled] { cursor: default; }
 .phase-sum[disabled]:hover { background: none; }
 
-.phase-mark {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  border: 1px solid var(--line-3);
-  color: var(--ink-4);
-  background: var(--bg);
-}
-.phase-mark svg { width: 12px; height: 12px; }
-.phase.done    .phase-mark { border-color: var(--ok);     color: var(--ok);     background: var(--ok-soft); }
-.phase.running .phase-mark { border-color: var(--run);    color: var(--run);    background: var(--run-soft); }
-.phase.gate    .phase-mark { border-color: var(--accent); color: var(--accent); background: var(--warn-soft); }
-.phase.redo    .phase-mark { border-color: var(--bad);    color: var(--bad);    background: var(--bad-soft); }
-
+.phase.done    .phase.running .phase.gate    .phase.redo    
 .phase-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .phase-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .phase-n { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-4); }
-.phase-name { font-size: var(--t-base); font-weight: 600; color: var(--ink); }
-.phase.pending .phase-name { color: var(--ink-3); font-weight: 500; }
-.phase-role { font-size: var(--t-xs); color: var(--ink-3); }
+.phase.pending .phase-role { font-size: var(--t-xs); color: var(--ink-3); }
 .phase-deliver {
   font-family: var(--mono);
   font-size: var(--t-xs);
