@@ -193,18 +193,28 @@
 /* ===========================================================================
    COMPOSER (home)
    =========================================================================== */
-.composer-page { max-width: 720px; margin: 0 auto; padding: 7vh 24px 64px; }
+.composer-page { max-width: 940px; margin: 0 auto; padding: 6vh 24px 72px; }
+.crew { margin-top: 44px; padding-top: 26px; border-top: 1px solid var(--line); }
+/* The one place the pixel face runs large. Silkscreen has no descender depth to
+   speak of, so it takes a looser line-height than a text face would. */
 .composer-h1 {
-  font-size: var(--t-4xl);
-  line-height: 1.1;
-  letter-spacing: -0.03em;
-  font-weight: 600;
+  font-family: var(--pixel);
+  font-size: clamp(26px, 4.4vw, 46px);
+  line-height: 1.32;
+  letter-spacing: 0.01em;
+  font-weight: 700;
+  text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.55);
 }
-.composer-h1 em { font-style: normal; color: var(--accent); }
+.composer-h1 em {
+  font-style: normal;
+  color: var(--accent);
+  text-shadow: 3px 3px 0 color-mix(in srgb, var(--accent) 22%, rgba(0, 0, 0, 0.6));
+}
 .composer-lede { margin: 14px 0 0; }
 
 .composer {
-  margin-top: 26px;
+  margin-top: 30px;
+  box-shadow: var(--shadow-2);
   border-radius: var(--r-lg);
   border: 1px solid var(--line-2);
   background: var(--bg-panel);
@@ -258,32 +268,6 @@
 }
 .example:hover { border-color: var(--line-3); background: var(--bg-raised); color: var(--ink); }
 
-.pipeline-legend { margin-top: 36px; padding-top: 22px; border-top: 1px solid var(--line); }
-.pipeline-legend-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-.pipeline-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 7px;
-  padding: 5px 10px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--line);
-  background: var(--bg-panel);
-  font-size: var(--t-sm);
-  color: var(--ink-2);
-}
-.pipeline-chip b { font-weight: 500; color: var(--ink-2); }
-.pipeline-chip i {
-  font-style: normal;
-  font-family: var(--mono);
-  font-size: var(--t-xs);
-  color: var(--ink-4);
-}
-
 /* ===========================================================================
    BUILD VIEW
    =========================================================================== */
@@ -292,46 +276,6 @@
 .build-head h1 { font-size: var(--t-2xl); max-width: 30ch; }
 .build-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .build-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-
-/* ── tracker: a scrollable rail; steps have a floor width so labels never clip ── */
-.tracker {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-  scroll-snap-type: x proximity;
-}
-.trk {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  flex: 1 1 auto;
-  min-width: max-content;
-  scroll-snap-align: start;
-}
-.trk-bar { height: 3px; border-radius: 2px; background: var(--line-2); }
-.trk.done      .trk-bar { background: var(--ok); }
-.trk.current   .trk-bar { background: var(--accent); }
-.trk.running   .trk-bar { background: var(--run); }
-.trk.rejected  .trk-bar { background: var(--bad); }
-.trk-label { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.trk-n { flex: none; font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-4); }
-.trk-name {
-  min-width: 0;
-  font-size: var(--t-sm);
-  color: var(--ink-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.trk.done .trk-name, .trk.running .trk-name { color: var(--ink-2); }
-.trk.current .trk-name { color: var(--ink); font-weight: 500; }
-.trk-mark { flex: none; display: inline-grid; place-items: center; }
-.trk-mark svg { width: 13px; height: 13px; }
-.trk.done .trk-mark { color: var(--ok); }
-.trk.current .trk-mark { color: var(--accent); }
-.trk.running .trk-mark { color: var(--run); }
-.trk.rejected .trk-mark { color: var(--bad); }
 
 /* ── meter strip ── */
 .meter { display: flex; gap: 26px; flex-wrap: wrap; }
@@ -361,29 +305,11 @@
 .phase-sum[disabled] { cursor: default; }
 .phase-sum[disabled]:hover { background: none; }
 
-.phase-mark {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  border: 1px solid var(--line-3);
-  color: var(--ink-4);
-  background: var(--bg);
-}
-.phase-mark svg { width: 12px; height: 12px; }
-.phase.done    .phase-mark { border-color: var(--ok);     color: var(--ok);     background: var(--ok-soft); }
-.phase.running .phase-mark { border-color: var(--run);    color: var(--run);    background: var(--run-soft); }
-.phase.gate    .phase-mark { border-color: var(--accent); color: var(--accent); background: var(--warn-soft); }
-.phase.redo    .phase-mark { border-color: var(--bad);    color: var(--bad);    background: var(--bad-soft); }
-
+.phase.done    .phase.running .phase.gate    .phase.redo    
 .phase-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .phase-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .phase-n { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-4); }
-.phase-name { font-size: var(--t-base); font-weight: 600; color: var(--ink); }
-.phase.pending .phase-name { color: var(--ink-3); font-weight: 500; }
-.phase-role { font-size: var(--t-xs); color: var(--ink-3); }
+.phase.pending .phase-role { font-size: var(--t-xs); color: var(--ink-3); }
 .phase-deliver {
   font-family: var(--mono);
   font-size: var(--t-xs);
@@ -603,7 +529,7 @@
 @media (max-width: 640px) {
   .build-wrap, .settings-wrap { padding: 18px 16px 64px; }
   .composer-page { padding: 5vh 16px 56px; }
-  .composer-h1 { font-size: var(--t-3xl); }
+  .composer-h1 { line-height: 1.4; }
   .build-head h1 { font-size: var(--t-xl); }
   .phase-body { padding-left: 8px; }
   .composer-foot { align-items: stretch; }

@@ -1,3 +1,5 @@
+import { AGENTS } from "@/components/agents/personas";
+
 // The eight pipeline phases, in order. Mirrors the backend agent keys
 // (app/agents/*) and the v3 design's phase metadata. Shared by the sidebar,
 // the New Build composer (pipeline footer) and the project/build view.
@@ -12,16 +14,16 @@ export type PhaseMeta = {
   debate?: boolean; // phases that debate before settling
 };
 
-export const PHASES: PhaseMeta[] = [
-  { key: "product_manager", n: "01", name: "Product Manager", label: "Requirements", role: "Scope & PRD", agent: "pm-agent", deliver: "product-spec.md" },
-  { key: "system_design", n: "02", name: "System Design", label: "Architecture", role: "Architecture", agent: "arch-agent", deliver: "architecture.md" },
-  { key: "backend_engineer", n: "03", name: "Backend Engineer", label: "Backend", role: "APIs & data", agent: "be-agent", deliver: "backend/", debate: true },
-  { key: "frontend_engineer", n: "04", name: "Frontend Engineer", label: "Frontend", role: "Interface", agent: "fe-agent", deliver: "frontend/" },
-  { key: "qa_engineer", n: "05", name: "QA Engineer", label: "Tests", role: "Tests", agent: "qa-agent", deliver: "tests/" },
-  { key: "security_engineer", n: "06", name: "Security Engineer", label: "Security", role: "Threat model", agent: "sec-agent", deliver: "security-review.md" },
-  { key: "devops_engineer", n: "07", name: "DevOps Engineer", label: "Deployment", role: "CI / CD", agent: "ops-agent", deliver: ".github/ + Dockerfile" },
-  { key: "cost_estimation", n: "08", name: "Cost Estimation", label: "Cost", role: "Budget", agent: "cost-agent", deliver: "cost-report.md" },
-];
+export const PHASES: PhaseMeta[] = AGENTS.map((a) => ({
+  key: a.key,
+  n: a.n,
+  name: a.role,
+  label: a.discipline,
+  role: a.discipline,
+  agent: a.codename,
+  deliver: a.deliver,
+  debate: a.debate,
+}));
 
 export const PHASE_LABELS: Record<string, string> = Object.fromEntries(
   PHASES.map((p) => [p.key, p.label]),

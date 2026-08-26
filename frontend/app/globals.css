@@ -47,6 +47,16 @@
   --accent-soft: rgba(245, 165, 36, 0.12);
   --accent-line: rgba(245, 165, 36, 0.42);
 
+  /* ── the crew's spectrum — each agent owns exactly one of these ── */
+  --a-scope:  #ffb627;
+  --a-atlas:  #4d9de0;
+  --a-forge:  #3dd68c;
+  --a-prism:  #ff5da2;
+  --a-sieve:  #ff8a3d;
+  --a-warden: #ff4d6d;
+  --a-relay:  #22d3ee;
+  --a-ledger: #c6f135;
+
   /* ── state vocabulary ── */
   --run:       #22b8cf;
   --run-soft:  rgba(34, 184, 207, 0.12);
@@ -60,6 +70,8 @@
   /* ── type ── */
   --sans: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   --mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Pixel face: codenames, agent plates, the display headline. Never body copy. */
+  --pixel: var(--font-pixel), var(--font-mono), monospace;
 
   /* fixed scale, ~1.2 ratio — product UI reads at a consistent size */
   --t-xs:   0.75rem;   /* 12 — meta, badges */
@@ -115,6 +127,42 @@ body {
 }
 
 ::selection { background: var(--accent-soft); color: var(--ink); }
+
+/* ── console atmosphere ──────────────────────────────────────────────────────
+   A fixed backdrop rather than a flat fill: a slow aurora in the crew's colours
+   under a fine CRT scanline grid. Both are `position: fixed` and pointer-inert,
+   so they cost one composite layer and never touch layout or scrolling. */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+body::before {
+  background:
+    radial-gradient(52% 40% at 12% 0%, color-mix(in srgb, var(--a-relay) 12%, transparent), transparent 70%),
+    radial-gradient(48% 44% at 92% 8%, color-mix(in srgb, var(--a-prism) 10%, transparent), transparent 72%),
+    radial-gradient(60% 50% at 50% 108%, color-mix(in srgb, var(--a-atlas) 11%, transparent), transparent 74%);
+  animation: aurora 34s ease-in-out infinite alternate;
+}
+body::after {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.016) 0px,
+    rgba(255, 255, 255, 0.016) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  opacity: 0.7;
+}
+@keyframes aurora {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(0, -2%, 0) scale(1.08); }
+}
+/* Everything the user actually reads sits above the atmosphere. */
+.shell { position: relative; z-index: 1; }
 
 /* Icons carry only a viewBox, so without a floor they stretch to fill whatever
    box they land in. Components override this with their own size. */

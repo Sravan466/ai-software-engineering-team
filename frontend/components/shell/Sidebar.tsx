@@ -157,6 +157,13 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
 
         <Link
           className="sb-link"
+          href="/crew"
+          aria-current={pathname === "/crew" ? "page" : undefined}
+        >
+          {Icon.sparkle} The crew
+        </Link>
+        <Link
+          className="sb-link"
           href="/settings"
           aria-current={pathname === "/settings" ? "page" : undefined}
         >
