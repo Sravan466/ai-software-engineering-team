@@ -41,6 +41,30 @@ export type Project = {
 const DEFAULT_TIMEOUT_MS = 15000;
 const LLM_TIMEOUT_MS = 300000; // 5 min — local generation on CPU is slow
 
+// FastAPI reports failures as {"detail": "..."} — sometimes a list of validation
+// objects. Surfacing the raw body means users read a JSON blob with an HTTP code
+// bolted to the front, so unwrap it into the sentence the backend actually wrote.
+async function errorMessage(res: Response): Promise<string> {
+  const body = await res.text().catch(() => "");
+  if (body) {
+    try {
+      const parsed = JSON.parse(body);
+      const detail = parsed?.detail ?? parsed?.message;
+      if (typeof detail === "string" && detail.trim()) return detail;
+      if (Array.isArray(detail)) {
+        const msgs = detail.map((d) => d?.msg).filter(Boolean);
+        if (msgs.length) return msgs.join("; ");
+      }
+    } catch {
+      // Not JSON — fall through to the raw body, which is usually plain text.
+    }
+    if (body.length < 400) return body;
+  }
+  if (res.status === 404) return "That resource no longer exists.";
+  if (res.status >= 500) return "The backend hit an error. Check its logs for details.";
+  return `Request failed (${res.status}).`;
+}
+
 async function req<T>(
   path: string,
   init?: RequestInit,
@@ -58,10 +82,7 @@ async function req<T>(
       credentials: "include",
       signal: ctrl.signal,
     });
-    if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`${res.status}: ${detail}`);
-    }
+    if (!res.ok) throw new Error(await errorMessage(res));
     if (res.status === 204) return undefined as T;
     return res.json();
   } catch (e: any) {
@@ -171,9 +192,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
     });
-    if (!res.ok || !res.body) {
-      throw new Error(`${res.status}: ${await res.text()}`);
-    }
+    if (!res.ok || !res.body) throw new Error(await errorMessage(res));
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";

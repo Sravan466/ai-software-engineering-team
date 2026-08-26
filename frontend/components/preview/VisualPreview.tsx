@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, PreviewSection, PreviewState } from "@/lib/api";
+import { Icon } from "@/components/shell/icons";
+import { SkeletonLines } from "@/components/ui/Skeleton";
 
 // Injected into the sandboxed iframe (sandbox="allow-scripts", no same-origin) so model HTML
 // can never reach the parent. It reports clicks up via postMessage and accepts "highlight"
@@ -9,7 +11,7 @@ import { api, PreviewSection, PreviewState } from "@/lib/api";
 const SELECT_SCRIPT = `
 <script>
 (function(){
-  var HL='2px solid #e5484d';
+  var HL='2px solid #f5a524';
   function clearAll(){ document.querySelectorAll('[data-section]').forEach(function(s){ s.style.removeProperty('outline'); s.style.removeProperty('outline-offset'); }); }
   function outline(el){ clearAll(); if(el){ el.style.outline=HL; el.style.outlineOffset='-2px'; } }
   function byId(id){ try { return id ? document.querySelector('[data-section="'+(window.CSS&&CSS.escape?CSS.escape(id):id)+'"]') : null; } catch(_) { return null; } }
@@ -66,7 +68,10 @@ export default function VisualPreview({ id }: { id: string }) {
 
   // Push the current selection into the iframe (on select, and after each (re)load).
   const highlight = useCallback((sectionId: string | null) => {
-    iframeRef.current?.contentWindow?.postMessage({ __preview: true, type: "highlight", id: sectionId }, "*");
+    iframeRef.current?.contentWindow?.postMessage(
+      { __preview: true, type: "highlight", id: sectionId },
+      "*",
+    );
   }, []);
   useEffect(() => {
     highlight(selected?.id ?? null);
@@ -96,88 +101,130 @@ export default function VisualPreview({ id }: { id: string }) {
   const html = state?.html ?? null;
   const srcDoc = useMemo(() => (html ? buildSrcDoc(html) : ""), [html]);
 
-  if (loading && !state) return <p className="fd-dim text-sm">Loading preview…</p>;
+  if (loading && !state) {
+    return (
+      <div className="card">
+        <SkeletonLines lines={3} />
+      </div>
+    );
+  }
 
-  // Empty state — no preview generated yet.
+  const errorNotice = error ? (
+    <div className="notice notice-bad" role="alert">
+      {Icon.alert}
+      <div className="notice-body">
+        <span className="notice-text">{error}</span>
+      </div>
+    </div>
+  ) : null;
+
+  // Empty state — nothing generated yet. It teaches what the tab is for.
   if (!html) {
     return (
-      <div className="fd-card space-y-3">
-        <p className="fd-kicker">visual preview</p>
-        <p className="text-sm fd-muted">
-          Generate a live visual mockup of what you&apos;re building. You&apos;ll be able to click any
-          section and ask for changes in plain language.
-          {state && !state.has_frontend && " It gets richer once the Frontend phase has run."}
-        </p>
-        <button className="fd-btn fd-btn-primary" disabled={busy} onClick={generate}>
-          {busy ? "Generating… (local models can take 30–60s)" : "Generate visual preview →"}
-        </button>
-        {error && (
-          <p className="text-sm" style={{ color: "var(--accent)" }}>
-            {error}
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div className="card empty">
+          <h3>See it before it exists</h3>
+          <p>
+            Generate a clickable mockup of what these agents are building. Select any section in the
+            result and describe the change you want in plain language.
+            {state && !state.has_frontend && " It gets much sharper once the Frontend phase has run."}
           </p>
-        )}
+          <button className="btn btn-primary" disabled={busy} onClick={generate}>
+            {busy && <span className="btn-spinner" aria-hidden="true" />}
+            {busy ? "Generating…" : "Generate mockup"}
+            {!busy && Icon.sparkle}
+          </button>
+          {busy && (
+            <p className="field-hint" style={{ margin: 0 }}>
+              A local model usually takes 30–60 seconds for this.
+            </p>
+          )}
+        </div>
+        {errorNotice}
       </div>
     );
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="fd-kicker">visual preview · approximate mockup</span>
-        <span className="fd-rule flex-1" />
-        <span className="fd-badge fd-badge-muted">{state!.revisions.length} rev</span>
-        <button className="fd-btn" disabled={busy || state!.revisions.length === 0} onClick={undo}>
-          Undo
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="prev-toolbar">
+        <h3 className="label">Mockup · approximate</h3>
+        <span className="rule" />
+        <span className="badge badge-mono">
+          {state!.revisions.length} rev{state!.revisions.length === 1 ? "" : "s"}
+        </span>
+        <button
+          className="btn btn-sm"
+          disabled={busy || state!.revisions.length === 0}
+          onClick={undo}
+        >
+          {Icon.undo} Undo
         </button>
-        <button className="fd-btn" disabled={busy} onClick={generate}>
+        <button className="btn btn-sm" disabled={busy} onClick={generate}>
+          {busy ? <span className="btn-spinner" aria-hidden="true" /> : Icon.refresh}
           Regenerate
         </button>
       </div>
 
-      {busy && <p className="text-xs fd-dim">Working… local models can take 30–60s.</p>}
-      {error && (
-        <p className="text-sm" style={{ color: "var(--accent)" }}>
-          {error}
+      {busy && (
+        <p className="field-hint" aria-live="polite">
+          Working… a local model usually takes 30–60 seconds.
         </p>
       )}
+      {errorNotice}
 
-      <div className="fd-card" style={{ padding: 0, overflow: "hidden" }}>
+      <div className="prev-frame">
+        <div className="prev-chrome">
+          <span className="dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="prev-url">localhost:3000</span>
+        </div>
         <iframe
           ref={iframeRef}
           key={state!.revisions[0]?.id || "iframe"}
-          title="Visual preview"
+          title="Generated mockup"
           sandbox="allow-scripts"
           srcDoc={srcDoc}
           onLoad={() => highlight(selected?.id ?? null)}
-          style={{ width: "100%", height: 620, border: 0, background: "#fff", display: "block" }}
         />
       </div>
 
       {selected ? (
-        <div className="fd-card fd-card-accent space-y-2">
-          <p className="fd-kicker" style={{ color: "var(--accent)" }}>
-            editing section
-          </p>
-          <h3 className="fd-title">{selected.label}</h3>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              className="fd-input flex-1"
-              placeholder="Describe the change… e.g. 'make the headline bigger and add a Get Started button'"
-              value={instruction}
-              onChange={(e) => setInstruction(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") applyEdit();
-              }}
-            />
+        <div className="card" style={{ borderColor: "var(--accent-line)", background: "var(--warn-soft)" }}>
+          <div className="sec-head">
+            <h3 className="label" style={{ color: "var(--accent)" }}>
+              Editing
+            </h3>
+            <span style={{ fontSize: "var(--t-base)", fontWeight: 600 }}>{selected.label}</span>
+            <span className="rule" />
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
+            <div className="field" style={{ flex: 1, minWidth: 240 }}>
+              <label htmlFor="prev-instruction">What should change?</label>
+              <input
+                id="prev-instruction"
+                className="input"
+                placeholder="e.g. make the headline bigger and add a Get started button"
+                value={instruction}
+                onChange={(e) => setInstruction(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyEdit();
+                }}
+              />
+            </div>
             <button
-              className="fd-btn fd-btn-primary"
+              className="btn btn-accent"
               disabled={busy || !instruction.trim()}
               onClick={applyEdit}
             >
-              Apply →
+              {busy && <span className="btn-spinner" aria-hidden="true" />}
+              Apply change
             </button>
             <button
-              className="fd-btn"
+              className="btn"
               disabled={busy}
               onClick={() => {
                 setSelected(null);
@@ -189,17 +236,18 @@ export default function VisualPreview({ id }: { id: string }) {
           </div>
         </div>
       ) : (
-        <p className="text-sm fd-dim">
-          Click any section in the preview to select it, then describe the change you want.
+        <p className="field-hint">
+          Click any section in the mockup to select it, then describe the change you want.
         </p>
       )}
 
       {state!.sections.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
           {state!.sections.map((s) => (
             <button
               key={s.id}
-              className={`fd-badge ${selected?.id === s.id ? "fd-badge-accent" : "fd-badge-muted"}`}
+              className={"badge" + (selected?.id === s.id ? " badge-warn" : "")}
+              style={{ cursor: "pointer" }}
               onClick={() => setSelected(s)}
             >
               {s.label}

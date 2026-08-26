@@ -5,15 +5,15 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { EXAMPLES, PHASES, ROUTING_MODES } from "@/components/shell/phases";
 import { useChrome } from "@/components/shell/ShellChrome";
+import { Icon } from "@/components/shell/icons";
 
 /**
- * The home view: the v3 "What should we build today?" composer. Describe an idea,
- * pick a routing mode + whether to gate on approvals, and Build → creates the
- * project, kicks off the run, and drops you into its live build view.
+ * The home view: describe an idea, choose how it should be routed and whether
+ * the pipeline pauses for you, then start the build.
  */
 export default function NewBuildPage() {
   const router = useRouter();
-  useChrome({ sub: "new build" }, []);
+  useChrome({ sub: "New build" }, []);
 
   const [idea, setIdea] = useState("");
   const [mode, setMode] = useState("local");
@@ -42,25 +42,25 @@ export default function NewBuildPage() {
     }
   }
 
+  const activeMode = ROUTING_MODES.find((m) => m.id === mode);
+
   return (
-    <div className="newbuild">
-      <div className="nb-kicker">
-        <span className="fd-kicker" style={{ color: "var(--accent)" }}>
-          autonomous engineering org · 8 agents
-        </span>
-      </div>
-      <h1 className="nb-h1">
-        What should we
-        <br />
-        <span className="em">build today?</span>
+    <div className="composer-page">
+      <h1 className="composer-h1">
+        What should we <em>build today?</em>
       </h1>
-      <p className="nb-lede">
-        Describe a product idea. A team of specialist agents takes it from requirements to a
-        deployment plan — pausing for your approval at every phase.
+      <p className="prose-lede composer-lede">
+        Describe a product idea. Eight specialist agents take it from requirements through
+        architecture, code, tests, security and deployment — pausing for your approval at every
+        phase.
       </p>
 
-      <div className="nb-composer">
+      <div className="composer">
+        <label htmlFor="idea" className="sr-only">
+          Product idea
+        </label>
         <textarea
+          id="idea"
           autoFocus
           placeholder="e.g. a habit-tracking app with streaks and smart reminders…"
           value={idea}
@@ -69,60 +69,84 @@ export default function NewBuildPage() {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) start();
           }}
         />
-        <div className="nb-foot">
-          <div className="nb-opts">
-            <div className="seg">
-              <span className="seg-k">routing</span>
+        <div className="composer-foot">
+          <div className="composer-opts">
+            <div className="seg" role="group" aria-label="Model routing">
               {ROUTING_MODES.map((m) => (
                 <button
                   key={m.id}
-                  className={"seg-btn" + (mode === m.id ? " on" : "")}
+                  type="button"
+                  className="seg-btn"
+                  aria-pressed={mode === m.id}
                   onClick={() => setMode(m.id)}
                   disabled={busy}
+                  title={m.hint}
                 >
-                  {m.id}
+                  {m.label}
                 </button>
               ))}
             </div>
             <button
-              className={"gate-toggle" + (approvals ? " on" : "")}
+              type="button"
+              className="switch"
+              role="switch"
+              aria-checked={approvals}
               onClick={() => setApprovals((a) => !a)}
               disabled={busy}
             >
-              <span className="gate-box" /> approval gates
+              <span className="switch-track" aria-hidden="true" />
+              Approval gates
             </button>
           </div>
-          <button className="fd-btn fd-btn-primary" disabled={!idea.trim() || busy} onClick={start}>
-            {busy ? "Starting…" : "Build →"}
-          </button>
+          <div className="composer-submit">
+            <span className="composer-hint" aria-hidden="true">
+              ⌘↵
+            </span>
+            <button className="btn btn-primary" disabled={!idea.trim() || busy} onClick={start}>
+              {busy && <span className="btn-spinner" aria-hidden="true" />}
+              {busy ? "Starting…" : "Start build"}
+              {!busy && Icon.arrowRight}
+            </button>
+          </div>
         </div>
       </div>
 
+      <p className="field-hint" style={{ marginTop: 10 }}>
+        {activeMode?.hint}
+        {approvals
+          ? " The pipeline stops after each phase so you can read the output and approve it."
+          : " The pipeline runs all eight phases without stopping."}
+      </p>
+
       {error && (
-        <p className="mt-3 text-sm" style={{ color: "var(--accent)", marginTop: 12 }}>
-          {error}
-        </p>
+        <div className="notice notice-bad" role="alert" style={{ marginTop: 14 }}>
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-title">Couldn&apos;t start the build</span>
+            <span className="notice-text">{error}</span>
+          </div>
+        </div>
       )}
 
-      <div className="nb-examples">
+      <div className="examples">
         {EXAMPLES.map((ex) => (
-          <button key={ex} className="nb-ex" onClick={() => setIdea(ex)}>
+          <button key={ex} className="example" onClick={() => setIdea(ex)}>
             {ex}
           </button>
         ))}
       </div>
 
-      <div className="nb-phases">
-        <span className="fd-kicker">the pipeline · every build</span>
-        <div className="nb-phases-row">
-          {PHASES.map((ph, i) => (
-            <span key={ph.key} style={{ display: "inline-flex", gap: "6px", alignItems: "center" }}>
+      <section className="pipeline-legend">
+        <h2 className="label">The pipeline · every build</h2>
+        <div className="pipeline-legend-row">
+          {PHASES.map((ph) => (
+            <span key={ph.key} className="pipeline-chip" title={`${ph.name} — ${ph.role}`}>
+              <i>{ph.n}</i>
               <b>{ph.label}</b>
-              {i < PHASES.length - 1 && <span className="sep">→</span>}
             </span>
           ))}
         </div>
-      </div>
+      </section>
     </div>
   );
 }

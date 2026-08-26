@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type GithubPushResult, type GithubStatus } from "@/lib/api";
+import { Icon } from "@/components/shell/icons";
+import { SkeletonLines } from "@/components/ui/Skeleton";
 
 // Light client-side mirror of the backend slug() so the prefilled repo name
 // matches what GitHub will actually get.
@@ -86,57 +88,64 @@ export default function GithubPublish({
       const res = await api.pushToGithub(id, { name: name.trim() || undefined, private: priv });
       setResult(res);
     } catch (e: any) {
-      // Strip the leading "400: " status that the API client prepends.
-      setError(String(e.message || e).replace(/^\d+:\s*/, ""));
+      setError(e.message);
     } finally {
       setPushing(false);
     }
   }
 
   return (
-    <div className="fd-card">
+    <section className="card">
       <div className="sec-head">
-        <span className="fd-kicker">publish to github</span>
-        <span className="fd-rule" />
+        <h2 className="label">Publish to GitHub</h2>
+        <span className="rule" />
         {status?.connected && status.login && (
-          <span className="fd-badge fd-badge-ok">@{status.login}</span>
+          <span className="badge badge-ok">
+            <span className="dot dot-ok" aria-hidden="true" />@{status.login}
+          </span>
         )}
       </div>
 
+      {!status && <SkeletonLines lines={2} />}
+
       {/* Not configured by the operator yet. */}
       {status && !status.configured && (
-        <p className="fd-muted" style={{ fontSize: 14, lineHeight: 1.55, margin: 0 }}>
-          GitHub publishing isn’t enabled on this server yet. The operator needs to add a free{" "}
+        <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6 }}>
+          GitHub publishing isn&apos;t enabled on this server yet. The operator needs to add a free{" "}
           <a
-            className="fd-link"
+            className="link"
             href="https://github.com/settings/developers"
             target="_blank"
             rel="noreferrer"
           >
             GitHub OAuth App
           </a>{" "}
-          and set <span className="fd-mono">GITHUB_CLIENT_ID</span> /{" "}
-          <span className="fd-mono">GITHUB_CLIENT_SECRET</span> in the backend{" "}
-          <span className="fd-mono">.env</span>.
+          and set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in the
+          backend&apos;s <code>.env</code>.
         </p>
       )}
 
-      {/* Configured, not connected → Connect button. */}
+      {/* Configured, not connected → Connect. */}
       {status && status.configured && !status.connected && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <p className="fd-muted" style={{ fontSize: 14, lineHeight: 1.55, margin: 0, maxWidth: "54ch" }}>
-            Log in with your own GitHub account, and we’ll create a fresh repository on it and push
-            this entire project — code, docs and README — in one commit.
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6, maxWidth: "58ch" }}>
+            Sign in with your own GitHub account and we&apos;ll create a fresh repository on it, then
+            push this entire project — source, docs and README — in a single commit.
           </p>
           <div>
-            <button className="fd-btn fd-btn-primary" onClick={connect}>
-              Connect GitHub →
+            <button className="btn btn-primary" onClick={connect}>
+              {Icon.github} Connect GitHub
             </button>
           </div>
           {notice === "error" && (
-            <p style={{ color: "var(--accent)", fontSize: 13.5, margin: 0 }}>
-              GitHub connection failed or was cancelled. Please try again.
-            </p>
+            <div className="notice notice-bad" role="alert">
+              {Icon.alert}
+              <div className="notice-body">
+                <span className="notice-text">
+                  The GitHub connection failed or was cancelled. Try connecting again.
+                </span>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -145,72 +154,71 @@ export default function GithubPublish({
       {status && status.connected && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {result ? (
-            <div className="setup-step" style={{ alignItems: "flex-start" }}>
-              <span className="n" style={{ color: "var(--a2)" }}>
-                ✓
-              </span>
-              <span style={{ fontSize: 14, lineHeight: 1.6 }}>
-                Pushed {result.files} files to{" "}
-                <a className="fd-link" href={result.html_url} target="_blank" rel="noreferrer">
-                  {result.full_name} →
-                </a>{" "}
-                <span className="fd-dim">
-                  ({result.private ? "private" : "public"} · {result.branch})
+            <div className="notice">
+              <span className="dot dot-ok" style={{ marginTop: 7 }} aria-hidden="true" />
+              <div className="notice-body">
+                <span className="notice-title">Pushed {result.files} files</span>
+                <span className="notice-text">
+                  <a className="link" href={result.html_url} target="_blank" rel="noreferrer">
+                    {result.full_name}
+                  </a>{" "}
+                  · {result.private ? "private" : "public"} · branch{" "}
+                  <code>{result.branch}</code>
                 </span>
-              </span>
+              </div>
             </div>
           ) : (
             <>
-              <p className="fd-muted" style={{ fontSize: 14, lineHeight: 1.55, margin: 0 }}>
-                Pushing to <b>@{status.login}</b>’s account. Pick a name for the new repository.
+              <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6 }}>
+                Pushing to <b>@{status.login}</b>. Pick a name for the new repository.
               </p>
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
-                <input
-                  className="fd-input"
-                  style={{ minWidth: 220, flex: 1 }}
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="repository-name"
-                  disabled={pushing}
-                />
-                <label
-                  className="fd-mono"
-                  style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}
-                >
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
+                <div className="field" style={{ flex: 1, minWidth: 220 }}>
+                  <label htmlFor="repo-name">Repository name</label>
                   <input
-                    type="checkbox"
-                    checked={priv}
-                    onChange={(e) => setPriv(e.target.checked)}
+                    id="repo-name"
+                    className="input input-mono"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="repository-name"
                     disabled={pushing}
                   />
-                  private
-                </label>
+                </div>
                 <button
-                  className="fd-btn fd-btn-primary"
+                  type="button"
+                  className="switch"
+                  role="switch"
+                  aria-checked={priv}
+                  onClick={() => setPriv((v) => !v)}
+                  disabled={pushing}
+                  style={{ minHeight: 38 }}
+                >
+                  <span className="switch-track" aria-hidden="true" />
+                  Private
+                </button>
+                <button
+                  className="btn btn-primary"
                   onClick={push}
                   disabled={pushing || disabled || !name.trim()}
                 >
-                  {pushing ? "Pushing…" : "Create repo & push →"}
+                  {pushing && <span className="btn-spinner" aria-hidden="true" />}
+                  {pushing ? "Pushing…" : "Create repo and push"}
                 </button>
               </div>
               {disabled && (
-                <p className="fd-dim" style={{ fontSize: 13, margin: 0 }}>
+                <p className="field-hint" style={{ margin: 0 }}>
                   Nothing to push yet — finish the build first.
                 </p>
               )}
             </>
           )}
 
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <button className="fd-btn fd-btn-sm" onClick={disconnect} disabled={pushing}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button className="btn btn-sm" onClick={disconnect} disabled={pushing}>
               Disconnect
             </button>
             {result && (
-              <button
-                className="fd-btn fd-btn-sm"
-                onClick={() => setResult(null)}
-                disabled={pushing}
-              >
+              <button className="btn btn-sm" onClick={() => setResult(null)} disabled={pushing}>
                 Push another
               </button>
             )}
@@ -219,10 +227,13 @@ export default function GithubPublish({
       )}
 
       {error && (
-        <p style={{ color: "var(--accent)", fontSize: 13.5, marginTop: 12, marginBottom: 0 }}>
-          {error}
-        </p>
+        <div className="notice notice-bad" role="alert" style={{ marginTop: 14 }}>
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-text">{error}</span>
+          </div>
+        </div>
       )}
-    </div>
+    </section>
   );
 }

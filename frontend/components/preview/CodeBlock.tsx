@@ -71,20 +71,19 @@ export default function CodeBlock({
         padding: "16px 14px",
         maxHeight: 560,
         overflow: "auto",
-        background: "transparent",
-        fontSize: 12.5,
-        lineHeight: 1.6,
+        background: "var(--bg-sunken)",
+        fontSize: "var(--t-xs)",
+        lineHeight: 1.65,
       }}
       lineNumberStyle={{
         minWidth: "2.6em",
         paddingRight: "1em",
-        color: "var(--dim, #4b4b57)",
+        color: "var(--ink-4)",
         userSelect: "none",
       }}
       codeTagProps={{
         style: {
-          fontFamily:
-            "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace)",
+          fontFamily: "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace",
         },
       }}
     >
