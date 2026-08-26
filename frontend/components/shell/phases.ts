@@ -13,7 +13,7 @@ export type PhaseMeta = {
 };
 
 export const PHASES: PhaseMeta[] = [
-  { key: "product_manager", n: "01", name: "Product Manager", label: "Product Requirements", role: "Scope & PRD", agent: "pm-agent", deliver: "product-spec.md" },
+  { key: "product_manager", n: "01", name: "Product Manager", label: "Requirements", role: "Scope & PRD", agent: "pm-agent", deliver: "product-spec.md" },
   { key: "system_design", n: "02", name: "System Design", label: "Architecture", role: "Architecture", agent: "arch-agent", deliver: "architecture.md" },
   { key: "backend_engineer", n: "03", name: "Backend Engineer", label: "Backend", role: "APIs & data", agent: "be-agent", deliver: "backend/", debate: true },
   { key: "frontend_engineer", n: "04", name: "Frontend Engineer", label: "Frontend", role: "Interface", agent: "fe-agent", deliver: "frontend/" },
@@ -39,9 +39,26 @@ export const EXAMPLES = [
   "An invoicing tool for freelancers with Stripe payouts",
 ];
 
-// The composer's routing toggle uses short labels; the backend expects these.
-export const ROUTING_MODES: { id: string; backend: string }[] = [
-  { id: "local", backend: "local_only" },
-  { id: "auto", backend: "auto" },
-  { id: "manual", backend: "manual" },
+// The composer's routing control. `label` is what a person reads, `backend` is
+// what the API expects, and `hint` explains the trade-off in one line so the
+// choice isn't three unexplained words.
+export const ROUTING_MODES: { id: string; label: string; backend: string; hint: string }[] = [
+  {
+    id: "local",
+    label: "Local",
+    backend: "local_only",
+    hint: "Runs entirely on your own machine through Ollama. Free, private, slower.",
+  },
+  {
+    id: "auto",
+    label: "Auto",
+    backend: "auto",
+    hint: "Picks the best available model per phase, falling back to local when a cloud key is missing.",
+  },
+  {
+    id: "manual",
+    label: "Manual",
+    backend: "manual",
+    hint: "Uses the model you pinned in Settings for every phase.",
+  },
 ];
