@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactElement } from "react";
+import { useMemo, useState, type ReactElement, type ReactNode } from "react";
 import CodeBlock from "@/components/preview/CodeBlock";
 import { Icon } from "@/components/shell/icons";
 import { fileSummary, type PayloadFile } from "./payload";
@@ -65,7 +65,15 @@ function allDirectories(nodes: Node[], into: Set<string> = new Set()): Set<strin
   return into;
 }
 
-export default function FileBrowser({ files }: { files: PayloadFile[] }) {
+export default function FileBrowser({
+  files,
+  /** Rendered in the open file's header. The Ship review puts per-file redo here,
+   *  so "this one is wrong" is answered where the wrong thing is being read. */
+  renderAction,
+}: {
+  files: PayloadFile[];
+  renderAction?: (file: PayloadFile) => ReactNode;
+}) {
   const tree = useMemo(() => buildTree(files), [files]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState(files[0]?.path ?? "");
@@ -152,6 +160,7 @@ export default function FileBrowser({ files }: { files: PayloadFile[] }) {
           <span className="file-facts">
             <span className="badge badge-mono">{current.language || "code"}</span>
             <span className="mono dim">{current.lines} lines</span>
+            {renderAction?.(current)}
           </span>
         </div>
         <CodeBlock code={current.content} path={current.path} tag={current.language} />

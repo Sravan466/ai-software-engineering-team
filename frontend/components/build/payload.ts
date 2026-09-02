@@ -303,6 +303,24 @@ export function badgeTone(value: string): string {
   return "";
 }
 
+/**
+ * The assembled project (from `/artifacts`) in the shape the file browser reads.
+ *
+ * `sourceKey` carries the phase that wrote each file, which is what makes per-file
+ * redo able to reach the agent responsible rather than whoever finished last.
+ */
+export function artifactFiles(
+  files: { path: string; content: string; language: string; phase: string }[],
+): PayloadFile[] {
+  return files.map((f) => ({
+    path: f.path,
+    content: f.content,
+    language: f.language,
+    sourceKey: f.phase,
+    lines: f.content.split("\n").length,
+  }));
+}
+
 /** "1,240 lines across 7 files" — the one-line answer to "what am I approving?". */
 export function fileSummary(files: PayloadFile[]): string {
   if (files.length === 0) return "";

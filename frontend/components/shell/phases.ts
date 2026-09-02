@@ -1,4 +1,5 @@
 import { AGENTS } from "@/components/agents/personas";
+import type { ApprovalMode } from "@/lib/api";
 
 // The eight pipeline phases, in order. Mirrors the backend agent keys
 // (app/agents/*) and the v3 design's phase metadata. Shared by the sidebar,
@@ -44,7 +45,18 @@ export const EXAMPLES = [
 // The composer's routing control. `label` is what a person reads, `backend` is
 // what the API expects, and `hint` explains the trade-off in one line so the
 // choice isn't three unexplained words.
-export const ROUTING_MODES: { id: string; label: string; backend: string; hint: string }[] = [
+export type RoutingModeMeta = {
+  id: string;
+  label: string;
+  backend: string;
+  hint: string;
+  /** Manual is only a real choice once a model is pinned to the run — without one
+   *  the router falls straight through to the auto chain, and the control does
+   *  nothing at all. */
+  needsModel?: boolean;
+};
+
+export const ROUTING_MODES: RoutingModeMeta[] = [
   {
     id: "local",
     label: "Local",
@@ -61,6 +73,57 @@ export const ROUTING_MODES: { id: string; label: string; backend: string; hint: 
     id: "manual",
     label: "Manual",
     backend: "manual",
-    hint: "Uses the model you pinned in Settings for every phase.",
+    hint: "Pins one model to every phase of this run.",
+    needsModel: true,
   },
 ];
+
+export const ROUTING_BY_ID: Record<string, RoutingModeMeta> = Object.fromEntries(
+  ROUTING_MODES.map((m) => [m.id, m]),
+);
+export const ROUTING_BY_BACKEND: Record<string, RoutingModeMeta> = Object.fromEntries(
+  ROUTING_MODES.map((m) => [m.backend, m]),
+);
+
+// ── how often the run stops for you ─────────────────────────────────────────
+// Gating every handoff identically is what turned review into a rubber stamp:
+// the same card and the same two buttons whether an agent renamed a field or
+// wrote the whole backend. The default gates on consequence instead.
+export type ApprovalModeMeta = {
+  id: ApprovalMode;
+  label: string;
+  /** The one line under the control. */
+  hint: string;
+  /** What the build view says is coming next, once the run is going. */
+  running: string;
+};
+
+export const APPROVAL_MODES: ApprovalModeMeta[] = [
+  {
+    id: "checkpoints",
+    label: "Two checkpoints",
+    hint: "Stops twice — once on the plan, once on the finished build — and interrupts in between only for a severe security finding or a cost overrun.",
+    running: "Stops on the plan and on the finished build.",
+  },
+  {
+    id: "every_phase",
+    label: "Every phase",
+    hint: "Stops after all eight handoffs. Thorough, and eight decisions long.",
+    running: "Stops after every one of the eight handoffs.",
+  },
+  {
+    id: "unattended",
+    label: "Unattended",
+    hint: "Runs all eight phases end to end and hands you the result. Nothing interrupts it.",
+    running: "Runs to the end without stopping.",
+  },
+];
+
+export const APPROVAL_BY_ID: Record<string, ApprovalModeMeta> = Object.fromEntries(
+  APPROVAL_MODES.map((m) => [m.id, m]),
+);
+
+// The phases each review covers. Mirrors PLAN_PHASES / SHIP_GATE_PHASE on the
+// backend: a Plan review is one decision over Scope's spec and Atlas's
+// architecture, and the Ship review is one pass over everything.
+export const PLAN_PHASE_KEYS = ["product_manager", "system_design"];

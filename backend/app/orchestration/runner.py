@@ -28,13 +28,22 @@ from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
 from app.core.config import settings
-from app.core.constants import PHASE_ORDER, PhaseStatus, PipelineStatus, RoutingMode
+from app.core.constants import (
+    PHASE_ORDER,
+    GateKind,
+    Phase,
+    PhaseStatus,
+    PipelineStatus,
+    RoutingMode,
+)
 from app.core.logging import get_logger
 from app.db.base import SessionLocal
-from app.db.models import DebateRecord, PhaseResult, Project
+from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
 from app.memory.store import memory_store
+from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.graph import graph
 from app.orchestration.state import PipelineState
+from app.preview.generator import build_context, generate_preview
 from app.router.base import ProviderError
 from app.schemas.llm import LLMResponse, Usage
 
@@ -124,11 +133,12 @@ class PipelineRunner:
                 row = self._reconcile_current_phase(db, project)
 
                 if row is not None and row.status == PhaseStatus.PENDING_APPROVAL.value:
-                    if project.require_approval:
-                        project.status = PipelineStatus.AWAITING_APPROVAL.value
-                        db.commit()
+                    gate = decide_gate(project, row.phase, row.output)
+                    if gate is not None:
+                        self._park(db, project, gate)
                         return project
-                    # Approvals are off — the reviewer's standing answer is "yes".
+                    # No gate here: this handoff isn't one the policy stops for, so
+                    # the reviewer's standing answer for it is "yes".
                     row.status = PhaseStatus.APPROVED.value
                     db.commit()
 
@@ -158,17 +168,33 @@ class PipelineRunner:
             return project
 
     def reject(self, db: Session, project: Project, feedback: str) -> Project:
-        """Re-run the current phase with reviewer feedback, patching the checkpoint.
+        """Send the phase the reviewer is looking at back to its agent."""
+        return self.redo(db, project, project.current_phase, feedback)
 
-        The graph is *not* advanced: the same node's output is replaced in place, so
-        the next approval continues from the corrected version.
+    def redo(
+        self, db: Session, project: Project, phase_key: Optional[str], feedback: str
+    ) -> Project:
+        """Re-run one phase with reviewer feedback, patching the checkpoint in place.
+
+        The graph is *not* advanced: the node's output is replaced where it sits, so
+        the pipeline's position is unchanged and the reviewer lands back on the same
+        decision with the corrected work in front of them.
+
+        `phase_key` need not be the phase being reviewed. The Ship review shows a
+        whole file tree assembled from several phases, and "this file is wrong" has
+        to reach the agent that wrote *that* file — otherwise per-file redo is a
+        button that sends a note to whoever happens to have finished last.
         """
-        phase_key = project.current_phase
         if not phase_key:
             return project
 
+        # Where to return to once the agent is done: the decision this redo was
+        # requested from, which is not necessarily the phase being re-run.
+        gate_phase = project.current_phase or phase_key
+        fallback = Gate(project.gate_kind or GateKind.PHASE.value, project.gate_note)
+
         # The attempt being sent back keeps its place in the history.
-        self._mark_latest(db, project, PhaseStatus.REJECTED.value, feedback=feedback)
+        self._mark_phase(db, project, phase_key, PhaseStatus.REJECTED.value, feedback=feedback)
         row = self._begin_phase(db, project, phase_key)
 
         try:
@@ -217,8 +243,14 @@ class PipelineRunner:
             self._settle_cancelled(db, project)
             return project
 
-        project.status = PipelineStatus.AWAITING_APPROVAL.value
-        db.commit()
+        # A redo of an earlier phase leaves the pipeline exactly where it was; only
+        # that phase's output changed. Put the reviewer back on their decision.
+        project.current_phase = gate_phase
+        if gate_phase != phase_key:
+            project.phase_started_at = None
+        gate_row = self._latest_row(db, project, gate_phase)
+        gate = decide_gate(project, gate_phase, gate_row.output if gate_row else None)
+        self._park(db, project, gate or fallback)
         return project
 
     # ── stop / resume ─────────────────────────────────────────────────────────
@@ -272,6 +304,9 @@ class PipelineRunner:
         self._persist_new_debates(db, project, state.get("debates", []))
         self._raise_if_cancelled(db, project)
 
+        if phase_key == Phase.FRONTEND_ENGINEER.value and last_result:
+            self._draw_mockup(db, project)
+
     def _begin_phase(self, db: Session, project: Project, phase_key: str) -> PhaseResult:
         """Mark a phase as *starting* — before a single token is generated.
 
@@ -295,6 +330,9 @@ class PipelineRunner:
         project.phase_started_at = now
         project.heartbeat_at = now
         project.status = PipelineStatus.RUNNING.value
+        # Moving means the pipeline is no longer parked; nothing is waiting on anyone.
+        project.gate_kind = None
+        project.gate_note = None
 
         row = PhaseResult(
             project_id=project.id,
@@ -327,6 +365,60 @@ class PipelineRunner:
         db.commit()
         self._record_usage(db, project, lr)
         return row
+
+    def _park(self, db: Session, project: Project, gate: Gate) -> None:
+        """Stop and wait for a person, recording which review to show and why."""
+        project.status = PipelineStatus.AWAITING_APPROVAL.value
+        project.gate_kind = gate.kind
+        project.gate_note = gate.note
+        db.commit()
+        log.info("Waiting on review: %s (%s)", project.id, gate.kind)
+
+    def _draw_mockup(self, db: Session, project: Project) -> None:
+        """Render the visual mockup as the Frontend phase finishes.
+
+        It used to be a button on a different tab: Prism had already written
+        `frontend/`, and the reviewer still had to leave the decision and ask for a
+        picture of it. Now it exists by the time anyone reviews the build.
+
+        Strictly best effort, and never on top of existing work — a mockup that
+        fails to draw must not fail a phase that produced real code, and a
+        regenerate would throw away sections the reviewer has already edited.
+        """
+        already = (
+            db.query(PreviewRevision).filter(PreviewRevision.project_id == project.id).count()
+        )
+        if already or self._cancel_requested(db, project):
+            return
+        # Sessions here are `expire_on_commit=False`, so the phase rows this brief is
+        # built from would otherwise be whatever was loaded before the phase ran.
+        db.refresh(project)
+        try:
+            with _heartbeat(project.id):
+                html, resp = generate_preview(
+                    project.idea,
+                    project.name,
+                    build_context(project),
+                    mode=RoutingMode(project.routing_mode),
+                    preferred_model=project.preferred_model,
+                )
+        except Exception as e:  # noqa: BLE001 - the build is the deliverable, not the picture
+            log.warning("Mockup generation failed for %s: %s", project.id, e)
+            return
+        if "<" not in html:
+            log.warning("Mockup generation returned no HTML for %s.", project.id)
+            return
+        db.add(
+            PreviewRevision(
+                project_id=project.id,
+                html=html,
+                source="generated",
+                model_used=resp.model,
+                provider_used=resp.provider,
+            )
+        )
+        db.commit()
+        tracker.record(db, response=resp, project_id=project.id, phase="preview")
 
     def _abandon_row(self, db: Session, row: PhaseResult, reason: str) -> None:
         row.status = PhaseStatus.FAILED.value
@@ -387,14 +479,19 @@ class PipelineRunner:
         return previous
 
     # ── cancellation ──────────────────────────────────────────────────────────
+    #: Re-read before every gate decision, because a person can change any of them
+    #: while the run is in flight.
+    _LIVE_FIELDS = ("cancel_requested", "approval_mode", "require_approval", "cost_cap_usd")
+
     @staticmethod
     def _cancel_requested(db: Session, project: Project) -> bool:
-        """Re-read the flag — Stop is set by a different request on a different session.
+        """Re-read the reviewer's live settings — Stop and the review policy are both
+        written by other requests on other sessions, and this session has the run.
 
         A project deleted mid-run counts as cancelled: there is nothing left to write to.
         """
         try:
-            db.refresh(project, ["cancel_requested"])
+            db.refresh(project, list(PipelineRunner._LIVE_FIELDS))
         except Exception:  # noqa: BLE001 - the row is gone (deleted from the UI)
             return True
         return bool(project.cancel_requested)
@@ -429,6 +526,8 @@ class PipelineRunner:
         project.current_phase = None
         project.phase_started_at = None
         project.last_error = None
+        project.gate_kind = None
+        project.gate_note = None
         db.commit()
         self._write_memory(project, values)
 
@@ -479,13 +578,18 @@ class PipelineRunner:
             .first()
         )
 
-    def _mark_latest(
-        self, db: Session, project: Project, status: str, feedback: Optional[str] = None
+    def _mark_phase(
+        self,
+        db: Session,
+        project: Project,
+        phase: Optional[str],
+        status: str,
+        feedback: Optional[str] = None,
     ) -> Optional[PhaseResult]:
-        """Set the status of the most recent phase row for the current phase."""
-        if not project.current_phase:
+        """Set the status of the most recent row for one named phase."""
+        if not phase:
             return None
-        row = self._latest_row(db, project, project.current_phase)
+        row = self._latest_row(db, project, phase)
         if row:
             row.status = status
             if feedback is not None:
@@ -493,9 +597,35 @@ class PipelineRunner:
             db.commit()
         return row
 
+    def _mark_latest(
+        self, db: Session, project: Project, status: str, feedback: Optional[str] = None
+    ) -> Optional[PhaseResult]:
+        """Set the status of the most recent phase row for the current phase."""
+        return self._mark_phase(db, project, project.current_phase, status, feedback)
+
     def approve_current(self, db: Session, project: Project) -> Optional[PhaseResult]:
-        """Record the reviewer's yes on the phase they were shown."""
-        return self._mark_latest(db, project, PhaseStatus.APPROVED.value)
+        """Record the reviewer's yes on the phase they were shown.
+
+        A Plan review covers two phases and a Ship review covers the whole run, so
+        the yes lands on every phase still waiting for one — otherwise the phases
+        the reviewer approved without being asked twice stay `pending_approval`
+        forever and read as unfinished.
+        """
+        project.gate_kind = None
+        project.gate_note = None
+        approved = self._mark_latest(db, project, PhaseStatus.APPROVED.value)
+        pending = (
+            db.query(PhaseResult)
+            .filter(
+                PhaseResult.project_id == project.id,
+                PhaseResult.status == PhaseStatus.PENDING_APPROVAL.value,
+            )
+            .all()
+        )
+        for row in pending:
+            row.status = PhaseStatus.APPROVED.value
+        db.commit()
+        return approved
 
     def _write_memory(self, project: Project, state: dict) -> None:
         outputs = state.get("prior_outputs", {})

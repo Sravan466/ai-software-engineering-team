@@ -96,6 +96,9 @@
    THE ARTIFACT — what the agent actually produced
    =========================================================================== */
 .artifact { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+/* A phase panel nested in the Ship review sits directly under that review's own
+   switcher, whose bottom border is already the rule between them. */
+.artifact .artifact { border-top: 0; }
 
 .artifact-bar {
   display: flex;
@@ -353,4 +356,240 @@
   /* The sweep is the only signal that a phase is alive, so it stays — as a static
      full-width bar rather than a moving one. The clock still ticks. */
   .working-bar span { animation: none; width: 100%; opacity: 0.55; }
+}
+
+/* ===========================================================================
+   THE DECISION — one surface, wherever the run stopped
+
+   There used to be one gate shape repeated eight times, rendered inside whichever
+   of eight phase rows happened to be open. Two things changed. The pipeline now
+   stops on consequence rather than on every handoff, so a stop means something;
+   and the stop always renders here, at the top of the build, so a person never
+   hunts for the thing waiting on them.
+
+   Amber still means exactly one thing — the pipeline needs you — and a security
+   interrupt is the one case that outranks it, because it is not asking for a
+   decision so much as reporting one that was made for you.
+   =========================================================================== */
+.decision {
+  border-radius: var(--r-lg);
+  border: 1px solid var(--accent-line);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  animation: rise var(--tr-slow) cubic-bezier(0.2, 0, 0.2, 1) both;
+}
+
+.decision-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 17px 18px 15px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--warn-soft), transparent);
+}
+.decision-mark {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.decision-mark svg { width: 17px; height: 17px; }
+.decision-headings { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.decision-headings h2 { font-size: var(--t-lg); }
+.decision-headings p {
+  margin: 0;
+  max-width: 64ch;
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.decision-head > .badge { flex: none; margin-top: 3px; }
+
+/* Why the run stopped, when it stopped for a reason of its own. */
+.decision-alarm {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bad-soft);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  line-height: 1.55;
+}
+.decision-alarm > svg { width: 16px; height: 16px; margin-top: 2px; color: var(--bad); }
+
+.decision-body { display: flex; flex-direction: column; }
+
+/* The buttons sit on their own surface, under everything they are about. */
+.decision-act {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  padding: 16px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+.decision-approve { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.decision-approve .field-hint { max-width: 46ch; }
+.decision-send { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.decision-send .field { flex: 1; min-width: 240px; }
+.decision-send code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line-2);
+  color: var(--accent);
+  font-size: var(--t-xs);
+}
+
+/* A stop Warden raised is not the same event as a decision you scheduled. */
+.decision-security { border-color: rgba(240, 82, 82, 0.42); }
+.decision-security .decision-head {
+  background: linear-gradient(180deg, var(--bad-soft), transparent);
+}
+.decision-security .decision-mark {
+  border-color: rgba(240, 82, 82, 0.4);
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+/* ── the plan: two agents, one decision ── */
+.plan-review { display: flex; flex-direction: column; }
+.plan-part + .plan-part { border-top: 1px solid var(--line); }
+.plan-part-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px 11px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--agent) 8%, transparent),
+    transparent 44%
+  );
+}
+.plan-part-head .phase-tokens { flex: none; }
+
+/* ===========================================================================
+   RUN SETTINGS — routing and review policy, after the idea rather than before it
+   =========================================================================== */
+.run-settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: var(--t-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--tr), border-color var(--tr), color var(--tr);
+}
+.run-settings-toggle:hover:not(:disabled) {
+  background: var(--bg-raised);
+  border-color: var(--line-2);
+  color: var(--ink-2);
+}
+.run-settings-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
+.run-settings-toggle .phase-chev { display: inline-grid; place-items: center; }
+.run-settings-toggle .phase-chev svg { width: 14px; height: 14px; }
+.run-settings-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+.run-settings-more { flex: none; color: var(--ink-3); }
+.run-settings-toggle:hover .run-settings-more { color: var(--accent); }
+
+.run-settings {
+  padding: 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+  animation: rise var(--tr) ease both;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 22px 28px;
+  align-items: start;
+}
+.setting { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.setting .field-hint { max-width: 52ch; }
+.setting .seg { align-self: flex-start; max-width: 100%; flex-wrap: wrap; }
+
+/* A currency field that says what its number means without a second label. */
+.prefixed { display: flex; align-items: center; gap: 8px; }
+.prefixed .input { flex: 1; min-width: 90px; max-width: 150px; }
+.prefixed-mark { font-family: var(--mono); font-size: var(--t-base); color: var(--ink-3); }
+.prefixed-suffix { font-size: var(--t-sm); color: var(--ink-3); }
+
+/* ===========================================================================
+   REVIEW POLICY — changeable while the run is in flight
+   =========================================================================== */
+.policy { position: relative; display: inline-flex; }
+.policy-toggle {
+  gap: 6px;
+  cursor: pointer;
+  font-family: var(--sans);
+  transition: border-color var(--tr), color var(--tr), background var(--tr);
+}
+.policy-toggle:hover:not(:disabled) { border-color: var(--line-3); color: var(--ink); }
+.policy-toggle:disabled { cursor: default; opacity: 0.6; }
+.policy-toggle .phase-chev { display: inline-grid; place-items: center; color: var(--ink-4); }
+.policy-toggle .phase-chev svg { width: 13px; height: 13px; }
+.policy-toggle[aria-expanded="true"] {
+  border-color: var(--accent-line);
+  color: var(--ink);
+}
+.policy-toggle[aria-expanded="true"] .phase-chev { transform: rotate(90deg); color: var(--accent); }
+
+.policy-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: var(--z-sticky);
+  width: min(400px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-3);
+  animation: rise var(--tr) ease both;
+}
+
+/* ===========================================================================
+   RESPONSIVE — the decision keeps its shape longest, because it is the point
+   =========================================================================== */
+@media (max-width: 720px) {
+  .decision-head { flex-wrap: wrap; }
+  .decision-head > .badge { order: -1; margin-left: 43px; }
+  .decision-approve .btn-lg { width: 100%; }
+  .decision-send .btn { flex: 1; }
+  .policy-panel { left: auto; right: 0; }
+}
+
+@media (max-width: 620px) {
+  .decision-head,
+  .decision-act,
+  .decision-alarm { padding-left: 14px; padding-right: 14px; }
+  .run-settings { padding: 14px; }
+  .settings-grid { gap: 20px; }
 }

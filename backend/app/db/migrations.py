@@ -35,7 +35,16 @@ log = get_logger(__name__)
 #: table -> column names that may be added to an existing table. Every entry must be
 #: safe to apply to a populated one: nullable, or NOT NULL with a constant default.
 ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
-    "projects": ("phase_started_at", "heartbeat_at", "cancel_requested", "last_error"),
+    "projects": (
+        "phase_started_at",
+        "heartbeat_at",
+        "cancel_requested",
+        "last_error",
+        "approval_mode",
+        "cost_cap_usd",
+        "gate_kind",
+        "gate_note",
+    ),
     "phase_results": ("started_at", "completed_at", "total_tokens", "latency_ms"),
 }
 

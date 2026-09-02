@@ -11,6 +11,39 @@ class RoutingMode(str, Enum):
     LOCAL_ONLY = "local_only"
 
 
+class ApprovalMode(str, Enum):
+    """How often the pipeline stops and asks a person.
+
+    Gating every handoff identically makes review a rubber stamp: the same card and
+    the same two buttons appear whether an agent renamed a field or wrote the whole
+    backend. The default gates on *consequence* instead — two decisions where change
+    is still cheap or still possible, plus an interrupt when the run itself reports
+    something alarming.
+    """
+
+    #: Two decisions — the plan, then the finished build — plus conditional interrupts.
+    CHECKPOINTS = "checkpoints"
+    #: Stop after every phase. Kept for anyone who wants the old rhythm.
+    EVERY_PHASE = "every_phase"
+    #: Never stop.
+    UNATTENDED = "unattended"
+
+
+class GateKind(str, Enum):
+    """Why the pipeline is waiting, which decides what the reviewer is shown."""
+
+    #: Scope + Atlas together: the spec, the scope and the architecture diagram.
+    PLAN = "plan"
+    #: One pass over the finished artifact: files, mockup, security findings, cost.
+    SHIP = "ship"
+    #: Warden found something severe enough to stop an otherwise unattended build.
+    SECURITY = "security"
+    #: Ledger's projected run cost passed the cap set for this build.
+    COST = "cost"
+    #: A single handoff, in every-phase mode.
+    PHASE = "phase"
+
+
 class PipelineStatus(str, Enum):
     CREATED = "created"
     RUNNING = "running"
@@ -56,6 +89,15 @@ PHASE_ORDER: list[Phase] = [
     Phase.DEVOPS_ENGINEER,
     Phase.COST_ESTIMATION,
 ]
+
+#: The phases the Plan review covers. They run back to back and are approved once,
+#: because a scope you accept and an architecture you accept are one decision.
+PLAN_PHASES: tuple[Phase, ...] = (Phase.PRODUCT_MANAGER, Phase.SYSTEM_DESIGN)
+
+#: Where each of the two checkpoint gates falls: after the last planning phase, and
+#: after the last phase of all.
+PLAN_GATE_PHASE: Phase = PLAN_PHASES[-1]
+SHIP_GATE_PHASE: Phase = PHASE_ORDER[-1]
 
 PHASE_LABELS: dict[str, str] = {
     Phase.PRODUCT_MANAGER.value: "Product Requirements",

@@ -386,22 +386,6 @@
 }
 @keyframes caret { 50% { opacity: 0; } }
 
-/* ===========================================================================
-   THE GATE, in the agent's colour
-   The character that produced the work owns the panel that asks about it.
-   =========================================================================== */
-.agent-gate { border-color: color-mix(in srgb, var(--agent) 55%, transparent); }
-.agent-gate .gate-head {
-  background: color-mix(in srgb, var(--agent) 11%, transparent);
-  gap: 12px;
-}
-.agent-gate .gate-head-title { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
-.agent-gate .btn-accent {
-  background: var(--agent);
-  border-color: var(--agent);
-  color: #0a0a12;
-}
-
 /* The phase a character is actively working gets a hairline of their colour. */
 .phase.running,
 .phase.gate { box-shadow: inset 2px 0 0 var(--agent); }
