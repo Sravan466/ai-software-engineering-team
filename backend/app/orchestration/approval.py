@@ -104,17 +104,18 @@ def projected_monthly_cost(output: object) -> Optional[float]:
     if not isinstance(output, dict):
         return None
 
-    reported: Optional[float] = None
-    for key in ("total_monthly_high_usd", "total_monthly_low_usd"):
-        reported = _number(output.get(key))
-        if reported is not None:
-            break
-
     # A reported total above zero is the answer. A reported *zero* is usually a field
     # the model left at its placeholder while itemising real money underneath it, and
-    # taking it at face value is how a $490/month build slips under a $100 cap.
-    if reported:
-        return reported
+    # taking it at face value is how a $490/month build slips under a $100 cap — so a
+    # zero is remembered rather than returned, and only stands if nothing else does.
+    # It cannot short-circuit the other total either: `high: 0, low: 50` is a build
+    # that costs 50.
+    zero_reported = False
+    for key in ("total_monthly_high_usd", "total_monthly_low_usd"):
+        value = _number(output.get(key))
+        if value:
+            return value
+        zero_reported = zero_reported or value is not None
 
     # Infrastructure and third-party spend are different money and both count.
     parts = [
@@ -127,7 +128,7 @@ def projected_monthly_cost(output: object) -> Optional[float]:
     ]
     if parts:
         return sum(parts)
-    return reported
+    return 0.0 if zero_reported else None
 
 
 # ── the decision ─────────────────────────────────────────────────────────────

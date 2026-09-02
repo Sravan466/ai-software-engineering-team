@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, type Artifacts, type PhaseResult, type Project, type RunResponse } from "@/lib/api";
+import { api, type Artifacts, type Project, type RunResponse } from "@/lib/api";
 import { APPROVAL_BY_ID, PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
 import { AGENT_BY_KEY, type Persona } from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
