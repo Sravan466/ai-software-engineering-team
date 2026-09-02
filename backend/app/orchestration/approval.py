@@ -85,12 +85,14 @@ def _sum_rows(rows: object, *fields: str) -> Optional[float]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        for field in fields:
-            value = _number(row.get(field))
-            if value is not None:
-                total += value
-                counted = True
-                break
+        present = [v for v in (_number(row.get(f)) for f in fields) if v is not None]
+        if not present:
+            continue
+        # A placeholder zero in the preferred field is not this line's cost. Same rule
+        # as the reported total above it: the first real number wins, and a zero only
+        # stands when every alternative on the row is also zero.
+        total += next((v for v in present if v), 0.0)
+        counted = True
     return total if counted else None
 
 

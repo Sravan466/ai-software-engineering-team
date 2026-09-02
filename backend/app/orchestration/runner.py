@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Optional
 
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -260,7 +261,7 @@ class PipelineRunner:
             # The front end was rewritten, so the picture of it is of code that no
             # longer exists. `_run_phase`'s hook does not fire on this path.
             if self._clear_generated_mockup(db, project.id):
-                self._draw_mockup_later(project.id)
+                self._draw_mockup_later(project.id, row.id)
         if stale:
             # Before the cancellation check, not after: a Stop pressed in that window
             # would otherwise leave a build whose backend is new and whose tests,
@@ -269,7 +270,7 @@ class PipelineRunner:
             self._discard_after(db, project, phase_key)
 
         if self._cancel_requested(db, project):
-            self._settle_cancelled(db, project)
+            self._settle_cancelled(db, project, rewinding=bool(stale))
             return project
 
         if gate_phase == phase_key:
@@ -309,22 +310,30 @@ class PipelineRunner:
         db.expire(project, ["phases"])
 
     @staticmethod
-    def _clear_generated_mockup(db: Session, project_id: str) -> bool:
-        """Drop an auto-drawn mockup so a rebuilt front end gets a fresh one.
+    def _has_mockup(db: Session, project_id: str) -> bool:
+        return bool(
+            db.query(PreviewRevision).filter(PreviewRevision.project_id == project_id).count()
+        )
 
-        Only ever an untouched one. The moment somebody has edited a section, the
-        preview is their work rather than a derived picture, and throwing it away to
-        redraw something they did not ask for would be worse than showing them a
-        mockup they can regenerate themselves.
+    @staticmethod
+    def _clear_generated_mockup(db: Session, project_id: str) -> bool:
+        """Make room for a fresh mockup. False means someone's own work is in the way.
+
+        Returns True when there is nothing to clear as well as when it cleared
+        something — the caller is asking "may I draw?", and *no mockup at all* is the
+        clearest yes there is. Conflating that with the one real no (a preview a
+        person has edited) let a redo skip scheduling its redraw, and an already
+        in-flight draw of the replaced front end became the mockup by default.
         """
         revisions = (
             db.query(PreviewRevision).filter(PreviewRevision.project_id == project_id).all()
         )
-        if not revisions or any(r.source != "generated" for r in revisions):
+        if any(r.source != "generated" for r in revisions):
             return False
         for revision in revisions:
             db.delete(revision)
-        db.commit()
+        if revisions:
+            db.commit()
         return True
 
     @staticmethod
@@ -411,7 +420,7 @@ class PipelineRunner:
         self._raise_if_cancelled(db, project)
 
         if phase_key == Phase.FRONTEND_ENGINEER.value and last_result:
-            self._draw_mockup_later(project.id)
+            self._draw_mockup_later(project.id, row.id)
 
     def _begin_phase(self, db: Session, project: Project, phase_key: str) -> PhaseResult:
         """Mark a phase as *starting* — before a single token is generated.
@@ -481,7 +490,16 @@ class PipelineRunner:
         return row
 
     def _park(self, db: Session, project: Project, gate: Gate) -> None:
-        """Stop and wait for a person, recording which review to show and why."""
+        """Stop and wait for a person, recording which review to show and why.
+
+        Re-reads the stop flag first. A Stop landing between the caller's check and
+        this write would otherwise be undone — the run coming back as a live decision
+        panel, with the reason it was stopped cleared along with it.
+        """
+        if self._cancel_requested(db, project):
+            self._settle_cancelled(db, project)
+            return
+
         project.status = PipelineStatus.AWAITING_APPROVAL.value
         project.gate_kind = gate.kind
         project.gate_note = gate.note
@@ -490,22 +508,57 @@ class PipelineRunner:
         db.commit()
         log.info("Waiting on review: %s (%s)", project.id, gate.kind)
 
-    def _draw_mockup_later(self, project_id: str) -> None:
+    def _draw_mockup_later(self, project_id: str, source_row_id: str) -> None:
         """Draw the mockup alongside the pipeline rather than in front of it.
 
         This is a whole extra model call, and inlining it between a phase and the gate
         it leads to held the reviewer's decision hostage to it — for minutes on a local
         model, with no agent shown as working, because the phase had already finished.
         The pipeline moves on; the picture catches up.
+
+        `source_row_id` is the Frontend attempt being drawn. A redo can replace that
+        attempt while this thread is still generating, and without something to check
+        at the end, whichever request happened to finish last would decide what the
+        Ship review shows.
         """
         threading.Thread(
             target=self._draw_mockup,
-            args=(project_id,),
+            args=(project_id, source_row_id),
             name=f"mockup-{project_id[:8]}",
             daemon=True,
         ).start()
 
-    def _draw_mockup(self, project_id: str) -> None:
+    def _wait_for_idle(self, project_id: str, timeout: float = 900.0) -> bool:
+        """Hold until the pipeline stops generating. False means don't bother drawing.
+
+        Moving the mockup off the critical path does not help on a local runtime,
+        where there is exactly one model: a draw running beside the next agent just
+        doubles that agent's visible elapsed time and charges the stall to the wrong
+        phase. Waiting for a gate — or for the end — spends the model on idle time
+        instead. Bounded, because an unattended run is `running` throughout.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            db = SessionLocal()
+            try:
+                project = db.get(Project, project_id)
+                if project is None:
+                    return False
+                status = project.status
+            finally:
+                db.close()
+            if status in (
+                PipelineStatus.AWAITING_APPROVAL.value,
+                PipelineStatus.COMPLETED.value,
+            ):
+                return True
+            if status != PipelineStatus.RUNNING.value:
+                return False  # cancelled or failed — don't spend a model call on it
+            if time.monotonic() >= deadline:
+                return True  # an unattended run never parks; draw rather than never
+            time.sleep(2.0)
+
+    def _draw_mockup(self, project_id: str, source_row_id: str) -> None:
         """Render the visual mockup from the Frontend phase's work.
 
         It used to be a button on a different tab: Prism had already written
@@ -516,16 +569,15 @@ class PipelineRunner:
         fails to draw must not fail a build that produced real code, and a
         regenerate would throw away sections the reviewer has already edited.
         """
+        if not self._wait_for_idle(project_id):
+            return
+
         db = SessionLocal()
         try:
             project = db.get(Project, project_id)
             if project is None or self._cancel_requested(db, project):
                 return
-            if (
-                db.query(PreviewRevision)
-                .filter(PreviewRevision.project_id == project_id)
-                .count()
-            ):
+            if self._has_mockup(db, project_id):
                 return
 
             html, resp = generate_preview(
@@ -537,6 +589,16 @@ class PipelineRunner:
             )
             if "<" not in html:
                 log.warning("Mockup generation returned no HTML for %s.", project_id)
+                return
+
+            # The front end may have been rewritten while this was drawing. A picture
+            # of the version that was replaced is worse than no picture, and the Ship
+            # review captions it as current.
+            current = self.latest_row(db, project, Phase.FRONTEND_ENGINEER.value)
+            if current is None or current.id != source_row_id:
+                log.info("Dropped a mockup of a replaced front end (%s).", project_id)
+                return
+            if self._has_mockup(db, project_id):
                 return
 
             db.add(
@@ -579,16 +641,26 @@ class PipelineRunner:
     def _reconcile_current_phase(
         self, db: Session, project: Project
     ) -> Optional[PhaseResult]:
-        """Return the latest row for the current phase, healing a dead `running` one.
+        """Return the latest row for the current phase, healing a dead or failed one.
 
         Background tasks die with their process, so a row left at `running` means an
-        interrupted run. Two cases: the graph checkpointed the phase's output before
-        dying (salvage it) or it did not (drop the row so the phase runs again).
+        interrupted run. A `failed` row means an attempt that raised — a redo whose
+        provider dropped, say. Both are rows with no usable output sitting where the
+        loop expects a deliverable, and both have the same two outcomes: the graph
+        checkpointed that phase's output before things went wrong (salvage it) or it
+        did not (drop the row so the phase runs again).
+
+        Failing to heal a `failed` one is how a run could report itself **completed**
+        with a phase's deliverable erased: the graph is at END, so `continue_run`
+        reads "nothing left to do" and finalises over the top of an empty row.
         """
         if not project.current_phase:
             return None
         row = self.latest_row(db, project, project.current_phase)
-        if row is None or row.status != PhaseStatus.RUNNING.value:
+        if row is None or row.status not in (
+            PhaseStatus.RUNNING.value,
+            PhaseStatus.FAILED.value,
+        ):
             return row
 
         with _lock:
@@ -598,7 +670,7 @@ class PipelineRunner:
             log.info("Recovered checkpointed output for %s/%s", project.id, row.phase)
             return self._complete_row(db, project, row, salvaged)
 
-        db.delete(row)
+        self._delete_rows(db, project, [row])
         # Rewind to the last phase that actually produced something, so the loop's
         # "what's next" question gets the truth.
         db.commit()
@@ -635,10 +707,21 @@ class PipelineRunner:
         if self._cancel_requested(db, project):
             raise CancelledRun()
 
-    def _settle_cancelled(self, db: Session, project: Project) -> None:
+    def _settle_cancelled(
+        self, db: Session, project: Project, rewinding: bool = False
+    ) -> None:
         project.status = PipelineStatus.CANCELLED.value
         project.cancel_requested = False
-        if not project.last_error:
+        if rewinding:
+            # The phases after the corrected one were dropped before the stop landed,
+            # so the build view now shows them as never-run. Say why, or they simply
+            # disappear and the reviewer is left to wonder what ate them.
+            project.last_error = (
+                "Stopped while rebuilding. The phases after the one you sent back were "
+                "cleared because they described the version it replaced — resume and "
+                "they run again from the corrected work."
+            )
+        elif not project.last_error:
             project.last_error = "Stopped by you. Resume picks up from the last approved phase."
         db.commit()
         log.info("Run cancelled: %s (at %s)", project.id, project.current_phase)

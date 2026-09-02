@@ -154,8 +154,14 @@ export default function Decision({
   /** Point the note at a phase — and at one file within it, when that is the ask. */
   function aim(phase: string, path?: string) {
     setTarget({ phase, path });
-    document.getElementById("decision-note")?.focus();
   }
+
+  // After the render that aiming causes, not during it: on a whole-build review the
+  // note field is disabled until something is aimed, and `focus()` on a disabled
+  // input does nothing at all — leaving an enabled empty box with no caret in it.
+  useEffect(() => {
+    if (target) document.getElementById("decision-note")?.focus();
+  }, [target]);
 
   async function send() {
     const text = note.trim();
@@ -375,6 +381,14 @@ function SinglePhase({
 // ── ship: the whole build in one pass ────────────────────────────────────────
 type ShipView = "files" | "mockup" | "security" | "cost";
 
+/** True when the picture was drawn before the front end it is captioned as showing. */
+function mockupIsStale(project: Project, preview: PreviewState | null): boolean {
+  const drawn = preview?.revisions?.[0]?.created_at;
+  const built = rowFor(project, "frontend_engineer")?.completed_at;
+  if (!drawn || !built) return false;
+  return +new Date(drawn) < +new Date(built);
+}
+
 function ShipReview({
   project,
   art,
@@ -396,6 +410,7 @@ function ShipReview({
 }) {
   const security = rowFor(project, "security_engineer");
   const cost = rowFor(project, "cost_estimation");
+  const stale = mockupIsStale(project, preview);
 
   const views: { key: ShipView; label: string; icon: ReactNode; count?: number }[] = [];
   if (files.length) views.push({ key: "files", label: "Files", icon: Icon.file, count: files.length });
@@ -484,9 +499,21 @@ function ShipReview({
       {active?.key === "mockup" && preview?.html && (
         <div className="artifact-view" style={{ maxHeight: 620 }}>
           <div className="artifact-pad">
+            {stale && (
+              <p className="decision-alarm" style={{ borderBottom: 0, marginBottom: 12 }}>
+                {Icon.alert}
+                <span>
+                  This mockup predates the current front end — it was kept because it
+                  has been edited by hand. Regenerate it on the Preview tab to see what
+                  was actually built.
+                </span>
+              </p>
+            )}
             <MockupFrame html={preview.html} height={460} />
             <p className="field-hint" style={{ marginTop: 10 }}>
-              Drawn by the Frontend phase. Edit it section by section on the Preview tab.
+              {stale
+                ? "Edit it section by section on the Preview tab."
+                : "Drawn by the Frontend phase. Edit it section by section on the Preview tab."}
             </p>
           </div>
         </div>
