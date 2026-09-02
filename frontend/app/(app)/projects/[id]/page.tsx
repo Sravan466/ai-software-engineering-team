@@ -124,6 +124,74 @@ const NODE_STATUS: Record<NodeState, string> = {
   done: "Done",
 };
 
+/**
+ * What a queued phase is actually waiting for.
+ *
+ * "Queued" is true and useless: eight steps saying the same word tell you
+ * nothing about which of them is next or what is holding the line. This reads
+ * the phase in front of it and says so.
+ */
+function waitingFor(project: Project, index: number): string {
+  if (index === 0) {
+    return project.status === "created"
+      ? "Queued — starts when you run the pipeline"
+      : "Queued";
+  }
+  const prev = PHASES[index - 1];
+  const prevName = AGENT_BY_KEY[prev.key].codename;
+  switch (nodeStateFor(project, prev.key)) {
+    case "running":
+      // A stalled run's phase row still says `running`; nothing is driving it.
+      // Reading the row alone is how the badge could say "Stalled" while the
+      // step beneath it said the phase in front was still working.
+      return effectiveStatus(project) === "stalled"
+        ? `Queued — ${prevName} stopped responding mid-phase`
+        : `Queued — ${prevName} is still working`;
+    case "gate":
+      return `Queued — waiting on your review of ${prevName}'s work`;
+    case "redo":
+      return `Queued — ${prevName} is running again`;
+    case "failed":
+      return `Queued — ${prevName} stopped mid-phase`;
+    case "done":
+      return `Queued — next after ${prevName}`;
+    default:
+      return `Queued — behind ${prevName}`;
+  }
+}
+
+/**
+ * The one-line answer to "who has the work". Used by the compact relay.
+ *
+ * Reads the project's *effective* status, not the phase row alone. A stalled run
+ * is one whose row still says `running` while nothing is driving it, so a summary
+ * built only from the row would announce "FORGE is working" directly between a
+ * badge reading "Stalled" and a panel offering to resume it.
+ */
+function relaySummary(project: Project, doneCount: number): string {
+  const stalled = effectiveStatus(project) === "stalled";
+  const live = PHASES.find((ph) => {
+    const ns = nodeStateFor(project, ph.key);
+    return ns === "running" || ns === "gate" || ns === "redo";
+  });
+  if (!live) {
+    if (doneCount === PHASES.length) return "All eight approved";
+    if (project.status === "created") return "Nobody has the work yet";
+    return "Nobody is working right now";
+  }
+  const name = AGENT_BY_KEY[live.key].codename;
+  const ns = nodeStateFor(project, live.key);
+  if (ns === "gate") return `${name} is waiting on you`;
+  if (ns === "redo") return `${name} is running again`;
+  return stalled ? `${name} stopped responding mid-phase` : `${name} is working`;
+}
+
+/** "SCOPE", "SCOPE and ATLAS", "SCOPE, ATLAS and FORGE". */
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 function localPct(project: Project): number | null {
   const withProvider = project.phases.filter((p) => p.provider_used);
   if (withProvider.length === 0) return null;
@@ -146,6 +214,12 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("build");
+  // Which phase the relay is sending you to. A pending instruction, not a
+  // record of where you last went: PhaseList clears it the moment it acts, or a
+  // tab round-trip — which unmounts and remounts that list with the same value
+  // still sitting here — would scroll you back to a phase you already left.
+  const [jump, setJump] = useState<{ key: string } | null>(null);
+  const clearJump = useCallback(() => setJump(null), []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -254,7 +328,6 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   }
 
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
-  const completed = project.status === "completed";
   const tabs: { key: Tab; label: string }[] = [
     { key: "build", label: "Build" },
     { key: "preview", label: "Preview" },
@@ -292,49 +365,66 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             <ReviewPolicy project={project} id={id} onChanged={load} />
           </div>
         </div>
+        {/* Actions belong to the view that owns them. The header used to carry a
+            Publish button that only switched tabs and a Download that the Deliver
+            tab then offered again; both live in Deliver now, in one place each. */}
         <div className="build-actions">
-          {completed && (
-            <>
-              <button className="btn" onClick={() => setTab("summary")}>
-                {Icon.github} Publish
-              </button>
-              <a className="btn btn-primary" href={api.downloadUrl(id)} download>
-                {Icon.download} Download .zip
-              </a>
-            </>
-          )}
           <RunControls project={project} busy={busy} act={act} />
         </div>
       </div>
 
-      {/* The relay: who has the work, who is next. */}
+      {/* The relay: who has the work, who is next — and a way into their work.
+          Every step is a link to its phase in the list below, so clicking the
+          agent you are curious about lands on what they produced. */}
       <div className="card" style={{ marginTop: 20 }}>
         <div className="sec-head">
           <h2 className="label">Relay</h2>
           <span className="rule" />
           <span className="label mono">{doneCount}/8</span>
         </div>
+        {/* Under ~600px the eight names don't fit, so the rail goes compact and
+            this line carries what the names were there to say. */}
+        <p className="relay-active" aria-live="polite">
+          {relaySummary(project, doneCount)}
+        </p>
         <ol
           className="relay"
           aria-label={`Pipeline progress: ${doneCount} of 8 phases complete`}
-          style={{ listStyle: "none", margin: 0, padding: "4px 0 8px" }}
         >
-          {PHASES.map((ph) => {
+          {PHASES.map((ph, i) => {
             const ns = nodeStateFor(project, ph.key);
             const agent = AGENT_BY_KEY[ph.key];
             const live = ns === "running" || ns === "gate";
+            // A stalled run's row still says `running`. The summary above and the
+            // steps behind it already say otherwise; the step itself has to agree.
+            const what =
+              ns === "pending"
+                ? waitingFor(project, i)
+                : ns === "running" && status === "stalled"
+                  ? "Stopped responding mid-phase"
+                  : NODE_STATUS[ns];
             return (
-              <li key={ph.key} style={{ display: "flex", flex: "1 1 auto", minWidth: 0 }}>
+              <li key={ph.key}>
                 <button
                   className={`relay-step ${ns}`}
                   style={{ ["--agent" as string]: agent.accent }}
                   aria-current={live ? "step" : undefined}
-                  onClick={() => setTab("build")}
-                  title={`${agent.codename} · ${agent.role} — ${NODE_STATUS[ns]}`}
+                  // The phase rows only exist while the Build tab is mounted, and
+                  // an aria-controls pointing at an absent id sends assistive tech
+                  // nowhere. The click still works from any tab — it switches first.
+                  aria-controls={tab === "build" ? `phase-${ph.key}` : undefined}
+                  onClick={() => {
+                    setTab("build");
+                    // A fresh object every click, so asking for the same phase
+                    // twice is two instructions rather than one unchanged value.
+                    setJump({ key: ph.key });
+                  }}
+                  title={`${agent.codename} · ${agent.role} — ${what}`}
                 >
                   <AgentSprite agent={agent} size={36} state={SPRITE_STATE[ns]} />
                   <span className="relay-name">{agent.codename}</span>
                   <span className="relay-bar" />
+                  <span className="sr-only">{`${agent.role} — ${what}. Go to this phase.`}</span>
                 </button>
               </li>
             );
@@ -384,7 +474,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         style={{ marginTop: 20 }}
       >
         {tab === "build" && (
-          <BuildTab project={project} analytics={analytics} busy={busy} act={act} id={id} />
+          <BuildTab
+            project={project}
+            analytics={analytics}
+            busy={busy}
+            act={act}
+            id={id}
+            jump={jump}
+            onJumpDone={clearJump}
+            onDeliver={() => setTab("summary")}
+          />
         )}
         {tab === "preview" && <PreviewTab id={id} />}
         {tab === "summary" && <SummaryTab id={id} analytics={analytics} />}
@@ -513,12 +612,19 @@ function BuildTab({
   busy,
   act,
   id,
+  jump,
+  onJumpDone,
+  onDeliver,
 }: {
   project: Project;
   analytics: any;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
+  /** A phase the relay is asking us to go to, if any. */
+  jump: { key: string } | null;
+  onJumpDone: () => void;
+  onDeliver: () => void;
 }) {
   const pct = localPct(project);
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
@@ -556,6 +662,33 @@ function BuildTab({
         <Decision project={project} id={id} busy={busy} act={act} />
       )}
 
+      {/* The same slot, for the one ending that isn't a dead end. The header used
+          to carry Publish and Download here; a finished run needs one sentence
+          about what it produced and one door, not two duplicated buttons. */}
+      {state === "completed" && (
+        <div className="notice notice-ok">
+          {Icon.check}
+          <div className="notice-body">
+            {/* Counted, not assumed: a run can reach `completed` with a phase that
+                never produced anything, and the header used to say nothing at all. */}
+            <span className="notice-title">
+              {doneCount === PHASES.length
+                ? "All eight phases approved"
+                : `This build is finished — ${doneCount} of ${PHASES.length} phases approved`}
+            </span>
+            <span className="notice-text">
+              The generated source, the setup steps and the ways of taking this away —
+              a .zip, or a repository on your own GitHub — are in Deliver.
+            </span>
+            <div className="notice-actions">
+              <button className="btn btn-sm btn-primary" onClick={onDeliver}>
+                Open Deliver {Icon.arrowRight}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <NowWorking project={project} />
 
       <div className="card" style={{ padding: "16px 20px" }}>
@@ -582,7 +715,7 @@ function BuildTab({
       </div>
 
       <div className="card card-flush">
-        <PhaseList project={project} />
+        <PhaseList project={project} jump={jump} onJumpDone={onJumpDone} />
       </div>
 
       {state === "completed" && analytics && (
@@ -613,13 +746,61 @@ function BuildTab({
  * The decision itself is no longer here. It used to render inside whichever of these
  * eight rows the pipeline happened to stop on, which is exactly why it was easy to
  * miss; it now has one home at the top of the tab. This list is for reading back.
+ *
+ * It is also where the relay lands. `jump` is the step you clicked up there: the
+ * row opens if it has anything to show, scrolls itself into view, and marks itself
+ * for a moment so you can see which of eight rows just answered you.
  */
-function PhaseList({ project }: { project: Project }) {
+function PhaseList({
+  project,
+  jump,
+  onJumpDone,
+}: {
+  project: Project;
+  jump: { key: string } | null;
+  onJumpDone: () => void;
+}) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [landed, setLanded] = useState<string | null>(null);
+  const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
+
+  // The scroll and the highlight outlive the instruction that started them, so
+  // they are torn down on unmount rather than by the effect below — which
+  // re-runs the instant `jump` is cleared.
+  useEffect(
+    () => () => {
+      if (timers.current.raf) cancelAnimationFrame(timers.current.raf);
+      if (timers.current.fade) clearTimeout(timers.current.fade);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!jump) return;
+    const { key } = jump;
+    const row = latestRow(project, key);
+    const hasDoc = Boolean(row && row.status !== "running" && (row.content_md || row.output));
+    if (hasDoc) setOpen((o) => ({ ...o, [key]: true }));
+    setLanded(key);
+    // The tab panel it lives in mounts in this same commit, so wait a frame for
+    // layout before asking the browser to scroll to it.
+    timers.current.raf = requestAnimationFrame(() => {
+      document
+        .getElementById(`phase-${key}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    timers.current.fade = setTimeout(() => setLanded(null), 1600);
+    // Acted on, so it stops being pending. Without this the value would still be
+    // here on the next mount of this list and scroll the page again.
+    onJumpDone();
+    // `project` is deliberately absent: a 2.5s poll landing mid-read must never
+    // re-scroll the page under someone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jump, onJumpDone]);
 
   return (
     <div className="phases">
-      {PHASES.map((ph) => {
+      {PHASES.map((ph, i) => {
         const ns = nodeStateFor(project, ph.key);
         const row = latestRow(project, ph.key);
         const isGate = ns === "gate";
@@ -632,7 +813,12 @@ function PhaseList({ project }: { project: Project }) {
         return (
           <div
             key={ph.key}
-            className={`phase ${ns}` + (isOpen && hasDoc ? " open" : "")}
+            id={`phase-${ph.key}`}
+            className={
+              `phase ${ns}` +
+              (isOpen && hasDoc ? " open" : "") +
+              (landed === ph.key ? " landed" : "")
+            }
             style={{ ["--agent" as string]: agent.accent }}
           >
             <button
@@ -652,9 +838,10 @@ function PhaseList({ project }: { project: Project }) {
                   {isGate && <span className="badge badge-warn">Under review above</span>}
                   {ns === "failed" && <span className="badge badge-bad">Interrupted</span>}
                 </span>
-                {/* The agent's own status line, in their voice. */}
+                {/* The agent's own status line, in their voice — and, for a phase
+                    that hasn't started, the plain reason it hasn't. */}
                 <span className={"agent-say" + (ns === "running" ? " live" : "")}>
-                  {agent.lines[VOICE_FOR[ns]]}
+                  {ns === "pending" ? waitingFor(project, i) : agent.lines[VOICE_FOR[ns]]}
                   {hasDoc && (
                     <span className="phase-deliver" style={{ marginLeft: 8 }}>
                       {ph.deliver}
@@ -724,6 +911,38 @@ function PreviewTab({ id }: { id: string }) {
 }
 
 // ── Deliver tab ──────────────────────────────────────────────────────────────
+/**
+ * What each phase actually put on the table.
+ *
+ * This row used to print all eight deliverable names as chips no matter what the
+ * run produced, so a build that stopped after two phases still advertised a
+ * security review and a Dockerfile. Files carry the phase that wrote them and
+ * every doc is `docs/<phase>.md`, so the row can simply be read off the artifacts.
+ *
+ * The count is files *surviving in the assembled project*, which is not always
+ * the number a phase wrote: `assemble` dedupes by path and lets a later phase
+ * win, stamping the survivor with the last writer. That makes it the right
+ * number for "what is in the archive" and the wrong one for "what this agent
+ * produced", so the chip says which it means. Membership comes from the docs,
+ * which are appended per phase and never collapse.
+ */
+function producedByPhase(art: Artifacts): Map<string, number> {
+  const byPhase = new Map<string, number>();
+  for (const f of art.files) {
+    byPhase.set(f.phase, (byPhase.get(f.phase) ?? 0) + 1);
+  }
+  for (const d of art.docs) {
+    const key = d.path.replace(/^docs\//, "").replace(/\.md$/, "");
+    if (!byPhase.has(key)) byPhase.set(key, 0);
+  }
+  return byPhase;
+}
+
+/** A run that can still produce something hasn't finished failing to. */
+function stillRunning(status: string): boolean {
+  return status === "created" || status === "running" || status === "awaiting_approval";
+}
+
 function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
   const [art, setArt] = useState<Artifacts | null>(null);
   const [error, setError] = useState("");
@@ -752,18 +971,19 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
   }
 
   const hasOutput = art.files.length > 0 || art.docs.length > 0;
+  const produced = producedByPhase(art);
+  const shipped = PHASES.filter((ph) => produced.has(ph.key));
+  const silent = PHASES.filter((ph) => !produced.has(ph.key));
 
   return (
+    /* Ordered by how much each step commits you: read what is here, run it on
+       your own machine, take a copy, and only then create a repository on a real
+       GitHub account. Publishing used to come first. */
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="card">
         <div className="sec-head">
           <h2 className="label">Your project</h2>
           <span className="rule" />
-          {hasOutput && (
-            <a className="btn btn-sm btn-primary" href={api.downloadUrl(id)} download>
-              {Icon.download} Download .zip
-            </a>
-          )}
         </div>
         <p className="muted" style={{ margin: 0, fontSize: "var(--t-md)", lineHeight: 1.6 }}>
           {art.idea}
@@ -773,6 +993,48 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
           <Stat v={art.docs.length} l="Documents" />
           <Stat v={art.setup_instructions.length} l="Setup steps" />
           <Stat v={analytics ? formatCost(analytics.total_cost_usd) : "—"} l="Cost" />
+        </div>
+
+        {/* Read off the artifacts, so this row can only ever claim what exists. */}
+        <div className="deliver-made">
+          <span className="label">What the agents produced</span>
+          {shipped.length > 0 ? (
+            <div className="deliverables">
+              {shipped.map((ph) => {
+                const files = produced.get(ph.key) ?? 0;
+                return (
+                  <span
+                    key={ph.key}
+                    className="badge badge-mono"
+                    title={
+                      `${AGENT_BY_KEY[ph.key].codename} · ${ph.name}` +
+                      (files > 0
+                        ? ` — ${files} ${files === 1 ? "file" : "files"} in the archive`
+                        : "")
+                    }
+                  >
+                    {ph.deliver}
+                    {files > 0 && <b className="deliver-n">{files}</b>}
+                  </span>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="field-hint" style={{ margin: 0 }}>
+              Nothing yet — no phase has produced a file or a document.
+            </p>
+          )}
+          {/* "Produced nothing" is a verdict, and a phase that hasn't had its turn
+              has not earned one. While the run can still reach them, they simply
+              haven't got there yet. */}
+          {shipped.length > 0 && silent.length > 0 && (
+            <p className="field-hint" style={{ margin: 0 }}>
+              {joinNames(silent.map((ph) => AGENT_BY_KEY[ph.key].codename))}{" "}
+              {stillRunning(art.status)
+                ? `${silent.length === 1 ? "hasn’t" : "haven’t"} produced anything yet.`
+                : `produced nothing in this run.`}
+            </p>
+          )}
         </div>
       </div>
 
@@ -792,8 +1054,6 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
           </div>
         </div>
       )}
-
-      <GithubPublish id={id} defaultName={art.name || art.idea} disabled={!hasOutput} />
 
       <div className="card">
         <div className="sec-head">
@@ -817,19 +1077,35 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
         )}
       </div>
 
+      {/* The one download control in the app. The header carried a second copy
+          of this button, which is how the same archive came to be offered twice. */}
       <div className="card">
         <div className="sec-head">
-          <h2 className="label">Deliverables</h2>
+          <h2 className="label">Take a copy</h2>
           <span className="rule" />
         </div>
-        <div className="deliverables">
-          {PHASES.map((ph) => (
-            <span key={ph.key} className="badge badge-mono" title={ph.name}>
-              {ph.deliver}
-            </span>
-          ))}
+        <div className="deliver-take">
+          <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6 }}>
+            {hasOutput ? (
+              <>
+                A .zip of everything above — {art.files.length} source{" "}
+                {art.files.length === 1 ? "file" : "files"}, {art.docs.length}{" "}
+                {art.docs.length === 1 ? "document" : "documents"} and a generated{" "}
+                <code>README.md</code>. Nothing leaves your machine.
+              </>
+            ) : (
+              <>Nothing to download yet — no phase has produced a file or a document.</>
+            )}
+          </p>
+          {hasOutput && (
+            <a className="btn btn-primary" href={api.downloadUrl(id)} download>
+              {Icon.download} Download .zip
+            </a>
+          )}
         </div>
       </div>
+
+      <GithubPublish id={id} defaultName={art.name || art.idea} disabled={!hasOutput} />
     </div>
   );
 }

@@ -236,6 +236,8 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
           aria-current={pathname === "/crew" ? "page" : undefined}
         >
           {Icon.sparkle} The crew
+          {/* One rail below a list of real builds, so it says which it is. */}
+          <span className="sb-link-tag">demo</span>
         </Link>
         <Link
           className="sb-link"

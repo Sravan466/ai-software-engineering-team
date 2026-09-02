@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, type GithubPushResult, type GithubStatus } from "@/lib/api";
+import { ApiError, api, type GithubPushResult, type GithubStatus } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
 
@@ -30,14 +30,32 @@ export default function GithubPublish({
   const [priv, setPriv] = useState(true);
   const [pushing, setPushing] = useState(false);
   const [result, setResult] = useState<GithubPushResult | null>(null);
-  const [error, setError] = useState("");
+  // The failed action travels with its message: "that push didn't go through" is
+  // the wrong sentence for a failed disconnect, and both used to share one string.
+  const [error, setError] = useState<{ action: "push" | "disconnect"; text: string } | null>(null);
+  // Kept apart from `error` again: this one is "we can't reach the feature at all",
+  // which needs different words and a different way out.
+  const [unreachable, setUnreachable] = useState("");
+  const [checking, setChecking] = useState(false);
   const [notice, setNotice] = useState<"connected" | "error" | "">("");
 
+  // A server without the GitHub router 404s here. That is not an error to shout
+  // about — it is precisely the not-configured state, which this card already
+  // knows how to explain, so say that instead of rendering a bare "Not Found".
   const refresh = useCallback(async () => {
+    setChecking(true);
     try {
       setStatus(await api.githubStatus());
+      setUnreachable("");
     } catch (e: any) {
-      setError(e.message);
+      if (e instanceof ApiError && e.status === 404) {
+        setStatus({ configured: false, connected: false, login: null, name: null, avatar: null });
+        setUnreachable("");
+      } else {
+        setUnreachable(e?.message || "The backend didn't answer.");
+      }
+    } finally {
+      setChecking(false);
     }
   }, []);
 
@@ -69,26 +87,26 @@ export default function GithubPublish({
   }
 
   async function disconnect() {
-    setError("");
+    setError(null);
     try {
       await api.githubDisconnect();
       setResult(null);
       setNotice("");
       await refresh();
     } catch (e: any) {
-      setError(e.message);
+      setError({ action: "disconnect", text: e.message });
     }
   }
 
   async function push() {
     setPushing(true);
-    setError("");
+    setError(null);
     setResult(null);
     try {
       const res = await api.pushToGithub(id, { name: name.trim() || undefined, private: priv });
       setResult(res);
     } catch (e: any) {
-      setError(e.message);
+      setError({ action: "push", text: e.message });
     } finally {
       setPushing(false);
     }
@@ -99,17 +117,45 @@ export default function GithubPublish({
       <div className="sec-head">
         <h2 className="label">Publish to GitHub</h2>
         <span className="rule" />
-        {status?.connected && status.login && (
+        {status?.connected && !unreachable && status.login && (
           <span className="badge badge-ok">
             <span className="dot dot-ok" aria-hidden="true" />@{status.login}
           </span>
         )}
       </div>
 
-      {!status && <SkeletonLines lines={2} />}
+      {/* The feature itself is out of reach — the backend is down, or older than
+          the router. Every other error surface in this app names the problem and
+          offers a way forward; this one used to print a bare "Not Found".
+          While it stands it replaces the card's body rather than sitting on top of
+          it: the last known status is stale, and an enabled "Create repo and push"
+          beneath a "not reachable" alert is a button that cannot work. */}
+      {unreachable && (
+        <div className="notice notice-bad" role="alert">
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-title">GitHub publishing isn&apos;t reachable</span>
+            <span className="notice-text">
+              The backend didn&apos;t answer this card&apos;s status check, so we can&apos;t tell
+              whether publishing is set up. Check that it is running on{" "}
+              <code>:8000</code> and try again — everything else on this page still works, and the
+              .zip above is unaffected.
+            </span>
+            <span className="notice-detail mono">{unreachable}</span>
+            <div className="notice-actions">
+              <button className="btn btn-sm" onClick={refresh} disabled={checking}>
+                {checking && <span className="btn-spinner" aria-hidden="true" />}
+                {Icon.refresh} Try again
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!status && !unreachable && <SkeletonLines lines={2} />}
 
       {/* Not configured by the operator yet. */}
-      {status && !status.configured && (
+      {status && !unreachable && !status.configured && (
         <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6 }}>
           GitHub publishing isn&apos;t enabled on this server yet. The operator needs to add a free{" "}
           <a
@@ -126,7 +172,7 @@ export default function GithubPublish({
       )}
 
       {/* Configured, not connected → Connect. */}
-      {status && status.configured && !status.connected && (
+      {status && !unreachable && status.configured && !status.connected && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6, maxWidth: "58ch" }}>
             Sign in with your own GitHub account and we&apos;ll create a fresh repository on it, then
@@ -151,7 +197,7 @@ export default function GithubPublish({
       )}
 
       {/* Connected → push form. */}
-      {status && status.connected && (
+      {status && !unreachable && status.connected && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {result ? (
             <div className="notice">
@@ -230,7 +276,18 @@ export default function GithubPublish({
         <div className="notice notice-bad" role="alert" style={{ marginTop: 14 }}>
           {Icon.alert}
           <div className="notice-body">
-            <span className="notice-text">{error}</span>
+            <span className="notice-title">
+              {error.action === "push"
+                ? "That push didn’t go through"
+                : "Couldn’t disconnect from GitHub"}
+            </span>
+            <span className="notice-text">{error.text}</span>
+            {error.action === "push" && (
+              <span className="notice-text">
+                A repository of that name may already exist on @{status?.login} — try another
+                name, or disconnect and sign in as a different account.
+              </span>
+            )}
           </div>
         </div>
       )}

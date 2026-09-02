@@ -136,7 +136,20 @@ const MOTION_NOTE: Record<Persona["motion"], string> = {
 };
 
 export default function CrewPage() {
-  useChrome({ sub: "Crew floor" }, []);
+  // Sitting under a rail of real builds, a scripted floor reads as one of them.
+  // The top bar says otherwise before the room is even on screen.
+  useChrome(
+    {
+      sub: "Crew floor",
+      badge: (
+        <span className="badge">
+          <span className="dot" aria-hidden="true" />
+          Demo
+        </span>
+      ),
+    },
+    [],
+  );
 
   const [scenario, setScenario] = useState(1);
   const [selected, setSelected] = useState(2);
@@ -199,6 +212,17 @@ export default function CrewPage() {
             Eight specialists, one pipeline. Pick a scenario to see how the floor behaves, run the
             relay to watch the work change hands, or click anyone to inspect them.
           </p>
+          {/* Every number on this page is scripted. Saying so once, plainly, and
+              in the same place your eye lands after the lede, is the difference
+              between a reference and a lie. */}
+          <p className="crew-demo">
+            {Icon.info}
+            <span>
+              Nothing here is a running build. This is a demo of how the floor behaves — the
+              scenarios below drive it. Your real builds are under Recent builds in the navigation,
+              and each one has its own relay at the top of its page.
+            </span>
+          </p>
         </div>
       </div>
 
@@ -211,7 +235,10 @@ export default function CrewPage() {
             <i />
           </span>
           <span className="win-title">CREW FLOOR · 8 STATIONS</span>
+          {/* "2/8 DONE · FORGE ACTIVE" is exactly the shape of live telemetry, so
+              the count never appears without the word that makes it scripted. */}
           <span className="win-meta">
+            <b className="win-demo">DEMO</b>
             {doneCount}/8 DONE
             {activeIndex >= 0 && ` · ${AGENTS[activeIndex].codename} ACTIVE`}
           </span>

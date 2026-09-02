@@ -74,6 +74,23 @@ export type Project = {
 const DEFAULT_TIMEOUT_MS = 15000;
 const LLM_TIMEOUT_MS = 300000; // 5 min — local generation on CPU is slow
 
+/**
+ * A failed request, carrying the code as well as the sentence.
+ *
+ * The message alone is not enough to decide what a failure *means*: a 404 on
+ * `/api/github/status` says "this server has no GitHub router", which is the
+ * not-configured state, not an error worth a red card. Callers that care read
+ * `status`; everything else keeps treating it as an ordinary Error.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 // FastAPI reports failures as {"detail": "..."} — sometimes a list of validation
 // objects. Surfacing the raw body means users read a JSON blob with an HTTP code
 // bolted to the front, so unwrap it into the sentence the backend actually wrote.
@@ -115,7 +132,7 @@ async function req<T>(
       credentials: "include",
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new Error(await errorMessage(res));
+    if (!res.ok) throw new ApiError(await errorMessage(res), res.status);
     if (res.status === 204) return undefined as T;
     return res.json();
   } catch (e: any) {
@@ -242,7 +259,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
     });
-    if (!res.ok || !res.body) throw new Error(await errorMessage(res));
+    if (!res.ok || !res.body) throw new ApiError(await errorMessage(res), res.status);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
