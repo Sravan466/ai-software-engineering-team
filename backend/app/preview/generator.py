@@ -6,8 +6,9 @@ imports — so a local 7B model can produce something that actually *renders*. E
 one ``data-section`` fragment at a time, which keeps each request small and reliable.
 """
 from __future__ import annotations
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
+import json
 import re
 
 from app.core.constants import RoutingMode
@@ -71,6 +72,48 @@ def _clean_fragment(text: str) -> str:
     if first != -1 and last > first:
         t = t[first: last + 1]
     return t.strip()
+
+
+def _short(value: object, limit: int = 600) -> str:
+    """Compact, readable one-liner for a JSON-ish value."""
+    try:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(value)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def build_context(project) -> str:
+    """Distil the team's outputs into a short brief for the preview generator.
+
+    Lives here rather than in the route because the Frontend phase now produces the
+    mockup as it finishes — the brief has two callers, and only one of them is an
+    HTTP request.
+    """
+    by_phase = {ph.phase: ph.output for ph in project.phases if isinstance(ph.output, dict)}
+    parts: List[str] = []
+
+    pm = by_phase.get("product_manager", {})
+    if pm.get("product_name"):
+        parts.append(f"Product name: {pm['product_name']}")
+    feats = pm.get("features") or pm.get("mvp_features") or pm.get("user_stories")
+    if feats:
+        parts.append(f"Key features: {_short(feats)}")
+
+    fe = by_phase.get("frontend_engineer", {})
+    if fe.get("framework"):
+        parts.append(f"Frontend framework: {fe['framework']}")
+    if fe.get("pages"):
+        parts.append(f"Pages: {_short(fe['pages'])}")
+    if fe.get("components"):
+        parts.append(f"Components: {_short(fe['components'])}")
+
+    ds = by_phase.get("system_design", {})
+    if ds.get("tech_stack"):
+        parts.append(f"Tech stack: {_short(ds['tech_stack'])}")
+
+    return "\n".join(parts) or "(No detailed design yet — infer a sensible layout from the idea.)"
 
 
 def generate_preview(

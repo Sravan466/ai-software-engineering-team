@@ -1,10 +1,11 @@
 """Request/response schemas for the visual-preview API."""
 from __future__ import annotations
 
-from datetime import datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
+
+from app.schemas.project import UtcDatetime
 
 
 class PreviewEditRequest(BaseModel):
@@ -19,7 +20,12 @@ class RevisionOut(BaseModel):
     instruction: Optional[str] = None
     model_used: Optional[str] = None
     provider_used: Optional[str] = None
-    created_at: datetime
+    # Stamped UTC like every other timestamp this API returns. Without it SQLite's
+    # naive value serialises with no offset, the browser reads it as *local* time,
+    # and on a UTC+5:30 machine a mockup drawn two minutes ago looks five hours older
+    # than the phase it depicts — which is exactly how the Ship review came to warn
+    # that a fresh picture was out of date.
+    created_at: UtcDatetime
 
     model_config = {"from_attributes": True, "protected_namespaces": ()}
 

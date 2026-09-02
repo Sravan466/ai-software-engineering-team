@@ -16,7 +16,7 @@ from app.api.deps import get_project
 from app.core.constants import RoutingMode
 from app.db.base import get_db
 from app.db.models import PreviewRevision, Project
-from app.preview.generator import edit_section, generate_preview
+from app.preview.generator import build_context, edit_section, generate_preview
 from app.preview.html import extract_section, replace_section, scan_sections
 from app.router.base import ProviderError
 from app.schemas.llm import LLMResponse
@@ -38,45 +38,6 @@ def _revisions(db: Session, project_id: str) -> List[PreviewRevision]:
         .order_by(PreviewRevision.created_at.desc())
         .all()
     )
-
-
-def _build_context(project: Project) -> str:
-    """Distil the team's outputs into a short brief for the preview generator."""
-    by_phase = {ph.phase: ph.output for ph in project.phases if isinstance(ph.output, dict)}
-    parts: List[str] = []
-
-    pm = by_phase.get("product_manager", {})
-    if pm.get("product_name"):
-        parts.append(f"Product name: {pm['product_name']}")
-    feats = pm.get("features") or pm.get("mvp_features") or pm.get("user_stories")
-    if feats:
-        parts.append(f"Key features: {_short(feats)}")
-
-    fe = by_phase.get("frontend_engineer", {})
-    if fe.get("framework"):
-        parts.append(f"Frontend framework: {fe['framework']}")
-    if fe.get("pages"):
-        parts.append(f"Pages: {_short(fe['pages'])}")
-    if fe.get("components"):
-        parts.append(f"Components: {_short(fe['components'])}")
-
-    ds = by_phase.get("system_design", {})
-    if ds.get("tech_stack"):
-        parts.append(f"Tech stack: {_short(ds['tech_stack'])}")
-
-    return "\n".join(parts) or "(No detailed design yet — infer a sensible layout from the idea.)"
-
-
-def _short(value: object, limit: int = 600) -> str:
-    """Compact, readable one-liner for a JSON-ish value."""
-    import json
-
-    try:
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        text = str(value)
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _save_revision(
@@ -134,7 +95,7 @@ def generate(project: Project = Depends(get_project), db: Session = Depends(get_
         html, resp = generate_preview(
             project.idea,
             project.name,
-            _build_context(project),
+            build_context(project),
             mode=RoutingMode(project.routing_mode),
             preferred_model=project.preferred_model,
         )

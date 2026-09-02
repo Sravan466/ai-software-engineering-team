@@ -293,7 +293,6 @@
   padding: 12px 14px 14px;
   border-top: 1px solid var(--line);
 }
-.composer-opts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .composer-submit { display: flex; align-items: center; gap: 12px; }
 .composer-hint { font-size: var(--t-xs); color: var(--ink-3); }
 
@@ -383,7 +382,7 @@
 
 /* Only render when the box actually overflows in that direction, so a short
    deliverable shows no chrome and a long one is visibly cut off, not silently. */
-.gate-doc, .phase-doc {
+.phase-doc {
   background-image:
     linear-gradient(var(--bg-sunken) 30%, rgba(7, 8, 12, 0)),
     linear-gradient(rgba(7, 8, 12, 0), var(--bg-sunken) 70%),
@@ -416,41 +415,6 @@
   background: var(--run);
   animation: scan 1.3s ease-in-out infinite;
 }
-
-/* ===========================================================================
-   THE APPROVAL GATE — the product's most important screen.
-   You cannot approve what you cannot read, so the deliverable comes first and
-   the decision sits underneath it.
-   =========================================================================== */
-.gate {
-  margin-top: 12px;
-  border-radius: var(--r-lg);
-  border: 1px solid var(--accent-line);
-  background: var(--bg-panel);
-  overflow: hidden;
-  box-shadow: var(--shadow-2);
-}
-.gate-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--warn-soft);
-}
-.gate-head > svg { width: 18px; height: 18px; color: var(--accent); }
-.gate-head-title { font-size: var(--t-base); font-weight: 600; color: var(--ink); }
-.gate-doc {
-  max-height: 460px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 18px 20px;
-}
-.gate-decide { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
-.gate-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.gate-reject { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
-.gate-reject .field { flex: 1; min-width: 220px; }
 
 /* ===========================================================================
    ANALYTICS + SUMMARY
@@ -515,8 +479,6 @@
 }
 .prev-frame iframe { width: 100%; height: 600px; border: 0; display: block; background: #fff; }
 
-.code-grid { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 16px; align-items: start; }
-.code-files { padding: 10px; max-height: 560px; overflow-y: auto; }
 .code-pane-head {
   display: flex;
   align-items: center;
@@ -555,10 +517,6 @@
 /* ===========================================================================
    RESPONSIVE — structural, not fluid type
    =========================================================================== */
-@media (max-width: 1080px) {
-  .code-grid { grid-template-columns: 1fr; }
-  .code-files { max-height: 220px; }
-}
 @media (max-width: 900px) {
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   /* Below this width the sidebar is an overlay drawer, closed by default. */

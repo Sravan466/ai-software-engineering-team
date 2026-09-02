@@ -25,6 +25,9 @@ export type PhaseResult = {
   latency_ms: number;
 };
 
+export type ApprovalMode = "checkpoints" | "every_phase" | "unattended";
+export type GateKind = "plan" | "ship" | "security" | "cost" | "phase";
+
 export type Project = {
   id: string;
   idea: string;
@@ -35,6 +38,16 @@ export type Project = {
   routing_mode: string;
   preferred_model: string | null;
   require_approval: boolean;
+
+  /** How often this run stops for review: checkpoints | every_phase | unattended. */
+  approval_mode: ApprovalMode;
+  /** Projected monthly run cost above which the build interrupts itself. */
+  cost_cap_usd: number | null;
+  /** Which review to show while waiting: plan | ship | security | cost | phase. */
+  gate_kind: GateKind | null;
+  /** One line on why the run stopped here — a severe finding, a cost overrun. */
+  gate_note: string | null;
+
   created_at: string;
   updated_at: string;
   phases: PhaseResult[];
@@ -126,8 +139,19 @@ export const api = {
     name?: string;
     routing_mode?: string;
     preferred_model?: string;
-    require_approval?: boolean;
+    approval_mode?: ApprovalMode;
+    cost_cap_usd?: number;
   }) => req<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
+  // Review policy is editable while the run is in flight — the runner re-reads it
+  // before every handoff.
+  updateProject: (
+    id: string,
+    body: {
+      approval_mode?: ApprovalMode;
+      cost_cap_usd?: number;
+      clear_cost_cap?: boolean;
+    },
+  ) => req<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteProject: (id: string) =>
     req<void>(`/api/projects/${id}`, { method: "DELETE" }),
 
@@ -146,7 +170,13 @@ export const api = {
       body: JSON.stringify({ reason: reason ?? null }),
     }),
   resume: (id: string) => req<RunResponse>(`/api/projects/${id}/resume`, { method: "POST" }),
-  routerStatus: () => req<any>("/api/models/status"),
+  /** Send one named phase back to its agent, from whichever review is on screen. */
+  redo: (id: string, phase: string, feedback: string) =>
+    req<RunResponse>(`/api/projects/${id}/redo`, {
+      method: "POST",
+      body: JSON.stringify({ phase, feedback }),
+    }),
+  routerStatus: () => req<RouterStatus>("/api/models/status"),
   pipelineShape: () => req<{ phases: Phase[]; mermaid: string }>("/api/models/pipeline"),
   analytics: (id: string) => req<any>(`/api/analytics/projects/${id}`),
 
@@ -257,6 +287,15 @@ export type GithubPushResult = {
   branch: string;
   private: boolean;
   files: number;
+};
+
+export type RouterStatus = {
+  default_mode: string;
+  providers: Record<
+    string,
+    { available: boolean; is_local: boolean; default_model: string | null }
+  >;
+  fallback_chain: string[];
 };
 
 export type ProviderSetting = {

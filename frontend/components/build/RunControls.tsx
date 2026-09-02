@@ -26,7 +26,7 @@ export default function RunControls({
 }: {
   project: Project;
   busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
 }) {
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);

@@ -1,20 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, type Artifacts, type PhaseResult, type Project, type RunResponse } from "@/lib/api";
-import { PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
+import { api, type Artifacts, type Project, type RunResponse } from "@/lib/api";
+import { APPROVAL_BY_ID, PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
 import { AGENT_BY_KEY, type Persona } from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
-import Markdown from "@/components/ui/Markdown";
 import { Skeleton, SkeletonLines } from "@/components/ui/Skeleton";
 import VisualPreview from "@/components/preview/VisualPreview";
-import CodeBlock from "@/components/preview/CodeBlock";
 import GithubPublish from "@/components/github/GithubPublish";
 import PhaseArtifact from "@/components/build/PhaseArtifact";
+import FileBrowser from "@/components/build/FileBrowser";
+import Decision from "@/components/build/Decision";
+import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
 import { Elapsed } from "@/components/build/Elapsed";
+import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
 
 type Tab = "build" | "preview" | "summary";
 type NodeState = "done" | "running" | "gate" | "redo" | "failed" | "pending";
@@ -63,12 +65,10 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-// Latest row produced for a phase (phases re-run when rejected).
-function latestRow(project: Project, key: string): PhaseResult | undefined {
-  const rows = project.phases.filter((p) => p.phase === key);
-  if (rows.length === 0) return undefined;
-  return [...rows].sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))[rows.length - 1];
-}
+// Latest row produced for a phase (phases re-run when sent back). One definition,
+// shared with the decision panel — two answers to "which attempt is current" would
+// let the badge on a phase and the artifact under review disagree.
+const latestRow = (project: Project, key: string) => rowFor(project.phases, key);
 
 /**
  * What a phase is doing, read from the phase's own row first.
@@ -197,12 +197,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     };
   }, [pollMs, load]);
 
+  /** Run a control call. Returns whether it landed, so callers can keep the
+   *  reviewer's typing when it didn't. */
   const act = useCallback(
-    async (fn: () => Promise<RunResponse | unknown>) => {
+    async (fn: () => Promise<RunResponse | unknown>): Promise<boolean> => {
       setBusy(true);
       setError("");
+      let ok = false;
       try {
         const result = (await fn()) as RunResponse | undefined;
+        ok = true;
         // Control endpoints return the status they just committed. Applying it
         // before the reload means the badge flips the instant the click lands,
         // instead of reading "Waiting for you" while an agent is generating.
@@ -215,6 +219,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         await load();
         setBusy(false);
       }
+      return ok;
     },
     [load],
   );
@@ -280,11 +285,11 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
           <h1>{project.name || project.idea}</h1>
           <div className="build-meta">
             <span className="badge">
-              {project.routing_mode === "local_only" ? "Local models" : project.routing_mode}
+              {project.routing_mode === "local_only"
+                ? "Local models"
+                : project.preferred_model || project.routing_mode}
             </span>
-            <span className="badge">
-              {project.require_approval ? "Approval gated" : "Runs unattended"}
-            </span>
+            <ReviewPolicy project={project} id={id} onChanged={load} />
           </div>
         </div>
         <div className="build-actions">
@@ -404,7 +409,7 @@ function RunInterrupted({
 }: {
   project: Project;
   busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
 }) {
   const state = effectiveStatus(project);
@@ -512,7 +517,7 @@ function BuildTab({
   project: Project;
   analytics: any;
   busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
 }) {
   const pct = localPct(project);
@@ -525,10 +530,11 @@ function BuildTab({
       <div className="card empty">
         <h3>Ready when you are</h3>
         <p>
-          Eight specialist agents will take this idea from requirements to a deployment plan.
-          {project.require_approval
-            ? " After each phase the pipeline stops and hands you what the agent produced — the files, the diagram, the data — so you can read it and decide."
-            : " It will run straight through all eight phases without stopping."}
+          Eight specialist agents will take this idea from requirements to a deployment
+          plan.{" "}
+          {APPROVAL_BY_ID[project.approval_mode]?.running}{" "}
+          Wherever it stops, it hands you what the agent produced — the files, the
+          diagram, the data — so you can read it before you decide.
         </p>
         <button className="btn btn-primary" disabled={busy} onClick={() => act(() => api.run(id))}>
           {busy && <span className="btn-spinner" aria-hidden="true" />}
@@ -542,6 +548,13 @@ function BuildTab({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {interrupted && <RunInterrupted project={project} busy={busy} act={act} id={id} />}
+
+      {/* One decision surface, always in the same place, whatever stopped the run.
+          The gate used to be buried inside whichever of eight phase rows happened
+          to be open. */}
+      {state === "awaiting_approval" && (
+        <Decision project={project} id={id} busy={busy} act={act} />
+      )}
 
       <NowWorking project={project} />
 
@@ -569,7 +582,7 @@ function BuildTab({
       </div>
 
       <div className="card card-flush">
-        <PhaseList project={project} busy={busy} act={act} id={id} />
+        <PhaseList project={project} />
       </div>
 
       {state === "completed" && analytics && (
@@ -594,25 +607,15 @@ function BuildTab({
 }
 
 /**
- * The phase list. Every phase that produced something is a disclosure over the
- * agent's full deliverable — the files, the diagram, the structured data, not just
- * the prose summary — and the approval gate leads with exactly that, because being
- * asked to approve work you can't read is the one thing this screen must never do.
+ * The history: every phase, in order, each a disclosure over the agent's full
+ * deliverable — the files, the diagram, the structured data, not just the prose.
+ *
+ * The decision itself is no longer here. It used to render inside whichever of these
+ * eight rows the pipeline happened to stop on, which is exactly why it was easy to
+ * miss; it now has one home at the top of the tab. This list is for reading back.
  */
-function PhaseList({
-  project,
-  busy,
-  act,
-  id,
-}: {
-  project: Project;
-  busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
-  id: string;
-}) {
-  // The phase waiting on a decision is open by default; everything else starts closed.
+function PhaseList({ project }: { project: Project }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const [feedback, setFeedback] = useState("");
 
   return (
     <div className="phases">
@@ -621,7 +624,9 @@ function PhaseList({
         const row = latestRow(project, ph.key);
         const isGate = ns === "gate";
         const hasDoc = Boolean(row && row.status !== "running" && (row.content_md || row.output));
-        const isOpen = open[ph.key] ?? isGate;
+        // Closed by default now: the phase under review is already open, in full,
+        // in the decision panel above. Opening it here would say it twice.
+        const isOpen = open[ph.key] ?? false;
         const agent = AGENT_BY_KEY[ph.key];
 
         return (
@@ -644,7 +649,7 @@ function PhaseList({
                   <span className="agent-line-name">{agent.codename}</span>
                   <span className="phase-role">{agent.role}</span>
                   {ph.debate && <span className="badge badge-run">Debated</span>}
-                  {isGate && <span className="badge badge-warn">Needs your approval</span>}
+                  {isGate && <span className="badge badge-warn">Under review above</span>}
                   {ns === "failed" && <span className="badge badge-bad">Interrupted</span>}
                 </span>
                 {/* The agent's own status line, in their voice. */}
@@ -683,65 +688,9 @@ function PhaseList({
               </span>
             </button>
 
-            {/* The decision, with the work it is about directly above it. */}
-            {isGate && row && (
-              <div className="phase-body" style={{ paddingTop: 0 }}>
-                <div className="gate agent-gate">
-                  <div className="gate-head">
-                    <AgentSprite agent={agent} size={32} state="gate" />
-                    <span className="gate-head-title">
-                      <b className="agent-line-name">{agent.codename}</b> hands you {ph.deliver}
-                    </span>
-                    <span className="rule" />
-                    <span className="badge badge-warn">Waiting on you</span>
-                  </div>
-
-                  <PhaseArtifact row={row} maxHeight={520} />
-
-                  <div className="gate-decide">
-                    <div className="gate-row">
-                      <button
-                        className="btn btn-accent"
-                        disabled={busy}
-                        onClick={() => act(() => api.approve(id))}
-                      >
-                        {busy && <span className="btn-spinner" aria-hidden="true" />}
-                        {Icon.check} Approve and continue
-                      </button>
-                      <span className="field-hint">
-                        Phase {ph.n} of 08 — approving starts the next agent.
-                      </span>
-                    </div>
-                    <div className="gate-reject">
-                      <div className="field">
-                        <label htmlFor={`fb-${ph.key}`}>
-                          Or send it back with a note on what to change
-                        </label>
-                        <input
-                          id={`fb-${ph.key}`}
-                          className="input"
-                          placeholder="e.g. drop the social feed and focus on the core loop"
-                          value={feedback}
-                          onChange={(e) => setFeedback(e.target.value)}
-                        />
-                      </div>
-                      <button
-                        className="btn btn-danger"
-                        disabled={busy || !feedback.trim()}
-                        onClick={() =>
-                          act(() => api.reject(id, feedback)).then(() => setFeedback(""))
-                        }
-                      >
-                        {Icon.undo} Reject and rerun
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Any finished phase can be read in full, whenever. */}
-            {!isGate && hasDoc && isOpen && row && (
+            {/* Any phase that produced something can be read in full, whenever —
+                including the one under review, which the decision above also shows. */}
+            {hasDoc && isOpen && row && (
               <div className="phase-body">
                 <PhaseArtifact row={row} maxHeight={420} />
                 {row.feedback && (
@@ -762,117 +711,16 @@ function PhaseList({
 }
 
 // ── Preview tab ──────────────────────────────────────────────────────────────
-type PreviewMode = "visual" | "code";
-
+/**
+ * The mockup, and the loop for changing it.
+ *
+ * This used to be half a file browser: generated source lived under Preview → Files
+ * while Deliver reported a *count* of source files you could not open. The files now
+ * sit where decisions about them are made — at the review, and in Deliver — and
+ * Preview is what its name says.
+ */
 function PreviewTab({ id }: { id: string }) {
-  const [mode, setMode] = useState<PreviewMode>("visual");
-  const modes: { key: PreviewMode; label: string }[] = [
-    { key: "visual", label: "Mockup" },
-    { key: "code", label: "Files" },
-  ];
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div className="switcher" role="group" aria-label="Preview mode" style={{ alignSelf: "flex-start" }}>
-        {modes.map((m) => (
-          <button
-            key={m.key}
-            className="seg-btn"
-            aria-pressed={mode === m.key}
-            onClick={() => setMode(m.key)}
-          >
-            {m.label}
-          </button>
-        ))}
-      </div>
-      {mode === "visual" ? <VisualPreview id={id} /> : <CodePreview id={id} />}
-    </div>
-  );
-}
-
-function CodePreview({ id }: { id: string }) {
-  const [art, setArt] = useState<Artifacts | null>(null);
-  const [error, setError] = useState("");
-  const [sel, setSel] = useState(0);
-
-  useEffect(() => {
-    api.getArtifacts(id).then(setArt).catch((e) => setError(e.message));
-  }, [id]);
-
-  if (error) {
-    return (
-      <div className="notice notice-bad" role="alert">
-        {Icon.alert}
-        <div className="notice-body">
-          <span className="notice-title">Couldn&apos;t load the files</span>
-          <span className="notice-text">{error}</span>
-        </div>
-      </div>
-    );
-  }
-  if (!art) {
-    return (
-      <div className="card">
-        <SkeletonLines lines={5} />
-      </div>
-    );
-  }
-
-  const items = [
-    ...art.files.map((f) => ({ path: f.path, content: f.content, tag: f.language || "code" })),
-    ...art.docs.map((d) => ({ path: d.path, content: d.content, tag: "md" })),
-  ];
-
-  if (items.length === 0) {
-    return (
-      <div className="card empty">
-        <h3>No files yet</h3>
-        <p>
-          Generated source and documentation land here as the Backend, Frontend, QA and DevOps
-          phases complete. Run the pipeline to fill it.
-        </p>
-      </div>
-    );
-  }
-
-  const current = items[Math.min(sel, items.length - 1)];
-
-  return (
-    <div className="code-grid">
-      <div className="card code-files">
-        <h3 className="label" style={{ padding: "4px 10px 8px" }}>
-          {items.length} files
-        </h3>
-        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-          {items.map((it, i) => (
-            <button
-              key={it.path}
-              className="filerow"
-              aria-current={i === sel}
-              onClick={() => setSel(i)}
-              title={it.path}
-            >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{it.path}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="card card-flush">
-        <div className="code-pane-head">
-          <span className="mono" style={{ fontSize: "var(--t-sm)", color: "var(--ink)" }}>
-            {current.path}
-          </span>
-          <span className="badge badge-mono">{current.tag}</span>
-        </div>
-        {current.tag === "md" ? (
-          <div style={{ padding: "18px 20px", maxHeight: 560, overflowY: "auto" }}>
-            <Markdown>{current.content}</Markdown>
-          </div>
-        ) : (
-          <CodeBlock code={current.content} path={current.path} tag={current.tag} />
-        )}
-      </div>
-    </div>
-  );
+  return <VisualPreview id={id} />;
 }
 
 // ── Deliver tab ──────────────────────────────────────────────────────────────
@@ -927,6 +775,23 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
           <Stat v={analytics ? formatCost(analytics.total_cost_usd) : "—"} l="Cost" />
         </div>
       </div>
+
+      {/* What you are actually taking away. Deliver used to report `12` under
+          "Source files" and offer no way to open one of them. */}
+      {art.files.length > 0 && (
+        <div className="card card-flush">
+          <div className="card-head">
+            <h2 className="label">The code</h2>
+            <span className="rule" />
+            <span className="mono dim" style={{ fontSize: "var(--t-xs)" }}>
+              {art.files.length} files
+            </span>
+          </div>
+          <div className="artifact-view artifact-files" style={{ maxHeight: 560 }}>
+            <FileBrowser files={artifactFiles(art.files)} />
+          </div>
+        </div>
+      )}
 
       <GithubPublish id={id} defaultName={art.name || art.idea} disabled={!hasOutput} />
 

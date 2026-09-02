@@ -24,15 +24,18 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_project
 from app.core import artifacts
 from app.core.config import settings
-from app.core.constants import PipelineStatus, RoutingMode
+from app.core.constants import PHASE_ORDER, ApprovalMode, PipelineStatus, RoutingMode
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
 from app.db.models import Project
+from app.orchestration.approval import decide_gate
 from app.orchestration.runner import runner
 from app.schemas.project import (
     ApprovalRequest,
     ProjectCreate,
     ProjectOut,
+    ProjectUpdate,
+    RedoRequest,
     RunResponse,
     StopRequest,
 )
@@ -46,21 +49,93 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _resolve_approval_mode(payload: ProjectCreate) -> str:
+    """The review policy for a new run.
+
+    `require_approval` is still accepted, and still means what it always did — stop
+    at every handoff — so an existing caller keeps its behaviour. Everything else
+    gets the two-checkpoint default.
+    """
+    if payload.approval_mode is not None:
+        return payload.approval_mode.value
+    if payload.require_approval is not None:
+        return (
+            ApprovalMode.EVERY_PHASE.value
+            if payload.require_approval
+            else ApprovalMode.UNATTENDED.value
+        )
+    return (
+        ApprovalMode.CHECKPOINTS.value
+        if settings.require_approval
+        else ApprovalMode.UNATTENDED.value
+    )
+
+
 @router.post("", response_model=ProjectOut, status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Project:
     mode = (payload.routing_mode or RoutingMode(settings.default_routing_mode)).value
+    approval = _resolve_approval_mode(payload)
     project = Project(
         idea=payload.idea,
         name=payload.name,
         routing_mode=mode,
         preferred_model=payload.preferred_model,
-        require_approval=(
-            payload.require_approval
-            if payload.require_approval is not None
-            else settings.require_approval
-        ),
+        approval_mode=approval,
+        cost_cap_usd=payload.cost_cap_usd,
+        # Kept in step with the mode so anything still reading the old flag — a saved
+        # query, an older client — never disagrees with the policy actually in force.
+        require_approval=approval != ApprovalMode.UNATTENDED.value,
     )
     db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+def _rederive_gate(db: Session, project: Project) -> None:
+    """Re-answer "why are we stopped here?" after the policy changed under a gate.
+
+    A run parked on a single handoff and then switched to two-checkpoint review is
+    standing at a Plan review, and should say so. Without this the panel keeps the
+    title the old policy gave it until the run moves again.
+
+    A policy that would no longer stop here at all keeps the existing gate: the run
+    is parked and something has to release it, so the decision on screen stays real.
+    """
+    if project.status != PipelineStatus.AWAITING_APPROVAL.value or not project.current_phase:
+        return
+    # The runner's own definition of "latest", so this cannot re-derive the gate from
+    # a different row than the one the loop parked on.
+    row = runner.latest_row(db, project, project.current_phase)
+    if row is None:
+        return
+    gate = decide_gate(project, row.phase, row.output)
+    if gate is not None:
+        project.gate_kind = gate.kind
+        project.gate_note = gate.note
+
+
+@router.patch("/{project_id}", response_model=ProjectOut)
+def update_project(
+    payload: ProjectUpdate,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> Project:
+    """Change how a run is reviewed — including one that is already in flight.
+
+    The policy used to be frozen at create time: a build heading somewhere expensive
+    could not be given a gate, and one you had come to trust could not be let off its
+    leash without starting over. The runner re-reads these before every handoff, so a
+    change lands on the next one rather than at the next restart.
+    """
+    if payload.approval_mode is not None:
+        project.approval_mode = payload.approval_mode.value
+        project.require_approval = payload.approval_mode != ApprovalMode.UNATTENDED
+    if payload.clear_cost_cap:
+        project.cost_cap_usd = None
+    elif payload.cost_cap_usd is not None:
+        project.cost_cap_usd = payload.cost_cap_usd
+    _rederive_gate(db, project)
     db.commit()
     db.refresh(project)
     return project
@@ -179,6 +254,30 @@ def _drive_reject(project_id: str, feedback: str) -> None:
         db.close()
 
 
+def _drive_redo(project_id: str, phase: str, feedback: str) -> None:
+    """Background task: regenerate one named phase and return to the same review."""
+    db = SessionLocal()
+    try:
+        project = db.get(Project, project_id)
+        if project is not None:
+            runner.redo(db, project, phase, feedback)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Redo task crashed for %s/%s", project_id, phase)
+        _strand(db, project_id, str(e))
+    finally:
+        db.close()
+
+
+#: What a reviewer is told when the platform itself fell over, rather than a model.
+#: The exception text goes to the log, where someone can act on it; a field the UI
+#: renders should not read "UPDATE statement on table 'phase_results'".
+_CRASHED = (
+    "The build stopped because this platform hit an internal error, not because a "
+    "model failed. Everything already approved is kept — resume to pick it up from "
+    "the last checkpoint. The details are in the backend log."
+)
+
+
 def _strand(db: Session, project_id: str, message: str) -> None:
     """Last resort: never leave a project `running` with nothing running.
 
@@ -191,8 +290,9 @@ def _strand(db: Session, project_id: str, message: str) -> None:
         project = db.get(Project, project_id)
         if project is not None and project.status == PipelineStatus.RUNNING.value:
             project.status = PipelineStatus.FAILED.value
-            project.last_error = message
+            project.last_error = _CRASHED
             db.commit()
+            log.error("Stranded %s: %s", project_id, message)
     except Exception:  # noqa: BLE001
         db.rollback()
 
@@ -251,6 +351,11 @@ def reject_phase(
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ) -> RunResponse:
+    """Send back whichever phase is under review.
+
+    `POST /redo` does this and more — it can name any phase — and is what the UI
+    calls. This stays for API callers that already use it; both run the same code.
+    """
     if not payload.feedback or not payload.feedback.strip():
         raise HTTPException(400, "Feedback is required when rejecting a phase.")
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
@@ -268,6 +373,45 @@ def reject_phase(
         status=project.status,
         current_phase=project.current_phase,
         message="Sent back — the agent is regenerating this phase with your note.",
+    )
+
+
+@router.post("/{project_id}/redo", response_model=RunResponse)
+def redo_phase(
+    payload: RedoRequest,
+    background: BackgroundTasks,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> RunResponse:
+    """Send one phase back to its agent without leaving the review you are in.
+
+    The Ship review shows a file tree assembled from four phases, so "this file is
+    wrong" has to reach whoever wrote that file. Reject can only ever address the
+    phase on screen; this addresses the one named.
+    """
+    if payload.phase not in {p.value for p in PHASE_ORDER}:
+        raise HTTPException(400, f"'{payload.phase}' is not a phase of this pipeline.")
+    if not payload.feedback.strip():
+        raise HTTPException(400, "Say what to change — an agent cannot act on blank feedback.")
+    if project.status != PipelineStatus.AWAITING_APPROVAL.value:
+        raise (
+            _conflict(project, "redo")
+            if project.status == PipelineStatus.RUNNING.value
+            else HTTPException(400, f"Nothing to redo (status '{project.status}').")
+        )
+    if not any(ph.phase == payload.phase and ph.output for ph in project.phases):
+        raise HTTPException(
+            400, f"The {payload.phase} phase hasn't produced anything to redo yet."
+        )
+    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+        raise _conflict(project, "redo")
+
+    background.add_task(_drive_redo, project.id, payload.phase, payload.feedback.strip())
+    return RunResponse(
+        project_id=project.id,
+        status=project.status,
+        current_phase=project.current_phase,
+        message="Sent back — that agent is redoing its work with your note.",
     )
 
 

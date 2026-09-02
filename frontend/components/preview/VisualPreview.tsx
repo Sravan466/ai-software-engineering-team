@@ -1,36 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, PreviewSection, PreviewState } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
-
-// Injected into the sandboxed iframe (sandbox="allow-scripts", no same-origin) so model HTML
-// can never reach the parent. It reports clicks up via postMessage and accepts "highlight"
-// messages back, so selection never has to change `srcDoc` (which would reload the document).
-const SELECT_SCRIPT = `
-<script>
-(function(){
-  var HL='2px solid #f5a524';
-  function clearAll(){ document.querySelectorAll('[data-section]').forEach(function(s){ s.style.removeProperty('outline'); s.style.removeProperty('outline-offset'); }); }
-  function outline(el){ clearAll(); if(el){ el.style.outline=HL; el.style.outlineOffset='-2px'; } }
-  function byId(id){ try { return id ? document.querySelector('[data-section="'+(window.CSS&&CSS.escape?CSS.escape(id):id)+'"]') : null; } catch(_) { return null; } }
-  document.addEventListener('mouseover', function(e){ var t=e.target; if(t&&t.closest){ var el=t.closest('[data-section]'); if(el) el.style.cursor='pointer'; } });
-  document.addEventListener('click', function(e){
-    var t=e.target; if(!t||!t.closest) return;
-    var el=t.closest('[data-section]'); if(!el) return;
-    e.preventDefault(); e.stopPropagation(); outline(el);
-    parent.postMessage({__preview:true, type:'select', id: el.getAttribute('data-section'), label: el.getAttribute('data-label')||el.getAttribute('data-section')}, '*');
-  }, true);
-  window.addEventListener('message', function(e){ var d=e.data; if(d&&d.__preview&&d.type==='highlight') outline(byId(d.id)); });
-})();
-</script>`;
-
-function buildSrcDoc(html: string): string {
-  return html.includes("</body>")
-    ? html.replace("</body>", SELECT_SCRIPT + "</body>")
-    : html + SELECT_SCRIPT;
-}
+import MockupFrame from "./MockupFrame";
 
 export default function VisualPreview({ id }: { id: string }) {
   const [state, setState] = useState<PreviewState | null>(null);
@@ -99,7 +73,6 @@ export default function VisualPreview({ id }: { id: string }) {
   }
 
   const html = state?.html ?? null;
-  const srcDoc = useMemo(() => (html ? buildSrcDoc(html) : ""), [html]);
 
   if (loading && !state) {
     return (
@@ -123,11 +96,12 @@ export default function VisualPreview({ id }: { id: string }) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div className="card empty">
-          <h3>See it before it exists</h3>
+          <h3>{state && !state.has_frontend ? "Prism hasn't built the front end yet" : "No mockup yet"}</h3>
           <p>
-            Generate a clickable mockup of what these agents are building. Select any section in the
-            result and describe the change you want in plain language.
-            {state && !state.has_frontend && " It gets much sharper once the Frontend phase has run."}
+            {state && !state.has_frontend
+              ? "The mockup is drawn as part of the Frontend phase, so it appears here on its own once Prism has run. You can draw one early from the design so far."
+              : "The Frontend phase draws this automatically. Something stopped it from landing — draw it now and it will be here for the Ship review."}{" "}
+            Click any section in the result to describe a change in plain language.
           </p>
           <button className="btn btn-primary" disabled={busy} onClick={generate}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}
@@ -173,24 +147,13 @@ export default function VisualPreview({ id }: { id: string }) {
       )}
       {errorNotice}
 
-      <div className="prev-frame">
-        <div className="prev-chrome">
-          <span className="dots" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-          <span className="prev-url">localhost:3000</span>
-        </div>
-        <iframe
-          ref={iframeRef}
-          key={state!.revisions[0]?.id || "iframe"}
-          title="Generated mockup"
-          sandbox="allow-scripts"
-          srcDoc={srcDoc}
-          onLoad={() => highlight(selected?.id ?? null)}
-        />
-      </div>
+      <MockupFrame
+        key={state!.revisions[0]?.id || "iframe"}
+        ref={iframeRef}
+        html={html!}
+        selectable
+        onLoad={() => highlight(selected?.id ?? null)}
+      />
 
       {selected ? (
         <div className="card" style={{ borderColor: "var(--accent-line)", background: "var(--warn-soft)" }}>

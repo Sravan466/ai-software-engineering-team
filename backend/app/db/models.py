@@ -9,6 +9,7 @@ from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, Stri
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import settings
+from app.core.constants import ApprovalMode
 from app.db.base import Base
 
 
@@ -62,6 +63,18 @@ class Project(Base):
     preferred_model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     require_approval: Mapped[bool] = mapped_column(default=True)
 
+    # ── review policy (mutable mid-run) ──────────────────────────────────────
+    # How often this run stops for a person. Nullable so a database written before
+    # the policy existed still reads correctly — see `effective_approval_mode`.
+    approval_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: Projected monthly run cost, in USD, above which Ledger interrupts the build.
+    cost_cap_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Why the pipeline is currently waiting — set when it parks at a gate, cleared
+    # when it moves. The reviewer is shown a different surface for each.
+    gate_kind: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    gate_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -77,6 +90,23 @@ class Project(Base):
     )
 
     # ── derived state ────────────────────────────────────────────────────────
+    @property
+    def effective_approval_mode(self) -> str:
+        """The review policy this run actually follows.
+
+        `approval_mode` is nullable on purpose: rows created before it existed have
+        only `require_approval`, and those runs were gated at *every* phase. Reading
+        them as `checkpoints` would silently drop gates a person was relying on, so
+        an unset column keeps the old meaning and only new runs get the new default.
+        """
+        if self.approval_mode:
+            return self.approval_mode
+        return (
+            ApprovalMode.EVERY_PHASE.value
+            if self.require_approval
+            else ApprovalMode.UNATTENDED.value
+        )
+
     @property
     def stalled(self) -> bool:
         """True when this run says `running` but nothing is actually driving it.

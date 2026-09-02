@@ -23,6 +23,15 @@ export type PayloadFile = {
   language: string;
   /** The output key it came from — `files`, `test_files`, `ci_cd`, … */
   sourceKey: string;
+  /**
+   * The pipeline phase that wrote it, when the list was assembled across phases.
+   *
+   * Separate from `sourceKey` on purpose: that one names a key *within* an agent's
+   * output, and overloading it with a phase key would mean `POST /redo` got sent
+   * `"test_files"` the day anyone wired a redo action into a single-phase browser.
+   * Absent means "we do not know who to send this back to" — so don't offer.
+   */
+  phase?: string;
   lines: number;
 };
 
@@ -301,6 +310,50 @@ export function badgeTone(value: string): string {
   if (["post", "put", "patch"].includes(v)) return "badge-warn";
   if (v === "delete") return "badge-bad";
   return "";
+}
+
+/**
+ * The most recent attempt at a phase — phases re-run when they are sent back.
+ *
+ * Mirrors the backend's `PipelineRunner.latest_row`, including its tie-break, because
+ * two answers to "which row is current" would put the decision panel and the runner
+ * on different versions of the same phase.
+ */
+export function latestRow<T extends { phase: string; created_at: string; id: string }>(
+  rows: T[],
+  phase: string,
+): T | undefined {
+  let best: T | undefined;
+  for (const row of rows) {
+    if (row.phase !== phase) continue;
+    if (
+      !best ||
+      row.created_at > best.created_at ||
+      (row.created_at === best.created_at && row.id > best.id)
+    ) {
+      best = row;
+    }
+  }
+  return best;
+}
+
+/**
+ * The assembled project (from `/artifacts`) in the shape the file browser reads.
+ *
+ * `sourceKey` carries the phase that wrote each file, which is what makes per-file
+ * redo able to reach the agent responsible rather than whoever finished last.
+ */
+export function artifactFiles(
+  files: { path: string; content: string; language: string; phase: string }[],
+): PayloadFile[] {
+  return files.map((f) => ({
+    path: f.path,
+    content: f.content,
+    language: f.language,
+    sourceKey: f.phase,
+    phase: f.phase,
+    lines: f.content.split("\n").length,
+  }));
 }
 
 /** "1,240 lines across 7 files" — the one-line answer to "what am I approving?". */

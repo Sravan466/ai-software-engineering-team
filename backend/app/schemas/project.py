@@ -4,10 +4,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import AliasChoices, BaseModel, BeforeValidator, Field
 from typing_extensions import Annotated
 
-from app.core.constants import RoutingMode
+from app.core.constants import ApprovalMode, RoutingMode
 
 
 def _as_utc(value: object) -> object:
@@ -35,7 +35,43 @@ class ProjectCreate(BaseModel):
     preferred_model: Optional[str] = Field(
         None, description="provider:model for Manual mode, e.g. 'anthropic:claude-opus-4-8'."
     )
+    approval_mode: Optional[ApprovalMode] = Field(
+        None, description="How often the run stops for review. Defaults to two checkpoints."
+    )
+    cost_cap_usd: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Projected monthly run cost above which the build interrupts itself. "
+            "Omit for no cap — zero would be indistinguishable from one. Only "
+            "`checkpoints` acts on it; the other modes are explicit choices about "
+            "being interrupted, and keep the value for when you switch back."
+        ),
+    )
+    #: Legacy switch, still honoured when `approval_mode` is absent.
     require_approval: Optional[bool] = None
+
+
+class ProjectUpdate(BaseModel):
+    """Settings a reviewer can change on a run that is already going.
+
+    Both of these were fixed at create time, which meant a run heading somewhere
+    expensive could not be given a gate, and a run you had come to trust could not
+    be let off its leash without starting over.
+    """
+
+    approval_mode: Optional[ApprovalMode] = None
+    cost_cap_usd: Optional[float] = Field(None, gt=0)
+    #: Send `null` to lift the cap. Pydantic cannot tell absent from null, so this
+    #: says which of the two a null in the body meant.
+    clear_cost_cap: bool = False
+
+
+class RedoRequest(BaseModel):
+    """Send one phase back to its agent, from whichever review is on screen."""
+
+    phase: str = Field(..., description="Phase key to re-run, e.g. 'backend_engineer'.")
+    feedback: str = Field(..., min_length=1, description="What to change.")
 
 
 class PhaseResultOut(BaseModel):
@@ -70,6 +106,18 @@ class ProjectOut(BaseModel):
     routing_mode: str
     preferred_model: Optional[str]
     require_approval: bool
+
+    # ── review policy ────────────────────────────────────────────────────────
+    #: Always resolved: a row written before the policy existed reports the mode its
+    #: `require_approval` flag actually meant. See `Project.effective_approval_mode`.
+    approval_mode: str = Field(
+        ApprovalMode.CHECKPOINTS.value,
+        validation_alias=AliasChoices("effective_approval_mode", "approval_mode"),
+    )
+    cost_cap_usd: Optional[float] = None
+    #: Which review to render, and the one line saying why the run stopped here.
+    gate_kind: Optional[str] = None
+    gate_note: Optional[str] = None
     created_at: UtcDatetime
     updated_at: UtcDatetime
     phases: list[PhaseResultOut] = []
@@ -85,7 +133,7 @@ class ProjectOut(BaseModel):
     #: Seconds the current phase has been generating (None when idle).
     elapsed_seconds: Optional[float] = None
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 class ApprovalRequest(BaseModel):

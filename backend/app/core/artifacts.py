@@ -12,7 +12,7 @@ import re
 import zipfile
 from typing import Iterator, Tuple
 
-from app.core.constants import PHASE_LABELS
+from app.core.constants import PHASE_LABELS, PhaseStatus
 from app.db.models import Project
 
 
@@ -33,13 +33,39 @@ def _iter_files(output: dict) -> Iterator[Tuple[str, str, str]]:
                 yield path.strip().lstrip("/"), content, lang
 
 
+#: Attempts that were superseded. Their output stays on the row — the history of
+#: what a reviewer turned down is worth keeping — but it is not part of the build.
+_SUPERSEDED = frozenset({PhaseStatus.REJECTED.value, PhaseStatus.FAILED.value})
+
+
+def current_phases(project: Project) -> list:
+    """The attempt that counts for each phase, newest first-class one per phase.
+
+    A phase re-runs when it is sent back, so a project can hold several attempts at
+    one phase. Merging them all was harmless while a rejection only happened at the
+    phase you were looking at; per-file redo makes it routine, and the result was a
+    .zip containing both the layout the reviewer rejected and the one that replaced
+    it — `files` is keyed on path, so a renamed file does not overwrite its ghost.
+    """
+    best: dict[str, object] = {}
+    for ph in project.phases:
+        if ph.status in _SUPERSEDED:
+            continue
+        current = best.get(ph.phase)
+        if current is None or (ph.created_at, ph.id) >= (current.created_at, current.id):
+            best[ph.phase] = ph
+    kept = set(id(v) for v in best.values())
+    # Keep the order the phases ran in, which is the order `project.phases` is loaded.
+    return [ph for ph in project.phases if id(ph) in kept]
+
+
 def assemble(project: Project) -> dict:
-    """Collapse all phases into deduped files + docs + setup instructions."""
+    """Collapse the current attempt at each phase into deduped files + docs + setup."""
     files: dict[str, dict] = {}  # path -> record (later phases win)
     setup: list[str] = []
     docs: list[dict] = []
 
-    for ph in project.phases:
+    for ph in current_phases(project):
         out = ph.output if isinstance(ph.output, dict) else {}
         for path, content, lang in _iter_files(out):
             files[path] = {"path": path, "content": content, "language": lang, "phase": ph.phase}
