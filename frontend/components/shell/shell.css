@@ -173,6 +173,16 @@
   text-decoration: none;
   transition: background var(--tr), color var(--tr);
 }
+/* One rail below a list of real builds, the crew floor has to say it is not one. */
+.sb-link-tag {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  color: var(--ink-3);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
 .sb-link:hover { background: var(--bg-raised); color: var(--ink); }
 .sb-link[aria-current="page"] { background: var(--bg-raised); color: var(--ink); }
 .sb-link svg { width: 16px; height: 16px; flex: none; color: var(--ink-3); }
@@ -328,8 +338,20 @@
 
 /* ── the phase list: each phase is a disclosure over its real deliverable ── */
 .phases { display: flex; flex-direction: column; }
-.phase { border-top: 1px solid var(--line); }
+.phase {
+  border-top: 1px solid var(--line);
+  /* The relay scrolls you to a row, and the workspace bar is 56px of sticky glass. */
+  scroll-margin-top: 72px;
+}
 .phase:first-child { border-top: 0; }
+
+/* Arrived from the relay. Eight near-identical rows need one moment of "this is
+   the one you asked for"; it fades on its own and leaves nothing behind. */
+.phase.landed { animation: phase-landed 1.6s ease-out both; }
+@keyframes phase-landed {
+  0%, 50% { background: color-mix(in srgb, var(--agent) 12%, transparent); }
+  100%    { background: transparent; }
+}
 
 .phase-sum {
   display: flex;
@@ -349,9 +371,11 @@
 .phase-sum[disabled] { cursor: default; }
 .phase-sum[disabled]:hover { background: none; }
 
-.phase.done    .phase.running .phase.gate    .phase.redo    
+/* `flex: 1; min-width: 0` is load-bearing, not cosmetic: without it the middle
+   column sizes to its content, and on a narrow screen it pushes the right-hand
+   column — elapsed, tokens, and the disclosure chevron — clean off the row. */
 .phase-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.phase-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.phase-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-width: 0; }
 .phase-n { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-4); }
 .phase.pending .phase-role { font-size: var(--t-xs); color: var(--ink-3); }
 .phase-deliver {
@@ -447,6 +471,44 @@
 }
 
 .deliverables { display: flex; flex-wrap: wrap; gap: 7px; }
+
+/* ── Deliver: what exists, and the two ways of taking it ── */
+.deliver-made {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+/* A count, on the chip that earned it. */
+.deliver-n {
+  margin-left: 7px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--line-2);
+  color: var(--ink-2);
+  font-weight: 500;
+  font-size: 10px;
+  line-height: 15px;
+}
+.deliver-take {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.deliver-take p { max-width: 62ch; }
+.deliver-take code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink);
+}
 
 /* ===========================================================================
    PREVIEW

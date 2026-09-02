@@ -283,13 +283,32 @@
 /* ===========================================================================
    RELAY RAIL — the handoff, made visible
    =========================================================================== */
+/* Each step navigates to that phase in the list below. It used to re-select the
+   tab you were already on, which is a click that looks like a link and isn't. */
+.relay-active {
+  margin: 0 0 2px;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
 .relay {
   display: flex;
   gap: 6px;
   overflow-x: auto;
-  padding: 4px 0 8px;
+  /* Room for the shell's focus ring on the first and last step, and under the
+     rail for the scrollbar when eight steps stop fitting. The negative margin
+     gives that room back to the card. */
+  padding: 5px 4px 9px;
+  margin: 0 -4px;
+  list-style: none;
   scroll-snap-type: x proximity;
 }
+
+/* An item may not shrink below the button inside it. It used to carry
+   `min-width: 0`, which let eight items compress past their own contents while
+   the buttons kept their width — which is how the rail came to overlap itself on
+   a phone instead of scrolling. */
+.relay > li { display: flex; flex: 1 1 auto; min-width: max-content; }
+
 .relay-step {
   position: relative;
   flex: 1 1 auto;
@@ -332,11 +351,16 @@
   background: var(--line-2);
   overflow: hidden;
 }
+/* These class names are the build view's node states — `running`, `redo`,
+   `failed`. They read `working` and `rejected` for a while, which are the sprite's
+   names for the same things, so the live pulse and the rejected rail never
+   rendered on the one rail that is meant to show them. */
 .relay-step.done .relay-bar { background: var(--ok); }
-.relay-step.rejected .relay-bar { background: var(--bad); }
-.relay-step.working .relay-bar,
+.relay-step.redo .relay-bar,
+.relay-step.failed .relay-bar { background: var(--bad); }
+.relay-step.running .relay-bar,
 .relay-step.gate .relay-bar { background: color-mix(in srgb, var(--agent) 35%, var(--line-2)); }
-.relay-step.working .relay-bar::after {
+.relay-step.running .relay-bar::after {
   content: "";
   position: absolute;
   inset: 0 auto 0 0;
@@ -356,6 +380,26 @@
   animation: relay-await 1.4s steps(2, end) infinite;
 }
 @keyframes relay-await { 50% { opacity: 0.25; } }
+
+/* Under this width eight codenames cannot sit side by side without colliding, so
+   the rail keeps the faces and the rails — which carry the state — and hands the
+   names to the summary line above it. Still scrollable, still tappable, still a
+   way into each phase. */
+@media (max-width: 620px) {
+  .relay { gap: 4px; padding-bottom: 12px; }
+  .relay-step {
+    /* 44px of finger, and the sprite is what you are aiming at. */
+    min-width: 44px;
+    padding: 8px 6px 6px;
+    gap: 5px;
+  }
+  /* `!important` earns its keep here: AgentSprite writes --sprite-size as an
+     inline style, and a normal stylesheet declaration can never beat one. The
+     inline value is the per-instance default; this is the breakpoint the file
+     header always meant it to be overridable by. */
+  .relay-step .sprite { --sprite-size: 28px !important; }
+  .relay-name { display: none; }
+}
 
 /* ===========================================================================
    AGENT HEADER — a working character, named, in the phase list
@@ -404,6 +448,34 @@
    =========================================================================== */
 .crew-page { max-width: 1180px; margin: 0 auto; padding: 24px 24px 72px; }
 .crew-head { margin-bottom: 20px; }
+
+/* Every number on this page is scripted. This says so once, in prose, where the
+   eye lands after the lede — the floor is a reference, and a reference that can
+   be mistaken for telemetry is worse than no reference. */
+.crew-demo {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  max-width: 68ch;
+  margin: 14px 0 0;
+  padding: 10px 13px;
+  border-radius: var(--r);
+  border: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  line-height: 1.55;
+}
+.crew-demo > svg { width: 16px; height: 16px; flex: none; margin-top: 1px; color: var(--ink-3); }
+/* In the window bar, where "2/8 DONE" would otherwise read as a live count. */
+.win-demo {
+  margin-right: 8px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--line-2);
+  color: var(--ink-2);
+  letter-spacing: 0.1em;
+}
 .crew-h1 {
   font-family: var(--pixel);
   font-size: clamp(19px, 2.5vw, 26px);
@@ -1398,7 +1470,7 @@
   /* Rank one stands behind rank two. */
   .station:nth-child(-n + 4) { --depth: 0.42; }
   .station:nth-child(n + 5) { --depth: 0.02; }
-  .station .sprite { --sprite-size: 54px; }
+  .station .sprite { --sprite-size: 54px !important; }
   .desk { width: 100%; max-width: 66px; }
   .cabin { width: 82px; height: 52px; }
   /* Two ranks of four leave no room for set dressing behind them. */
@@ -1408,7 +1480,7 @@
 @media (max-width: 640px) {
   .crew-page { padding: 18px 16px 64px; }
   .bubble { white-space: normal; max-width: 128px; }
-  .station .sprite { --sprite-size: 46px; }
+  .station .sprite { --sprite-size: 46px !important; }
   .desk { max-width: 54px; }
   .cabin { width: 68px; height: 46px; }
 }
@@ -1441,8 +1513,14 @@
   .sprite.grounded.is-working .sprite-ground,
   .sprite.grounded.is-gate .sprite-ground { transform: none; }
   .p-drone { animation: none; }
-  .relay-step.working .relay-bar::after { animation: none; width: 100%; }
+  .relay-step.running .relay-bar::after { animation: none; width: 100%; }
   .relay-step.gate .relay-bar::after { animation: none; }
+  /* The landing mark still has to identify the row the relay sent you to, so it
+     stays — as a held tint rather than a fade. */
+  .phase.landed {
+    animation: none;
+    background: color-mix(in srgb, var(--agent) 12%, transparent);
+  }
   .agent-say.live::after { animation: none; }
   .agent-card:hover { transform: none; }
   .bubble { animation: none; }

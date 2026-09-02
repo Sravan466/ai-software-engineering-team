@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, type GithubPushResult, type GithubStatus } from "@/lib/api";
+import { ApiError, api, type GithubPushResult, type GithubStatus } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
 
@@ -31,13 +31,29 @@ export default function GithubPublish({
   const [pushing, setPushing] = useState(false);
   const [result, setResult] = useState<GithubPushResult | null>(null);
   const [error, setError] = useState("");
+  // Kept apart from `error`: one is "we can't reach the feature at all", the other
+  // is "this push failed". They need different words and different ways out.
+  const [unreachable, setUnreachable] = useState("");
+  const [checking, setChecking] = useState(false);
   const [notice, setNotice] = useState<"connected" | "error" | "">("");
 
+  // A server without the GitHub router 404s here. That is not an error to shout
+  // about — it is precisely the not-configured state, which this card already
+  // knows how to explain, so say that instead of rendering a bare "Not Found".
   const refresh = useCallback(async () => {
+    setChecking(true);
     try {
       setStatus(await api.githubStatus());
+      setUnreachable("");
     } catch (e: any) {
-      setError(e.message);
+      if (e instanceof ApiError && e.status === 404) {
+        setStatus({ configured: false, connected: false, login: null, name: null, avatar: null });
+        setUnreachable("");
+      } else {
+        setUnreachable(e?.message || "The backend didn't answer.");
+      }
+    } finally {
+      setChecking(false);
     }
   }, []);
 
@@ -106,7 +122,32 @@ export default function GithubPublish({
         )}
       </div>
 
-      {!status && <SkeletonLines lines={2} />}
+      {/* The feature itself is out of reach — the backend is down, or older than
+          the router. Every other error surface in this app names the problem and
+          offers a way forward; this one used to print a bare "Not Found". */}
+      {unreachable && (
+        <div className="notice notice-bad" role="alert">
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-title">GitHub publishing isn&apos;t reachable</span>
+            <span className="notice-text">
+              The backend didn&apos;t answer this card&apos;s status check, so we can&apos;t tell
+              whether publishing is set up. Check that it is running on{" "}
+              <code>:8000</code> and try again — everything else on this page still works, and the
+              .zip above is unaffected.
+            </span>
+            <span className="notice-detail mono">{unreachable}</span>
+            <div className="notice-actions">
+              <button className="btn btn-sm" onClick={refresh} disabled={checking}>
+                {checking && <span className="btn-spinner" aria-hidden="true" />}
+                {Icon.refresh} Try again
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!status && !unreachable && <SkeletonLines lines={2} />}
 
       {/* Not configured by the operator yet. */}
       {status && !status.configured && (
@@ -230,7 +271,16 @@ export default function GithubPublish({
         <div className="notice notice-bad" role="alert" style={{ marginTop: 14 }}>
           {Icon.alert}
           <div className="notice-body">
+            <span className="notice-title">
+              {status?.connected ? "That push didn't go through" : "GitHub returned an error"}
+            </span>
             <span className="notice-text">{error}</span>
+            {status?.connected && (
+              <span className="notice-text">
+                A repository of that name may already exist on @{status.login} — try another name,
+                or disconnect and sign in as a different account.
+              </span>
+            )}
           </div>
         </div>
       )}
