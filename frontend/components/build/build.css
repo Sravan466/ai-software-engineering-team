@@ -27,6 +27,18 @@
     linear-gradient(90deg, color-mix(in srgb, var(--agent) 9%, transparent), transparent 42%),
     var(--bg-panel);
 }
+/* The same panel, for an agent that *was* working — the run stalled, was stopped,
+   or failed while this phase held the work. It keeps the one thing the notice
+   above it cannot say (which agent had it, and how long it ran) and drops every
+   signal that means "now": the accent tint, the sweep, the ticking clock.
+   Neutral rather than red, because the notice above already carries the alarm. */
+.working-stopped {
+  border-color: var(--line-2);
+  background: var(--bg-panel);
+}
+.working-stopped .working-verb,
+.working-stopped .elapsed { color: var(--ink-3); }
+
 .working-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .working-line { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; min-width: 0; }
 .working-verb { font-size: var(--t-base); color: var(--ink-2); }
