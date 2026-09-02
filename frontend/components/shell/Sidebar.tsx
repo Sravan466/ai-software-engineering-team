@@ -13,6 +13,8 @@ const DOT: Record<string, string> = {
   awaiting_approval: "dot-warn dot-pulse",
   running: "dot-run dot-pulse",
   failed: "dot-bad",
+  stalled: "dot-bad",
+  cancelled: "dot-warn",
 };
 
 const STATUS_TEXT: Record<string, string> = {
@@ -20,8 +22,16 @@ const STATUS_TEXT: Record<string, string> = {
   awaiting_approval: "Waiting for your approval",
   running: "Running",
   failed: "Failed",
+  cancelled: "Stopped",
+  stalled: "Stalled — no longer responding",
   created: "Not started",
 };
+
+// A build that says `running` with no live runner behind it is stalled, and the
+// rail should say so rather than pulsing at a corpse.
+function rowStatus(p: Project): string {
+  return p.status === "running" && p.stalled ? "stalled" : p.status;
+}
 
 // Compact relative time ("3h", "2d") for the recent-builds list.
 function timeAgo(iso: string): string {
@@ -54,6 +64,10 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [local, setLocal] = useState<LocalStatus | null>(null);
   const [localError, setLocalError] = useState(false);
+  // Which row is asking "are you sure?". `DELETE /api/projects/{id}` has always
+  // existed and nothing called it, so a build you no longer want was permanent.
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -74,6 +88,24 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     refresh();
   }, [refresh, pathname]);
+
+  const remove = useCallback(
+    async (id: string) => {
+      setDeletingId(id);
+      try {
+        await api.deleteProject(id);
+        setProjects((list) => (list ?? []).filter((p) => p.id !== id));
+        if (pathname === `/projects/${id}`) router.push("/");
+      } catch {
+        // Leave the row in place — the confirm closes and the list refreshes below.
+      } finally {
+        setDeletingId(null);
+        setConfirmId(null);
+        refresh();
+      }
+    },
+    [pathname, refresh, router],
+  );
 
   const ready = !localError && local?.reachable && local?.has_default;
   const runtimeLabel = localError
@@ -123,20 +155,63 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
           projects.map((p) => {
             const active = pathname === `/projects/${p.id}`;
             const title = p.name || p.idea;
+            const state = rowStatus(p);
+
+            if (confirmId === p.id) {
+              return (
+                <div
+                  key={p.id}
+                  className="sb-confirm"
+                  role="group"
+                  aria-label={`Delete ${title}?`}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setConfirmId(null);
+                  }}
+                >
+                  <span className="sb-confirm-text">Delete this build?</span>
+                  <button
+                    className="btn btn-sm"
+                    disabled={deletingId === p.id}
+                    onClick={() => setConfirmId(null)}
+                    autoFocus
+                  >
+                    Keep
+                  </button>
+                  <button
+                    className="btn btn-sm btn-danger"
+                    disabled={deletingId === p.id}
+                    onClick={() => remove(p.id)}
+                  >
+                    {deletingId === p.id && <span className="btn-spinner" aria-hidden="true" />}
+                    Delete
+                  </button>
+                </div>
+              );
+            }
+
             return (
-              <Link
-                key={p.id}
-                href={`/projects/${p.id}`}
-                className="sb-item"
-                aria-current={active ? "page" : undefined}
-              >
-                <span
-                  className={"dot " + (DOT[p.status] || "")}
-                  title={STATUS_TEXT[p.status] || p.status}
-                />
-                <span className="sb-item-title">{title}</span>
-                <span className="sb-item-time">{timeAgo(p.updated_at || p.created_at)}</span>
-              </Link>
+              <div key={p.id} className="sb-row">
+                <Link
+                  href={`/projects/${p.id}`}
+                  className="sb-item"
+                  aria-current={active ? "page" : undefined}
+                >
+                  <span
+                    className={"dot " + (DOT[state] || "")}
+                    title={STATUS_TEXT[state] || state}
+                  />
+                  <span className="sb-item-title">{title}</span>
+                  <span className="sb-item-time">{timeAgo(p.updated_at || p.created_at)}</span>
+                </Link>
+                <button
+                  className="sb-del"
+                  aria-label={`Delete build: ${title}`}
+                  title="Delete this build"
+                  onClick={() => setConfirmId(p.id)}
+                >
+                  {Icon.trash}
+                </button>
+              </div>
             );
           })
         )}

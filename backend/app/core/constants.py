@@ -17,12 +17,19 @@ class PipelineStatus(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
+    #: Stopped by the reviewer. Resumable from the last checkpoint.
+    CANCELLED = "cancelled"
 
 
 class PhaseStatus(str, Enum):
+    #: The agent is generating right now — no output yet. The row exists so the UI
+    #: can show which agent has the work and for how long.
+    RUNNING = "running"
     PENDING_APPROVAL = "pending_approval"
     APPROVED = "approved"
     REJECTED = "rejected"
+    #: The phase was abandoned mid-flight (cancelled, or the server restarted).
+    FAILED = "failed"
 
 
 class Phase(str, Enum):

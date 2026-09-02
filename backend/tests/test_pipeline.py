@@ -31,10 +31,11 @@ def test_health_and_pipeline_shape(client):
 def test_full_run_with_approvals(client):
     pid = _create(client, require_approval=True)
 
-    # Start -> first phase produced, awaiting approval.
+    # Start returns immediately with `running` — the phase itself is a background
+    # task. TestClient drains it before the next request, so the poll below sees
+    # the gate the same way a real client's 2.5s poll would.
     run = client.post(f"/api/projects/{pid}/run").json()
-    assert run["status"] == "awaiting_approval"
-    assert run["current_phase"] == "product_manager"
+    assert run["status"] == "running"
 
     # Approve through to completion.
     seen_phases = []
@@ -45,7 +46,8 @@ def test_full_run_with_approvals(client):
         assert proj["status"] == "awaiting_approval"
         seen_phases.append(proj["current_phase"])
         resp = client.post(f"/api/projects/{pid}/approve").json()
-        assert resp["status"] in ("awaiting_approval", "completed")
+        # Approve hands the next phase to a background task and returns at once.
+        assert resp["status"] == "running"
 
     proj = client.get(f"/api/projects/{pid}").json()
     assert proj["status"] == "completed"
@@ -75,14 +77,15 @@ def test_reject_regenerates_phase(client):
     assert before["current_phase"] == "product_manager"
     pm_rows_before = [p for p in before["phases"] if p["phase"] == "product_manager"]
 
-    # Reject with feedback -> regenerates the same phase, stays awaiting approval.
+    # Reject with feedback -> regenerates the same phase in the background.
     resp = client.post(
         f"/api/projects/{pid}/reject", json={"feedback": "Tighten the MVP scope"}
     ).json()
-    assert resp["status"] == "awaiting_approval"
-    assert resp["current_phase"] == "product_manager"
+    assert resp["status"] == "running"
 
     after = client.get(f"/api/projects/{pid}").json()
+    assert after["status"] == "awaiting_approval"
+    assert after["current_phase"] == "product_manager"
     pm_rows_after = [p for p in after["phases"] if p["phase"] == "product_manager"]
     # One row was rejected and a fresh pending one was produced.
     assert len(pm_rows_after) == len(pm_rows_before) + 1
@@ -111,30 +114,99 @@ def test_auto_run_without_approvals(client):
     assert "Nothing to approve" in err.text
 
 
-def test_auto_run_stays_running_between_phases(stub_router):
-    """Regression: auto-run must never park in `awaiting_approval` mid-pipeline.
+def test_a_phase_is_announced_before_it_runs(stub_router):
+    """Regression: `current_phase` used to be written only *after* an agent finished.
 
-    That status is what the frontend renders as an approval gate; if auto-run used it
-    between phases, the UI would show (and let the user click) an approve button that the
-    backend then rejects with `400 Nothing to approve` once the background run finishes.
+    That is why the first phase rendered as eight queued nodes with no elapsed time —
+    there was nothing to say who had the work. The row and the timestamps now exist
+    from the moment generation starts.
     """
+    from app.core.constants import PhaseStatus
     from app.db.base import SessionLocal
-    from app.db.models import Project
+    from app.db.models import PhaseResult, Project
     from app.orchestration.runner import runner
 
     db = SessionLocal()
     try:
-        project = Project(idea="Build a landing site", routing_mode="local_only", require_approval=False)
+        project = Project(idea="Build a landing site", routing_mode="local_only")
         db.add(project)
         db.commit()
         db.refresh(project)
 
-        runner.start(db, project, pause=False)
-        assert project.status == "running"  # mid-run, not a phantom gate
-        assert project.current_phase == "product_manager"
-
-        runner.advance(db, project, pause=False)
+        row = runner._begin_phase(db, project, "product_manager")
         assert project.status == "running"
-        assert project.current_phase == "system_design"
+        assert project.current_phase == "product_manager"
+        assert project.phase_started_at is not None
+        assert project.heartbeat_at is not None
+        assert row.status == PhaseStatus.RUNNING.value
+        assert row.started_at is not None
+
+        # A live phase is not stalled; a run whose heartbeat never lands is.
+        assert project.stalled is False
+        project.heartbeat_at = None
+        project.phase_started_at = None
+        db.commit()
+        assert project.stalled is True
+
+        # The placeholder is filled in, not duplicated, when the phase completes.
+        assert db.query(PhaseResult).filter_by(project_id=project.id).count() == 1
     finally:
         db.close()
+
+
+def test_approve_is_idempotent_across_tabs(client):
+    """A stale second tab must not advance two phases on one click's worth of intent."""
+    pid = _create(client, require_approval=True)
+    client.post(f"/api/projects/{pid}/run")
+    assert client.get(f"/api/projects/{pid}").json()["current_phase"] == "product_manager"
+
+    first = client.post(f"/api/projects/{pid}/approve")
+    assert first.status_code == 200
+
+    # The project is `awaiting_approval` again (system_design), but this tab is
+    # replaying the click it made against product_manager. It wins its own claim —
+    # what must never happen is two claims landing on the *same* pending phase.
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.core.constants import PipelineStatus
+
+    db = SessionLocal()
+    try:
+        project = db.get(Project, pid)
+        project.status = PipelineStatus.RUNNING.value  # pretend a run is in flight
+        db.commit()
+    finally:
+        db.close()
+
+    stale = client.post(f"/api/projects/{pid}/approve")
+    assert stale.status_code == 409
+    assert "already" in stale.json()["detail"]
+
+
+def test_stop_then_resume(client):
+    """Any run can be got out of, and back into, from the UI."""
+    pid = _create(client, require_approval=True)
+    client.post(f"/api/projects/{pid}/run")
+    assert client.get(f"/api/projects/{pid}").json()["status"] == "awaiting_approval"
+
+    stopped = client.post(f"/api/projects/{pid}/stop", json={}).json()
+    assert stopped["status"] == "cancelled"
+    proj = client.get(f"/api/projects/{pid}").json()
+    assert proj["status"] == "cancelled"
+    assert proj["last_error"]
+
+    # Everything generated before the stop survives it.
+    assert any(p["phase"] == "product_manager" for p in proj["phases"])
+
+    resumed = client.post(f"/api/projects/{pid}/resume").json()
+    assert resumed["status"] == "running"
+    after = client.get(f"/api/projects/{pid}").json()
+    # The unapproved phase is offered again rather than skipped.
+    assert after["status"] == "awaiting_approval"
+    assert after["current_phase"] == "product_manager"
+
+
+def test_delete_removes_the_build(client):
+    pid = _create(client)
+    assert client.delete(f"/api/projects/{pid}").status_code == 204
+    assert client.get(f"/api/projects/{pid}").status_code == 404

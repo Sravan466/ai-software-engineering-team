@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, type Artifacts, type PhaseResult, type Project } from "@/lib/api";
-import { PHASES } from "@/components/shell/phases";
+import { api, type Artifacts, type PhaseResult, type Project, type RunResponse } from "@/lib/api";
+import { PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
 import { AGENT_BY_KEY, type Persona } from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
@@ -12,9 +12,12 @@ import { Skeleton, SkeletonLines } from "@/components/ui/Skeleton";
 import VisualPreview from "@/components/preview/VisualPreview";
 import CodeBlock from "@/components/preview/CodeBlock";
 import GithubPublish from "@/components/github/GithubPublish";
+import PhaseArtifact from "@/components/build/PhaseArtifact";
+import RunControls from "@/components/build/RunControls";
+import { Elapsed } from "@/components/build/Elapsed";
 
 type Tab = "build" | "preview" | "summary";
-type NodeState = "done" | "running" | "gate" | "redo" | "pending";
+type NodeState = "done" | "running" | "gate" | "redo" | "failed" | "pending";
 
 // ── status → presentation ────────────────────────────────────────────────────
 const STATUS_LABEL: Record<string, string> = {
@@ -23,14 +26,21 @@ const STATUS_LABEL: Record<string, string> = {
   awaiting_approval: "Waiting for you",
   completed: "Completed",
   failed: "Failed",
+  cancelled: "Stopped",
+  stalled: "Stalled",
 };
 
 function badgeClass(status: string): string {
   if (status === "completed") return "badge-ok";
   if (status === "awaiting_approval") return "badge-warn";
   if (status === "running") return "badge-run";
-  if (status === "failed") return "badge-bad";
+  if (status === "failed" || status === "stalled") return "badge-bad";
   return "";
+}
+
+/** A stalled run says `running` in the database and is not running. Say the truth. */
+function effectiveStatus(project: Project): string {
+  return project.status === "running" && project.stalled ? "stalled" : project.status;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -42,7 +52,7 @@ function StatusBadge({ status }: { status: string }) {
         ? "dot-warn dot-pulse"
         : status === "running"
           ? "dot-run dot-pulse"
-          : status === "failed"
+          : status === "failed" || status === "stalled"
             ? "dot-bad"
             : "";
   return (
@@ -60,16 +70,28 @@ function latestRow(project: Project, key: string): PhaseResult | undefined {
   return [...rows].sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))[rows.length - 1];
 }
 
+/**
+ * What a phase is doing, read from the phase's own row first.
+ *
+ * This used to be inferred from the *project* status plus `current_phase`, and both
+ * of those only moved once an agent had finished — so a phase mid-generation was
+ * indistinguishable from one that had never started. A row now exists from the moment
+ * generation begins, and it carries its own status, which makes this a lookup instead
+ * of a guess.
+ */
 function nodeStateFor(project: Project, key: string): NodeState {
   const row = latestRow(project, key);
-  if (row?.status === "approved") return "done";
-  if (project.current_phase === key) {
-    if (project.status === "awaiting_approval") return "gate";
-    if (project.status === "running") return "running";
+  if (!row) return "pending";
+  if (row.status === "running") return "running";
+  if (row.status === "approved") return "done";
+  if (row.status === "rejected") return "redo";
+  if (row.status === "failed") return "failed";
+  if (row.status === "pending_approval") {
+    const waiting =
+      project.status === "awaiting_approval" && project.current_phase === key;
+    return waiting ? "gate" : "done";
   }
-  if (row?.status === "rejected") return "redo";
-  if (row) return "done";
-  return "pending";
+  return "done";
 }
 
 // Which of an agent's voice lines fits the state it's in. A phase waiting at a
@@ -80,6 +102,7 @@ const VOICE_FOR: Record<NodeState, keyof Persona["lines"]> = {
   gate: "done",
   done: "done",
   redo: "rejected",
+  failed: "rejected",
 };
 
 // The build view and the sprite share one idea of what an agent is doing.
@@ -88,6 +111,7 @@ const SPRITE_STATE: Record<NodeState, SpriteState> = {
   running: "working",
   gate: "gate",
   redo: "rejected",
+  failed: "rejected",
   pending: "queued",
 };
 
@@ -95,6 +119,7 @@ const NODE_STATUS: Record<NodeState, string> = {
   pending: "Queued",
   running: "Running",
   redo: "Rejected — re-running",
+  failed: "Stopped mid-phase",
   gate: "Needs your approval",
   done: "Done",
 };
@@ -144,10 +169,25 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     if (new URLSearchParams(window.location.search).get("github")) setTab("summary");
   }, []);
 
-  // Poll while the pipeline is actively running.
+  // Poll while anything can still change under us — at a cadence matched to how
+  // fast it can change.
+  //
+  // A live `running` build is the only thing worth a tight loop. A *stalled* one is
+  // not running at all, and hammering it every 2.5s forever is precisely the old
+  // behaviour this issue is about. `awaiting_approval` looks static but isn't:
+  // another tab can approve, stop or reject it, and a tab showing a gate that no
+  // longer exists is how one click's worth of intent used to advance two phases.
+  const pollMs = !project
+    ? 0
+    : project.status === "running" && !project.stalled
+      ? 2500
+      : project.status === "running" || project.status === "awaiting_approval"
+        ? 10000
+        : 0;
+
   useEffect(() => {
-    if (project?.status === "running") {
-      pollRef.current = setInterval(load, 2500);
+    if (pollMs > 0) {
+      pollRef.current = setInterval(load, pollMs);
     } else if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -155,14 +195,20 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [project?.status, load]);
+  }, [pollMs, load]);
 
   const act = useCallback(
-    async (fn: () => Promise<unknown>) => {
+    async (fn: () => Promise<RunResponse | unknown>) => {
       setBusy(true);
       setError("");
       try {
-        await fn();
+        const result = (await fn()) as RunResponse | undefined;
+        // Control endpoints return the status they just committed. Applying it
+        // before the reload means the badge flips the instant the click lands,
+        // instead of reading "Waiting for you" while an agent is generating.
+        if (result && typeof result.status === "string") {
+          setProject((p) => (p ? { ...p, status: result.status } : p));
+        }
       } catch (e: any) {
         setError(e.message);
       } finally {
@@ -174,7 +220,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   );
 
   const title = project ? project.name || project.idea : undefined;
-  const status = project?.status;
+  const status = project ? effectiveStatus(project) : undefined;
   useChrome(
     project ? { title, badge: <StatusBadge status={status!} /> } : { sub: "Build" },
     [title, status],
@@ -241,16 +287,19 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             </span>
           </div>
         </div>
-        {completed && (
-          <div className="build-actions">
-            <button className="btn" onClick={() => setTab("summary")}>
-              {Icon.github} Publish
-            </button>
-            <a className="btn btn-primary" href={api.downloadUrl(id)} download>
-              {Icon.download} Download .zip
-            </a>
-          </div>
-        )}
+        <div className="build-actions">
+          {completed && (
+            <>
+              <button className="btn" onClick={() => setTab("summary")}>
+                {Icon.github} Publish
+              </button>
+              <a className="btn btn-primary" href={api.downloadUrl(id)} download>
+                {Icon.download} Download .zip
+              </a>
+            </>
+          )}
+          <RunControls project={project} busy={busy} act={act} />
+        </div>
       </div>
 
       {/* The relay: who has the work, who is next. */}
@@ -340,6 +389,119 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
 }
 
 // ── Build tab ────────────────────────────────────────────────────────────────
+/**
+ * Why a run stopped, and the way out of it.
+ *
+ * Three different dead ends used to look the same — or worse, look like progress.
+ * A stalled run reported "Running" forever; a cancelled one had no representation at
+ * all. Each of these names what happened and puts the recovery in the same box.
+ */
+function RunInterrupted({
+  project,
+  busy,
+  act,
+  id,
+}: {
+  project: Project;
+  busy: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<void>;
+  id: string;
+}) {
+  const state = effectiveStatus(project);
+  const copy: Record<string, { title: string; text: string; action: string }> = {
+    stalled: {
+      title: "This build stopped responding",
+      text:
+        "It is still marked as running, but nothing has reported progress in a while — " +
+        "usually the backend restarted mid-phase. Resuming re-runs the interrupted phase " +
+        "from the last checkpoint; everything already approved is kept.",
+      action: "Resume from checkpoint",
+    },
+    cancelled: {
+      title: "You stopped this build",
+      text:
+        "Every phase generated before the stop is kept. Resuming picks up from the last " +
+        "approved phase.",
+      action: "Resume",
+    },
+    failed: {
+      title: "This build stopped after a model error",
+      text:
+        "The most common cause is the local runtime being unavailable. Check that Ollama is " +
+        "running and the model is downloaded, then pick it back up from where it left off.",
+      action: "Resume from checkpoint",
+    },
+  };
+  const { title, text, action } = copy[state] ?? copy.failed;
+
+  return (
+    <div className={"notice " + (state === "cancelled" ? "notice-warn" : "notice-bad")}>
+      {Icon.alert}
+      <div className="notice-body">
+        <span className="notice-title">{title}</span>
+        <span className="notice-text">{text}</span>
+        {project.last_error && state !== "cancelled" && (
+          <span className="notice-detail mono">{project.last_error}</span>
+        )}
+        <div className="notice-actions">
+          <button
+            className="btn btn-sm btn-primary"
+            disabled={busy}
+            onClick={() => act(() => api.resume(id))}
+          >
+            {busy && <span className="btn-spinner" aria-hidden="true" />}
+            {Icon.play} {action}
+          </button>
+          {state === "failed" && (
+            <a className="btn btn-sm" href="/settings">
+              Check runtime
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Who has the work, right now, and for how long.
+ *
+ * The single most useful thing the build view can say while a model generates — and
+ * for eight phases it said nothing at all, because `current_phase` was only written
+ * after an agent finished.
+ */
+function NowWorking({ project }: { project: Project }) {
+  const key = project.current_phase;
+  const row = key ? latestRow(project, key) : undefined;
+  if (!key || row?.status !== "running") return null;
+
+  const agent = AGENT_BY_KEY[key];
+  const meta = PHASE_BY_KEY[key];
+  if (!agent) return null;
+
+  return (
+    <div
+      className="working"
+      style={{ ["--agent" as string]: agent.accent }}
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <AgentSprite agent={agent} size={40} state="working" />
+      <div className="working-body">
+        <div className="working-line">
+          <b className="agent-line-name">{agent.codename}</b>
+          <span className="working-verb">{agent.lines.working.toLowerCase()}</span>
+          {meta && <span className="phase-deliver">{meta.deliver}</span>}
+        </div>
+        <div className="working-bar" aria-hidden="true">
+          <span />
+        </div>
+      </div>
+      <Elapsed startIso={row.started_at ?? project.phase_started_at} live />
+    </div>
+  );
+}
+
 function BuildTab({
   project,
   analytics,
@@ -355,15 +517,17 @@ function BuildTab({
 }) {
   const pct = localPct(project);
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
+  const state = effectiveStatus(project);
+  const interrupted = state === "failed" || state === "cancelled" || state === "stalled";
 
-  if (project.status === "created") {
+  if (state === "created") {
     return (
       <div className="card empty">
         <h3>Ready when you are</h3>
         <p>
           Eight specialist agents will take this idea from requirements to a deployment plan.
           {project.require_approval
-            ? " After each phase the pipeline stops and shows you what the agent produced, so you can read it and decide."
+            ? " After each phase the pipeline stops and hands you what the agent produced — the files, the diagram, the data — so you can read it and decide."
             : " It will run straight through all eight phases without stopping."}
         </p>
         <button className="btn btn-primary" disabled={busy} onClick={() => act(() => api.run(id))}>
@@ -375,41 +539,12 @@ function BuildTab({
     );
   }
 
-  if (project.status === "failed") {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div className="notice notice-bad">
-          {Icon.alert}
-          <div className="notice-body">
-            <span className="notice-title">This build stopped after a model error</span>
-            <span className="notice-text">
-              The most common cause is the local runtime being unavailable. Check that Ollama is
-              running and the model is downloaded, then run it again from where it left off.
-            </span>
-            <div className="notice-actions">
-              <button
-                className="btn btn-sm btn-primary"
-                disabled={busy}
-                onClick={() => act(() => api.run(id))}
-              >
-                {busy && <span className="btn-spinner" aria-hidden="true" />}
-                Retry build
-              </button>
-              <a className="btn btn-sm" href="/settings">
-                Check runtime
-              </a>
-            </div>
-          </div>
-        </div>
-        <div className="card card-flush">
-          <PhaseList project={project} busy={busy} act={act} id={id} />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {interrupted && <RunInterrupted project={project} busy={busy} act={act} id={id} />}
+
+      <NowWorking project={project} />
+
       <div className="card" style={{ padding: "16px 20px" }}>
         <div className="meter">
           <div className="meter-row">
@@ -437,7 +572,7 @@ function BuildTab({
         <PhaseList project={project} busy={busy} act={act} id={id} />
       </div>
 
-      {project.status === "completed" && analytics && (
+      {state === "completed" && analytics && (
         <div className="card">
           <div className="sec-head">
             <h2 className="label">Analytics</h2>
@@ -460,9 +595,9 @@ function BuildTab({
 
 /**
  * The phase list. Every phase that produced something is a disclosure over the
- * agent's full, rendered deliverable — and the approval gate leads with that
- * document, because being asked to approve work you can't read is the one thing
- * this screen must never do.
+ * agent's full deliverable — the files, the diagram, the structured data, not just
+ * the prose summary — and the approval gate leads with exactly that, because being
+ * asked to approve work you can't read is the one thing this screen must never do.
  */
 function PhaseList({
   project,
@@ -475,7 +610,6 @@ function PhaseList({
   act: (fn: () => Promise<unknown>) => Promise<void>;
   id: string;
 }) {
-  const gateKey = project.status === "awaiting_approval" ? project.current_phase : null;
   // The phase waiting on a decision is open by default; everything else starts closed.
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [feedback, setFeedback] = useState("");
@@ -486,7 +620,7 @@ function PhaseList({
         const ns = nodeStateFor(project, ph.key);
         const row = latestRow(project, ph.key);
         const isGate = ns === "gate";
-        const hasDoc = Boolean(row?.content_md);
+        const hasDoc = Boolean(row && row.status !== "running" && (row.content_md || row.output));
         const isOpen = open[ph.key] ?? isGate;
         const agent = AGENT_BY_KEY[ph.key];
 
@@ -511,6 +645,7 @@ function PhaseList({
                   <span className="phase-role">{agent.role}</span>
                   {ph.debate && <span className="badge badge-run">Debated</span>}
                   {isGate && <span className="badge badge-warn">Needs your approval</span>}
+                  {ns === "failed" && <span className="badge badge-bad">Interrupted</span>}
                 </span>
                 {/* The agent's own status line, in their voice. */}
                 <span className={"agent-say" + (ns === "running" ? " live" : "")}>
@@ -529,6 +664,12 @@ function PhaseList({
               </span>
 
               <span className="phase-side">
+                {ns === "running" && <Elapsed startIso={row?.started_at ?? null} live />}
+                {ns !== "running" && row?.total_tokens ? (
+                  <span className="phase-tokens mono">
+                    {row.total_tokens.toLocaleString()} tok
+                  </span>
+                ) : null}
                 {row?.provider_used && row?.model_used && (
                   <span className="phase-model">
                     {row.provider_used}/{row.model_used}
@@ -542,7 +683,7 @@ function PhaseList({
               </span>
             </button>
 
-            {/* The decision, with the document it is about directly above it. */}
+            {/* The decision, with the work it is about directly above it. */}
             {isGate && row && (
               <div className="phase-body" style={{ paddingTop: 0 }}>
                 <div className="gate agent-gate">
@@ -554,9 +695,9 @@ function PhaseList({
                     <span className="rule" />
                     <span className="badge badge-warn">Waiting on you</span>
                   </div>
-                  <div className="gate-doc">
-                    <Markdown>{row.content_md}</Markdown>
-                  </div>
+
+                  <PhaseArtifact row={row} maxHeight={520} />
+
                   <div className="gate-decide">
                     <div className="gate-row">
                       <button
@@ -600,14 +741,14 @@ function PhaseList({
             )}
 
             {/* Any finished phase can be read in full, whenever. */}
-            {!isGate && hasDoc && isOpen && (
+            {!isGate && hasDoc && isOpen && row && (
               <div className="phase-body">
-                <div className="phase-doc">
-                  <Markdown>{row!.content_md}</Markdown>
-                </div>
-                {row?.feedback && (
+                <PhaseArtifact row={row} maxHeight={420} />
+                {row.feedback && (
                   <p className="phase-feedback">
-                    <strong style={{ color: "var(--bad)" }}>You sent this back:</strong>{" "}
+                    <strong style={{ color: "var(--bad)" }}>
+                      {row.status === "failed" ? "This phase was interrupted:" : "You sent this back:"}
+                    </strong>{" "}
                     {row.feedback}
                   </p>
                 )}

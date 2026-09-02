@@ -115,6 +115,51 @@
 }
 .sb-item-time { flex: none; font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
 
+/* Delete lives on the row, revealed on hover or focus so the rail stays a list of
+   builds rather than a list of buttons. It is never hidden from the keyboard:
+   `:focus-within` brings it back, and it is a real button in the tab order. */
+.sb-row { position: relative; display: flex; align-items: center; }
+.sb-row .sb-item { flex: 1; min-width: 0; }
+.sb-del {
+  position: absolute;
+  right: 14px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+  color: var(--ink-3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--tr), background var(--tr), color var(--tr);
+}
+.sb-del svg { width: 15px; height: 15px; }
+.sb-row:hover .sb-del,
+.sb-row:focus-within .sb-del { opacity: 1; }
+.sb-del:hover { background: var(--bad-soft); color: var(--bad); }
+/* Touch has no hover, so the control is simply always there. */
+@media (hover: none) {
+  .sb-del { opacity: 1; background: none; }
+}
+
+.sb-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  width: calc(100% - 16px);
+  margin: 1px 8px;
+  padding: 8px 10px;
+  border-radius: var(--r);
+  border: 1px solid rgba(240, 82, 82, 0.4);
+  background: var(--bad-soft);
+  animation: rise var(--tr) ease both;
+}
+.sb-confirm-text { flex-basis: 100%; font-size: var(--t-sm); color: var(--ink); }
+.sb-confirm .btn { flex: 1; min-width: 0; }
+
 .sb-foot { border-top: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 2px; }
 .sb-link {
   display: flex;

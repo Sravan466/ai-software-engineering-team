@@ -34,3 +34,6 @@ yarn-error.log*
 
 # Personal/global Claude skill library (not part of this project)
 claude/
+
+# Playwright MCP session artifacts (snapshots, console logs)
+.playwright-mcp/

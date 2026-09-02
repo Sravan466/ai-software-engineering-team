@@ -5,9 +5,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.config import settings
 from app.db.base import Base
 
 
@@ -17,6 +18,17 @@ def _uuid() -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _aware(value: Optional[datetime]) -> Optional[datetime]:
+    """SQLite hands back naive datetimes even for `DateTime(timezone=True)` columns.
+
+    Everything written here is UTC, so re-attach the timezone rather than letting a
+    naive/aware comparison raise in the middle of a status check.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 class Project(Base):
@@ -29,6 +41,21 @@ class Project(Base):
     # Pipeline state
     status: Mapped[str] = mapped_column(String(32), default="created")  # see PipelineStatus
     current_phase: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
+
+    # When the phase named by `current_phase` started generating. Set *before* the
+    # agent runs, so the UI can show elapsed time while a phase is in flight.
+    phase_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Written every few seconds by the live runner. A `running` project whose
+    # heartbeat has gone quiet is stalled — see `stalled` below.
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Set by Stop. The runner checks it between phases and after each agent returns.
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Why the last run stopped, in words a person can act on.
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Routing config chosen for this project
     routing_mode: Mapped[str] = mapped_column(String(16), default="local_only")
@@ -49,6 +76,30 @@ class Project(Base):
         order_by="PreviewRevision.created_at",
     )
 
+    # ── derived state ────────────────────────────────────────────────────────
+    @property
+    def stalled(self) -> bool:
+        """True when this run says `running` but nothing is actually driving it.
+
+        Background tasks die with the process, so a `running` row that outlives its
+        server is unrecoverable on its own — and used to poll forever. A missing
+        heartbeat is proof there is no live runner: only the runner writes one.
+        """
+        if self.status != "running":
+            return False
+        beat = _aware(self.heartbeat_at) or _aware(self.phase_started_at)
+        if beat is None:
+            return True
+        return (_now() - beat).total_seconds() > settings.stall_after_seconds
+
+    @property
+    def elapsed_seconds(self) -> Optional[float]:
+        """Seconds the current phase has been generating, or None when idle."""
+        started = _aware(self.phase_started_at)
+        if self.status != "running" or started is None:
+            return None
+        return max(0.0, (_now() - started).total_seconds())
+
 
 class PhaseResult(Base):
     """Output of a single agent/phase, plus its approval state."""
@@ -61,6 +112,17 @@ class PhaseResult(Base):
     phase: Mapped[str] = mapped_column(String(48), nullable=False)
     agent: Mapped[str] = mapped_column(String(48), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending_approval")
+
+    # A row is created the moment the agent starts (status `running`) and filled in
+    # when it finishes, so "which agent has the work, since when" is always answerable.
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # Structured output the agent produced (dict) + the human-readable markdown.
     output: Mapped[dict] = mapped_column(JSON, default=dict)

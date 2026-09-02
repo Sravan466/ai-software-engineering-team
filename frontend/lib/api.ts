@@ -11,6 +11,7 @@ export type PhaseResult = {
   id: string;
   phase: string;
   agent: string;
+  /** running | pending_approval | approved | rejected | failed */
   status: string;
   output: Record<string, unknown>;
   content_md: string;
@@ -18,12 +19,17 @@ export type PhaseResult = {
   provider_used: string | null;
   feedback: string | null;
   created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  total_tokens: number;
+  latency_ms: number;
 };
 
 export type Project = {
   id: string;
   idea: string;
   name: string | null;
+  /** created | running | awaiting_approval | completed | failed | cancelled */
   status: string;
   current_phase: string | null;
   routing_mode: string;
@@ -32,12 +38,26 @@ export type Project = {
   created_at: string;
   updated_at: string;
   phases: PhaseResult[];
+
+  // Liveness, so the UI never has to guess whether a `running` build is alive.
+  phase_started_at: string | null;
+  heartbeat_at: string | null;
+  cancel_requested: boolean;
+  last_error: string | null;
+  /** `running`, but nothing is driving it. The server owns the threshold. */
+  stalled: boolean;
+  elapsed_seconds: number | null;
 };
 
 // Fast CRUD calls should fail fast so a hung/restarting backend surfaces an error
-// instead of an infinite "Loading…". LLM-driven endpoints (run / generate / edit a
-// preview) drive a local Ollama model that can take far longer than 15s, so they
-// pass the longer cap below.
+// instead of an infinite "Loading…". LLM-driven endpoints (generate / edit a preview)
+// drive a local Ollama model that can take far longer than 15s, so they pass the
+// longer cap below.
+//
+// Pipeline control (run / approve / reject / stop / resume) is deliberately NOT in
+// that second group any more: those endpoints hand the phase to a background task
+// and return immediately, so a slow one means the backend is in trouble — not that
+// a model is thinking.
 const DEFAULT_TIMEOUT_MS = 15000;
 const LLM_TIMEOUT_MS = 300000; // 5 min — local generation on CPU is slow
 
@@ -108,24 +128,24 @@ export const api = {
     preferred_model?: string;
     require_approval?: boolean;
   }) => req<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
-  run: (id: string) =>
-    req<{ message: string; status: string }>(
-      `/api/projects/${id}/run`,
-      { method: "POST" },
-      LLM_TIMEOUT_MS
-    ),
+  deleteProject: (id: string) =>
+    req<void>(`/api/projects/${id}`, { method: "DELETE" }),
+
+  // ── Pipeline control — all of these return in well under a second ──
+  run: (id: string) => req<RunResponse>(`/api/projects/${id}/run`, { method: "POST" }),
   approve: (id: string) =>
-    req<{ message: string; status: string }>(
-      `/api/projects/${id}/approve`,
-      { method: "POST" },
-      LLM_TIMEOUT_MS
-    ),
+    req<RunResponse>(`/api/projects/${id}/approve`, { method: "POST" }),
   reject: (id: string, feedback: string) =>
-    req<{ message: string; status: string }>(
-      `/api/projects/${id}/reject`,
-      { method: "POST", body: JSON.stringify({ feedback }) },
-      LLM_TIMEOUT_MS
-    ),
+    req<RunResponse>(`/api/projects/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ feedback }),
+    }),
+  stop: (id: string, reason?: string) =>
+    req<RunResponse>(`/api/projects/${id}/stop`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    }),
+  resume: (id: string) => req<RunResponse>(`/api/projects/${id}/resume`, { method: "POST" }),
   routerStatus: () => req<any>("/api/models/status"),
   pipelineShape: () => req<{ phases: Phase[]; mermaid: string }>("/api/models/pipeline"),
   analytics: (id: string) => req<any>(`/api/analytics/projects/${id}`),
@@ -214,6 +234,13 @@ export const api = {
       }
     }
   },
+};
+
+export type RunResponse = {
+  project_id: string;
+  status: string;
+  current_phase: string | null;
+  message: string;
 };
 
 export type GithubStatus = {

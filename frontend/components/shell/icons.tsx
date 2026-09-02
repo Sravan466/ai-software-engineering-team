@@ -37,7 +37,14 @@ export type IconName =
   | "sparkle"
   | "github"
   | "rotate"
-  | "arrowRight";
+  | "arrowRight"
+  | "stop"
+  | "play"
+  | "trash"
+  | "file"
+  | "folder"
+  | "diagram"
+  | "list";
 
 export const Icon: Record<IconName, ReactNode> = {
   menu: svg(<path d="M4 6h16M4 12h16M4 18h16" />),
@@ -81,4 +88,13 @@ export const Icon: Record<IconName, ReactNode> = {
   ),
   rotate: svg(<path d="M4 12a8 8 0 1 1 2.6 5.9M4 19.5V14h5.5" />),
   arrowRight: svg(<path d="M4.5 12h15m0 0-5.5-5.5M19.5 12 14 17.5" />),
+  // Run controls: a square halts, a triangle resumes — the transport vocabulary
+  // every person already knows, drawn to this set's 24/1.7 spec.
+  stop: svg(<rect x="6.5" y="6.5" width="11" height="11" rx="1.6" />),
+  play: svg(<path d="M8 5.6v12.8a.7.7 0 0 0 1.07.6l10.2-6.4a.7.7 0 0 0 0-1.2L9.07 5a.7.7 0 0 0-1.07.6z" />),
+  trash: svg(<path d="M4.5 7h15M9.5 7V5.2a1.2 1.2 0 0 1 1.2-1.2h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12M10.5 11v5.5M13.5 11v5.5" />),
+  file: svg(<path d="M13.5 3.5H7a1.5 1.5 0 0 0-1.5 1.5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8.5zM13.5 3.5v5h5" />),
+  folder: svg(<path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h3.8l1.7 2.2H19a1.5 1.5 0 0 1 1.5 1.5v9.8A1.5 1.5 0 0 1 19 20H5a1.5 1.5 0 0 1-1.5-1.5z" />),
+  diagram: svg(<path d="M9 4.5h6v4H9zM3.5 15.5h5v4h-5zM15.5 15.5h5v4h-5zM12 8.5v3M6 15.5v-2a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v2" />),
+  list: svg(<path d="M9 6.5h11M9 12h11M9 17.5h11M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" />),
 };
