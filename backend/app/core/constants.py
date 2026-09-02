@@ -17,12 +17,33 @@ class PipelineStatus(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
+    #: Stopped by the reviewer. Resumable from the last checkpoint.
+    CANCELLED = "cancelled"
+
+
+#: Statuses a run can be moved out of by resuming it. A `running` project is only
+#: resumable once it looks stalled (see `Project.stalled`) — the route checks that.
+RESUMABLE_STATUSES: frozenset[str] = frozenset(
+    {
+        PipelineStatus.CANCELLED.value,
+        PipelineStatus.FAILED.value,
+        PipelineStatus.RUNNING.value,
+    }
+)
+
+#: Statuses that mean "nothing is happening and nothing will" — no stop, no resume.
+TERMINAL_STATUSES: frozenset[str] = frozenset({PipelineStatus.COMPLETED.value})
 
 
 class PhaseStatus(str, Enum):
+    #: The agent is generating right now — no output yet. The row exists so the UI
+    #: can show which agent has the work and for how long.
+    RUNNING = "running"
     PENDING_APPROVAL = "pending_approval"
     APPROVED = "approved"
     REJECTED = "rejected"
+    #: The phase was abandoned mid-flight (cancelled, or the server restarted).
+    FAILED = "failed"
 
 
 class Phase(str, Enum):

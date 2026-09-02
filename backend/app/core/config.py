@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # ── Pipeline ──
     require_approval: bool = True
     enable_debate: bool = True
+    #: A `running` project whose heartbeat is older than this is reported stalled,
+    #: which is what makes Resume available instead of an endless poll. Generous
+    #: enough for a slow local model to finish one phase without being written off.
+    stall_after_seconds: int = 900
+    #: How often the live runner touches `heartbeat_at` while a phase generates.
+    heartbeat_interval_seconds: int = 5
 
     # ── Derived helpers ──
     @property

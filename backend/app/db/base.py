@@ -38,10 +38,12 @@ class Base(DeclarativeBase):
 
 
 def init_db() -> None:
-    """Create tables. Import models so they register on the metadata."""
+    """Create missing tables, then add any columns an existing database is missing."""
     from app.db import models  # noqa: F401
+    from app.db.migrations import run_migrations
 
     Base.metadata.create_all(bind=engine)
+    run_migrations(engine)
 
 
 def get_db() -> Iterator[Session]:

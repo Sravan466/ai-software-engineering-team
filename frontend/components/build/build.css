@@ -1,0 +1,356 @@
+/* ===========================================================================
+   build.css — the review surface.
+
+   Everything here serves one sentence: you cannot approve what you cannot see.
+   The gate used to render two sentences of prose over an Approve button while the
+   agent's actual output — source files, an architecture diagram, an API surface —
+   sat unread in the same response. These are the surfaces that show it, plus the
+   liveness and run controls that make the loop escapable.
+
+   Structure and state only. Every colour, size, radius and duration is a Foundry
+   token from app/globals.css; the per-agent accent arrives as `--agent`, set by
+   the phase that owns the panel.
+   =========================================================================== */
+
+/* ===========================================================================
+   NOW WORKING — who has the work, and for how long
+   The one thing the build view could not say while a model generated.
+   =========================================================================== */
+.working {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid color-mix(in srgb, var(--agent) 45%, transparent);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--agent) 9%, transparent), transparent 42%),
+    var(--bg-panel);
+}
+.working-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.working-line { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; min-width: 0; }
+.working-verb { font-size: var(--t-base); color: var(--ink-2); }
+
+/* A single travelling pulse: it says "in flight", not "n% complete", because the
+   phase genuinely has no measurable progress to report. */
+.working-bar {
+  position: relative;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.working-bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 34%;
+  border-radius: 2px;
+  background: var(--agent);
+  animation: working-sweep 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes working-sweep {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+
+/* The clock. Tabular so the digits don't jitter as the seconds roll. */
+.elapsed {
+  flex: none;
+  font-size: var(--t-md);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+}
+.phase-side .elapsed { font-size: var(--t-sm); color: var(--agent); }
+.phase-tokens { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-3); }
+
+/* ===========================================================================
+   RUN CONTROLS — the ways out of a run
+   =========================================================================== */
+.icon-btn-danger:hover { background: var(--bad-soft); color: var(--bad); }
+
+/* Two-step delete. A modal would interrupt a task that needs no protected focus;
+   this replaces the controls in place, and Escape backs out. */
+.confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 8px 7px 14px;
+  border-radius: var(--r);
+  border: 1px solid rgba(240, 82, 82, 0.4);
+  background: var(--bad-soft);
+  animation: rise var(--tr) ease both;
+}
+.confirm-text { font-size: var(--t-sm); color: var(--ink); }
+
+.notice-detail {
+  margin-top: 2px;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* ===========================================================================
+   THE ARTIFACT — what the agent actually produced
+   =========================================================================== */
+.artifact { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+
+.artifact-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+.artifact-note { margin-left: auto; font-size: var(--t-xs); color: var(--ink-3); }
+
+/* The view switcher reuses the app's segmented control, with room for an icon and
+   a count — the file tab reads "Files 7" before you open it. */
+.seg-btn-icon { display: inline-flex; align-items: center; gap: 7px; }
+.seg-btn-icon svg { width: 14px; height: 14px; opacity: 0.75; }
+.seg-btn-icon[aria-pressed="true"] svg { opacity: 1; }
+.seg-count {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--line-2);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 16px;
+}
+.seg-btn[aria-pressed="true"] .seg-count { background: var(--accent-soft); color: var(--accent); }
+
+/* The shared segmented control is 28px tall, which is right for a mouse and short of
+   the 44px a finger needs. Bumped only on coarse pointers, and only for this strip,
+   so the app's switcher vocabulary is unchanged everywhere it already works. */
+@media (hover: none) {
+  .artifact-bar .seg-btn-icon { min-height: 44px; padding: 0 14px; }
+}
+
+.artifact-view {
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-sunken);
+  animation: rise var(--tr) ease both;
+}
+.artifact-pad { padding: 18px 20px; }
+/* The files view brings its own two-pane frame and scrolls internally. */
+.artifact-files { overflow: hidden; }
+
+.artifact-empty {
+  padding: 20px;
+  font-size: var(--t-base);
+  color: var(--ink-3);
+  background: var(--bg-sunken);
+  border-top: 1px solid var(--line);
+}
+
+/* ===========================================================================
+   FILES — a tree beside the code
+   =========================================================================== */
+.files { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 0; }
+.files-tree {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+.files-tree-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 6px 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.files-tree-head .label { flex: 1; min-width: 0; }
+.files-tree-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 6px 10px; }
+
+.treerow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding-right: 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--tr), color var(--tr);
+}
+.treerow:hover { background: var(--bg-raised); color: var(--ink); }
+.tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-lines { flex: none; color: var(--ink-4); font-size: 10px; }
+.treedir { color: var(--ink-3); }
+.tree-chev { flex: none; display: inline-grid; place-items: center; color: var(--ink-4); transition: transform var(--tr); }
+.tree-chev svg { width: 13px; height: 13px; }
+.tree-chev.open { transform: rotate(90deg); }
+.treefile[aria-current="true"] {
+  background: var(--accent-soft);
+  color: var(--ink);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.treefile[aria-current="true"] .tree-lines { color: var(--ink-3); }
+
+.files-code { min-width: 0; display: flex; flex-direction: column; background: var(--bg-sunken); }
+.file-path { font-size: var(--t-sm); color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.file-facts { display: flex; align-items: center; gap: 10px; flex: none; }
+.file-facts .dim { font-size: var(--t-xs); }
+
+/* ===========================================================================
+   DIAGRAM — the architecture the agent drew and nobody ever saw
+   =========================================================================== */
+.diagram { display: flex; flex-direction: column; gap: 10px; }
+.diagram-frame {
+  padding: 18px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  overflow: auto;
+}
+.diagram-svg { display: flex; justify-content: center; min-width: min-content; }
+/* globals.css floors every bare <svg> at 16x16 so icons don't stretch to fill their
+   box. Mermaid emits a real, viewBox-sized drawing with `width="100%"` — a
+   presentation attribute, which any stylesheet rule outranks — so without this it
+   renders as a 16px speck. */
+.diagram-svg svg { width: 100%; height: auto; flex: 1 1 auto; }
+.diagram-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-3);
+  font-size: var(--t-sm);
+}
+.diagram-foot { display: flex; }
+.diagram-foot .phase-chev { display: inline-grid; place-items: center; transition: transform var(--tr); }
+.diagram-foot .phase-chev.open { transform: rotate(90deg); }
+.diagram-invalid { display: flex; flex-direction: column; gap: 12px; }
+
+/* ===========================================================================
+   DETAILS — the payload as data, not as a bulleted prose dump
+   =========================================================================== */
+.details { display: flex; flex-direction: column; gap: 22px; }
+
+/* Scalars first, in one scannable block: "FastAPI · 12 endpoints · 6 weeks". */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 14px 22px;
+  margin: 0;
+}
+.fact { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.fact dt { font-size: var(--t-xs); color: var(--ink-3); }
+.fact dd {
+  margin: 0;
+  font-size: var(--t-base);
+  color: var(--ink);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.detail-block { display: flex; flex-direction: column; gap: 9px; }
+.detail-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+.detail-count {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-2);
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 17px;
+  font-weight: 400;
+}
+.detail-p { margin: 0; font-size: var(--t-md); line-height: 1.65; color: var(--ink-2); max-width: 72ch; }
+.detail-list { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 5px; }
+.detail-list li { font-size: var(--t-base); line-height: 1.55; color: var(--ink-2); max-width: 72ch; }
+.detail-list li::marker { color: var(--ink-4); }
+/* One step of nesting, expressed once on the container so groups and lists indent
+   alike, with the sub-headings stepping down a level rather than repeating h4. */
+.details-nested {
+  gap: 14px;
+  padding-left: 13px;
+  border-left: 1px solid var(--line);
+}
+.details-nested .detail-h { font-size: var(--t-xs); color: var(--ink-2); font-weight: 500; }
+.details-nested .detail-list li { font-size: var(--t-sm); }
+
+/* A wide table scrolls inside its own well; the panel never scrolls sideways. */
+.detail-table-wrap {
+  overflow-x: auto;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+}
+.detail-table { width: 100%; border-collapse: collapse; font-size: var(--t-sm); }
+.detail-table th {
+  position: sticky;
+  top: 0;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--bg-raised);
+  color: var(--ink-2);
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+.detail-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-2);
+  line-height: 1.5;
+  vertical-align: top;
+}
+.detail-table tbody tr:last-child td { border-bottom: 0; }
+.detail-table tbody tr:hover td { background: var(--bg-raised); }
+.detail-table .mono { font-size: var(--t-xs); color: var(--ink); }
+.cell-list { margin: 0; padding-left: 1.05em; display: flex; flex-direction: column; gap: 3px; }
+.cell-list li::marker { color: var(--ink-4); }
+
+/* ===========================================================================
+   RESPONSIVE — the tree and the code stack before either becomes unusable
+   =========================================================================== */
+@media (max-width: 900px) {
+  .files { grid-template-columns: minmax(0, 1fr); }
+  .files-tree { border-right: 0; border-bottom: 1px solid var(--line); }
+  .files-tree-body { max-height: 190px; }
+  .artifact-note { display: none; }
+  .working { flex-wrap: wrap; }
+}
+
+@media (max-width: 640px) {
+  /* The phase row carries elapsed, tokens, the model id and a chevron on the right.
+     At this width that is more than fits, and the model id is the one piece of it
+     nobody makes a decision from — it stays available in the artifact and analytics. */
+  .phase-model { display: none; }
+  .phase-side { gap: 8px; }
+}
+
+@media (max-width: 620px) {
+  .artifact-bar { padding: 10px 12px; }
+  .artifact-pad { padding: 14px; }
+  .facts { grid-template-columns: minmax(0, 1fr); }
+  .confirm { padding: 10px 12px; }
+  .confirm-text { flex-basis: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The sweep is the only signal that a phase is alive, so it stays — as a static
+     full-width bar rather than a moving one. The clock still ticks. */
+  .working-bar span { animation: none; width: 100%; opacity: 0.55; }
+}
