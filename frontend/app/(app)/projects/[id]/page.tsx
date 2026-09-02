@@ -313,7 +313,6 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   }
 
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
-  const completed = project.status === "completed";
   const tabs: { key: Tab; label: string }[] = [
     { key: "build", label: "Build" },
     { key: "preview", label: "Preview" },
@@ -640,7 +639,13 @@ function BuildTab({
         <div className="notice notice-ok">
           {Icon.check}
           <div className="notice-body">
-            <span className="notice-title">All eight phases approved</span>
+            {/* Counted, not assumed: a run can reach `completed` with a phase that
+                never produced anything, and the header used to say nothing at all. */}
+            <span className="notice-title">
+              {doneCount === PHASES.length
+                ? "All eight phases approved"
+                : `This build is finished — ${doneCount} of ${PHASES.length} phases approved`}
+            </span>
             <span className="notice-text">
               The generated source, the setup steps and the ways of taking this away —
               a .zip, or a repository on your own GitHub — are in Deliver.

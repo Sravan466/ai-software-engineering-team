@@ -74,9 +74,6 @@ export type Project = {
 const DEFAULT_TIMEOUT_MS = 15000;
 const LLM_TIMEOUT_MS = 300000; // 5 min — local generation on CPU is slow
 
-// FastAPI reports failures as {"detail": "..."} — sometimes a list of validation
-// objects. Surfacing the raw body means users read a JSON blob with an HTTP code
-// bolted to the front, so unwrap it into the sentence the backend actually wrote.
 /**
  * A failed request, carrying the code as well as the sentence.
  *
@@ -94,6 +91,9 @@ export class ApiError extends Error {
   }
 }
 
+// FastAPI reports failures as {"detail": "..."} — sometimes a list of validation
+// objects. Surfacing the raw body means users read a JSON blob with an HTTP code
+// bolted to the front, so unwrap it into the sentence the backend actually wrote.
 async function errorMessage(res: Response): Promise<string> {
   const body = await res.text().catch(() => "");
   if (body) {

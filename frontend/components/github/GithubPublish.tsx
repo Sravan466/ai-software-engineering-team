@@ -30,9 +30,11 @@ export default function GithubPublish({
   const [priv, setPriv] = useState(true);
   const [pushing, setPushing] = useState(false);
   const [result, setResult] = useState<GithubPushResult | null>(null);
-  const [error, setError] = useState("");
-  // Kept apart from `error`: one is "we can't reach the feature at all", the other
-  // is "this push failed". They need different words and different ways out.
+  // The failed action travels with its message: "that push didn't go through" is
+  // the wrong sentence for a failed disconnect, and both used to share one string.
+  const [error, setError] = useState<{ action: "push" | "disconnect"; text: string } | null>(null);
+  // Kept apart from `error` again: this one is "we can't reach the feature at all",
+  // which needs different words and a different way out.
   const [unreachable, setUnreachable] = useState("");
   const [checking, setChecking] = useState(false);
   const [notice, setNotice] = useState<"connected" | "error" | "">("");
@@ -85,26 +87,26 @@ export default function GithubPublish({
   }
 
   async function disconnect() {
-    setError("");
+    setError(null);
     try {
       await api.githubDisconnect();
       setResult(null);
       setNotice("");
       await refresh();
     } catch (e: any) {
-      setError(e.message);
+      setError({ action: "disconnect", text: e.message });
     }
   }
 
   async function push() {
     setPushing(true);
-    setError("");
+    setError(null);
     setResult(null);
     try {
       const res = await api.pushToGithub(id, { name: name.trim() || undefined, private: priv });
       setResult(res);
     } catch (e: any) {
-      setError(e.message);
+      setError({ action: "push", text: e.message });
     } finally {
       setPushing(false);
     }
@@ -272,13 +274,15 @@ export default function GithubPublish({
           {Icon.alert}
           <div className="notice-body">
             <span className="notice-title">
-              {status?.connected ? "That push didn't go through" : "GitHub returned an error"}
+              {error.action === "push"
+                ? "That push didn’t go through"
+                : "Couldn’t disconnect from GitHub"}
             </span>
-            <span className="notice-text">{error}</span>
-            {status?.connected && (
+            <span className="notice-text">{error.text}</span>
+            {error.action === "push" && (
               <span className="notice-text">
-                A repository of that name may already exist on @{status.login} — try another name,
-                or disconnect and sign in as a different account.
+                A repository of that name may already exist on @{status?.login} — try another
+                name, or disconnect and sign in as a different account.
               </span>
             )}
           </div>

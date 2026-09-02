@@ -283,13 +283,15 @@
 /* ===========================================================================
    RELAY RAIL — the handoff, made visible
    =========================================================================== */
-/* Each step navigates to that phase in the list below. It used to re-select the
-   tab you were already on, which is a click that looks like a link and isn't. */
+/* Who has the work, in one sentence. It is what the compact rail leans on under
+   620px, where eight codenames cannot fit side by side. */
 .relay-active {
   margin: 0 0 2px;
   font-size: var(--t-sm);
   color: var(--ink-2);
 }
+/* Each step navigates to its phase in the list below. It used to re-select the
+   tab you were already on — a click that looks like a link and isn't. */
 .relay {
   display: flex;
   gap: 6px;
@@ -449,6 +451,13 @@
 .crew-page { max-width: 1180px; margin: 0 auto; padding: 24px 24px 72px; }
 .crew-head { margin-bottom: 20px; }
 
+.crew-h1 {
+  font-family: var(--pixel);
+  font-size: clamp(19px, 2.5vw, 26px);
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.55);
+}
 /* Every number on this page is scripted. This says so once, in prose, where the
    eye lands after the lede — the floor is a reference, and a reference that can
    be mistaken for telemetry is worse than no reference. */
@@ -475,13 +484,6 @@
   background: var(--line-2);
   color: var(--ink-2);
   letter-spacing: 0.1em;
-}
-.crew-h1 {
-  font-family: var(--pixel);
-  font-size: clamp(19px, 2.5vw, 26px);
-  line-height: 1.4;
-  letter-spacing: 0.01em;
-  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.55);
 }
 
 /* ── window chrome ── */
