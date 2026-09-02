@@ -79,8 +79,10 @@ function scalarToString(v: unknown): string {
  */
 export function extractFiles(output: Record<string, unknown> | null | undefined): PayloadFile[] {
   if (!isPlainObject(output)) return [];
-  const files: PayloadFile[] = [];
-  const seen = new Set<string>();
+  // Keyed by path, last occurrence winning — the same rule the backend applies when
+  // it assembles the .zip. Parity is the entire point of this function, so the tie
+  // break has to match too.
+  const byPath = new Map<string, PayloadFile>();
 
   for (const [key, value] of Object.entries(output)) {
     if (!Array.isArray(value)) continue;
@@ -92,8 +94,6 @@ export function extractFiles(output: Record<string, unknown> | null | undefined)
       if (typeof content !== "string" || !content.trim()) continue;
 
       const path = rawPath.trim().replace(/^\/+/, "");
-      if (seen.has(path)) continue;
-      seen.add(path);
 
       const language =
         (typeof item.language === "string" && item.language) ||
@@ -101,7 +101,7 @@ export function extractFiles(output: Record<string, unknown> | null | undefined)
         (typeof item.tool === "string" && item.tool) ||
         "";
 
-      files.push({
+      byPath.set(path, {
         path,
         content,
         language,
@@ -110,7 +110,7 @@ export function extractFiles(output: Record<string, unknown> | null | undefined)
       });
     }
   }
-  return files.sort((a, b) => a.path.localeCompare(b.path));
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 /** Output keys that produced at least one file — the details pass must not repeat them. */

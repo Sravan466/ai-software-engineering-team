@@ -112,6 +112,12 @@ class PipelineRunner:
         Safe to hand to a background task: it owns `project.status` for the whole
         run and leaves it in a terminal state (or `cancelled`) on every path out.
         """
+        # How many times each phase has been started by *this* call. The loop derives
+        # its next move from the graph checkpoint, so a node that returned without
+        # producing output and without advancing would be re-run forever — an
+        # unbounded retry against a paid model. One retry, then stop and say so.
+        attempts: dict[str, int] = {}
+
         try:
             while True:
                 self._raise_if_cancelled(db, project)
@@ -131,7 +137,19 @@ class PipelineRunner:
                     self._finalize(db, project)
                     return project
 
-                self._run_phase(db, project, next_node if started else PHASE_ORDER[0].value)
+                phase_key = next_node if started else PHASE_ORDER[0].value
+                attempts[phase_key] = attempts.get(phase_key, 0) + 1
+                if attempts[phase_key] > 2:
+                    self._fail(
+                        db,
+                        project,
+                        f"The {phase_key} phase produced no usable output after "
+                        "repeated attempts, so the run was stopped rather than retried "
+                        "indefinitely. Resume to try again.",
+                    )
+                    return project
+
+                self._run_phase(db, project, phase_key)
         except CancelledRun:
             self._settle_cancelled(db, project)
             return project

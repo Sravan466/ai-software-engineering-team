@@ -180,8 +180,14 @@ def _drive_reject(project_id: str, feedback: str) -> None:
 
 
 def _strand(db: Session, project_id: str, message: str) -> None:
-    """Last resort: never leave a project `running` with nothing running."""
+    """Last resort: never leave a project `running` with nothing running.
+
+    This runs on the session the crash happened on, whose transaction may already be
+    poisoned — so roll back first. Without that the recovery write fails too and the
+    project stays `running` forever, which is the dead end this whole change removes.
+    """
     try:
+        db.rollback()
         project = db.get(Project, project_id)
         if project is not None and project.status == PipelineStatus.RUNNING.value:
             project.status = PipelineStatus.FAILED.value
