@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, type LocalStatus, type RouterStatus } from "@/lib/api";
@@ -60,7 +60,7 @@ export default function NewBuildPage() {
     probe();
   }, [probe]);
 
-  const options = modelOptions(local, models);
+  const options = useMemo(() => modelOptions(local, models), [local, models]);
   const blocker = runtimeBlocker(config, local, models);
 
   async function start() {

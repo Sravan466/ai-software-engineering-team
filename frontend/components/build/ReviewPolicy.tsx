@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type ApprovalMode, type Project } from "@/lib/api";
 import { APPROVAL_BY_ID, APPROVAL_MODES } from "@/components/shell/phases";
 import { Icon } from "@/components/shell/icons";
@@ -29,6 +29,29 @@ export default function ReviewPolicy({
   const [cap, setCap] = useState(
     project.cost_cap_usd === null ? "" : String(project.cost_cap_usd),
   );
+
+  // It floats over the page, so it dismisses the way a floating thing is expected
+  // to: Escape from anywhere inside it, or a click outside. Escape returns focus to
+  // the control that opened it rather than dropping the keyboard at the page root.
+  const root = useRef<HTMLDivElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      toggle.current?.focus();
+    };
+    const onDown = (e: MouseEvent) => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [open]);
 
   const current = APPROVAL_BY_ID[project.approval_mode] ?? APPROVAL_MODES[0];
   const settled =
@@ -61,9 +84,10 @@ export default function ReviewPolicy({
   }
 
   return (
-    <div className="policy">
+    <div className="policy" ref={root}>
       <button
         type="button"
+        ref={toggle}
         className="badge policy-toggle"
         aria-expanded={open}
         aria-controls="review-policy"
