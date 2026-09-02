@@ -290,6 +290,25 @@ class PipelineRunner:
         return self.continue_run(db, project)
 
     @staticmethod
+    def _delete_rows(db: Session, project: Project, rows: list[PhaseResult]) -> None:
+        """Delete phase rows through the ORM, and forget them properly.
+
+        A bulk `query(...).delete()` is faster and wrong here. These sessions are
+        `expire_on_commit=False` and `Project.phases` cascades `delete-orphan`, so a
+        bulk delete leaves the deleted rows sitting in the identity map and in any
+        loaded collection — and a later flush can emit an UPDATE against a row that is
+        no longer there, which fails the whole run with a `StaleDataError` naming a
+        table rather than anything a person could act on. Deleting each instance and
+        expiring the collection keeps the session's picture and the database's the
+        same. There are never more than eight of these.
+        """
+        if not rows:
+            return
+        for row in rows:
+            db.delete(row)
+        db.expire(project, ["phases"])
+
+    @staticmethod
     def _clear_generated_mockup(db: Session, project_id: str) -> bool:
         """Drop an auto-drawn mockup so a rebuilt front end gets a fresh one.
 
@@ -322,10 +341,16 @@ class PipelineRunner:
         downstream = self._phases_after(phase_key)
         if not downstream:
             return
-        db.query(PhaseResult).filter(
-            PhaseResult.project_id == project.id,
-            PhaseResult.phase.in_(downstream),
-        ).delete(synchronize_session=False)
+        self._delete_rows(
+            db,
+            project,
+            db.query(PhaseResult)
+            .filter(
+                PhaseResult.project_id == project.id,
+                PhaseResult.phase.in_(downstream),
+            )
+            .all(),
+        )
 
         # The mockup is a picture of the front end. If the front end is being rebuilt,
         # the picture is of code that will not exist. Re-running that phase draws a
@@ -401,19 +426,27 @@ class PipelineRunner:
         # stack identical dead rows every time someone resumes. A *rejected* attempt
         # is different — that one generated real output the reviewer turned down, and
         # that history is worth keeping.
-        db.query(PhaseResult).filter(
-            PhaseResult.project_id == project.id,
-            PhaseResult.phase == phase_key,
-            PhaseResult.status == PhaseStatus.FAILED.value,
-        ).delete(synchronize_session=False)
+        self._delete_rows(
+            db,
+            project,
+            db.query(PhaseResult)
+            .filter(
+                PhaseResult.project_id == project.id,
+                PhaseResult.phase == phase_key,
+                PhaseResult.status == PhaseStatus.FAILED.value,
+            )
+            .all(),
+        )
 
         project.current_phase = phase_key
         project.phase_started_at = now
         project.heartbeat_at = now
         project.status = PipelineStatus.RUNNING.value
-        # Moving means the pipeline is no longer parked; nothing is waiting on anyone.
+        # Moving means the pipeline is no longer parked; nothing is waiting on anyone,
+        # and whatever stopped the last attempt has been superseded by this one.
         project.gate_kind = None
         project.gate_note = None
+        project.last_error = None
 
         row = PhaseResult(
             project_id=project.id,
@@ -452,6 +485,8 @@ class PipelineRunner:
         project.status = PipelineStatus.AWAITING_APPROVAL.value
         project.gate_kind = gate.kind
         project.gate_note = gate.note
+        # "Waiting for you" and "here is why the run died" cannot both be true.
+        project.last_error = None
         db.commit()
         log.info("Waiting on review: %s (%s)", project.id, gate.kind)
 

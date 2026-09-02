@@ -268,6 +268,16 @@ def _drive_redo(project_id: str, phase: str, feedback: str) -> None:
         db.close()
 
 
+#: What a reviewer is told when the platform itself fell over, rather than a model.
+#: The exception text goes to the log, where someone can act on it; a field the UI
+#: renders should not read "UPDATE statement on table 'phase_results'".
+_CRASHED = (
+    "The build stopped because this platform hit an internal error, not because a "
+    "model failed. Everything already approved is kept — resume to pick it up from "
+    "the last checkpoint. The details are in the backend log."
+)
+
+
 def _strand(db: Session, project_id: str, message: str) -> None:
     """Last resort: never leave a project `running` with nothing running.
 
@@ -280,8 +290,9 @@ def _strand(db: Session, project_id: str, message: str) -> None:
         project = db.get(Project, project_id)
         if project is not None and project.status == PipelineStatus.RUNNING.value:
             project.status = PipelineStatus.FAILED.value
-            project.last_error = message
+            project.last_error = _CRASHED
             db.commit()
+            log.error("Stranded %s: %s", project_id, message)
     except Exception:  # noqa: BLE001
         db.rollback()
 
