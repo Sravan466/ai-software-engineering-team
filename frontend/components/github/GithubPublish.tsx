@@ -117,7 +117,7 @@ export default function GithubPublish({
       <div className="sec-head">
         <h2 className="label">Publish to GitHub</h2>
         <span className="rule" />
-        {status?.connected && status.login && (
+        {status?.connected && !unreachable && status.login && (
           <span className="badge badge-ok">
             <span className="dot dot-ok" aria-hidden="true" />@{status.login}
           </span>
@@ -126,7 +126,10 @@ export default function GithubPublish({
 
       {/* The feature itself is out of reach — the backend is down, or older than
           the router. Every other error surface in this app names the problem and
-          offers a way forward; this one used to print a bare "Not Found". */}
+          offers a way forward; this one used to print a bare "Not Found".
+          While it stands it replaces the card's body rather than sitting on top of
+          it: the last known status is stale, and an enabled "Create repo and push"
+          beneath a "not reachable" alert is a button that cannot work. */}
       {unreachable && (
         <div className="notice notice-bad" role="alert">
           {Icon.alert}
@@ -152,7 +155,7 @@ export default function GithubPublish({
       {!status && !unreachable && <SkeletonLines lines={2} />}
 
       {/* Not configured by the operator yet. */}
-      {status && !status.configured && (
+      {status && !unreachable && !status.configured && (
         <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6 }}>
           GitHub publishing isn&apos;t enabled on this server yet. The operator needs to add a free{" "}
           <a
@@ -169,7 +172,7 @@ export default function GithubPublish({
       )}
 
       {/* Configured, not connected → Connect. */}
-      {status && status.configured && !status.connected && (
+      {status && !unreachable && status.configured && !status.connected && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6, maxWidth: "58ch" }}>
             Sign in with your own GitHub account and we&apos;ll create a fresh repository on it, then
@@ -194,7 +197,7 @@ export default function GithubPublish({
       )}
 
       {/* Connected → push form. */}
-      {status && status.connected && (
+      {status && !unreachable && status.connected && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {result ? (
             <div className="notice">

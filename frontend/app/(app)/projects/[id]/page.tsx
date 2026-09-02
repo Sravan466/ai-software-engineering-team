@@ -141,7 +141,12 @@ function waitingFor(project: Project, index: number): string {
   const prevName = AGENT_BY_KEY[prev.key].codename;
   switch (nodeStateFor(project, prev.key)) {
     case "running":
-      return `Queued — ${prevName} is still working`;
+      // A stalled run's phase row still says `running`; nothing is driving it.
+      // Reading the row alone is how the badge could say "Stalled" while the
+      // step beneath it said the phase in front was still working.
+      return effectiveStatus(project) === "stalled"
+        ? `Queued — ${prevName} stopped responding mid-phase`
+        : `Queued — ${prevName} is still working`;
     case "gate":
       return `Queued — waiting on your review of ${prevName}'s work`;
     case "redo":
@@ -155,8 +160,16 @@ function waitingFor(project: Project, index: number): string {
   }
 }
 
-/** The one-line answer to "who has the work". Used by the compact relay. */
+/**
+ * The one-line answer to "who has the work". Used by the compact relay.
+ *
+ * Reads the project's *effective* status, not the phase row alone. A stalled run
+ * is one whose row still says `running` while nothing is driving it, so a summary
+ * built only from the row would announce "FORGE is working" directly between a
+ * badge reading "Stalled" and a panel offering to resume it.
+ */
 function relaySummary(project: Project, doneCount: number): string {
+  const stalled = effectiveStatus(project) === "stalled";
   const live = PHASES.find((ph) => {
     const ns = nodeStateFor(project, ph.key);
     return ns === "running" || ns === "gate" || ns === "redo";
@@ -170,7 +183,7 @@ function relaySummary(project: Project, doneCount: number): string {
   const ns = nodeStateFor(project, live.key);
   if (ns === "gate") return `${name} is waiting on you`;
   if (ns === "redo") return `${name} is running again`;
-  return `${name} is working`;
+  return stalled ? `${name} stopped responding mid-phase` : `${name} is working`;
 }
 
 /** "SCOPE", "SCOPE and ATLAS", "SCOPE, ATLAS and FORGE". */
@@ -201,10 +214,12 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("build");
-  // Which phase the relay last sent you to. The counter is what makes clicking
-  // the same step twice work — the key alone would look unchanged to the effect
-  // that does the scrolling.
-  const [jump, setJump] = useState<{ key: string; n: number } | null>(null);
+  // Which phase the relay is sending you to. A pending instruction, not a
+  // record of where you last went: PhaseList clears it the moment it acts, or a
+  // tab round-trip — which unmounts and remounts that list with the same value
+  // still sitting here — would scroll you back to a phase you already left.
+  const [jump, setJump] = useState<{ key: string } | null>(null);
+  const clearJump = useCallback(() => setJump(null), []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -380,17 +395,29 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             const ns = nodeStateFor(project, ph.key);
             const agent = AGENT_BY_KEY[ph.key];
             const live = ns === "running" || ns === "gate";
-            const what = ns === "pending" ? waitingFor(project, i) : NODE_STATUS[ns];
+            // A stalled run's row still says `running`. The summary above and the
+            // steps behind it already say otherwise; the step itself has to agree.
+            const what =
+              ns === "pending"
+                ? waitingFor(project, i)
+                : ns === "running" && status === "stalled"
+                  ? "Stopped responding mid-phase"
+                  : NODE_STATUS[ns];
             return (
               <li key={ph.key}>
                 <button
                   className={`relay-step ${ns}`}
                   style={{ ["--agent" as string]: agent.accent }}
                   aria-current={live ? "step" : undefined}
-                  aria-controls={`phase-${ph.key}`}
+                  // The phase rows only exist while the Build tab is mounted, and
+                  // an aria-controls pointing at an absent id sends assistive tech
+                  // nowhere. The click still works from any tab — it switches first.
+                  aria-controls={tab === "build" ? `phase-${ph.key}` : undefined}
                   onClick={() => {
                     setTab("build");
-                    setJump((j) => ({ key: ph.key, n: (j?.n ?? 0) + 1 }));
+                    // A fresh object every click, so asking for the same phase
+                    // twice is two instructions rather than one unchanged value.
+                    setJump({ key: ph.key });
                   }}
                   title={`${agent.codename} · ${agent.role} — ${what}`}
                 >
@@ -454,6 +481,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             act={act}
             id={id}
             jump={jump}
+            onJumpDone={clearJump}
             onDeliver={() => setTab("summary")}
           />
         )}
@@ -585,6 +613,7 @@ function BuildTab({
   act,
   id,
   jump,
+  onJumpDone,
   onDeliver,
 }: {
   project: Project;
@@ -592,8 +621,9 @@ function BuildTab({
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
-  /** The phase the relay last pointed at, if any. */
-  jump: { key: string; n: number } | null;
+  /** A phase the relay is asking us to go to, if any. */
+  jump: { key: string } | null;
+  onJumpDone: () => void;
   onDeliver: () => void;
 }) {
   const pct = localPct(project);
@@ -685,7 +715,7 @@ function BuildTab({
       </div>
 
       <div className="card card-flush">
-        <PhaseList project={project} jump={jump} />
+        <PhaseList project={project} jump={jump} onJumpDone={onJumpDone} />
       </div>
 
       {state === "completed" && analytics && (
@@ -724,35 +754,49 @@ function BuildTab({
 function PhaseList({
   project,
   jump,
+  onJumpDone,
 }: {
   project: Project;
-  jump: { key: string; n: number } | null;
+  jump: { key: string } | null;
+  onJumpDone: () => void;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [landed, setLanded] = useState<string | null>(null);
+  const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
+
+  // The scroll and the highlight outlive the instruction that started them, so
+  // they are torn down on unmount rather than by the effect below — which
+  // re-runs the instant `jump` is cleared.
+  useEffect(
+    () => () => {
+      if (timers.current.raf) cancelAnimationFrame(timers.current.raf);
+      if (timers.current.fade) clearTimeout(timers.current.fade);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!jump) return;
-    const row = latestRow(project, jump.key);
+    const { key } = jump;
+    const row = latestRow(project, key);
     const hasDoc = Boolean(row && row.status !== "running" && (row.content_md || row.output));
-    if (hasDoc) setOpen((o) => ({ ...o, [jump.key]: true }));
-    setLanded(jump.key);
+    if (hasDoc) setOpen((o) => ({ ...o, [key]: true }));
+    setLanded(key);
     // The tab panel it lives in mounts in this same commit, so wait a frame for
     // layout before asking the browser to scroll to it.
-    const raf = requestAnimationFrame(() => {
+    timers.current.raf = requestAnimationFrame(() => {
       document
-        .getElementById(`phase-${jump.key}`)
+        .getElementById(`phase-${key}`)
         ?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
-    const clear = setTimeout(() => setLanded(null), 1600);
-    return () => {
-      cancelAnimationFrame(raf);
-      clearTimeout(clear);
-    };
-    // Deliberately keyed on the click, not on the project: a poll landing mid-read
-    // must never re-scroll the page under someone.
+    timers.current.fade = setTimeout(() => setLanded(null), 1600);
+    // Acted on, so it stops being pending. Without this the value would still be
+    // here on the next mount of this list and scroll the page again.
+    onJumpDone();
+    // `project` is deliberately absent: a 2.5s poll landing mid-read must never
+    // re-scroll the page under someone.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jump?.key, jump?.n]);
+  }, [jump, onJumpDone]);
 
   return (
     <div className="phases">
@@ -874,6 +918,13 @@ function PreviewTab({ id }: { id: string }) {
  * run produced, so a build that stopped after two phases still advertised a
  * security review and a Dockerfile. Files carry the phase that wrote them and
  * every doc is `docs/<phase>.md`, so the row can simply be read off the artifacts.
+ *
+ * The count is files *surviving in the assembled project*, which is not always
+ * the number a phase wrote: `assemble` dedupes by path and lets a later phase
+ * win, stamping the survivor with the last writer. That makes it the right
+ * number for "what is in the archive" and the wrong one for "what this agent
+ * produced", so the chip says which it means. Membership comes from the docs,
+ * which are appended per phase and never collapse.
  */
 function producedByPhase(art: Artifacts): Map<string, number> {
   const byPhase = new Map<string, number>();
@@ -885,6 +936,11 @@ function producedByPhase(art: Artifacts): Map<string, number> {
     if (!byPhase.has(key)) byPhase.set(key, 0);
   }
   return byPhase;
+}
+
+/** A run that can still produce something hasn't finished failing to. */
+function stillRunning(status: string): boolean {
+  return status === "created" || status === "running" || status === "awaiting_approval";
 }
 
 function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
@@ -950,7 +1006,12 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
                   <span
                     key={ph.key}
                     className="badge badge-mono"
-                    title={`${AGENT_BY_KEY[ph.key].codename} · ${ph.name}`}
+                    title={
+                      `${AGENT_BY_KEY[ph.key].codename} · ${ph.name}` +
+                      (files > 0
+                        ? ` — ${files} ${files === 1 ? "file" : "files"} in the archive`
+                        : "")
+                    }
                   >
                     {ph.deliver}
                     {files > 0 && <b className="deliver-n">{files}</b>}
@@ -963,10 +1024,15 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
               Nothing yet — no phase has produced a file or a document.
             </p>
           )}
+          {/* "Produced nothing" is a verdict, and a phase that hasn't had its turn
+              has not earned one. While the run can still reach them, they simply
+              haven't got there yet. */}
           {shipped.length > 0 && silent.length > 0 && (
             <p className="field-hint" style={{ margin: 0 }}>
               {joinNames(silent.map((ph) => AGENT_BY_KEY[ph.key].codename))}{" "}
-              {silent.length === 1 ? "has" : "have"} not produced anything in this run.
+              {stillRunning(art.status)
+                ? `${silent.length === 1 ? "hasn’t" : "haven’t"} produced anything yet.`
+                : `produced nothing in this run.`}
             </p>
           )}
         </div>
