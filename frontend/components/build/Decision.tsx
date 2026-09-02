@@ -115,8 +115,25 @@ export default function Decision({
     api.getPreview(id).then(setPreview).catch(() => setPreview(null));
   }, [wantsBuild, id, reloads]);
 
+  // The mockup is drawn alongside the pipeline, so on a fast run it can still be
+  // generating when this review opens. Without this the Mockup tab would simply be
+  // missing, and the reviewer would approve a build with no picture — which is the
+  // thing folding it into the Frontend phase was meant to fix.
+  const awaitingMockup = wantsBuild && !preview?.html;
+  useEffect(() => {
+    if (!awaitingMockup) return;
+    const timer = setInterval(() => {
+      api.getPreview(id).then(setPreview).catch(() => {});
+    }, 8000);
+    return () => clearInterval(timer);
+  }, [awaitingMockup, id]);
+
   const files = useMemo(() => (art ? artifactFiles(art.files) : []), [art]);
 
+  // On a whole-build review the gate phase is Ledger, which is the least likely
+  // recipient of "the auth flow is wrong". Nothing is assumed: the reviewer aims the
+  // note at a file or a panel first.
+  const mustAim = wantsBuild && !target;
   const redoPhase = target?.phase || gatePhase;
   const redoAgent = AGENT_BY_KEY[redoPhase];
 
@@ -136,7 +153,7 @@ export default function Decision({
 
   async function send() {
     const text = note.trim();
-    if (!text || !redoPhase || sending || busy) return;
+    if (!text || !redoPhase || mustAim || sending || busy) return;
     const message = target?.path ? `Rewrite \`${target.path}\` — ${text}` : text;
     setSending(true);
     const sent = await act(() => api.redo(id, redoPhase, message));
@@ -153,7 +170,7 @@ export default function Decision({
     <section className={`decision decision-${kind}`} aria-labelledby="decision-title">
       <header className="decision-head">
         <span className="decision-mark" aria-hidden="true">
-          {kind === "security" ? Icon.alert : Icon.check}
+          {kind === "security" || kind === "cost" ? Icon.alert : Icon.check}
         </span>
         <div className="decision-headings">
           <h2 id="decision-title">{copy.title}</h2>
@@ -186,7 +203,7 @@ export default function Decision({
             files={files}
             preview={preview}
             onRedo={aim}
-            onRedoFile={(file) => aim(file.sourceKey, file.path)}
+            onRedoFile={(file) => file.phase && aim(file.phase, file.path)}
           />
         )}
       </div>
@@ -212,6 +229,8 @@ export default function Decision({
                   Send <code className="mono">{target.path}</code> back to{" "}
                   {redoAgent?.codename ?? redoPhase}
                 </>
+              ) : mustAim ? (
+                <>Or send part of it back — pick a file or a panel above first</>
               ) : (
                 <>Or send it back to {redoAgent?.codename ?? redoPhase} with a note</>
               )}
@@ -225,7 +244,7 @@ export default function Decision({
                   : "e.g. drop the social feed and focus on the core loop"
               }
               value={note}
-              disabled={busy}
+              disabled={busy || mustAim}
               onChange={(e) => setNote(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") send();
@@ -242,7 +261,11 @@ export default function Decision({
               Whole phase instead
             </button>
           )}
-          <button className="btn btn-danger" disabled={busy || !note.trim()} onClick={send}>
+          <button
+            className="btn btn-danger"
+            disabled={busy || mustAim || !note.trim()}
+            onClick={send}
+          >
             {sending && <span className="btn-spinner" aria-hidden="true" />}
             {Icon.undo} {rebuilds ? "Send back and rebuild" : "Send back"}
           </button>
@@ -434,17 +457,21 @@ function ShipReview({
         <div className="artifact-view artifact-files" style={{ maxHeight: 520 }}>
           <FileBrowser
             files={files}
-            renderAction={(file) => (
-              <button
-                className="btn btn-sm btn-danger"
-                onClick={() => onRedoFile(file)}
-                title={`Send this file back to ${
-                  AGENT_BY_KEY[file.sourceKey]?.codename ?? file.sourceKey
-                }`}
-              >
-                {Icon.undo} Redo this file
-              </button>
-            )}
+            renderAction={(file) =>
+              // Only when the file knows which phase wrote it — there is no honest
+              // redo for a file we cannot address.
+              file.phase ? (
+                <button
+                  className="btn btn-sm btn-danger"
+                  onClick={() => onRedoFile(file)}
+                  title={`Send this file back to ${
+                    AGENT_BY_KEY[file.phase]?.codename ?? file.phase
+                  }`}
+                >
+                  {Icon.undo} Redo this file
+                </button>
+              ) : null
+            }
           />
         </div>
       )}

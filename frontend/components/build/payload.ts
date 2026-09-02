@@ -23,6 +23,15 @@ export type PayloadFile = {
   language: string;
   /** The output key it came from — `files`, `test_files`, `ci_cd`, … */
   sourceKey: string;
+  /**
+   * The pipeline phase that wrote it, when the list was assembled across phases.
+   *
+   * Separate from `sourceKey` on purpose: that one names a key *within* an agent's
+   * output, and overloading it with a phase key would mean `POST /redo` got sent
+   * `"test_files"` the day anyone wired a redo action into a single-phase browser.
+   * Absent means "we do not know who to send this back to" — so don't offer.
+   */
+  phase?: string;
   lines: number;
 };
 
@@ -342,6 +351,7 @@ export function artifactFiles(
     content: f.content,
     language: f.language,
     sourceKey: f.phase,
+    phase: f.phase,
     lines: f.content.split("\n").length,
   }));
 }

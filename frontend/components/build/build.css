@@ -460,12 +460,17 @@
 }
 .decision-consequence > svg { width: 14px; height: 14px; flex: none; margin-top: 2px; color: var(--accent); }
 
-/* A stop Warden raised is not the same event as a decision you scheduled. */
-.decision-security { border-color: rgba(240, 82, 82, 0.42); }
-.decision-security .decision-head {
+/* A stop the run raised for itself is not the same event as one you scheduled, and
+   an over-budget Ship review must not look like a clean one — the only thing telling
+   them apart used to be a line of prose under an identical green check. */
+.decision-security,
+.decision-cost { border-color: rgba(240, 82, 82, 0.42); }
+.decision-security .decision-head,
+.decision-cost .decision-head {
   background: linear-gradient(180deg, var(--bad-soft), transparent);
 }
-.decision-security .decision-mark {
+.decision-security .decision-mark,
+.decision-cost .decision-mark {
   border-color: rgba(240, 82, 82, 0.4);
   background: var(--bad-soft);
   color: var(--bad);

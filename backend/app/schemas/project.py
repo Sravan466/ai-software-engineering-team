@@ -43,7 +43,9 @@ class ProjectCreate(BaseModel):
         gt=0,
         description=(
             "Projected monthly run cost above which the build interrupts itself. "
-            "Omit for no cap — zero would be indistinguishable from one."
+            "Omit for no cap — zero would be indistinguishable from one. Only "
+            "`checkpoints` acts on it; the other modes are explicit choices about "
+            "being interrupted, and keep the value for when you switch back."
         ),
     )
     #: Legacy switch, still honoured when `approval_mode` is absent.

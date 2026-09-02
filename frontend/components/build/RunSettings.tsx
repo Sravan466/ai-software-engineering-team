@@ -141,6 +141,10 @@ export function runtimeBlocker(
 
   if (config.routing.backend === "manual") {
     if (!config.model) {
+      // Nothing pinned because nothing was *found* — but if neither probe answered,
+      // "found nothing" and "could not ask" look identical from here, and only one of
+      // them is a reason to refuse to start.
+      if (!local && !models) return null;
       return {
         title: "No model to pin",
         text:

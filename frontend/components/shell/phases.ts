@@ -78,13 +78,6 @@ export const ROUTING_MODES: RoutingModeMeta[] = [
   },
 ];
 
-export const ROUTING_BY_ID: Record<string, RoutingModeMeta> = Object.fromEntries(
-  ROUTING_MODES.map((m) => [m.id, m]),
-);
-export const ROUTING_BY_BACKEND: Record<string, RoutingModeMeta> = Object.fromEntries(
-  ROUTING_MODES.map((m) => [m.backend, m]),
-);
-
 // ── how often the run stops for you ─────────────────────────────────────────
 // Gating every handoff identically is what turned review into a rubber stamp:
 // the same card and the same two buttons whether an agent renamed a field or

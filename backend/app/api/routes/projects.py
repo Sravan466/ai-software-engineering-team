@@ -380,6 +380,8 @@ def redo_phase(
     """
     if payload.phase not in {p.value for p in PHASE_ORDER}:
         raise HTTPException(400, f"'{payload.phase}' is not a phase of this pipeline.")
+    if not payload.feedback.strip():
+        raise HTTPException(400, "Say what to change — an agent cannot act on blank feedback.")
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "redo")

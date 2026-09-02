@@ -69,24 +69,29 @@ def _number(value: object) -> Optional[float]:
         return None
 
 
-def _sum_column(rows: object, *fields: str) -> Optional[float]:
-    """Total one column of a line-item list, taking the first field that has values.
+def _sum_rows(rows: object, *fields: str) -> Optional[float]:
+    """Total a line-item list, taking each row's first present field.
 
     The fields are alternatives for the same number, not separate costs: a model that
     gives a range writes `high_usd`, one that gives a point estimate may only write
-    `low_usd`, and adding both would double-count the same line.
+    `low_usd`, and adding both would double-count the line. The choice is made *per
+    row*, because one list routinely mixes the two — picking a winning field for the
+    whole list silently drops every row that used the other one.
     """
     if not isinstance(rows, list):
         return None
-    for field in fields:
-        found = [
-            value
-            for value in (_number(r.get(field)) for r in rows if isinstance(r, dict))
-            if value is not None
-        ]
-        if found:
-            return sum(found)
-    return None
+    total = 0.0
+    counted = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in fields:
+            value = _number(row.get(field))
+            if value is not None:
+                total += value
+                counted = True
+                break
+    return total if counted else None
 
 
 def projected_monthly_cost(output: object) -> Optional[float]:
@@ -99,21 +104,30 @@ def projected_monthly_cost(output: object) -> Optional[float]:
     if not isinstance(output, dict):
         return None
 
+    reported: Optional[float] = None
     for key in ("total_monthly_high_usd", "total_monthly_low_usd"):
-        total = _number(output.get(key))
-        if total is not None:
-            return total
+        reported = _number(output.get(key))
+        if reported is not None:
+            break
+
+    # A reported total above zero is the answer. A reported *zero* is usually a field
+    # the model left at its placeholder while itemising real money underneath it, and
+    # taking it at face value is how a $490/month build slips under a $100 cap.
+    if reported:
+        return reported
 
     # Infrastructure and third-party spend are different money and both count.
     parts = [
         total
         for total in (
-            _sum_column(output.get("monthly_infra_cost"), "high_usd", "low_usd"),
-            _sum_column(output.get("api_or_third_party_cost"), "monthly_usd"),
+            _sum_rows(output.get("monthly_infra_cost"), "high_usd", "low_usd"),
+            _sum_rows(output.get("api_or_third_party_cost"), "monthly_usd"),
         )
         if total is not None
     ]
-    return sum(parts) if parts else None
+    if parts:
+        return sum(parts)
+    return reported
 
 
 # ── the decision ─────────────────────────────────────────────────────────────
@@ -175,15 +189,11 @@ def cost_overrun_note(project, output: object) -> Optional[str]:
 
 
 def _security_note(severe: list[dict]) -> str:
-    """"Warden raised 2 high-severity findings (SQL injection, secret exposure)." """
-    kinds = [
-        str(f.get("category") or f.get("title") or "").strip()
-        for f in severe
-        if str(f.get("category") or f.get("title") or "").strip()
-    ]
+    """"Warden raised 2 findings at high severity or above — SQL injection, XSS." """
+    named = (str(f.get("category") or f.get("title") or "").strip() for f in severe)
+    # Deduplicate before taking three, or four findings across three categories can
+    # report two of them and drop the one the reviewer most needed to see.
+    kinds = list(dict.fromkeys(k for k in named if k))[:3]
     count = len(severe)
     subject = f"{count} finding{'' if count == 1 else 's'} at high severity or above"
-    if kinds:
-        shown = ", ".join(dict.fromkeys(kinds[:3]))
-        return f"Warden raised {subject} — {shown}."
-    return f"Warden raised {subject}."
+    return f"Warden raised {subject} — {', '.join(kinds)}." if kinds else f"Warden raised {subject}."

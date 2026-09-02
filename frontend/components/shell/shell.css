@@ -293,7 +293,6 @@
   padding: 12px 14px 14px;
   border-top: 1px solid var(--line);
 }
-.composer-opts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .composer-submit { display: flex; align-items: center; gap: 12px; }
 .composer-hint { font-size: var(--t-xs); color: var(--ink-3); }
 

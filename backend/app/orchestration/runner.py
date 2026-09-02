@@ -197,6 +197,11 @@ class PipelineRunner:
         # requested from, which is not necessarily the phase being re-run.
         gate_phase = project.current_phase or phase_key
         fallback = Gate(project.gate_kind or GateKind.PHASE.value, project.gate_note)
+        # Phases built on top of the one being replaced. They are about to be rebuilt,
+        # so they are dropped from both the database and the graph's own memory — an
+        # agent re-running against the discarded build's outputs is the same defect
+        # this rewind exists to fix, one layer down.
+        stale = set(self._phases_after(phase_key)) if gate_phase != phase_key else set()
 
         # The attempt being sent back keeps its place in the history.
         self._mark_phase(db, project, phase_key, PhaseStatus.REJECTED.value, feedback=feedback)
@@ -217,7 +222,7 @@ class PipelineRunner:
                         prior_outputs={
                             k: v
                             for k, v in values.get("prior_outputs", {}).items()
-                            if k != phase_key
+                            if k != phase_key and k not in stale
                         },
                         feedback=feedback,
                     )
@@ -226,13 +231,15 @@ class PipelineRunner:
                     from app.orchestration.graph import _serialize_result
 
                     last_result = _serialize_result(phase_key, agent.title, result)
+                    kept = {
+                        key: value
+                        for key, value in values.get("prior_outputs", {}).items()
+                        if key not in stale
+                    }
                     graph.update_state(
                         cfg,
                         {
-                            "prior_outputs": {
-                                **values.get("prior_outputs", {}),
-                                phase_key: result.output,
-                            },
+                            "prior_outputs": {**kept, phase_key: result.output},
                             "last_phase": phase_key,
                             "last_result": last_result,
                             "feedback": {**values.get("feedback", {}), phase_key: feedback},
@@ -249,6 +256,13 @@ class PipelineRunner:
             return project
 
         self._complete_row(db, project, row, last_result)
+        if stale:
+            # Before the cancellation check, not after: a Stop pressed in that window
+            # would otherwise leave a build whose backend is new and whose tests,
+            # findings and costs describe the code it replaced — and `artifacts.assemble`
+            # would hand out both halves in one .zip without a word.
+            self._discard_after(db, project, phase_key)
+
         if self._cancel_requested(db, project):
             self._settle_cancelled(db, project)
             return project
@@ -261,35 +275,49 @@ class PipelineRunner:
             self._park(db, project, gate or fallback)
             return project
 
-        # An *earlier* phase changed, so everything built on top of it is now a review
-        # of code that no longer exists — Sieve's tests, Warden's findings, Ledger's
-        # numbers. Returning the reviewer to a Ship review still showing those would
-        # invite them to approve a security review of a build that was replaced. Drop
-        # what was derived from the old output and rebuild forward instead.
-        #
-        # Only now, not before the agent ran: the database and the checkpoint move
-        # together, so a provider failure mid-redo leaves the run exactly as it was
-        # rather than with a hole where the downstream phases used to be.
-        self._discard_after(db, project, phase_key)
+        # Everything built on top of the replaced phase is gone (above); rebuild it.
+        # The discard waits until the agent has returned, so a provider failure
+        # mid-redo leaves the run exactly as it was rather than with a hole where the
+        # downstream phases used to be.
         project.current_phase = phase_key
         db.commit()
+        if phase_key == Phase.FRONTEND_ENGINEER.value:
+            # This path re-runs the phase itself, so `_run_phase`'s hook never fires.
+            self._draw_mockup_later(project.id)
         log.info("Rebuilding %s from %s after a redo", project.id, phase_key)
         return self.continue_run(db, project)
 
     @staticmethod
-    def _discard_after(db: Session, project: Project, phase_key: str) -> None:
-        """Forget every phase that ran after `phase_key` — they are about to re-run."""
+    def _phases_after(phase_key: str) -> list[str]:
+        """The phases that run after `phase_key`, in order."""
         order = [p.value for p in PHASE_ORDER]
         try:
-            downstream = order[order.index(phase_key) + 1 :]
+            return order[order.index(phase_key) + 1 :]
         except ValueError:
-            return
+            return []
+
+    def _discard_after(self, db: Session, project: Project, phase_key: str) -> None:
+        """Forget every phase that ran after `phase_key` — they are about to re-run."""
+        downstream = self._phases_after(phase_key)
         if not downstream:
             return
         db.query(PhaseResult).filter(
             PhaseResult.project_id == project.id,
             PhaseResult.phase.in_(downstream),
         ).delete(synchronize_session=False)
+
+        # The mockup is a picture of the front end. If the front end is being rebuilt,
+        # the picture is of code that will not exist — unless a person has edited it,
+        # in which case it is their work and stays.
+        if Phase.FRONTEND_ENGINEER.value in downstream:
+            revisions = (
+                db.query(PreviewRevision)
+                .filter(PreviewRevision.project_id == project.id)
+                .all()
+            )
+            if revisions and all(r.source == "generated" for r in revisions):
+                for revision in revisions:
+                    db.delete(revision)
         db.commit()
 
     # ── stop / resume ─────────────────────────────────────────────────────────

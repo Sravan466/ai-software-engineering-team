@@ -16,7 +16,7 @@ import Decision from "@/components/build/Decision";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
 import { Elapsed } from "@/components/build/Elapsed";
-import { artifactFiles } from "@/components/build/payload";
+import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
 
 type Tab = "build" | "preview" | "summary";
 type NodeState = "done" | "running" | "gate" | "redo" | "failed" | "pending";
@@ -65,12 +65,10 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-// Latest row produced for a phase (phases re-run when rejected).
-function latestRow(project: Project, key: string): PhaseResult | undefined {
-  const rows = project.phases.filter((p) => p.phase === key);
-  if (rows.length === 0) return undefined;
-  return [...rows].sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))[rows.length - 1];
-}
+// Latest row produced for a phase (phases re-run when sent back). One definition,
+// shared with the decision panel — two answers to "which attempt is current" would
+// let the badge on a phase and the artifact under review disagree.
+const latestRow = (project: Project, key: string) => rowFor(project.phases, key);
 
 /**
  * What a phase is doing, read from the phase's own row first.
