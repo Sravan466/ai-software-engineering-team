@@ -36,7 +36,20 @@ export type Field =
   | { kind: "group"; label: string; fields: Field[] };
 
 // Keys whose contents are surfaced by a dedicated view, so the details pass skips them.
+// `diagram` is included because models rename the spec'd key about as often as they
+// honour it — but see `looksLikeMermaid`: a key alone is not enough to claim a value.
 const MERMAID_KEYS = ["architecture_diagram_mermaid", "diagram_mermaid", "mermaid", "diagram"];
+
+// A Mermaid definition opens by naming its diagram type. Requiring that keeps a prose
+// description that happens to live under `diagram` out of the diagram view — where it
+// would render as a parse failure *and* vanish from Details, which skips these keys.
+const MERMAID_OPENERS =
+  /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(-v2)?|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|sankey(-beta)?|xychart(-beta)?|block(-beta)?|architecture(-beta)?|C4Context)\b/;
+
+function looksLikeMermaid(src: string): boolean {
+  const firstLine = src.split("\n").find((l) => l.trim() && !l.trim().startsWith("%%"));
+  return MERMAID_OPENERS.test((firstLine ?? "").trim());
+}
 
 // Acronyms that look wrong in sentence case. Everything else is lowercased after the
 // first word, matching the design system's label voice.
@@ -113,25 +126,52 @@ export function extractFiles(output: Record<string, unknown> | null | undefined)
   return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-/** Output keys that produced at least one file — the details pass must not repeat them. */
+/**
+ * Output keys whose contents the Files view is showing — the details pass skips these.
+ *
+ * Derived from the raw payload rather than from `extractFiles`, because a key that
+ * lost the duplicate-path tie-break contributed nothing to the final list yet is
+ * still file content. Reading it off the deduped result let such a key reappear in
+ * Details as a raw dump of source code.
+ */
 export function fileKeys(output: Record<string, unknown> | null | undefined): Set<string> {
-  return new Set(extractFiles(output).map((f) => f.sourceKey));
+  const keys = new Set<string>();
+  if (!isPlainObject(output)) return keys;
+  for (const [key, value] of Object.entries(output)) {
+    if (!Array.isArray(value)) continue;
+    const isFileList = value.some(
+      (item) =>
+        isPlainObject(item) &&
+        typeof item.path === "string" &&
+        item.path.trim() !== "" &&
+        typeof (item.code ?? item.content) === "string",
+    );
+    if (isFileList) keys.add(key);
+  }
+  return keys;
 }
 
 // ── 2. diagram ───────────────────────────────────────────────────────────────
-/** The Mermaid definition, unfenced. Returns null when the agent produced none. */
-export function extractMermaid(
+/** The drawable diagram and the key it came from, or null when there is none. */
+function findMermaid(
   output: Record<string, unknown> | null | undefined,
-): string | null {
+): { key: string; src: string } | null {
   if (!isPlainObject(output)) return null;
   for (const key of MERMAID_KEYS) {
     const raw = output[key];
     if (typeof raw !== "string") continue;
     // Models wrap the definition in a fence about half the time.
     const src = raw.replace(/^\s*```(?:mermaid)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
-    if (src) return src;
+    if (src && looksLikeMermaid(src)) return { key, src };
   }
   return null;
+}
+
+/** The Mermaid definition, unfenced. Returns null when the agent produced none. */
+export function extractMermaid(
+  output: Record<string, unknown> | null | undefined,
+): string | null {
+  return findMermaid(output)?.src ?? null;
 }
 
 // ── 3. everything else ───────────────────────────────────────────────────────
@@ -231,10 +271,15 @@ export function toFields(
 ): Field[] {
   if (!isPlainObject(output)) return [];
 
+  // Exactly one key is claimed by the diagram view. Any *other* diagram-ish key —
+  // a `diagram` holding a prose description alongside a real mermaid definition —
+  // still belongs in Details rather than disappearing between the two views.
+  const drawnKey = findMermaid(output)?.key;
+
   const fields: Field[] = [];
   for (const [key, value] of Object.entries(output)) {
     if (skipKeys.has(key)) continue;
-    if (MERMAID_KEYS.includes(key)) continue;
+    if (key === drawnKey) continue;
     const field = fieldFor(labelize(key), value, depth);
     if (field) fields.push(field);
   }
