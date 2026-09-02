@@ -15,7 +15,7 @@ import FileBrowser from "@/components/build/FileBrowser";
 import Decision from "@/components/build/Decision";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
-import { Elapsed } from "@/components/build/Elapsed";
+import { Elapsed, formatDuration } from "@/components/build/Elapsed";
 import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
 
 type Tab = "build" | "preview" | "summary";
@@ -568,11 +568,51 @@ function RunInterrupted({
 }
 
 /**
+ * A finished span between two instants, or null if it can't be read.
+ *
+ * `Elapsed` deliberately renders nothing when it isn't live — it owns the ticking
+ * clock and schedules no timers for anything else — so a duration that has stopped
+ * growing needs its own path rather than a frozen ticker.
+ */
+function staticDuration(fromIso: string | null, toIso: string | null): string | null {
+  if (!fromIso || !toIso) return null;
+  const from = Date.parse(fromIso);
+  const to = Date.parse(toIso);
+  if (Number.isNaN(from) || Number.isNaN(to) || to < from) return null;
+  return formatDuration((to - from) / 1000);
+}
+
+// Why an agent that a phase row still calls `running` isn't. Keyed by the run's
+// effective status, so each ending is named the way its notice above names it.
+//
+// `cancelled` is deliberately not here. `runner.stop` marks the project cancelled
+// the instant you click Stop, but it cannot interrupt the model call in flight —
+// the loop honours the flag when the agent returns. So a cancelled run with a
+// `running` row still has someone generating, for minutes on a local 7B, and it
+// gets the live treatment with a verb that says what is happening.
+const STOPPED_VERB: Record<string, string> = {
+  stalled: "was mid-phase when the build stopped responding",
+  failed: "was mid-phase when the run failed",
+};
+
+/**
  * Who has the work, right now, and for how long.
  *
  * The single most useful thing the build view can say while a model generates — and
  * for eight phases it said nothing at all, because `current_phase` was only written
  * after an agent finished.
+ *
+ * A phase row says `running` from the moment generation begins, and nothing rewrites
+ * it when the runner dies with its process. So the row on its own cannot tell you
+ * whether an agent *is* working or *was* working, and this panel used to assume the
+ * first: a stalled build rendered an animating sprite, a present-tense voice line,
+ * a sweeping "in flight" bar and a clock ticking up in real time — directly beneath
+ * a notice explaining that nothing had reported progress in fifteen minutes. The
+ * project's effective status is what knows the difference, so it decides here too.
+ *
+ * "Not running" is narrower than "not `running`", though: a cancelled run is still
+ * finishing the model call that Stop could not interrupt, so it keeps the live
+ * treatment and says so. Only `stalled` and `failed` mean nobody is generating.
  */
 function NowWorking({ project }: { project: Project }) {
   const key = project.current_phase;
@@ -583,25 +623,65 @@ function NowWorking({ project }: { project: Project }) {
   const meta = PHASE_BY_KEY[key];
   if (!agent) return null;
 
+  const state = effectiveStatus(project);
+  // Is anyone actually generating? Only a stalled or failed run has genuinely
+  // stopped mid-phase; a cancelled one is still finishing the call it can't cancel.
+  const stopped = state === "stalled" || state === "failed";
+  const startIso = row.started_at ?? project.phase_started_at;
+
+  // How long it actually ran, rather than how long ago it started: the heartbeat
+  // is the last moment the runner was alive, so start → heartbeat is the honest
+  // span. A clock still counting past that is the lie this panel was telling.
+  //
+  // Null when the run predates the columns that carry those instants, and the
+  // clock is then omitted rather than guessed at: the panel's load-bearing fact
+  // is *who* held the work, and inventing a duration to fill the slot would put
+  // back the kind of confident wrong number this whole change is about.
+  const ranFor = stopped ? staticDuration(startIso, project.heartbeat_at) : null;
+
   return (
     <div
-      className="working"
+      className={"working" + (stopped ? " working-stopped" : "")}
       style={{ ["--agent" as string]: agent.accent }}
+      // Kept in both states, and it matters most in the transition between them:
+      // this is how a screen reader hears that the run it was following stopped,
+      // rather than a ticker that silently quit updating. The live clock inside
+      // carries role="timer", whose implicit aria-live="off" keeps it from
+      // re-announcing the panel every second.
       aria-live="polite"
       aria-atomic="true"
     >
-      <AgentSprite agent={agent} size={40} state="working" />
+      {/* Dimmed and static. There is no sprite state for "died mid-phase", and
+          `queued` is the one that reads as not-currently-doing-anything. */}
+      <AgentSprite agent={agent} size={40} state={stopped ? "queued" : "working"} />
       <div className="working-body">
         <div className="working-line">
           <b className="agent-line-name">{agent.codename}</b>
-          <span className="working-verb">{agent.lines.working.toLowerCase()}</span>
+          <span className="working-verb">
+            {stopped
+              ? (STOPPED_VERB[state] ?? "is no longer running")
+              : state === "cancelled"
+                ? "is finishing this phase, then stopping"
+                : agent.lines.working.toLowerCase()}
+          </span>
           {meta && <span className="phase-deliver">{meta.deliver}</span>}
         </div>
-        <div className="working-bar" aria-hidden="true">
-          <span />
-        </div>
+        {/* The sweep says "in flight". Nothing is in flight. */}
+        {!stopped && (
+          <div className="working-bar" aria-hidden="true">
+            <span />
+          </div>
+        )}
       </div>
-      <Elapsed startIso={row.started_at ?? project.phase_started_at} live />
+      {stopped ? (
+        ranFor && (
+          <span className="elapsed mono" aria-label="How long this phase ran before it stopped">
+            {ranFor}
+          </span>
+        )
+      ) : (
+        <Elapsed startIso={startIso} live />
+      )}
     </div>
   );
 }
