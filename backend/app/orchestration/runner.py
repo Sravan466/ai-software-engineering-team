@@ -256,6 +256,11 @@ class PipelineRunner:
             return project
 
         self._complete_row(db, project, row, last_result)
+        if phase_key == Phase.FRONTEND_ENGINEER.value:
+            # The front end was rewritten, so the picture of it is of code that no
+            # longer exists. `_run_phase`'s hook does not fire on this path.
+            if self._clear_generated_mockup(db, project.id):
+                self._draw_mockup_later(project.id)
         if stale:
             # Before the cancellation check, not after: a Stop pressed in that window
             # would otherwise leave a build whose backend is new and whose tests,
@@ -281,11 +286,27 @@ class PipelineRunner:
         # downstream phases used to be.
         project.current_phase = phase_key
         db.commit()
-        if phase_key == Phase.FRONTEND_ENGINEER.value:
-            # This path re-runs the phase itself, so `_run_phase`'s hook never fires.
-            self._draw_mockup_later(project.id)
         log.info("Rebuilding %s from %s after a redo", project.id, phase_key)
         return self.continue_run(db, project)
+
+    @staticmethod
+    def _clear_generated_mockup(db: Session, project_id: str) -> bool:
+        """Drop an auto-drawn mockup so a rebuilt front end gets a fresh one.
+
+        Only ever an untouched one. The moment somebody has edited a section, the
+        preview is their work rather than a derived picture, and throwing it away to
+        redraw something they did not ask for would be worse than showing them a
+        mockup they can regenerate themselves.
+        """
+        revisions = (
+            db.query(PreviewRevision).filter(PreviewRevision.project_id == project_id).all()
+        )
+        if not revisions or any(r.source != "generated" for r in revisions):
+            return False
+        for revision in revisions:
+            db.delete(revision)
+        db.commit()
+        return True
 
     @staticmethod
     def _phases_after(phase_key: str) -> list[str]:
@@ -307,17 +328,10 @@ class PipelineRunner:
         ).delete(synchronize_session=False)
 
         # The mockup is a picture of the front end. If the front end is being rebuilt,
-        # the picture is of code that will not exist — unless a person has edited it,
-        # in which case it is their work and stays.
+        # the picture is of code that will not exist. Re-running that phase draws a
+        # fresh one through `_run_phase`'s hook.
         if Phase.FRONTEND_ENGINEER.value in downstream:
-            revisions = (
-                db.query(PreviewRevision)
-                .filter(PreviewRevision.project_id == project.id)
-                .all()
-            )
-            if revisions and all(r.source == "generated" for r in revisions):
-                for revision in revisions:
-                    db.delete(revision)
+            self._clear_generated_mockup(db, project.id)
         db.commit()
 
     # ── stop / resume ─────────────────────────────────────────────────────────

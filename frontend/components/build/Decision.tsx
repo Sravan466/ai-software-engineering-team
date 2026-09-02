@@ -119,10 +119,16 @@ export default function Decision({
   // generating when this review opens. Without this the Mockup tab would simply be
   // missing, and the reviewer would approve a build with no picture — which is the
   // thing folding it into the Frontend phase was meant to fix.
-  const awaitingMockup = wantsBuild && !preview?.html;
+  //
+  // Bounded: a local model takes 30-60s for this, so past a couple of minutes it did
+  // not fail to arrive in time, it failed. Polling a dead generation for as long as
+  // someone leaves the tab open buys nothing; the Preview tab can draw one on demand.
+  const [waited, setWaited] = useState(0);
+  const awaitingMockup = wantsBuild && !preview?.html && waited < 15;
   useEffect(() => {
     if (!awaitingMockup) return;
     const timer = setInterval(() => {
+      setWaited((n) => n + 1);
       api.getPreview(id).then(setPreview).catch(() => {});
     }, 8000);
     return () => clearInterval(timer);
