@@ -199,12 +199,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     };
   }, [pollMs, load]);
 
+  /** Run a control call. Returns whether it landed, so callers can keep the
+   *  reviewer's typing when it didn't. */
   const act = useCallback(
-    async (fn: () => Promise<RunResponse | unknown>) => {
+    async (fn: () => Promise<RunResponse | unknown>): Promise<boolean> => {
       setBusy(true);
       setError("");
+      let ok = false;
       try {
         const result = (await fn()) as RunResponse | undefined;
+        ok = true;
         // Control endpoints return the status they just committed. Applying it
         // before the reload means the badge flips the instant the click lands,
         // instead of reading "Waiting for you" while an agent is generating.
@@ -217,6 +221,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         await load();
         setBusy(false);
       }
+      return ok;
     },
     [load],
   );
@@ -406,7 +411,7 @@ function RunInterrupted({
 }: {
   project: Project;
   busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
 }) {
   const state = effectiveStatus(project);
@@ -514,7 +519,7 @@ function BuildTab({
   project: Project;
   analytics: any;
   busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
 }) {
   const pct = localPct(project);
@@ -604,13 +609,14 @@ function BuildTab({
 }
 
 /**
- * The phase list. Every phase that produced something is a disclosure over the
- * agent's full deliverable — the files, the diagram, the structured data, not just
- * the prose summary — and the approval gate leads with exactly that, because being
- * asked to approve work you can't read is the one thing this screen must never do.
+ * The history: every phase, in order, each a disclosure over the agent's full
+ * deliverable — the files, the diagram, the structured data, not just the prose.
+ *
+ * The decision itself is no longer here. It used to render inside whichever of these
+ * eight rows the pipeline happened to stop on, which is exactly why it was easy to
+ * miss; it now has one home at the top of the tab. This list is for reading back.
  */
 function PhaseList({ project }: { project: Project }) {
-  // The phase waiting on a decision is open by default; everything else starts closed.
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
   return (

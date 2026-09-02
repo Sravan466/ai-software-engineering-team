@@ -40,8 +40,11 @@ class ProjectCreate(BaseModel):
     )
     cost_cap_usd: Optional[float] = Field(
         None,
-        ge=0,
-        description="Projected monthly run cost above which the build interrupts itself.",
+        gt=0,
+        description=(
+            "Projected monthly run cost above which the build interrupts itself. "
+            "Omit for no cap — zero would be indistinguishable from one."
+        ),
     )
     #: Legacy switch, still honoured when `approval_mode` is absent.
     require_approval: Optional[bool] = None
@@ -56,7 +59,7 @@ class ProjectUpdate(BaseModel):
     """
 
     approval_mode: Optional[ApprovalMode] = None
-    cost_cap_usd: Optional[float] = Field(None, ge=0)
+    cost_cap_usd: Optional[float] = Field(None, gt=0)
     #: Send `null` to lift the cap. Pydantic cannot tell absent from null, so this
     #: says which of the two a null in the body meant.
     clear_cost_cap: bool = False

@@ -9,7 +9,7 @@ import {
   type PreviewState,
   type Project,
 } from "@/lib/api";
-import { PHASE_BY_KEY, PLAN_PHASE_KEYS } from "@/components/shell/phases";
+import { PHASES, PHASE_BY_KEY, PLAN_PHASE_KEYS } from "@/components/shell/phases";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
@@ -17,7 +17,7 @@ import { SkeletonLines } from "@/components/ui/Skeleton";
 import MockupFrame from "@/components/preview/MockupFrame";
 import PhaseArtifact from "./PhaseArtifact";
 import FileBrowser from "./FileBrowser";
-import { artifactFiles, type PayloadFile } from "./payload";
+import { artifactFiles, latestRow, type PayloadFile } from "./payload";
 
 /**
  * The decision the pipeline is waiting on, and everything it is a decision about.
@@ -52,10 +52,10 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
     after: "Approving marks this build complete.",
   },
   cost: {
-    title: "Cost check",
-    blurb: "Ledger's estimate came in over the cap you set for this build.",
-    approve: "Accept the cost",
-    after: "Approving lets the run finish.",
+    title: "Ship review · over budget",
+    blurb: "Everything the crew built — and an estimate that came in over your cap.",
+    approve: "Ship it anyway",
+    after: "Approving accepts the cost and marks this build complete.",
   },
   security: {
     title: "Security stop",
@@ -71,14 +71,7 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
   },
 };
 
-// Latest row produced for a phase (phases re-run when sent back).
-function latestRow(project: Project, key: string): PhaseResult | undefined {
-  const rows = project.phases.filter((p) => p.phase === key);
-  if (rows.length === 0) return undefined;
-  return [...rows].sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at))[
-    rows.length - 1
-  ];
-}
+const rowFor = (project: Project, key: string) => latestRow(project.phases, key);
 
 export default function Decision({
   project,
@@ -89,7 +82,7 @@ export default function Decision({
   project: Project;
   id: string;
   busy: boolean;
-  act: (fn: () => Promise<unknown>) => Promise<void>;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
 }) {
   const kind: GateKind = (project.gate_kind as GateKind) || "phase";
   const gatePhase = project.current_phase || "";
@@ -103,27 +96,57 @@ export default function Decision({
   const wantsBuild = kind === "ship" || kind === "cost";
   const [art, setArt] = useState<Artifacts | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [artError, setArtError] = useState("");
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     if (!wantsBuild) return;
-    api.getArtifacts(id).then(setArt).catch(() => setArt(null));
+    setArtError("");
+    // A failed fetch is not "still loading". Collapsing the two left the Ship review
+    // showing placeholder bars forever above a live Ship it button — approving a
+    // build whose files, findings and costs were never actually on screen.
+    api
+      .getArtifacts(id)
+      .then((a) => {
+        setArt(a);
+        setArtError("");
+      })
+      .catch((e: any) => setArtError(e.message));
     api.getPreview(id).then(setPreview).catch(() => setPreview(null));
-  }, [wantsBuild, id]);
+  }, [wantsBuild, id, reloads]);
 
   const files = useMemo(() => (art ? artifactFiles(art.files) : []), [art]);
 
   const redoPhase = target?.phase || gatePhase;
   const redoAgent = AGENT_BY_KEY[redoPhase];
 
+  // Sending an earlier phase back invalidates everything built on top of it, so the
+  // run rebuilds from there. That is a much bigger action than correcting the phase
+  // on screen, and the reviewer should know before they press it, not after.
+  const order = PHASES.map((p) => p.key);
+  const rebuilds =
+    order.indexOf(redoPhase) >= 0 &&
+    order.indexOf(gatePhase) > order.indexOf(redoPhase);
+
+  /** Point the note at a phase — and at one file within it, when that is the ask. */
+  function aim(phase: string, path?: string) {
+    setTarget({ phase, path });
+    document.getElementById("decision-note")?.focus();
+  }
+
   async function send() {
     const text = note.trim();
-    if (!text || !redoPhase) return;
+    if (!text || !redoPhase || sending || busy) return;
     const message = target?.path ? `Rewrite \`${target.path}\` — ${text}` : text;
     setSending(true);
-    await act(() => api.redo(id, redoPhase, message));
+    const sent = await act(() => api.redo(id, redoPhase, message));
     setSending(false);
-    setNote("");
-    setTarget(null);
+    // Only on success. A 409 from a second tab used to take the typed note and the
+    // chosen file with it, leaving a red banner and nothing to resend.
+    if (sent) {
+      setNote("");
+      setTarget(null);
+    }
   }
 
   return (
@@ -150,19 +173,20 @@ export default function Decision({
       )}
 
       <div className="decision-body">
-        {kind === "plan" && <PlanReview project={project} />}
-        {kind === "security" && <SinglePhase project={project} phase={gatePhase} />}
-        {kind === "phase" && <SinglePhase project={project} phase={gatePhase} />}
+        {kind === "plan" && <PlanReview project={project} onRedo={aim} />}
+        {(kind === "security" || kind === "phase") && (
+          <SinglePhase project={project} phase={gatePhase} onRedo={aim} />
+        )}
         {wantsBuild && (
           <ShipReview
             project={project}
             art={art}
+            error={artError}
+            onRetry={() => setReloads((n) => n + 1)}
             files={files}
             preview={preview}
-            onRedoFile={(file) => {
-              setTarget({ phase: file.sourceKey, path: file.path });
-              document.getElementById("decision-note")?.focus();
-            }}
+            onRedo={aim}
+            onRedoFile={(file) => aim(file.sourceKey, file.path)}
           />
         )}
       </div>
@@ -189,7 +213,7 @@ export default function Decision({
                   {redoAgent?.codename ?? redoPhase}
                 </>
               ) : (
-                <>Or send it back with a note on what to change</>
+                <>Or send it back to {redoAgent?.codename ?? redoPhase} with a note</>
               )}
             </label>
             <input
@@ -210,57 +234,53 @@ export default function Decision({
             />
           </div>
           {target?.path && (
-            <button className="btn" disabled={busy} onClick={() => setTarget(null)}>
+            <button
+              className="btn"
+              disabled={busy}
+              onClick={() => setTarget({ phase: target.phase })}
+            >
               Whole phase instead
             </button>
           )}
           <button className="btn btn-danger" disabled={busy || !note.trim()} onClick={send}>
             {sending && <span className="btn-spinner" aria-hidden="true" />}
-            {Icon.undo} Send back
+            {Icon.undo} {rebuilds ? "Send back and rebuild" : "Send back"}
           </button>
         </div>
+        {rebuilds && (
+          <p className="field-hint decision-consequence">
+            {Icon.alert}
+            <span>
+              Every phase after {redoAgent?.codename ?? redoPhase} was built on the
+              version you are replacing, so the run rebuilds from there. You come back
+              to this review over the new build.
+            </span>
+          </p>
+        )}
       </div>
     </section>
   );
 }
 
-// ── plan: two agents, one decision ───────────────────────────────────────────
-function PlanReview({ project }: { project: Project }) {
-  const rows = PLAN_PHASE_KEYS.map((key) => [key, latestRow(project, key)] as const).filter(
-    ([, row]) => row,
-  );
-  if (rows.length === 0) return <Nothing>The plan hasn&apos;t been written yet.</Nothing>;
-
-  return (
-    <div className="plan-review">
-      {rows.map(([key, row]) => {
-        const agent = AGENT_BY_KEY[key];
-        const meta = PHASE_BY_KEY[key];
-        return (
-          <div key={key} className="plan-part" style={{ ["--agent" as string]: agent?.accent }}>
-            <div className="plan-part-head">
-              <AgentSprite agent={agent} size={30} state="gate" />
-              <b className="agent-line-name">{agent?.codename}</b>
-              <span className="phase-deliver">{meta?.deliver}</span>
-              <span className="rule" />
-              {row!.total_tokens > 0 && (
-                <span className="phase-tokens mono">
-                  {row!.total_tokens.toLocaleString()} tok
-                </span>
-              )}
-            </div>
-            <PhaseArtifact row={row!} maxHeight={380} />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── one handoff, or one interrupt ────────────────────────────────────────────
-function SinglePhase({ project, phase }: { project: Project; phase: string }) {
-  const row = phase ? latestRow(project, phase) : undefined;
-  if (!row) return <Nothing>There is nothing to read for this phase.</Nothing>;
+/**
+ * One agent's contribution to the decision, with the way to send *that* part back.
+ *
+ * A review that covers several agents needs this: the Plan review shows Scope and
+ * Atlas together, and "narrow the scope" has to reach Scope. Addressing the send-back
+ * to whichever phase the gate happens to sit on would quietly hand a scope note to
+ * the architect.
+ */
+function PhasePanel({
+  phase,
+  row,
+  maxHeight,
+  onRedo,
+}: {
+  phase: string;
+  row: PhaseResult;
+  maxHeight: number;
+  onRedo: (phase: string) => void;
+}) {
   const agent = AGENT_BY_KEY[phase];
   const meta = PHASE_BY_KEY[phase];
   return (
@@ -270,10 +290,57 @@ function SinglePhase({ project, phase }: { project: Project; phase: string }) {
         <b className="agent-line-name">{agent?.codename}</b>
         <span className="phase-deliver">{meta?.deliver}</span>
         <span className="rule" />
+        {row.total_tokens > 0 && (
+          <span className="phase-tokens mono">{row.total_tokens.toLocaleString()} tok</span>
+        )}
+        <button
+          className="btn btn-sm btn-danger"
+          onClick={() => onRedo(phase)}
+          title={`Address the note below to ${agent?.codename ?? phase}`}
+        >
+          {Icon.undo} Send back
+        </button>
       </div>
-      <PhaseArtifact row={row} maxHeight={480} />
+      <PhaseArtifact row={row} maxHeight={maxHeight} />
     </div>
   );
+}
+
+// ── plan: two agents, one decision ───────────────────────────────────────────
+function PlanReview({
+  project,
+  onRedo,
+}: {
+  project: Project;
+  onRedo: (phase: string) => void;
+}) {
+  const rows = PLAN_PHASE_KEYS.map((key) => [key, rowFor(project, key)] as const).filter(
+    (entry): entry is readonly [string, PhaseResult] => Boolean(entry[1]),
+  );
+  if (rows.length === 0) return <Nothing>The plan hasn&apos;t been written yet.</Nothing>;
+
+  return (
+    <div className="plan-review">
+      {rows.map(([key, row]) => (
+        <PhasePanel key={key} phase={key} row={row} maxHeight={380} onRedo={onRedo} />
+      ))}
+    </div>
+  );
+}
+
+// ── one handoff, or one interrupt ────────────────────────────────────────────
+function SinglePhase({
+  project,
+  phase,
+  onRedo,
+}: {
+  project: Project;
+  phase: string;
+  onRedo: (phase: string) => void;
+}) {
+  const row = phase ? rowFor(project, phase) : undefined;
+  if (!row) return <Nothing>There is nothing to read for this phase.</Nothing>;
+  return <PhasePanel phase={phase} row={row} maxHeight={480} onRedo={onRedo} />;
 }
 
 // ── ship: the whole build in one pass ────────────────────────────────────────
@@ -282,18 +349,24 @@ type ShipView = "files" | "mockup" | "security" | "cost";
 function ShipReview({
   project,
   art,
+  error,
+  onRetry,
   files,
   preview,
+  onRedo,
   onRedoFile,
 }: {
   project: Project;
   art: Artifacts | null;
+  error: string;
+  onRetry: () => void;
   files: PayloadFile[];
   preview: PreviewState | null;
+  onRedo: (phase: string) => void;
   onRedoFile: (file: PayloadFile) => void;
 }) {
-  const security = latestRow(project, "security_engineer");
-  const cost = latestRow(project, "cost_estimation");
+  const security = rowFor(project, "security_engineer");
+  const cost = rowFor(project, "cost_estimation");
 
   const views: { key: ShipView; label: string; icon: ReactNode; count?: number }[] = [];
   if (files.length) views.push({ key: "files", label: "Files", icon: Icon.file, count: files.length });
@@ -304,6 +377,26 @@ function ShipReview({
   const [view, setView] = useState<ShipView>("files");
   const active = views.find((v) => v.key === view) ?? views[0];
 
+  if (error) {
+    return (
+      <div className="artifact-pad">
+        <div className="notice notice-bad" role="alert">
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-title">Couldn&apos;t load what this build produced</span>
+            <span className="notice-text">
+              {error} Nothing below is the build — don&apos;t ship it until this loads.
+            </span>
+            <div className="notice-actions">
+              <button className="btn btn-sm btn-primary" onClick={onRetry}>
+                {Icon.refresh} Try again
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (!art) {
     return (
       <div className="artifact-pad">
@@ -369,9 +462,16 @@ function ShipReview({
           costs as figures — so the phase panel nests here rather than being flattened
           into a wall of prose. */}
       {active?.key === "security" && security && (
-        <PhaseArtifact row={security} maxHeight={460} />
+        <PhasePanel
+          phase="security_engineer"
+          row={security}
+          maxHeight={440}
+          onRedo={onRedo}
+        />
       )}
-      {active?.key === "cost" && cost && <PhaseArtifact row={cost} maxHeight={460} />}
+      {active?.key === "cost" && cost && (
+        <PhasePanel phase="cost_estimation" row={cost} maxHeight={440} onRedo={onRedo} />
+      )}
     </div>
   );
 }

@@ -30,6 +30,15 @@ export default function ReviewPolicy({
     project.cost_cap_usd === null ? "" : String(project.cost_cap_usd),
   );
 
+  // The page polls without remounting this, so a cap saved elsewhere would otherwise
+  // sit here as a stale number waiting to be written back over the newer one. Only
+  // resyncs when the project's value actually differs from what is in the field, so
+  // it never snatches a number out from under someone typing.
+  useEffect(() => {
+    const live = project.cost_cap_usd;
+    setCap((text) => (Number(text) === live ? text : live === null ? "" : String(live)));
+  }, [project.cost_cap_usd]);
+
   // It floats over the page, so it dismisses the way a floating thing is expected
   // to: Escape from anywhere inside it, or a click outside. Escape returns focus to
   // the control that opened it rather than dropping the keyboard at the page root.
@@ -76,8 +85,10 @@ export default function ReviewPolicy({
     const raw = cap.trim();
     if (raw === "") return save({ clear_cost_cap: true });
     const value = Number(raw);
-    if (!Number.isFinite(value) || value < 0) {
-      setError("Enter a number of dollars per month, or clear the field for no cap.");
+    if (!Number.isFinite(value) || value <= 0) {
+      // Zero is not a cap you can be under, and the API rejects it — say so here
+      // rather than letting a 422 come back for something with an obvious meaning.
+      setError("Enter an amount above zero, or clear the field for no cap.");
       return;
     }
     return save({ cost_cap_usd: value });

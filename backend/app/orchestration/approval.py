@@ -69,6 +69,26 @@ def _number(value: object) -> Optional[float]:
         return None
 
 
+def _sum_column(rows: object, *fields: str) -> Optional[float]:
+    """Total one column of a line-item list, taking the first field that has values.
+
+    The fields are alternatives for the same number, not separate costs: a model that
+    gives a range writes `high_usd`, one that gives a point estimate may only write
+    `low_usd`, and adding both would double-count the same line.
+    """
+    if not isinstance(rows, list):
+        return None
+    for field in fields:
+        found = [
+            value
+            for value in (_number(r.get(field)) for r in rows if isinstance(r, dict))
+            if value is not None
+        ]
+        if found:
+            return sum(found)
+    return None
+
+
 def projected_monthly_cost(output: object) -> Optional[float]:
     """Ledger's projected monthly run cost in USD, or None when it reported none.
 
@@ -84,23 +104,16 @@ def projected_monthly_cost(output: object) -> Optional[float]:
         if total is not None:
             return total
 
-    itemised: list[float] = []
-    for key, field in (
-        ("monthly_infra_cost", "high_usd"),
-        ("monthly_infra_cost", "low_usd"),
-        ("api_or_third_party_cost", "monthly_usd"),
-    ):
-        rows = output.get(key)
-        if not isinstance(rows, list):
-            continue
-        values = [_number(r.get(field)) for r in rows if isinstance(r, dict)]
-        found = [v for v in values if v is not None]
-        if found:
-            itemised.append(sum(found))
-            # low_usd is only a stand-in for a missing high_usd on the same key.
-            if field == "high_usd":
-                break
-    return sum(itemised) if itemised else None
+    # Infrastructure and third-party spend are different money and both count.
+    parts = [
+        total
+        for total in (
+            _sum_column(output.get("monthly_infra_cost"), "high_usd", "low_usd"),
+            _sum_column(output.get("api_or_third_party_cost"), "monthly_usd"),
+        )
+        if total is not None
+    ]
+    return sum(parts) if parts else None
 
 
 # ── the decision ─────────────────────────────────────────────────────────────
@@ -119,8 +132,22 @@ def decide_gate(project, phase_key: str, output: object) -> Optional[Gate]:
         return Gate(GateKind.PHASE.value)
 
     # ── checkpoints: two decisions, plus what the run itself raises ──
+    overrun = (
+        cost_overrun_note(project, output)
+        if phase_key == Phase.COST_ESTIMATION.value
+        else None
+    )
+
     if phase_key == SHIP_GATE_PHASE.value:
-        return Gate(GateKind.SHIP.value, cost_overrun_note(project, output))
+        # Ledger is the last phase, so an overrun cannot interrupt a build that has
+        # already finished. What it changes is what this stop *is*: a review of a
+        # finished product, or a review of one that costs more than you allowed.
+        return Gate(GateKind.COST.value if overrun else GateKind.SHIP.value, overrun)
+
+    if overrun:
+        # Reachable only if Ledger stops being the last phase — then an overrun is a
+        # real mid-run interrupt, and this is where it fires.
+        return Gate(GateKind.COST.value, overrun)
 
     if phase_key == PLAN_GATE_PHASE.value:
         return Gate(GateKind.PLAN.value)
@@ -129,11 +156,6 @@ def decide_gate(project, phase_key: str, output: object) -> Optional[Gate]:
         severe = severe_findings(output)
         if severe:
             return Gate(GateKind.SECURITY.value, _security_note(severe))
-
-    if phase_key == Phase.COST_ESTIMATION.value:
-        note = cost_overrun_note(project, output)
-        if note:
-            return Gate(GateKind.COST.value, note)
 
     return None
 

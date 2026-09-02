@@ -450,6 +450,16 @@
   font-size: var(--t-xs);
 }
 
+/* What sending this back is actually going to do, next to the button that does it. */
+.decision-consequence {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: -4px 0 0;
+  max-width: 76ch;
+}
+.decision-consequence > svg { width: 14px; height: 14px; flex: none; margin-top: 2px; color: var(--accent); }
+
 /* A stop Warden raised is not the same event as a decision you scheduled. */
 .decision-security { border-color: rgba(240, 82, 82, 0.42); }
 .decision-security .decision-head {
@@ -476,6 +486,15 @@
   );
 }
 .plan-part-head .phase-tokens { flex: none; }
+/* The send-back for *this* agent lives with this agent's work, so a review that
+   covers two of them can address either. It keeps its size; the rule absorbs the
+   slack. */
+.plan-part-head .btn { flex: none; }
+
+@media (max-width: 620px) {
+  .plan-part-head { flex-wrap: wrap; }
+  .plan-part-head .rule { display: none; }
+}
 
 /* ===========================================================================
    RUN SETTINGS — routing and review policy, after the idea rather than before it

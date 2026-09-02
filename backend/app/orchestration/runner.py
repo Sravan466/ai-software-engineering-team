@@ -168,7 +168,12 @@ class PipelineRunner:
             return project
 
     def reject(self, db: Session, project: Project, feedback: str) -> Project:
-        """Send the phase the reviewer is looking at back to its agent."""
+        """Send the phase the reviewer is looking at back to its agent.
+
+        `redo` with the phase filled in. Kept because `POST /reject` is a published
+        endpoint with its own tests; the UI drives `POST /redo`, which can address any
+        phase. Both are this one code path — do not grow a second.
+        """
         return self.redo(db, project, project.current_phase, feedback)
 
     def redo(
@@ -232,6 +237,11 @@ class PipelineRunner:
                             "last_result": last_result,
                             "feedback": {**values.get("feedback", {}), phase_key: feedback},
                         },
+                        # Attribute the correction to the node that made it, so the
+                        # graph resumes at the phase *after* it. Redoing the backend
+                        # from the Ship review has to rewind to the backend, not
+                        # leave the pipeline sitting at the end.
+                        as_node=phase_key,
                     )
         except ProviderError as e:
             self._abandon_row(db, row, "The model provider failed while regenerating.")
@@ -243,15 +253,44 @@ class PipelineRunner:
             self._settle_cancelled(db, project)
             return project
 
-        # A redo of an earlier phase leaves the pipeline exactly where it was; only
-        # that phase's output changed. Put the reviewer back on their decision.
-        project.current_phase = gate_phase
-        if gate_phase != phase_key:
-            project.phase_started_at = None
-        gate_row = self._latest_row(db, project, gate_phase)
-        gate = decide_gate(project, gate_phase, gate_row.output if gate_row else None)
-        self._park(db, project, gate or fallback)
-        return project
+        if gate_phase == phase_key:
+            # The reviewer sent back the phase they were looking at. Nothing
+            # downstream exists yet, so put them back on the same decision.
+            gate_row = self.latest_row(db, project, phase_key)
+            gate = decide_gate(project, phase_key, gate_row.output if gate_row else None)
+            self._park(db, project, gate or fallback)
+            return project
+
+        # An *earlier* phase changed, so everything built on top of it is now a review
+        # of code that no longer exists — Sieve's tests, Warden's findings, Ledger's
+        # numbers. Returning the reviewer to a Ship review still showing those would
+        # invite them to approve a security review of a build that was replaced. Drop
+        # what was derived from the old output and rebuild forward instead.
+        #
+        # Only now, not before the agent ran: the database and the checkpoint move
+        # together, so a provider failure mid-redo leaves the run exactly as it was
+        # rather than with a hole where the downstream phases used to be.
+        self._discard_after(db, project, phase_key)
+        project.current_phase = phase_key
+        db.commit()
+        log.info("Rebuilding %s from %s after a redo", project.id, phase_key)
+        return self.continue_run(db, project)
+
+    @staticmethod
+    def _discard_after(db: Session, project: Project, phase_key: str) -> None:
+        """Forget every phase that ran after `phase_key` — they are about to re-run."""
+        order = [p.value for p in PHASE_ORDER]
+        try:
+            downstream = order[order.index(phase_key) + 1 :]
+        except ValueError:
+            return
+        if not downstream:
+            return
+        db.query(PhaseResult).filter(
+            PhaseResult.project_id == project.id,
+            PhaseResult.phase.in_(downstream),
+        ).delete(synchronize_session=False)
+        db.commit()
 
     # ── stop / resume ─────────────────────────────────────────────────────────
     def stop(self, db: Session, project: Project, reason: str) -> Project:
@@ -305,7 +344,7 @@ class PipelineRunner:
         self._raise_if_cancelled(db, project)
 
         if phase_key == Phase.FRONTEND_ENGINEER.value and last_result:
-            self._draw_mockup(db, project)
+            self._draw_mockup_later(project.id)
 
     def _begin_phase(self, db: Session, project: Project, phase_key: str) -> PhaseResult:
         """Mark a phase as *starting* — before a single token is generated.
@@ -374,51 +413,70 @@ class PipelineRunner:
         db.commit()
         log.info("Waiting on review: %s (%s)", project.id, gate.kind)
 
-    def _draw_mockup(self, db: Session, project: Project) -> None:
-        """Render the visual mockup as the Frontend phase finishes.
+    def _draw_mockup_later(self, project_id: str) -> None:
+        """Draw the mockup alongside the pipeline rather than in front of it.
+
+        This is a whole extra model call, and inlining it between a phase and the gate
+        it leads to held the reviewer's decision hostage to it — for minutes on a local
+        model, with no agent shown as working, because the phase had already finished.
+        The pipeline moves on; the picture catches up.
+        """
+        threading.Thread(
+            target=self._draw_mockup,
+            args=(project_id,),
+            name=f"mockup-{project_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _draw_mockup(self, project_id: str) -> None:
+        """Render the visual mockup from the Frontend phase's work.
 
         It used to be a button on a different tab: Prism had already written
         `frontend/`, and the reviewer still had to leave the decision and ask for a
         picture of it. Now it exists by the time anyone reviews the build.
 
         Strictly best effort, and never on top of existing work — a mockup that
-        fails to draw must not fail a phase that produced real code, and a
+        fails to draw must not fail a build that produced real code, and a
         regenerate would throw away sections the reviewer has already edited.
         """
-        already = (
-            db.query(PreviewRevision).filter(PreviewRevision.project_id == project.id).count()
-        )
-        if already or self._cancel_requested(db, project):
-            return
-        # Sessions here are `expire_on_commit=False`, so the phase rows this brief is
-        # built from would otherwise be whatever was loaded before the phase ran.
-        db.refresh(project)
+        db = SessionLocal()
         try:
-            with _heartbeat(project.id):
-                html, resp = generate_preview(
-                    project.idea,
-                    project.name,
-                    build_context(project),
-                    mode=RoutingMode(project.routing_mode),
-                    preferred_model=project.preferred_model,
-                )
-        except Exception as e:  # noqa: BLE001 - the build is the deliverable, not the picture
-            log.warning("Mockup generation failed for %s: %s", project.id, e)
-            return
-        if "<" not in html:
-            log.warning("Mockup generation returned no HTML for %s.", project.id)
-            return
-        db.add(
-            PreviewRevision(
-                project_id=project.id,
-                html=html,
-                source="generated",
-                model_used=resp.model,
-                provider_used=resp.provider,
+            project = db.get(Project, project_id)
+            if project is None or self._cancel_requested(db, project):
+                return
+            if (
+                db.query(PreviewRevision)
+                .filter(PreviewRevision.project_id == project_id)
+                .count()
+            ):
+                return
+
+            html, resp = generate_preview(
+                project.idea,
+                project.name,
+                build_context(project),
+                mode=RoutingMode(project.routing_mode),
+                preferred_model=project.preferred_model,
             )
-        )
-        db.commit()
-        tracker.record(db, response=resp, project_id=project.id, phase="preview")
+            if "<" not in html:
+                log.warning("Mockup generation returned no HTML for %s.", project_id)
+                return
+
+            db.add(
+                PreviewRevision(
+                    project_id=project_id,
+                    html=html,
+                    source="generated",
+                    model_used=resp.model,
+                    provider_used=resp.provider,
+                )
+            )
+            db.commit()
+            tracker.record(db, response=resp, project_id=project_id, phase="preview")
+        except Exception as e:  # noqa: BLE001 - the build is the deliverable, not the picture
+            log.warning("Mockup generation failed for %s: %s", project_id, e)
+        finally:
+            db.close()
 
     def _abandon_row(self, db: Session, row: PhaseResult, reason: str) -> None:
         row.status = PhaseStatus.FAILED.value
@@ -452,7 +510,7 @@ class PipelineRunner:
         """
         if not project.current_phase:
             return None
-        row = self._latest_row(db, project, project.current_phase)
+        row = self.latest_row(db, project, project.current_phase)
         if row is None or row.status != PhaseStatus.RUNNING.value:
             return row
 
@@ -570,7 +628,12 @@ class PipelineRunner:
         db.commit()
 
     @staticmethod
-    def _latest_row(db: Session, project: Project, phase: str) -> Optional[PhaseResult]:
+    def latest_row(db: Session, project: Project, phase: str) -> Optional[PhaseResult]:
+        """The most recent attempt at one phase — a phase re-runs when sent back.
+
+        Public because the PATCH route re-derives a gate from the same row this loop
+        parks on; two spellings of "latest" would let those two disagree.
+        """
         return (
             db.query(PhaseResult)
             .filter(PhaseResult.project_id == project.id, PhaseResult.phase == phase)
@@ -589,7 +652,7 @@ class PipelineRunner:
         """Set the status of the most recent row for one named phase."""
         if not phase:
             return None
-        row = self._latest_row(db, project, phase)
+        row = self.latest_row(db, project, phase)
         if row:
             row.status = status
             if feedback is not None:

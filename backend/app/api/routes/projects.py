@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.core.constants import PHASE_ORDER, ApprovalMode, PipelineStatus, RoutingMode
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
-from app.db.models import PhaseResult, Project
+from app.db.models import Project
 from app.orchestration.approval import decide_gate
 from app.orchestration.runner import runner
 from app.schemas.project import (
@@ -104,15 +104,9 @@ def _rederive_gate(db: Session, project: Project) -> None:
     """
     if project.status != PipelineStatus.AWAITING_APPROVAL.value or not project.current_phase:
         return
-    row = (
-        db.query(PhaseResult)
-        .filter(
-            PhaseResult.project_id == project.id,
-            PhaseResult.phase == project.current_phase,
-        )
-        .order_by(PhaseResult.created_at.desc(), PhaseResult.id.desc())
-        .first()
-    )
+    # The runner's own definition of "latest", so this cannot re-derive the gate from
+    # a different row than the one the loop parked on.
+    row = runner.latest_row(db, project, project.current_phase)
     if row is None:
         return
     gate = decide_gate(project, row.phase, row.output)
@@ -346,6 +340,11 @@ def reject_phase(
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ) -> RunResponse:
+    """Send back whichever phase is under review.
+
+    `POST /redo` does this and more — it can name any phase — and is what the UI
+    calls. This stays for API callers that already use it; both run the same code.
+    """
     if not payload.feedback or not payload.feedback.strip():
         raise HTTPException(400, "Feedback is required when rejecting a phase.")
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:

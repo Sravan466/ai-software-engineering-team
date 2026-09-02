@@ -304,6 +304,31 @@ export function badgeTone(value: string): string {
 }
 
 /**
+ * The most recent attempt at a phase — phases re-run when they are sent back.
+ *
+ * Mirrors the backend's `PipelineRunner.latest_row`, including its tie-break, because
+ * two answers to "which row is current" would put the decision panel and the runner
+ * on different versions of the same phase.
+ */
+export function latestRow<T extends { phase: string; created_at: string; id: string }>(
+  rows: T[],
+  phase: string,
+): T | undefined {
+  let best: T | undefined;
+  for (const row of rows) {
+    if (row.phase !== phase) continue;
+    if (
+      !best ||
+      row.created_at > best.created_at ||
+      (row.created_at === best.created_at && row.id > best.id)
+    ) {
+      best = row;
+    }
+  }
+  return best;
+}
+
+/**
  * The assembled project (from `/artifacts`) in the shape the file browser reads.
  *
  * `sourceKey` carries the phase that wrote each file, which is what makes per-file

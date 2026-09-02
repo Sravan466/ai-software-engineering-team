@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import type { ApprovalMode, LocalStatus, RouterStatus } from "@/lib/api";
 import {
@@ -196,6 +196,16 @@ export default function RunSettings({
 }) {
   const { routing, model, approval, costCap } = config;
 
+  // The field holds text, not the parsed number. Round-tripping through `Number`
+  // swallowed the decimal point as you typed it ("1." became "1"), so no fractional
+  // cap could ever be entered — and a value that parsed to NaN silently reached the
+  // API as `null`, creating a run with no cap at all while the UI showed one.
+  //
+  // No resync from the prop: this panel is the only thing that ever writes the cap
+  // it is shown, and an effect keyed on the parsed number would wipe the "." the
+  // moment it was typed.
+  const [capText, setCapText] = useState(costCap === null ? "" : String(costCap));
+
   // Manual with nothing pinned is the dead control this fixes, so picking Manual
   // pins something the moment it is picked — the first model that actually works.
   useEffect(() => {
@@ -299,11 +309,17 @@ export default function RunSettings({
                 className="input input-mono"
                 inputMode="decimal"
                 placeholder="no cap"
-                value={costCap === null ? "" : String(costCap)}
+                value={capText}
                 disabled={disabled}
                 onChange={(e) => {
                   const raw = e.target.value.replace(/[^0-9.]/g, "");
-                  onChange({ ...config, costCap: raw === "" ? null : Number(raw) });
+                  setCapText(raw);
+                  const value = Number(raw);
+                  onChange({
+                    ...config,
+                    // Anything not yet a usable number means "no cap" until it is one.
+                    costCap: raw !== "" && Number.isFinite(value) && value > 0 ? value : null,
+                  });
                 }}
               />
               <span className="prefixed-suffix">/month</span>
