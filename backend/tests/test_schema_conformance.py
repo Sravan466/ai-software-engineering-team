@@ -161,6 +161,71 @@ def test_the_ollama_request_carries_the_window_and_the_output_budget():
     assert downgraded["options"]["num_ctx"] == 8192
 
 
+@pytest.mark.parametrize(
+    "version,capabilities,expected,why",
+    [
+        ((0, 30, 10), ["completion", "tools"], True, "a current server and a chat model"),
+        ((0, 4, 9), ["completion"], False, "schema `format` predates this server"),
+        ((0, 30, 10), ["embedding"], False, "a model that cannot complete text"),
+        ((0, 30, 10), [], True, "a server too old to report capabilities at all"),
+        (None, ["completion"], False, "a server that would not say which version it is"),
+    ],
+)
+def test_schema_constrained_decoding_degrades_rather_than_failing(
+    version, capabilities, expected, why
+):
+    """Every path out of "this model can't be grammar-constrained" is plain JSON mode."""
+    from unittest.mock import patch
+
+    from app.router.providers.ollama import OllamaProvider
+
+    provider = OllamaProvider()
+    provider._version = version
+    show = {
+        "capabilities": capabilities,
+        "details": {"family": "qwen2"},
+        "model_info": {"general.architecture": "qwen2", "qwen2.context_length": 8192},
+    }
+    with patch.object(OllamaProvider, "_show", return_value=show), patch.object(
+        OllamaProvider, "_weight_bytes", return_value=None
+    ), patch.object(OllamaProvider, "server_version", return_value=version):
+        profile = provider.profile(f"m-{why}")
+
+    assert profile.supports_schema_format is expected, why
+    # Whatever the answer, the window and the output budget still arrive.
+    assert profile.context_window == 8192
+    assert profile.max_output_tokens == 4096
+
+
+def test_a_failure_that_was_never_about_the_schema_keeps_its_advice():
+    """A 404 is a model that isn't pulled. Retrying without the schema hides that."""
+    from unittest.mock import patch
+
+    import httpx
+
+    from app.router.base import ProviderError
+    from app.router.providers.ollama import OllamaProvider
+
+    class _NotFound:
+        status_code = 404
+        text = "model 'ghost' not found"
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("404", request=None, response=self)
+
+    provider = OllamaProvider()
+    with patch.object(OllamaProvider, "_show", return_value=None), patch(
+        "httpx.post", return_value=_NotFound()
+    ):
+        with pytest.raises(ProviderError) as caught:
+            provider.generate(
+                [],
+                "ghost",
+                GenerationOptions(json_mode=True, json_schema={"type": "object"}),
+            )
+    assert "ollama pull ghost" in str(caught.value)
+
+
 def test_prompt_truncation_follows_the_window(monkeypatch):
     """The same agent inlines more upstream context on a model with more room."""
     agent = get_agent(Phase.DEVOPS_ENGINEER.value)
