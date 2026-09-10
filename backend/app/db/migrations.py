@@ -45,7 +45,14 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "gate_kind",
         "gate_note",
     ),
-    "phase_results": ("started_at", "completed_at", "total_tokens", "latency_ms"),
+    "phase_results": (
+        "started_at",
+        "completed_at",
+        "total_tokens",
+        "latency_ms",
+        "schema_status",
+        "schema_note",
+    ),
 }
 
 

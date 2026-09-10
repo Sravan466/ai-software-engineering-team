@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import QAEngineerOutput
 
 
 class QAEngineerAgent(BaseAgent):
@@ -17,17 +18,7 @@ class QAEngineerAgent(BaseAgent):
         Phase.BACKEND_ENGINEER.value,
         Phase.FRONTEND_ENGINEER.value,
     )
-    output_spec = (
-        "{\n"
-        '  "summary": "string",\n'
-        '  "test_strategy": "string",\n'
-        '  "test_files": [{"path": "string", "framework": "string", "targets": "string", '
-        '"code": "string"}],\n'
-        '  "edge_cases": ["string"],\n'
-        '  "coverage_estimate": "string",\n'
-        '  "risks": ["string"]\n'
-        "}"
-    )
+    output_model = QAEngineerOutput
 
     def task_instruction(self) -> str:
         return (

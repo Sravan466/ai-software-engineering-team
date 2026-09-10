@@ -134,7 +134,9 @@ class PipelineRunner:
                 row = self._reconcile_current_phase(db, project)
 
                 if row is not None and row.status == PhaseStatus.PENDING_APPROVAL.value:
-                    gate = decide_gate(project, row.phase, row.output)
+                    gate = decide_gate(
+                        project, row.phase, row.output, row.schema_status
+                    )
                     if gate is not None:
                         self._park(db, project, gate)
                         return project
@@ -277,7 +279,12 @@ class PipelineRunner:
             # The reviewer sent back the phase they were looking at. Nothing
             # downstream exists yet, so put them back on the same decision.
             gate_row = self.latest_row(db, project, phase_key)
-            gate = decide_gate(project, phase_key, gate_row.output if gate_row else None)
+            gate = decide_gate(
+                project,
+                phase_key,
+                gate_row.output if gate_row else None,
+                gate_row.schema_status if gate_row else None,
+            )
             self._park(db, project, gate or fallback)
             return project
 
@@ -483,6 +490,8 @@ class PipelineRunner:
         row.provider_used = lr.get("provider_used")
         row.latency_ms = int(lr.get("latency_ms") or 0)
         row.total_tokens = int(usage.get("total_tokens") or 0)
+        row.schema_status = lr.get("schema_status")
+        row.schema_note = lr.get("schema_note")
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
         db.commit()
@@ -750,16 +759,32 @@ class PipelineRunner:
         self._write_memory(project, values)
 
     def _record_usage(self, db: Session, project: Project, lr: dict) -> None:
-        usage = lr.get("usage") or {}
-        resp = LLMResponse(
-            text="",
-            provider=lr.get("provider_used") or "unknown",
-            model=lr.get("model_used") or "unknown",
-            usage=Usage(**usage) if usage else Usage(),
-            latency_ms=lr.get("latency_ms", 0),
-            fallback_used=lr.get("fallback_used", False),
-        )
-        tracker.record(db, response=resp, project_id=project.id, phase=lr["phase"])
+        """One usage event per model call — including a schema repair round.
+
+        A repaired phase is two calls. Recording it as one would leave the token
+        total right and the call count and average latency wrong, which is the kind
+        of quiet inaccuracy this dashboard exists to not have.
+        """
+        calls = lr.get("calls") or [
+            {
+                "provider": lr.get("provider_used"),
+                "model": lr.get("model_used"),
+                "usage": lr.get("usage") or {},
+                "latency_ms": lr.get("latency_ms", 0),
+                "fallback_used": lr.get("fallback_used", False),
+            }
+        ]
+        for call in calls:
+            usage = call.get("usage") or {}
+            resp = LLMResponse(
+                text="",
+                provider=call.get("provider") or "unknown",
+                model=call.get("model") or "unknown",
+                usage=Usage(**usage) if usage else Usage(),
+                latency_ms=call.get("latency_ms", 0),
+                fallback_used=call.get("fallback_used", False),
+            )
+            tracker.record(db, response=resp, project_id=project.id, phase=lr["phase"])
 
     def _persist_new_debates(self, db: Session, project: Project, debates: list[dict]) -> None:
         existing = (

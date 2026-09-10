@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import DevOpsEngineerOutput
 
 
 class DevOpsEngineerAgent(BaseAgent):
@@ -17,17 +18,7 @@ class DevOpsEngineerAgent(BaseAgent):
         Phase.BACKEND_ENGINEER.value,
         Phase.FRONTEND_ENGINEER.value,
     )
-    output_spec = (
-        "{\n"
-        '  "summary": "string",\n'
-        '  "target_platform": "string",\n'
-        '  "dockerfiles": [{"path": "string", "content": "string"}],\n'
-        '  "compose_or_manifests": [{"path": "string", "content": "string"}],\n'
-        '  "ci_cd": [{"path": "string", "tool": "string", "content": "string"}],\n'
-        '  "deployment_steps": ["string"],\n'
-        '  "rollback_plan": "string"\n'
-        "}"
-    )
+    output_model = DevOpsEngineerOutput
 
     def task_instruction(self) -> str:
         return (

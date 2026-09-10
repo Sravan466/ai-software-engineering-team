@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import CostEstimationOutput
 
 
 class CostEstimationAgent(BaseAgent):
@@ -16,19 +17,7 @@ class CostEstimationAgent(BaseAgent):
         Phase.SYSTEM_DESIGN.value,
         Phase.DEVOPS_ENGINEER.value,
     )
-    output_spec = (
-        "{\n"
-        '  "summary": "string",\n'
-        '  "monthly_infra_cost": [{"item": "string", "low_usd": 0, "high_usd": 0, '
-        '"notes": "string"}],\n'
-        '  "api_or_third_party_cost": [{"item": "string", "monthly_usd": 0}],\n'
-        '  "dev_effort": [{"role": "string", "weeks": 0}],\n'
-        '  "estimated_timeline_weeks": 0,\n'
-        '  "total_monthly_low_usd": 0,\n'
-        '  "total_monthly_high_usd": 0,\n'
-        '  "cost_optimization_tips": ["string"]\n'
-        "}"
-    )
+    output_model = CostEstimationOutput
 
     def task_instruction(self) -> str:
         return (

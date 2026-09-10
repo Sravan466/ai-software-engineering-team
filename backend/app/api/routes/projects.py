@@ -109,7 +109,11 @@ def _rederive_gate(db: Session, project: Project) -> None:
     row = runner.latest_row(db, project, project.current_phase)
     if row is None:
         return
-    gate = decide_gate(project, row.phase, row.output)
+    # `schema_status` matters as much as the output here: without it a re-derive
+    # would drop the "this check could not run" warning off a parked gate, and the
+    # only sign the reviewer had that nothing was actually checked would vanish the
+    # moment they adjusted the cost cap.
+    gate = decide_gate(project, row.phase, row.output, row.schema_status)
     if gate is not None:
         project.gate_kind = gate.kind
         project.gate_note = gate.note

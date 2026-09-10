@@ -15,6 +15,8 @@ log = get_logger(__name__)
 class OpenAIProvider(LLMProvider):
     name = "openai"
     is_local = False
+    #: Published rather than probed — there is no capability endpoint to ask.
+    context_tokens = settings.openai_context_tokens
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.api_key = api_key or settings.openai_api_key
@@ -47,7 +49,7 @@ class OpenAIProvider(LLMProvider):
         kwargs: dict = {
             "model": model,
             "messages": [m.model_dump() for m in messages],
-            "max_tokens": options.max_tokens,
+            "max_tokens": options.resolve_max_tokens(self.profile(model).max_output_tokens),
         }
         if options.temperature is not None:
             kwargs["temperature"] = options.temperature

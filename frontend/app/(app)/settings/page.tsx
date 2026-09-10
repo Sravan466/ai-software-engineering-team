@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, LocalStatus, ProviderSetting } from "@/lib/api";
+import { api, LocalStatus, ModelProfile, ProviderSetting } from "@/lib/api";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
@@ -152,6 +152,18 @@ function LocalModelCard() {
               <div className="notice-body">
                 <span className="notice-title">
                   <span className="mono">{model}</span> is ready
+                  {status.profile?.supports_schema_format && (
+                    <span
+                      className="badge badge-ok"
+                      style={{ marginLeft: 8, verticalAlign: "middle" }}
+                      title={
+                        "Each agent's required output shape is sent to the model as a " +
+                        "schema, so it cannot answer with anything else."
+                      }
+                    >
+                      Shape-locked
+                    </span>
+                  )}
                 </span>
                 <span className="notice-text">
                   Builds set to Local will run entirely on this machine, at no cost.
@@ -159,6 +171,8 @@ function LocalModelCard() {
               </div>
             </div>
           )}
+
+          {status?.profile && <ModelCapability profile={status.profile} />}
 
           {status?.reachable && !status.has_default && (
             <div className="notice notice-warn">
@@ -225,6 +239,67 @@ function LocalModelCard() {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * What this model can actually do, asked of the model rather than assumed.
+ *
+ * The window here is the one the pipeline sends as `num_ctx` — the same resolved
+ * number, not a second guess at it. It is shown because it used to be invisible:
+ * every call ran at the server default, prompts were truncated from the head where
+ * the instructions live, and the only evidence was in a log nobody reads.
+ */
+function ModelCapability({ profile }: { profile: ModelProfile }) {
+  const tokens = (n: number) => `${n.toLocaleString()} tokens`;
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div className="sec-head" style={{ marginBottom: 10 }}>
+        <h3 className="label">What it can hold</h3>
+        <span className="rule" />
+      </div>
+
+      <dl className="facts">
+        <div className="fact">
+          <dt>Context window</dt>
+          <dd className="mono">{tokens(profile.context_window)}</dd>
+        </div>
+        <div className="fact">
+          <dt>Longest reply</dt>
+          <dd className="mono">{tokens(profile.max_output_tokens)}</dd>
+        </div>
+        {profile.parameter_size && (
+          <div className="fact">
+            <dt>Parameters</dt>
+            <dd className="mono">{profile.parameter_size}</dd>
+          </div>
+        )}
+        {profile.quantization && (
+          <div className="fact">
+            <dt>Quantization</dt>
+            <dd className="mono">{profile.quantization}</dd>
+          </div>
+        )}
+      </dl>
+
+      {/* Where the number came from, in one line — because "32,768" means something
+          different when the model reported it than when nobody could. */}
+      <p className="field-hint" style={{ marginTop: 12 }}>
+        {profile.source === "probe" && profile.context_limit
+          ? `Read from the model itself; it supports up to ${profile.context_limit.toLocaleString()}.`
+          : "This model doesn't report a window, so the configured fallback is in force."}
+        {profile.clamp_reason ? ` It is ${profile.clamp_reason}.` : ""}
+      </p>
+
+      {profile.warnings.map((warning) => (
+        <div className="notice notice-warn" style={{ marginTop: 12 }} key={warning}>
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-text">{warning}</span>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

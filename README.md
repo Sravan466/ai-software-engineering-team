@@ -141,6 +141,35 @@ ending at the local Ollama model so the pipeline keeps running.
 
 ---
 
+## How much room a model gets, and what it must return
+
+Pull whatever model you like — nothing about it is hardcoded. On first use the router
+asks the model itself (`POST /api/show`) how large a window it was trained for, works
+out how much of that the machine's RAM can actually hold as KV cache, and sends the
+smaller of the two as `num_ctx` on every call. Settings → **Local runtime** shows the
+resolved number, and so does the log:
+
+```
+Resolved model profile: ollama:qwen2.5:7b — context 32,768 tokens (model limit 32,768,
+source probe), output ≤ 4,096, schema-constrained decoding on
+```
+
+This is not a nicety. Without `num_ctx` a request over the server's default window is
+truncated **from the head** — the system prompt, where the required output shape is
+written, goes first — and the truncation is logged server-side where no client sees it.
+
+Each agent declares its deliverable as a type (`app/schemas/agent_outputs.py`). That one
+declaration becomes the JSON sketch in the prompt, the JSON Schema decoding is constrained
+to, and the check the response is validated against. A response that misses gets one
+repair round carrying the validation errors; if it still misses, the phase is flagged
+rather than quietly stored — and the cost and security gates, which read specific keys off
+these outputs, stop the run instead of reading nothing and calling it fine.
+
+Every ceiling involved is yours to move: `OLLAMA_CONTEXT_CEILING`, `OLLAMA_RAM_FRACTION`,
+`MAX_OUTPUT_TOKENS`, `SCHEMA_REPAIR_ROUNDS`. See `.env.example`.
+
+---
+
 ## Workflow
 
 A product idea flows through **8 specialist agents** in order. After each phase the graph

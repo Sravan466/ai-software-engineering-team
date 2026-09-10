@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.constants import RoutingMode
 from app.core.logging import get_logger
 from app.router.base import LLMProvider, ProviderError
+from app.router.model_profile import ModelProfile, fallback_profile
 from app.router.providers.anthropic_provider import AnthropicProvider
 from app.router.providers.gemini_provider import GeminiProvider
 from app.router.providers.ollama import OllamaProvider
@@ -49,6 +50,34 @@ class ModelRouter:
     # ── public API ────────────────────────────────────────────────────────────
     def provider(self, name: str) -> Optional[LLMProvider]:
         return self._providers.get(name)
+
+    def profile_for(
+        self,
+        mode: RoutingMode = RoutingMode.LOCAL_ONLY,
+        preferred_model: Optional[str] = None,
+        complexity: str = "medium",
+    ) -> ModelProfile:
+        """The profile of the model this request will most likely land on.
+
+        Callers size their prompts from it, so it resolves the same chain `complete`
+        does and reports the first link that is actually up — a budget built for a
+        cloud model that is not configured would be a budget for a call that never
+        happens. When nothing is available the head of the chain is described anyway,
+        so prompt assembly still has numbers to work with and the failure surfaces
+        as a provider error rather than as a mis-sized prompt.
+        """
+        chain = self._resolve_chain(mode, preferred_model, complexity)
+        for pname, model in chain:
+            prov = self._providers.get(pname)
+            if prov is not None and prov.available():
+                return prov.profile(model)
+        if not chain:
+            return fallback_profile("none", "unresolved")
+        pname, model = chain[0]
+        head = self._providers.get(pname)
+        return fallback_profile(
+            pname, model, local=bool(head is not None and head.is_local)
+        )
 
     # ── runtime provider configuration (Settings UI) ───────────────────────────
     def _apply(
@@ -107,18 +136,26 @@ class ModelRouter:
         return out
 
     def local_status(self) -> dict:
-        """Ollama reachability + which models are pulled (for the local-model panel)."""
+        """Ollama reachability, which models are pulled, and what the default can do."""
         prov = self._providers["ollama"]
         default = self._default_model["ollama"]
-        models = prov.list_models() if hasattr(prov, "list_models") else []
+        # One tag list and one reachability check for the whole answer. Asking four
+        # times over made the Settings page wait four timeouts instead of one whenever
+        # Ollama was down — which is exactly when someone is looking at that page.
+        reachable = prov.available()
+        models = prov.list_models() if reachable and hasattr(prov, "list_models") else []
+        base = default.split(":", 1)[0]
+        has_default = default in models or any(m.split(":", 1)[0] == base for m in models)
+        # The probe is the same one the pipeline runs on, so the window shown here is
+        # the window agents will actually get — not a second guess at it.
+        profile = prov.profile(default).as_dict() if has_default else None
         return {
             "base_url": getattr(prov, "base_url", settings.ollama_base_url),
-            "reachable": prov.available(),
+            "reachable": reachable,
             "models": models,
             "default_model": default,
-            "has_default": (
-                prov.has_model(default) if hasattr(prov, "has_model") else (default in models)
-            ),
+            "has_default": has_default,
+            "profile": profile,
         }
 
     def complete(
@@ -147,6 +184,21 @@ class ModelRouter:
                 resp = prov.generate(messages, model, options)
                 resp.fallback_used = idx > 0
                 resp.attempts = attempts
+                if idx > 0:
+                    # The caller sized its prompt against the head of this chain, and
+                    # this is not that model. Nothing here can re-size a prompt that
+                    # has already been sent, so the least this can do is not let the
+                    # substitution pass unrecorded.
+                    head = chain[0]
+                    log.warning(
+                        "Served %s:%s after %s:%s failed. The prompt was budgeted for "
+                        "the latter's context window, so it may not have fitted this "
+                        "one — check the phase's output before trusting it.",
+                        pname,
+                        model,
+                        head[0],
+                        head[1],
+                    )
                 return resp
             except ProviderError as e:
                 log.warning("Provider %s/%s failed: %s", pname, model, e)

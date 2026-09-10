@@ -70,6 +70,18 @@ export default function PhaseArtifact({
 
   return (
     <div className="artifact">
+      {/* Said here, next to the output it describes, rather than only as a badge on
+          a row above. A phase that missed its shape is one whose keys nothing
+          downstream could read — that is worth a sentence, not a tooltip. */}
+      {row.schema_status === "invalid" && (
+        <p className="artifact-flag" role="status">
+          <strong>This doesn&apos;t match the shape {row.agent} declares.</strong>{" "}
+          {row.schema_note ? `${row.schema_note}. ` : ""}
+          Checks and later phases that read these keys have nothing to read. Send it
+          back and the agent will try again.
+        </p>
+      )}
+
       {views.length > 1 && (
         <div className="artifact-bar">
           <div className="switcher" role="group" aria-label="What this agent produced">

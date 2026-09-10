@@ -10,10 +10,8 @@ a verdict — cheap, deterministic to parse, and good enough to demonstrate the 
 from __future__ import annotations
 from typing import Optional
 
-import json
-import re
-
 from app.core.constants import RoutingMode
+from app.core.reading import json_object
 from app.core.logging import get_logger
 from app.router.router import router
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
@@ -38,16 +36,27 @@ def conduct_debate(
     mode: RoutingMode,
     preferred_model: Optional[str],
 ) -> tuple[dict, LLMResponse]:
-    user = (
-        f"# Decision to debate\n{topic}\n\n"
-        f"# Architecture context\n{context[:5000]}\n\n"
-        "Run the debate and decide."
-    )
+    # How much architecture to quote comes from the model that will answer — and the
+    # overhead is measured the same way the agents measure theirs, by assembling the
+    # thing with nothing in it. Subtracting a hand-counted `len(_SYSTEM) + len(topic)`
+    # misses the headings and the closing line wrapped around them, which is how a
+    # budget computed here overruns the window it was computed from.
+    profile = router.profile_for(mode, preferred_model, complexity="medium")
+
+    def assemble(quoted: str) -> str:
+        return (
+            f"# Decision to debate\n{topic}\n\n"
+            f"# Architecture context\n{quoted}\n\n"
+            "Run the debate and decide."
+        )
+
+    overhead = len(_SYSTEM) + len(assemble(""))
+    user = assemble(context[: max(profile.prompt_char_budget - overhead, 0)])
     resp = router.complete(
         [ChatMessage(role="system", content=_SYSTEM), ChatMessage(role="user", content=user)],
         mode=mode,
         preferred_model=preferred_model,
-        options=GenerationOptions(max_tokens=2048, json_mode=True),
+        options=GenerationOptions(json_mode=True),
         complexity="medium",
     )
     record = _parse(resp.text, topic)
@@ -55,22 +64,22 @@ def conduct_debate(
 
 
 def _parse(text: str, topic: str) -> dict:
-    text = text.strip()
-    fence = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", text)
-    candidate = fence.group(1) if fence else text
-    if not candidate.lstrip().startswith("{"):
-        brace = re.search(r"\{.*\}", candidate, re.DOTALL)
-        if brace:
-            candidate = brace.group(0)
-    try:
-        data = json.loads(candidate)
-        data.setdefault("topic", topic)
-        data.setdefault("arguments", [])
-        data.setdefault("decision", "")
-        data.setdefault("rationale", "")
-        return data
-    except (json.JSONDecodeError, ValueError):
+    """The verdict, or a record that carries the raw reply instead of dying on it.
+
+    The extractor is shared with the agents rather than copied — this function used
+    to hold its own near-identical copy, which meant a reply parsing to something
+    other than an object (`123`, `"sorry"`) reached `setdefault` and raised an
+    `AttributeError` that killed the Backend phase. One copy had been fixed; this
+    one had not, which is the argument for there being one.
+    """
+    data = json_object(text)
+    if data is None:
         return {"topic": topic, "arguments": [], "decision": text, "rationale": ""}
+    data.setdefault("topic", topic)
+    data.setdefault("arguments", [])
+    data.setdefault("decision", "")
+    data.setdefault("rationale", "")
+    return data
 
 
 def decision_summary(record: dict) -> str:

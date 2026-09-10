@@ -38,10 +38,31 @@ class GateKind(str, Enum):
     SHIP = "ship"
     #: Warden found something severe enough to stop an otherwise unattended build.
     SECURITY = "security"
+    #: A gate's own phase failed its schema, so the check that gate performs never
+    #: ran. Distinct from SECURITY on purpose: "Warden found something serious" and
+    #: "nobody could read Warden's report" are different facts, and telling the
+    #: reviewer the first when the second happened is the failure this all fixes.
+    UNCHECKED = "unchecked"
     #: Ledger's projected run cost passed the cap set for this build.
     COST = "cost"
     #: A single handoff, in every-phase mode.
     PHASE = "phase"
+
+
+class SchemaStatus(str, Enum):
+    """What validation made of an agent's output against its declared shape.
+
+    Recorded per phase because two gates downstream read specific keys off these
+    outputs: a phase that did not match its shape is a check that did not run, and
+    that has to be visible rather than inferred from a key being missing.
+    """
+
+    #: Matched first time.
+    VALID = "valid"
+    #: Matched after being sent back with the validation errors attached.
+    REPAIRED = "repaired"
+    #: Still did not match. The best attempt is kept and flagged, never silently used.
+    INVALID = "invalid"
 
 
 class PipelineStatus(str, Enum):

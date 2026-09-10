@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import FrontendEngineerOutput
 
 
 class FrontendEngineerAgent(BaseAgent):
@@ -17,17 +18,7 @@ class FrontendEngineerAgent(BaseAgent):
         Phase.SYSTEM_DESIGN.value,
         Phase.BACKEND_ENGINEER.value,
     )
-    output_spec = (
-        "{\n"
-        '  "framework": "string (e.g. Next.js + React)",\n'
-        '  "summary": "string",\n'
-        '  "pages": [{"route": "string", "purpose": "string"}],\n'
-        '  "components": [{"name": "string", "purpose": "string"}],\n'
-        '  "state_management": "string",\n'
-        '  "files": [{"path": "string", "language": "string", "purpose": "string", '
-        '"code": "string"}]\n'
-        "}"
-    )
+    output_model = FrontendEngineerOutput
 
     def task_instruction(self) -> str:
         return (

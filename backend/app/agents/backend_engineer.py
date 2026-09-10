@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import BackendEngineerOutput
 
 
 class BackendEngineerAgent(BaseAgent):
@@ -13,17 +14,7 @@ class BackendEngineerAgent(BaseAgent):
         "realise the system design. You write clean, runnable code."
     )
     depends_on = (Phase.PRODUCT_MANAGER.value, Phase.SYSTEM_DESIGN.value)
-    output_spec = (
-        "{\n"
-        '  "framework": "string (e.g. FastAPI)",\n'
-        '  "summary": "string",\n'
-        '  "db_models": "string (code)",\n'
-        '  "auth_flow": "string",\n'
-        '  "files": [{"path": "string", "language": "string", "purpose": "string", '
-        '"code": "string"}],\n'
-        '  "setup_instructions": ["string"]\n'
-        "}"
-    )
+    output_model = BackendEngineerOutput
 
     def task_instruction(self) -> str:
         return (

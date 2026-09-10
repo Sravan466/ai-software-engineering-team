@@ -10,6 +10,7 @@ import { Icon } from "@/components/shell/icons";
 import { Skeleton, SkeletonLines } from "@/components/ui/Skeleton";
 import VisualPreview from "@/components/preview/VisualPreview";
 import GithubPublish from "@/components/github/GithubPublish";
+import SchemaBadge from "@/components/build/SchemaBadge";
 import PhaseArtifact from "@/components/build/PhaseArtifact";
 import FileBrowser from "@/components/build/FileBrowser";
 import Decision from "@/components/build/Decision";
@@ -917,6 +918,7 @@ function PhaseList({
                   {ph.debate && <span className="badge badge-run">Debated</span>}
                   {isGate && <span className="badge badge-warn">Under review above</span>}
                   {ns === "failed" && <span className="badge badge-bad">Interrupted</span>}
+                  {row && <SchemaBadge row={row} />}
                 </span>
                 {/* The agent's own status line, in their voice — and, for a phase
                     that hasn't started, the plain reason it hasn't. */}
