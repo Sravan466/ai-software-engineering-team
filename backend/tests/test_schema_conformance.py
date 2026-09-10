@@ -565,6 +565,59 @@ def test_an_unreadable_cost_estimate_says_so_at_the_ship_review():
     assert "could not be checked" in (gate.note or "")
 
 
+_CRITICAL = {
+    "title": "SQLi",
+    "severity": "critical",
+    "category": "SQL injection",
+    "location": "users.py",
+    "description": "d",
+    "recommendation": "r",
+}
+_SEVERE = {"summary": "…", "findings": [_CRITICAL]}
+_CLEAN = {"summary": "…", "findings": []}
+_PRICEY = {"summary": "…", "total_monthly_high_usd": 490}
+_CHEAP = {"summary": "…", "total_monthly_high_usd": 50}
+
+
+@pytest.mark.parametrize(
+    "mode,phase,output,status,expected",
+    [
+        # Unattended is an explicit choice about not being interrupted. Failing
+        # closed is a checkpoints promise, not a licence to override the mode.
+        (ApprovalMode.UNATTENDED, Phase.SECURITY_ENGINEER, _SEVERE, "valid", None),
+        (ApprovalMode.UNATTENDED, Phase.SECURITY_ENGINEER, _CLEAN, "invalid", None),
+        (ApprovalMode.UNATTENDED, Phase.COST_ESTIMATION, _PRICEY, "valid", None),
+        # Every-phase keeps its rhythm whatever the output says.
+        (ApprovalMode.EVERY_PHASE, Phase.BACKEND_ENGINEER, {}, "valid", GateKind.PHASE.value),
+        (ApprovalMode.EVERY_PHASE, Phase.SECURITY_ENGINEER, _CLEAN, "invalid", GateKind.PHASE.value),
+        # Checkpoints: two scheduled decisions…
+        (ApprovalMode.CHECKPOINTS, Phase.SYSTEM_DESIGN, {}, "valid", GateKind.PLAN.value),
+        (ApprovalMode.CHECKPOINTS, Phase.BACKEND_ENGINEER, {}, "valid", None),
+        (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, _CHEAP, "valid", GateKind.SHIP.value),
+        # …plus what the run raises for itself.
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "valid", GateKind.SECURITY.value),
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _CLEAN, "valid", None),
+        (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, _PRICEY, "valid", GateKind.COST.value),
+        # …and, when a gate's own phase failed its shape, a stop that says so.
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _CLEAN, "invalid", GateKind.UNCHECKED.value),
+        (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, {}, "invalid", GateKind.SHIP.value),
+        # A finding it *could* read outranks "could not read": a known critical is
+        # more actionable than an unreadable report.
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "invalid", GateKind.SECURITY.value),
+    ],
+)
+def test_the_whole_gate_policy_in_one_table(mode, phase, output, status, expected):
+    """Every mode against every gated phase and both schema outcomes.
+
+    The policy is small enough to state exhaustively, and a table is the only form
+    in which "unattended never stops" and "a check that did not run stops the run"
+    can be read as the single consistent rule they are.
+    """
+    project = _Project(mode=mode, cap=100 if phase == Phase.COST_ESTIMATION else None)
+    gate = decide_gate(project, phase.value, output, status)
+    assert (gate.kind if gate else None) == expected
+
+
 def test_unattended_still_means_unattended():
     """Failing closed is a checkpoints-mode promise, not a licence to ignore the mode."""
     project = _Project(mode=ApprovalMode.UNATTENDED)
