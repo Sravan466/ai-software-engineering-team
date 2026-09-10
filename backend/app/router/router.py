@@ -139,16 +139,19 @@ class ModelRouter:
         """Ollama reachability, which models are pulled, and what the default can do."""
         prov = self._providers["ollama"]
         default = self._default_model["ollama"]
-        models = prov.list_models() if hasattr(prov, "list_models") else []
-        has_default = (
-            prov.has_model(default) if hasattr(prov, "has_model") else (default in models)
-        )
+        # One tag list and one reachability check for the whole answer. Asking four
+        # times over made the Settings page wait four timeouts instead of one whenever
+        # Ollama was down — which is exactly when someone is looking at that page.
+        reachable = prov.available()
+        models = prov.list_models() if reachable and hasattr(prov, "list_models") else []
+        base = default.split(":", 1)[0]
+        has_default = default in models or any(m.split(":", 1)[0] == base for m in models)
         # The probe is the same one the pipeline runs on, so the window shown here is
         # the window agents will actually get — not a second guess at it.
-        profile = prov.profile(default).as_dict() if has_default and prov.available() else None
+        profile = prov.profile(default).as_dict() if has_default else None
         return {
             "base_url": getattr(prov, "base_url", settings.ollama_base_url),
-            "reachable": prov.available(),
+            "reachable": reachable,
             "models": models,
             "default_model": default,
             "has_default": has_default,

@@ -14,6 +14,7 @@ from typing import Optional
 
 import time
 from dataclasses import replace
+from urllib.parse import urlparse
 
 import httpx
 
@@ -25,6 +26,7 @@ from app.router.model_profile import (
     ProfileCache,
     build_profile,
     fallback_profile,
+    total_ram_bytes,
 )
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
@@ -38,10 +40,16 @@ _SCHEMA_FORMAT_MIN_VERSION = (0, 5, 0)
 _COMPLETION_CAPABILITY = "completion"
 
 
-def _parse_version(text: str) -> tuple[int, ...]:
-    """'0.30.10' -> (0, 30, 10). A pre-release suffix on a part stops the parse there."""
+def _parse_version(text: str) -> tuple[int, int, int]:
+    """'0.30.10' -> (0, 30, 10). Always three parts, so comparisons mean what they read.
+
+    A two-part version is padded rather than left short: `"0.5"` as `(0, 5)` compares
+    *below* `(0, 5, 0)`, which would reject the very first release that supports the
+    feature being checked for. `()` is returned for anything unparseable, and the
+    caller treats that as "did not answer" rather than "answered zero".
+    """
     parts: list[int] = []
-    for chunk in str(text).split("."):
+    for chunk in str(text).strip().lstrip("vV").split("."):
         digits = ""
         for ch in chunk:
             if not ch.isdigit():
@@ -50,7 +58,10 @@ def _parse_version(text: str) -> tuple[int, ...]:
         if not digits:
             break
         parts.append(int(digits))
-    return tuple(parts)
+    if not parts:
+        return ()  # type: ignore[return-value]
+    parts += [0] * (3 - len(parts))
+    return tuple(parts[:3])  # type: ignore[return-value]
 
 
 class _SchemaFormatRejected(RuntimeError):
@@ -116,13 +127,29 @@ class OllamaProvider(LLMProvider):
         return None
 
     def server_version(self) -> Optional[tuple[int, ...]]:
-        if self._version is None:
-            try:
-                r = httpx.get(f"{self.base_url}/api/version", timeout=2.0)
-                r.raise_for_status()
-                self._version = _parse_version(r.json().get("version", ""))
-            except Exception:  # noqa: BLE001 - unreachable, or a build with no such route
-                return None
+        """The server's version, asked once — but only remembered once it answers.
+
+        A version that could not be read is not cached. Storing the empty parse would
+        make the not-`None` check pass forever after, and schema-constrained decoding
+        would stay off for every model on this host for the life of the process, with
+        nothing said about why.
+        """
+        if self._version:
+            return self._version
+        try:
+            r = httpx.get(f"{self.base_url}/api/version", timeout=2.0)
+            r.raise_for_status()
+            parsed = _parse_version(r.json().get("version", ""))
+        except Exception:  # noqa: BLE001 - unreachable, or a build with no such route
+            return None
+        if not parsed:
+            log.warning(
+                "Ollama at %s reported a version this cannot read; schema-constrained "
+                "decoding stays off until it reports one that can be.",
+                self.base_url,
+            )
+            return None
+        self._version = parsed
         return self._version
 
     def profile(self, model: str) -> ModelProfile:
@@ -140,6 +167,11 @@ class OllamaProvider(LLMProvider):
         show = self._show(model)
         if show is None:
             return fallback_profile(self.name, model, local=True)
+
+        # The KV cache lives in the Ollama process. When that is on another host — or
+        # in its own container — this machine's RAM says nothing about what fits there,
+        # and a confident clamp built on it would be a number about the wrong computer.
+        ram = total_ram_bytes() if self.is_same_machine() else None
 
         capabilities = [str(c) for c in (show.get("capabilities") or [])]
         version = self.server_version()
@@ -159,6 +191,7 @@ class OllamaProvider(LLMProvider):
                 show=show,
                 weight_bytes=self._weight_bytes(model),
                 supports_schema_format=supports_schema,
+                ram_bytes=ram,
             ),
         )
 
@@ -178,6 +211,11 @@ class OllamaProvider(LLMProvider):
                 settings.model_context_fallback_tokens,
             )
             return None
+
+    def is_same_machine(self) -> bool:
+        """Whether Ollama runs where this process does, so local RAM is its RAM."""
+        host = urlparse(self.base_url).hostname or ""
+        return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
     def forget_profile(self, model: Optional[str] = None) -> None:
         """Drop cached probes — after a pull, or when the host changes underneath us."""

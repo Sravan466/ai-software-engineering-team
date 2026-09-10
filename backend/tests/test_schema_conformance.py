@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from app.agents import get_agent
 from app.agents.base import AgentContext, BaseAgent
@@ -226,22 +227,67 @@ def test_a_failure_that_was_never_about_the_schema_keeps_its_advice():
     assert "ollama pull ghost" in str(caught.value)
 
 
-def test_prompt_truncation_follows_the_window(monkeypatch):
+def _profile(window: int) -> ModelProfile:
+    return ModelProfile(
+        provider="ollama",
+        model="m",
+        context_limit=window,
+        context_window=window,
+        max_output_tokens=min(4096, window // 2),
+    )
+
+
+def test_prompt_truncation_follows_the_window():
     """The same agent inlines more upstream context on a model with more room."""
     agent = get_agent(Phase.DEVOPS_ENGINEER.value)
-    ctx = AgentContext(idea="A team standup bot", prior_outputs={})
-
-    def budgets(window: int) -> int:
-        profile = ModelProfile(
-            provider="ollama",
-            model="m",
-            context_limit=window,
-            context_window=window,
-            max_output_tokens=min(4096, window // 2),
-        )
-        return agent._section_budgets(ctx, profile)["depends_on"]
-
+    ctx = AgentContext(
+        idea="A team standup bot",
+        prior_outputs={d: {"summary": "x"} for d in agent.depends_on},
+    )
+    budgets = lambda w: agent._section_budgets(ctx, _profile(w))["depends_on"]  # noqa: E731
     assert budgets(32768) > budgets(8192)
+
+
+def test_an_absent_section_does_not_reserve_room_it_will_never_use():
+    """A share held back for a knowledge base nobody uploaded is window spent on nothing."""
+    agent = get_agent(Phase.DEVOPS_ENGINEER.value)
+    deps = {d: {"summary": "x"} for d in agent.depends_on}
+
+    alone = agent._section_budgets(
+        AgentContext(idea="A team standup bot", prior_outputs=deps), _profile(32768)
+    )
+    crowded = agent._section_budgets(
+        AgentContext(
+            idea="A team standup bot",
+            prior_outputs=deps,
+            rag_context="reference material",
+            memory_context="a lesson from a past build",
+        ),
+        _profile(32768),
+    )
+    assert alone["rag"] == 0 and alone["memory"] == 0
+    assert alone["depends_on"] > crowded["depends_on"]
+    assert crowded["rag"] > 0 and crowded["memory"] > 0
+
+
+def test_the_repair_round_still_fits_the_window():
+    """The one call whose job is to restate the shape must not be cut from the head."""
+    agent = get_agent(Phase.SECURITY_ENGINEER.value)
+    profile = _profile(32768)
+    ctx = AgentContext(
+        idea="A team standup bot",
+        prior_outputs={d: {"code": "x" * 200_000} for d in agent.depends_on},
+    )
+
+    # A rejected attempt as long as anything a model could return.
+    messages = agent._repair_messages(ctx, profile, "y" * 200_000, ["`findings` — Field required"])
+    total = sum(len(m.content) for m in messages)
+    assert total <= profile.prompt_char_budget, (
+        f"repair prompt is {total:,} chars against a {profile.prompt_char_budget:,} budget"
+    )
+    # And the system prompt — the thing carrying the shape — is still first.
+    assert messages[0].role == "system"
+    assert "findings" in messages[0].content
 
 
 # ── 2. the declared shape is one declaration, read three ways ────────────────
@@ -461,6 +507,114 @@ def test_unattended_still_means_unattended():
         )
         is None
     )
+
+
+# ── 5. what a review pass found, kept found ──────────────────────────────────
+def test_a_setting_left_blank_does_not_take_the_app_down():
+    """`.env.example` ships `OLLAMA_CONTEXT_CEILING=` and the README says to copy it."""
+    from app.core.config import Settings
+
+    assert Settings(_env_file=None, ollama_context_ceiling="").ollama_context_ceiling is None
+    assert Settings(_env_file=None, ollama_context_ceiling="4096").ollama_context_ceiling == 4096
+
+
+def test_a_null_does_not_mask_the_alias_that_holds_the_findings():
+    """The nastiest shape of all: it used to validate as `valid` and lose a critical.
+
+    `{"findings": null, "security_findings": [critical]}` — `AliasChoices` took the
+    null because the key was present, the null became an empty list, and the gate read
+    zero findings off output nothing had flagged as suspect.
+    """
+    critical = {
+        "title": "SQLi",
+        "severity": "critical",
+        "category": "SQL injection",
+        "location": "users.py",
+        "description": "d",
+        "recommendation": "r",
+    }
+    payload = {
+        **_minimal(SecurityEngineerOutput),
+        "findings": None,
+        "security_findings": [critical],
+    }
+    out = SecurityEngineerOutput.model_validate(payload).model_dump(mode="json")
+    assert len(out["findings"]) == 1
+    assert len(severe_findings(out)) == 1
+    assert decide_gate(_Project(), Phase.SECURITY_ENGINEER.value, out).kind == GateKind.SECURITY.value
+
+
+def test_a_null_on_a_required_list_is_a_repair_not_an_empty_list():
+    payload = {**_minimal(SecurityEngineerOutput), "findings": None}
+    with pytest.raises(ValidationError):
+        SecurityEngineerOutput.model_validate(payload)
+
+
+def test_the_gate_reads_past_a_null_to_the_key_that_holds_the_number():
+    drifted = {"summary": "…", "total_monthly_high_usd": None, "monthly_total_usd": 640}
+    assert projected_monthly_cost(drifted) == 640
+
+
+def test_a_configured_ceiling_is_not_overridden_by_a_floor(monkeypatch):
+    """The knob `.env.example` documents has to actually lower the window."""
+    from app.core import config
+    from app.router import model_profile
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", 2048)
+    window, reason = model_profile.resolve_window(
+        context_limit=32768, kv_bytes_per_token=None, weight_bytes=None, ram_bytes=None
+    )
+    assert window == 2048
+    assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
+
+
+def test_a_machine_that_cannot_hold_the_cache_is_told_so_not_overruled(monkeypatch):
+    from app.router import model_profile
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    window, reason = model_profile.resolve_window(
+        context_limit=32768,
+        kv_bytes_per_token=57344,
+        weight_bytes=7_000_000_000,
+        ram_bytes=8 * 2**30,
+    )
+    # Whatever RAM allows is what is sent — never inflated back to a comfortable number.
+    assert window < 32768
+    assert reason and ("RAM" in reason or "below what an agent prompt needs" in reason)
+
+
+def test_the_ram_clamp_is_skipped_when_ollama_is_on_another_machine():
+    """This process's RAM says nothing about a KV cache allocated somewhere else."""
+    from app.router.providers.ollama import OllamaProvider
+
+    assert OllamaProvider("http://localhost:11434").is_same_machine()
+    assert not OllamaProvider("http://ollama.internal:11434").is_same_machine()
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("0.5", (0, 5, 0)), ("0.30.10", (0, 30, 10)), ("v0.30.1", (0, 30, 1)), ("unknown", ())],
+)
+def test_version_parsing_pads_and_refuses(text, expected):
+    """`"0.5"` as `(0, 5)` compares below `(0, 5, 0)` — rejecting the first release
+    that supports the feature being checked for."""
+    from app.router.providers.ollama import _parse_version
+
+    assert _parse_version(text) == expected
+
+
+def test_an_unreadable_version_is_retried_rather_than_cached():
+    from unittest.mock import patch
+
+    from app.router.providers.ollama import OllamaProvider
+
+    provider = OllamaProvider()
+    with patch("httpx.get") as get:
+        get.return_value.json.return_value = {"version": "unknown"}
+        get.return_value.raise_for_status.return_value = None
+        assert provider.server_version() is None
+        assert provider.server_version() is None
+        assert get.call_count == 2, "an unreadable version was cached and never retried"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

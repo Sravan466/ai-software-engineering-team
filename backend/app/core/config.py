@@ -7,7 +7,25 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Optional
 
+from pydantic import BeforeValidator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing_extensions import Annotated
+
+
+def _blank_is_unset(value: object) -> object:
+    """`FOO=` in a .env file means "I did not set this", not "parse this as a number".
+
+    Without this an optional numeric setting left blank — which is exactly how
+    `.env.example` ships it, and the README says to copy that file — raises at import
+    of this module and the app never starts.
+    """
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+#: An optional integer setting that tolerates being left blank in the environment.
+OptionalInt = Annotated[Optional[int], BeforeValidator(_blank_is_unset)]
 
 
 class Settings(BaseSettings):
@@ -40,7 +58,7 @@ class Settings(BaseSettings):
     # these are the ceilings and the last resorts, all of them user-settable.
     #: Lower the local context window to at most this many tokens (unset = only the
     #: model's own limit and RAM decide). Useful for handing memory back.
-    ollama_context_ceiling: Optional[int] = None
+    ollama_context_ceiling: OptionalInt = None
     #: Share of physical RAM the KV cache may claim once the weights are loaded.
     ollama_ram_fraction: float = 0.6
     #: The window assumed *only* when a provider will not report one at all.

@@ -20,6 +20,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+from app.router.model_profile import ModelProfile  # noqa: E402
 from app.router.router import router as model_router  # noqa: E402
 from app.schemas.llm import LLMResponse, Usage  # noqa: E402
 
@@ -67,10 +68,35 @@ def _fake_complete(messages, **kwargs) -> LLMResponse:
     )
 
 
+#: The model these tests size their prompts against. Fixed on purpose: a probe would
+#: read whatever the developer happens to have pulled, so budget-sensitive behaviour
+#: would differ between a laptop with a 32k model and CI with none.
+STUB_PROFILE = ModelProfile(
+    provider="mock",
+    model="mock-model",
+    context_limit=32768,
+    context_window=32768,
+    max_output_tokens=4096,
+    supports_schema_format=True,
+    source="probe",
+)
+
+
+def _fake_profile(*_args, **_kwargs) -> ModelProfile:
+    return STUB_PROFILE
+
+
 @pytest.fixture
 def stub_router(monkeypatch):
-    """Replace the LLM router with the deterministic fake (no Ollama / cloud keys)."""
+    """Replace the LLM router with the deterministic fake (no Ollama / cloud keys).
+
+    Both halves are stubbed. `profile_for` is not a detail: agents call it before
+    every prompt, and left live it reaches out to Ollama over HTTP — so the suite
+    would depend on whether the machine running it has a model pulled, and block on
+    a timeout per phase when nothing is listening.
+    """
     monkeypatch.setattr(model_router, "complete", _fake_complete)
+    monkeypatch.setattr(model_router, "profile_for", _fake_profile)
 
 
 @pytest.fixture

@@ -55,18 +55,24 @@ def _norm(name: object) -> str:
 
 
 def read_key(source: object, *names: str) -> object:
-    """The first of `names` present on `source`, matched by normalised key.
+    """The first of `names` that actually holds something, matched by normalised key.
 
     Agents rename keys — that is the drift this whole module now assumes. Matching
     on the shape of the name rather than its exact spelling costs nothing and turns
     a class of silent gate failures into a non-event.
+
+    "Holds something" rather than "is present" is the important half. A model that
+    writes `"findings": null` next to a populated `"security_findings"` has reported
+    findings; stopping at the null because the key existed would lose them, which is
+    the whole failure this module is being hardened against.
     """
     if not isinstance(source, dict):
         return None
     flat = {_norm(k): v for k, v in source.items()}
     for name in names:
-        if _norm(name) in flat:
-            return flat[_norm(name)]
+        value = flat.get(_norm(name))
+        if value is not None:
+            return value
     return None
 
 

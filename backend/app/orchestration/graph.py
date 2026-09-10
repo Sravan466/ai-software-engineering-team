@@ -41,7 +41,6 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # a missing one means "nothing to report" or "nobody could read the report".
         "schema_status": result.schema_status,
         "schema_note": result.schema_note,
-        "repair_rounds": result.repair_rounds,
         # One entry per model call. A repaired phase made two, and analytics counts
         # calls and averages latency across them — folding both into a single event
         # would report one call that took as long as two.

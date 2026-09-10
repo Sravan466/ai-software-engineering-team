@@ -21,19 +21,31 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Optional, Union, get_args, get_origin
 
-from pydantic import AliasChoices, BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 
 # ── coercions ────────────────────────────────────────────────────────────────
 def _as_list(value: Any) -> Any:
-    """A lone item where a list belongs is the list. `None` is the empty one.
+    """A lone item where a list belongs is the list.
 
     Worth absorbing rather than rejecting because of where it bites: a Warden that
     reports its one critical finding as `"findings": {...}` instead of `[{...}]` is
     a run that sails past the security gate on a formatting detail.
+
+    `None` is emphatically **not** absorbed. Turning a null into an empty list is how
+    "the model reported nothing here" becomes "the model reported that there is
+    nothing here" — and those are the two readings the security gate must never
+    confuse. A null fails validation and earns a repair round instead.
     """
     if value is None:
-        return []
+        return None
     if isinstance(value, (list, tuple)):
         return list(value)
     return [value]
@@ -41,6 +53,8 @@ def _as_list(value: Any) -> Any:
 
 def _as_str_list(value: Any) -> Any:
     """The same, plus the two shapes models reach for instead of a list of strings."""
+    if value is None:
+        return None
     if isinstance(value, dict):
         return [f"{k}: {v}" for k, v in value.items()]
     items = _as_list(value)
@@ -74,6 +88,27 @@ class _Shape(BaseModel):
     """Base for every declared shape: strict about what is required, open to more."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_nulls(cls, data: Any) -> Any:
+        """Remove keys the model set to null, before anything else looks at them.
+
+        Two things depend on this, and the second is a security property.
+
+        `AliasChoices` picks the first alias that is *present*, not the first that
+        holds anything. A model that writes `"findings": null` beside a populated
+        `"security_findings"` would have the null win, and the real findings would
+        survive only as an ignored extra key — a critical vulnerability silently
+        dropped from the list the gate reads, on output marked `valid`.
+
+        And a null on a field with a default is the model declining to answer, which
+        should give the default; a null on a required field is a miss, which should
+        give a repair round. Neither of those is "an empty list".
+        """
+        if not isinstance(data, dict):
+            return data
+        return {k: v for k, v in data.items() if v is not None}
 
 
 def _list_of(item: type) -> Any:

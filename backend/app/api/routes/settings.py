@@ -66,6 +66,11 @@ def pull_local(body: PullRequest):
     base = settings.ollama_base_url.rstrip("/")
 
     def stream():
+        # The model on disk is about to change, so whatever was probed about it is
+        # already stale. Dropping the cache in a `finally` rather than after the loop
+        # covers the case that actually happens: the user closes the tab mid-pull,
+        # Starlette throws GeneratorExit — a BaseException, so no `except Exception`
+        # sees it — and every later call would size prompts for the previous model.
         try:
             with httpx.stream(
                 "POST", f"{base}/api/pull", json={"name": model}, timeout=None
@@ -79,10 +84,6 @@ def pull_local(body: PullRequest):
                 for line in r.iter_lines():
                     if line:
                         yield line if line.endswith("\n") else line + "\n"
-            # The model on disk has changed, so anything probed about it is stale.
-            prov = model_router.provider("ollama")
-            if prov is not None and hasattr(prov, "forget_profile"):
-                prov.forget_profile(model)
         except Exception as e:  # noqa: BLE001 - surface a clean error line to the client
             yield json.dumps(
                 {
@@ -92,5 +93,9 @@ def pull_local(body: PullRequest):
                     )
                 }
             ) + "\n"
+        finally:
+            prov = model_router.provider("ollama")
+            if prov is not None and hasattr(prov, "forget_profile"):
+                prov.forget_profile(model)
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")

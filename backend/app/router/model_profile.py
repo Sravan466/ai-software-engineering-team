@@ -154,6 +154,9 @@ class ModelProfile:
 _PROMPT_SAFETY_MARGIN = 0.9
 #: However the arithmetic lands, an agent needs room for its own instructions.
 _MIN_PROMPT_TOKENS = 512
+#: Below this a window cannot hold a system prompt plus a useful reply. Reaching it
+#: is reported, never corrected: the constraint that got us here is a real one.
+_MIN_WORKABLE_TOKENS = 2048
 
 
 def fallback_profile(
@@ -211,34 +214,49 @@ def resolve_window(
 
     Asking for more than the model was trained for either errors or wastes memory,
     and asking for more KV cache than the machine has swaps or gets killed. Both are
-    ceilings on the same number, so the smallest wins and the reason is kept for the
-    log line and the Settings page.
+    ceilings on the same number, so the smallest wins, and the one that actually bound
+    it is reported for the log line and the Settings page.
+
+    Every candidate here is a real constraint, so none of them is ever overridden —
+    a floor that raised the window back up would hand a user who capped the window at
+    2,048 a 8,192-token one, and hand a machine that can hold 3,000 tokens of cache a
+    window twice that size, which is precisely the swapping the RAM clamp exists to
+    prevent. A window too small to work in is reported as such, not quietly inflated.
     """
     limit = context_limit or settings.model_context_fallback_tokens
-    window = limit
-    reason: Optional[str] = None
+    candidates: list[tuple[int, Optional[str]]] = [(limit, None)]
 
     ram_tokens = _tokens_that_fit_in_ram(kv_bytes_per_token, weight_bytes, ram_bytes)
-    if ram_tokens is not None and ram_tokens < window:
+    if ram_tokens is not None:
         gib = (ram_bytes or 0) / 2**30
-        window = ram_tokens
-        reason = (
-            f"clamped to {window:,} tokens by RAM — {gib:.0f} GiB total, "
-            f"{settings.ollama_ram_fraction:.0%} of it available to the KV cache"
+        candidates.append(
+            (
+                ram_tokens,
+                f"clamped to {ram_tokens:,} tokens by RAM — {gib:.0f} GiB total, "
+                f"{settings.ollama_ram_fraction:.0%} of it available to the KV cache",
+            )
         )
 
-    ceilinged = _apply_ceiling(window)
-    if ceilinged < window:
-        window = ceilinged
-        reason = f"clamped to the configured OLLAMA_CONTEXT_CEILING of {window:,} tokens"
+    ceiling = settings.ollama_context_ceiling
+    if ceiling and ceiling > 0:
+        candidates.append(
+            (
+                ceiling,
+                f"clamped to the configured OLLAMA_CONTEXT_CEILING of {ceiling:,} tokens",
+            )
+        )
 
-    # A floor, so a machine under memory pressure degrades instead of collapsing to
-    # a window no prompt fits in. Never above what the model itself supports.
-    floor = min(limit, settings.model_context_fallback_tokens)
-    if window < floor:
-        window = floor
-        reason = (
-            f"held at the {floor:,}-token floor — less than that and no agent prompt fits"
+    window, reason = min(candidates, key=lambda c: c[0])
+
+    if window < _MIN_WORKABLE_TOKENS:
+        # Not raised back up — that would be answering a real constraint with a
+        # wish. `num_ctx` must still be positive, and the reason says what is wrong
+        # so the Settings page can show it rather than the run failing mysteriously.
+        floored = max(window, 1)
+        return floored, (
+            f"{reason or 'resolved to'} — {floored:,} tokens is below what an agent "
+            "prompt needs, so phases will be truncated. Raise OLLAMA_CONTEXT_CEILING, "
+            "free memory, or use a smaller model."
         )
     return window, reason
 

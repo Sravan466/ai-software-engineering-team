@@ -42,6 +42,10 @@ _CONTEXT_SHARE = {
 }
 #: No section is worth including as a stump.
 _MIN_SECTION_CHARS = 400
+#: What wraps each section that is not its content: the heading, the code fence, the
+#: separator, and the note left behind when the content was cut. Counted against the
+#: budget, because a budget that only measures the payload is one the frame overruns.
+_SECTION_FRAME_CHARS = 160
 
 
 @dataclass
@@ -122,10 +126,13 @@ class BaseAgent:
                 rounds,
             )
             # Rebuilt from the original ask each round, carrying only the *latest*
-            # attempt. Appending each failure to the last would grow the prompt with
-            # every round — which is the shape of the bug being fixed here.
+            # attempt, and with the room for that attempt taken *out* of the context
+            # budget rather than added on top of it. Appending an echo to a prompt
+            # already sized to fill the window is how the repair call — the one whose
+            # whole job is to restate the shape — gets truncated from the head and
+            # loses the system prompt that carries it.
             resp = self._complete(
-                self._repair_messages(ask, resp.text, errors, profile), ctx, options
+                self._repair_messages(ctx, profile, resp.text, errors), ctx, options
             )
             responses.append(resp)
             output, errors = self._validate(self._parse(resp.text))
@@ -181,9 +188,12 @@ class BaseAgent:
         )
 
     def _build_messages(
-        self, ctx: AgentContext, profile: Optional[ModelProfile] = None
+        self,
+        ctx: AgentContext,
+        profile: Optional[ModelProfile] = None,
+        reserve: int = 0,
     ) -> list[ChatMessage]:
-        budget = self._section_budgets(ctx, profile)
+        budget = self._section_budgets(ctx, profile, reserve)
         parts: list[str] = [f"# Product idea\n{ctx.idea}\n"]
 
         deps = [d for d in self.depends_on if d in ctx.prior_outputs]
@@ -221,15 +231,21 @@ class BaseAgent:
         ]
 
     def _section_budgets(
-        self, ctx: AgentContext, profile: Optional[ModelProfile]
+        self,
+        ctx: AgentContext,
+        profile: Optional[ModelProfile],
+        reserve: int = 0,
     ) -> dict[str, int]:
         """How many characters each optional section may spend.
 
         Derived from the window the model reported, minus what is already committed:
-        the system prompt, the idea, the instruction, and anything a person wrote. A
-        section's share of what remains is the same proportion whatever the model, so
-        a 32k window inlines the whole of the upstream phase and an 8k one inlines the
-        part that fits — rather than both cutting at the same invented number.
+        the system prompt, the idea, the instruction, anything a person wrote, and
+        `reserve` — room a caller needs for something it will append afterwards.
+
+        The shares are renormalised over the sections that actually have content. A
+        fixed 26% held back for reference material nobody uploaded is 26% of the
+        window spent on nothing, and the upstream phase gets cut to make space for
+        it — which is the opposite of the point.
         """
         if profile is None:
             profile = router.profile_for(
@@ -237,11 +253,27 @@ class BaseAgent:
             )
 
         committed = len(self.system_prompt()) + len(self.task_instruction()) + len(ctx.idea)
-        committed += len(ctx.extra_context) + len(ctx.feedback or "")
+        committed += len(ctx.extra_context) + len(ctx.feedback or "") + max(reserve, 0)
+        deps = [d for d in self.depends_on if d in ctx.prior_outputs]
         free = max(profile.prompt_char_budget - committed, 0)
+
+        present = {
+            "depends_on": bool(deps),
+            "rag": bool(ctx.rag_context),
+            "memory": bool(ctx.memory_context),
+        }
+        free -= _SECTION_FRAME_CHARS * (len(deps) + bool(ctx.rag_context) + bool(ctx.memory_context))
+        free = max(free, 0)
+        total_share = sum(_CONTEXT_SHARE[name] for name, has in present.items() if has)
+        if total_share <= 0:
+            return {name: 0 for name in _CONTEXT_SHARE}
         return {
-            name: max(int(free * share), _MIN_SECTION_CHARS)
-            for name, share in _CONTEXT_SHARE.items()
+            name: (
+                max(int(free * (_CONTEXT_SHARE[name] / total_share)), _MIN_SECTION_CHARS)
+                if present[name]
+                else 0
+            )
+            for name in _CONTEXT_SHARE
         }
 
     def task_instruction(self) -> str:
@@ -250,34 +282,32 @@ class BaseAgent:
 
     def _repair_messages(
         self,
-        messages: list[ChatMessage],
+        ctx: AgentContext,
+        profile: ModelProfile,
         attempt: str,
         errors: list[str],
-        profile: ModelProfile,
     ) -> list[ChatMessage]:
-        """The same ask, plus what was wrong with the answer.
+        """The same ask, plus what was wrong with the answer — inside the same window.
 
         The rejected attempt is echoed back so the model corrects rather than starts
-        over — clipped to a fraction of the window, because the thing being repaired
-        is sometimes a wall of generated code.
+        over, because the thing being repaired is sometimes a wall of generated code.
+        That echo is reserved *before* the context sections are sized, so the whole
+        exchange still fits: a repair prompt that overflows gets cut from the head,
+        and the head is the system prompt naming the shape being repaired.
         """
         problems = "\n".join(f"- {e}" for e in errors[:12])
+        instruction = (
+            "That response does not match the required shape. Fix exactly these "
+            f"problems:\n{problems}\n\n"
+            "Return the COMPLETE JSON object again — every key from the shape, "
+            "not a patch and not an apology. Keep everything that was already correct."
+        )
+        echo_budget = max(profile.prompt_char_budget // 4, _MIN_SECTION_CHARS)
+        echo = _clip(attempt, echo_budget)
         return [
-            *messages,
-            ChatMessage(
-                role="assistant",
-                content=_clip(attempt, max(profile.prompt_char_budget // 3, 1000)),
-            ),
-            ChatMessage(
-                role="user",
-                content=(
-                    "That response does not match the required shape. Fix exactly these "
-                    f"problems:\n{problems}\n\n"
-                    "Return the COMPLETE JSON object again — every key from the shape, "
-                    "not a patch and not an apology. Keep everything that was already "
-                    "correct."
-                ),
-            ),
+            *self._build_messages(ctx, profile, reserve=len(echo) + len(instruction)),
+            ChatMessage(role="assistant", content=echo),
+            ChatMessage(role="user", content=instruction),
         ]
 
     # ── output handling ───────────────────────────────────────────────────────
@@ -326,8 +356,15 @@ _TRUNCATED = "… [cut at {limit:,} characters to fit this model's context windo
 
 
 def _clip(text: str, limit: int) -> str:
-    """Cut to `limit` characters, saying so."""
-    if limit <= 0 or len(text) <= limit:
+    """Cut to `limit` characters, saying so.
+
+    A limit of zero means there is no room left, so nothing of the text survives —
+    returning all of it, which the inverted guard here used to do, overflows exactly
+    the window this budget exists to respect.
+    """
+    if limit <= 0:
+        return _TRUNCATED.format(limit=0)
+    if len(text) <= limit:
         return text
     return text[:limit] + "\n" + _TRUNCATED.format(limit=limit)
 
