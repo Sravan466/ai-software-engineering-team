@@ -23,6 +23,8 @@ _ADAPTIVE_THINKING_PREFIXES = ("claude-opus-4-8", "claude-opus-4-7", "claude-fab
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
     is_local = False
+    #: Published rather than probed — there is no capability endpoint to ask.
+    context_tokens = settings.anthropic_context_tokens
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.api_key = api_key or settings.anthropic_api_key
@@ -64,7 +66,9 @@ class AnthropicProvider(LLMProvider):
 
         kwargs: dict = {
             "model": model,
-            "max_tokens": options.max_tokens,
+            # `max_tokens` is required here, and the caller normally leaves it unset
+            # so the model's own window decides rather than a literal at the call site.
+            "max_tokens": options.resolve_max_tokens(self.profile(model).max_output_tokens),
             "messages": convo,
         }
         if system_text:

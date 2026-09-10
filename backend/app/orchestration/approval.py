@@ -13,9 +13,19 @@ anyone who wants it; `unattended` never stops.
 
 This module owns that decision and nothing else. It reads a finished phase and
 answers one question, so the runner stays a loop and the policy stays legible.
+
+Two of those gates read specific keys off an agent's output — Ledger's projected cost,
+Warden's findings — and a gate that cannot find its key used to return `None`, which
+means "carry on". Reading nothing looked exactly like reading "nothing to worry about",
+so a renamed field took the gate down without a word. Three things stop that here:
+every read is by *normalised* key, so `overallRiskAssessment` and `overall_risk_assessment`
+are the same name; a missing total falls back to the line items rather than to zero; and
+an output that failed its schema outright **stops the run** instead of sailing past.
+A gate that silently stops gating is worse than no gate.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -25,11 +35,48 @@ from app.core.constants import (
     PLAN_GATE_PHASE,
     Phase,
     SHIP_GATE_PHASE,
+    SchemaStatus,
 )
 
 #: Severities Warden is allowed to stop an unattended build over. Anything below this
 #: is worth reading at the Ship review, not worth interrupting a run for.
 STOPPING_SEVERITIES = frozenset({"critical", "high"})
+
+#: Phases whose output a gate actually reads. When one of these fails validation the
+#: check it feeds cannot run, and the run stops for a person instead of pretending it did.
+GATED_PHASES = (Phase.SECURITY_ENGINEER.value, Phase.COST_ESTIMATION.value)
+
+
+# ── reading a key that may have been renamed ─────────────────────────────────
+def _norm(name: object) -> str:
+    """`overallRiskAssessment`, `overall_risk_assessment`, `Overall Risk Assessment`
+    all collapse to one string, so case and punctuation drift stop mattering."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def read_key(source: object, *names: str) -> object:
+    """The first of `names` present on `source`, matched by normalised key.
+
+    Agents rename keys — that is the drift this whole module now assumes. Matching
+    on the shape of the name rather than its exact spelling costs nothing and turns
+    a class of silent gate failures into a non-event.
+    """
+    if not isinstance(source, dict):
+        return None
+    flat = {_norm(k): v for k, v in source.items()}
+    for name in names:
+        if _norm(name) in flat:
+            return flat[_norm(name)]
+    return None
+
+
+def _as_rows(value: object) -> list[dict]:
+    """A list of objects, whatever the agent wrapped it in (or forgot to)."""
+    if isinstance(value, dict):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
 
 
 @dataclass(frozen=True)
@@ -44,19 +91,18 @@ class Gate:
 def severe_findings(output: object) -> list[dict]:
     """Security findings severe enough to interrupt, newest schema or not.
 
-    Models are inconsistent about case and about wrapping the list, so this reads
-    leniently: what matters is that a `severity` says critical or high.
+    Models are inconsistent about case, about what they call the list, and about
+    whether a single finding is wrapped in one at all — so this reads leniently on
+    every axis. What matters is that something says critical or high.
     """
-    if not isinstance(output, dict):
-        return []
-    findings = output.get("findings")
-    if not isinstance(findings, list):
-        return []
+    findings = _as_rows(
+        read_key(output, "findings", "security_findings", "vulnerabilities", "issues")
+    )
     return [
         f
         for f in findings
-        if isinstance(f, dict)
-        and str(f.get("severity", "")).strip().lower() in STOPPING_SEVERITIES
+        if str(read_key(f, "severity", "risk", "level", "impact") or "").strip().lower()
+        in STOPPING_SEVERITIES
     ]
 
 
@@ -78,14 +124,13 @@ def _sum_rows(rows: object, *fields: str) -> Optional[float]:
     row*, because one list routinely mixes the two — picking a winning field for the
     whole list silently drops every row that used the other one.
     """
-    if not isinstance(rows, list):
+    rows = _as_rows(rows)
+    if not rows:
         return None
     total = 0.0
     counted = False
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        present = [v for v in (_number(row.get(f)) for f in fields) if v is not None]
+        present = [v for v in (_number(read_key(row, f)) for f in fields) if v is not None]
         if not present:
             continue
         # A placeholder zero in the preferred field is not this line's cost. Same rule
@@ -113,8 +158,11 @@ def projected_monthly_cost(output: object) -> Optional[float]:
     # It cannot short-circuit the other total either: `high: 0, low: 50` is a build
     # that costs 50.
     zero_reported = False
-    for key in ("total_monthly_high_usd", "total_monthly_low_usd"):
-        value = _number(output.get(key))
+    for names in (
+        ("total_monthly_high_usd", "total_monthly_cost_usd", "monthly_total_usd"),
+        ("total_monthly_low_usd", "estimated_monthly_cost_usd", "total_monthly_usd"),
+    ):
+        value = _number(read_key(output, *names))
         if value:
             return value
         zero_reported = zero_reported or value is not None
@@ -123,8 +171,21 @@ def projected_monthly_cost(output: object) -> Optional[float]:
     parts = [
         total
         for total in (
-            _sum_rows(output.get("monthly_infra_cost"), "high_usd", "low_usd"),
-            _sum_rows(output.get("api_or_third_party_cost"), "monthly_usd"),
+            _sum_rows(
+                read_key(output, "monthly_infra_cost", "infrastructure_cost", "infra_costs"),
+                "high_usd",
+                "low_usd",
+            ),
+            _sum_rows(
+                read_key(
+                    output,
+                    "api_or_third_party_cost",
+                    "third_party_cost",
+                    "api_costs",
+                    "api_cost",
+                ),
+                "monthly_usd",
+            ),
         )
         if total is not None
     ]
@@ -134,12 +195,18 @@ def projected_monthly_cost(output: object) -> Optional[float]:
 
 
 # ── the decision ─────────────────────────────────────────────────────────────
-def decide_gate(project, phase_key: str, output: object) -> Optional[Gate]:
+def decide_gate(
+    project, phase_key: str, output: object, schema_status: Optional[str] = None
+) -> Optional[Gate]:
     """Should the pipeline stop after `phase_key`? Returns the gate, or None.
 
     `project` is the live row: the policy is re-read on every phase so switching a
     run to unattended — or adding gates back to one going sideways — takes effect
     from the next handoff rather than at the next restart.
+
+    `schema_status` is what validation made of the agent's output. When a gate's own
+    phase failed it, the check that gate performs did not really happen, and the run
+    stops so a person does it instead.
     """
     mode = project.effective_approval_mode
 
@@ -149,6 +216,7 @@ def decide_gate(project, phase_key: str, output: object) -> Optional[Gate]:
         return Gate(GateKind.PHASE.value)
 
     # ── checkpoints: two decisions, plus what the run itself raises ──
+    unchecked = unchecked_note(phase_key, schema_status)
     overrun = (
         cost_overrun_note(project, output)
         if phase_key == Phase.COST_ESTIMATION.value
@@ -158,8 +226,11 @@ def decide_gate(project, phase_key: str, output: object) -> Optional[Gate]:
     if phase_key == SHIP_GATE_PHASE.value:
         # Ledger is the last phase, so an overrun cannot interrupt a build that has
         # already finished. What it changes is what this stop *is*: a review of a
-        # finished product, or a review of one that costs more than you allowed.
-        return Gate(GateKind.COST.value if overrun else GateKind.SHIP.value, overrun)
+        # finished product, one that costs more than you allowed, or one whose cost
+        # nobody could read.
+        if overrun:
+            return Gate(GateKind.COST.value, overrun)
+        return Gate(GateKind.SHIP.value, unchecked)
 
     if overrun:
         # Reachable only if Ledger stops being the last phase — then an overrun is a
@@ -173,8 +244,27 @@ def decide_gate(project, phase_key: str, output: object) -> Optional[Gate]:
         severe = severe_findings(output)
         if severe:
             return Gate(GateKind.SECURITY.value, _security_note(severe))
+        if unchecked:
+            # Warden's report is unreadable, so "no severe findings" is not a fact —
+            # it is the absence of one. Stop rather than infer the reassuring half.
+            return Gate(GateKind.SECURITY.value, unchecked)
 
     return None
+
+
+def unchecked_note(phase_key: str, schema_status: Optional[str]) -> Optional[str]:
+    """"Warden's report didn't match its shape, so the check didn't really run."""
+    if phase_key not in GATED_PHASES or schema_status != SchemaStatus.INVALID.value:
+        return None
+    if phase_key == Phase.SECURITY_ENGINEER.value:
+        return (
+            "Warden's report did not match the shape the security check reads, so that "
+            "check could not run. Read the findings yourself before shipping this."
+        )
+    return (
+        "Ledger's estimate did not match the shape the cost check reads, so the cap on "
+        "this build could not be checked. Read the numbers yourself."
+    )
 
 
 def cost_overrun_note(project, output: object) -> Optional[str]:

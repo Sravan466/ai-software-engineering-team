@@ -138,7 +138,9 @@ def generate_preview(
         ],
         mode=mode,
         preferred_model=preferred_model,
-        options=GenerationOptions(max_tokens=4096, json_mode=False, temperature=0.4),
+        # No max_tokens: a whole HTML document is exactly the request that a literal
+        # output budget cuts in half. The resolved model window decides.
+        options=GenerationOptions(json_mode=False, temperature=0.4),
         complexity="high",
     )
     return _clean_document(resp.text), resp
@@ -164,7 +166,7 @@ def edit_section(
         ],
         mode=mode,
         preferred_model=preferred_model,
-        options=GenerationOptions(max_tokens=2048, json_mode=False, temperature=0.3),
+        options=GenerationOptions(json_mode=False, temperature=0.3),
         complexity="medium",
     )
     return _clean_fragment(resp.text), resp

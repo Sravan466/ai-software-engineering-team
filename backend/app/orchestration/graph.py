@@ -36,6 +36,12 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         "usage": r.usage.model_dump(),
         "latency_ms": r.latency_ms,
         "fallback_used": r.fallback_used,
+        # Whether the agent actually produced the shape it was asked for. Two gates
+        # downstream read specific keys off `output`; this is how they know whether
+        # a missing one means "nothing to report" or "nobody could read the report".
+        "schema_status": result.schema_status,
+        "schema_note": result.schema_note,
+        "repair_rounds": result.repair_rounds,
     }
 
 

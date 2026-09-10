@@ -6,6 +6,7 @@ Ollama or any cloud key.
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
@@ -22,22 +23,43 @@ from app.main import app  # noqa: E402
 from app.router.router import router as model_router  # noqa: E402
 from app.schemas.llm import LLMResponse, Usage  # noqa: E402
 
-# A JSON blob that satisfies every agent's and the debate's parser.
+# What the debate parser reads. Agents get a payload built from their own schema
+# instead — see `_conforming`.
 MOCK_JSON = (
     '{"summary": "mock deliverable", '
-    '"product_name": "Demo", '
-    '"tech_stack": {"frontend": ["Next.js"], "backend": ["FastAPI"], "database": ["PostgreSQL"]}, '
-    '"overall_posture": "low risk", '
-    '"estimated_timeline_weeks": 6, '
-    '"total_monthly_low_usd": 50, "total_monthly_high_usd": 120, '
     '"decision": "PostgreSQL", "arguments": [{"agent": "Security", "position": "Postgres", '
     '"rationale": "relational integrity"}], "rationale": "fits the relational data model"}'
 )
 
 
+def _conforming(schema: dict) -> object:
+    """Build the smallest value that satisfies `schema`.
+
+    The stub answers the schema it was handed, which is the same schema a real
+    provider constrains decoding to. That keeps these tests exercising orchestration
+    rather than accidentally exercising the repair loop — and it means a schema that
+    stops matching its agent's model shows up here as a failure.
+    """
+    kind = schema.get("type")
+    if kind == "object":
+        props = schema.get("properties") or {}
+        required = schema.get("required") or list(props)
+        return {name: _conforming(props.get(name, {})) for name in required}
+    if kind == "array":
+        return [_conforming(schema.get("items") or {"type": "string"})]
+    if kind in ("number", "integer"):
+        return 12
+    if kind == "boolean":
+        return True
+    return "mock deliverable"
+
+
 def _fake_complete(messages, **kwargs) -> LLMResponse:
+    options = kwargs.get("options")
+    schema = getattr(options, "json_schema", None)
+    text = json.dumps(_conforming(schema)) if schema else MOCK_JSON
     return LLMResponse(
-        text=MOCK_JSON,
+        text=text,
         provider="mock",
         model="mock-model",
         usage=Usage(prompt_tokens=12, completion_tokens=34, total_tokens=46),

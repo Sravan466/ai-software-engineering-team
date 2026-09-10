@@ -44,6 +44,22 @@ class GateKind(str, Enum):
     PHASE = "phase"
 
 
+class SchemaStatus(str, Enum):
+    """What validation made of an agent's output against its declared shape.
+
+    Recorded per phase because two gates downstream read specific keys off these
+    outputs: a phase that did not match its shape is a check that did not run, and
+    that has to be visible rather than inferred from a key being missing.
+    """
+
+    #: Matched first time.
+    VALID = "valid"
+    #: Matched after being sent back with the validation errors attached.
+    REPAIRED = "repaired"
+    #: Still did not match. The best attempt is kept and flagged, never silently used.
+    INVALID = "invalid"
+
+
 class PipelineStatus(str, Enum):
     CREATED = "created"
     RUNNING = "running"

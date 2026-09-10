@@ -15,6 +15,8 @@ log = get_logger(__name__)
 class GeminiProvider(LLMProvider):
     name = "gemini"
     is_local = False
+    #: Published rather than probed — there is no capability endpoint to ask.
+    context_tokens = settings.gemini_context_tokens
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.api_key = api_key or settings.gemini_api_key
@@ -59,7 +61,11 @@ class GeminiProvider(LLMProvider):
         if not contents:
             contents = [{"role": "user", "parts": [system_text or "Proceed."]}]
 
-        gen_config: dict = {"max_output_tokens": options.max_tokens}
+        gen_config: dict = {
+            "max_output_tokens": options.resolve_max_tokens(
+                self.profile(model).max_output_tokens
+            )
+        }
         if options.temperature is not None:
             gen_config["temperature"] = options.temperature
         if options.json_mode:

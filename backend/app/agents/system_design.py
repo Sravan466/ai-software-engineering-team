@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import SystemDesignOutput
 
 
 class SystemDesignAgent(BaseAgent):
@@ -13,19 +14,7 @@ class SystemDesignAgent(BaseAgent):
         "APIs, and plan for scale. You justify each major choice."
     )
     depends_on = (Phase.PRODUCT_MANAGER.value,)
-    output_spec = (
-        "{\n"
-        '  "architecture_overview": "string",\n'
-        '  "tech_stack": {"frontend": ["string"], "backend": ["string"], '
-        '"database": ["string"], "infra": ["string"]},\n'
-        '  "components": [{"name": "string", "responsibility": "string"}],\n'
-        '  "data_model": [{"entity": "string", "fields": ["name:type"], '
-        '"relationships": ["string"]}],\n'
-        '  "api_endpoints": [{"method": "string", "path": "string", "purpose": "string"}],\n'
-        '  "scaling_considerations": ["string"],\n'
-        '  "architecture_diagram_mermaid": "string (a Mermaid flowchart definition)"\n'
-        "}"
-    )
+    output_model = SystemDesignOutput
 
     def task_instruction(self) -> str:
         return (

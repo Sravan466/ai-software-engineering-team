@@ -34,13 +34,43 @@ class Settings(BaseSettings):
     ollama_default_model: str = "qwen2.5:7b"
     fallback_chain: str = "ollama:qwen2.5:7b"
 
+    # ── Model capability & prompt budgets ──
+    # Nothing below is a context size this app assumes about a local model. That
+    # window is probed from the model itself (`POST /api/show`) and clamped by RAM;
+    # these are the ceilings and the last resorts, all of them user-settable.
+    #: Lower the local context window to at most this many tokens (unset = only the
+    #: model's own limit and RAM decide). Useful for handing memory back.
+    ollama_context_ceiling: Optional[int] = None
+    #: Share of physical RAM the KV cache may claim once the weights are loaded.
+    ollama_ram_fraction: float = 0.6
+    #: The window assumed *only* when a provider will not report one at all.
+    model_context_fallback_tokens: int = 8192
+    #: Ceiling on tokens one call may generate. The resolved window can lower this,
+    #: never raise it — half the window is the hard cap.
+    max_output_tokens: int = 4096
+    #: Characters per token, used to turn a token budget into a truncation length.
+    #: An estimate by nature; raise it if your prompts are mostly prose, lower it
+    #: if they are mostly code.
+    approx_chars_per_token: float = 3.5
+    #: A model below this many parameters produces thin output whatever the prompt
+    #: says. The Settings page says so rather than leaving the user to wonder why.
+    small_model_parameter_count: int = 4_000_000_000
+    #: How many times a schema-invalid agent response is sent back for repair before
+    #: the run keeps the best attempt and flags it. Each round is a whole extra call.
+    schema_repair_rounds: int = 1
+
     # ── Cloud providers ──
     anthropic_api_key: Optional[str] = None
     anthropic_default_model: str = "claude-opus-4-8"
+    #: Published context windows. Cloud providers expose no probe, so these are
+    #: configuration rather than a guess — override them when a model differs.
+    anthropic_context_tokens: int = 200_000
     openai_api_key: Optional[str] = None
     openai_default_model: str = "gpt-4o"
+    openai_context_tokens: int = 128_000
     gemini_api_key: Optional[str] = None
     gemini_default_model: str = "gemini-1.5-pro"
+    gemini_context_tokens: int = 1_000_000
 
     # ── GitHub publishing (OAuth "Connect" flow) ──
     # Register a free OAuth App at https://github.com/settings/developers and set

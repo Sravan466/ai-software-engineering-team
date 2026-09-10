@@ -165,6 +165,12 @@ class PhaseResult(Base):
     # Human feedback when rejected.
     feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # What validation made of this output against the agent's declared shape, and
+    # what was wrong when something was. Nullable because rows written before the
+    # check existed cannot answer for themselves — see `SchemaStatus`.
+    schema_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    schema_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="phases")

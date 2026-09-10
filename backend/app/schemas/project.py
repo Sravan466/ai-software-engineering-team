@@ -86,6 +86,12 @@ class PhaseResultOut(BaseModel):
     feedback: Optional[str] = None
     created_at: UtcDatetime
 
+    #: valid | repaired | invalid — did this agent produce the shape it was asked
+    #: for, and did it take a second attempt? `None` on rows written before the
+    #: check existed. The reviewer is told rather than left to spot it.
+    schema_status: Optional[str] = None
+    schema_note: Optional[str] = None
+
     # Timing, so a phase in flight can show elapsed time and a finished one can show
     # what it actually cost in wall-clock and tokens.
     started_at: Optional[UtcDatetime] = None

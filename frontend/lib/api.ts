@@ -23,6 +23,14 @@ export type PhaseResult = {
   completed_at: string | null;
   total_tokens: number;
   latency_ms: number;
+  /**
+   * Did this agent return the shape it declares, and did it take a second attempt?
+   * `null` on rows written before the check existed — which is not the same as
+   * "valid", so the UI says nothing at all for those rather than a reassuring badge.
+   */
+  schema_status: "valid" | "repaired" | "invalid" | null;
+  /** What was wrong, when something was. */
+  schema_note: string | null;
 };
 
 export type ApprovalMode = "checkpoints" | "every_phase" | "unattended";
@@ -322,12 +330,41 @@ export type ProviderSetting = {
   default_model: string | null;
 };
 
+/**
+ * What the local model reported about itself when the backend probed it. The
+ * window here is the window agents actually get — the same resolved number the
+ * pipeline sends as `num_ctx` — not a second guess at it.
+ */
+export type ModelProfile = {
+  provider: string;
+  model: string;
+  /** What the model was trained for. `null` when it does not report one. */
+  context_limit: number | null;
+  /** What we ask for: the limit, lowered by RAM or by a configured ceiling. */
+  context_window: number;
+  max_output_tokens: number;
+  prompt_token_budget: number;
+  parameter_count: number | null;
+  parameter_size: string | null;
+  quantization: string | null;
+  capabilities: string[];
+  /** True when decoding is constrained to each agent's schema, not just to JSON. */
+  supports_schema_format: boolean;
+  source: "probe" | "configured" | "fallback";
+  /** Why the window sits below the model's own limit, when it does. */
+  clamp_reason: string | null;
+  is_small: boolean;
+  warnings: string[];
+};
+
 export type LocalStatus = {
   base_url: string;
   reachable: boolean;
   models: string[];
   default_model: string;
   has_default: boolean;
+  /** Null while Ollama is unreachable or the default model isn't pulled yet. */
+  profile: ModelProfile | null;
 };
 
 export type PullProgress = {

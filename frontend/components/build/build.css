@@ -156,6 +156,20 @@
 /* The files view brings its own two-pane frame and scrolls internally. */
 .artifact-files { overflow: hidden; }
 
+/* A phase that missed its declared shape. Tinted rather than shouted: the output
+   below is still worth reading — it is the reading that now needs a caveat. The
+   left edge is the app's 1px rule, not a colour bar; the tint carries the state. */
+.artifact-flag {
+  margin: 0;
+  padding: 11px 16px;
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--ink-2);
+  background: var(--bad-soft);
+  border-bottom: 1px solid rgba(240, 82, 82, 0.4);
+}
+.artifact-flag strong { color: var(--bad); font-weight: 600; }
+
 .artifact-empty {
   padding: 20px;
   font-size: var(--t-base);

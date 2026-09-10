@@ -79,6 +79,10 @@ def pull_local(body: PullRequest):
                 for line in r.iter_lines():
                     if line:
                         yield line if line.endswith("\n") else line + "\n"
+            # The model on disk has changed, so anything probed about it is stale.
+            prov = model_router.provider("ollama")
+            if prov is not None and hasattr(prov, "forget_profile"):
+                prov.forget_profile(model)
         except Exception as e:  # noqa: BLE001 - surface a clean error line to the client
             yield json.dumps(
                 {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import SecurityEngineerOutput
 
 
 class SecurityEngineerAgent(BaseAgent):
@@ -17,17 +18,7 @@ class SecurityEngineerAgent(BaseAgent):
         Phase.BACKEND_ENGINEER.value,
         Phase.FRONTEND_ENGINEER.value,
     )
-    output_spec = (
-        "{\n"
-        '  "summary": "string",\n'
-        '  "findings": [{"title": "string", "severity": "critical|high|medium|low", '
-        '"category": "string (e.g. SQL injection, XSS, CSRF, authz, secret exposure)", '
-        '"location": "string", "description": "string", "recommendation": "string"}],\n'
-        '  "secrets_check": "string",\n'
-        '  "risk_assessment": "string",\n'
-        '  "overall_posture": "string"\n'
-        "}"
-    )
+    output_model = SecurityEngineerOutput
 
     def task_instruction(self) -> str:
         return (

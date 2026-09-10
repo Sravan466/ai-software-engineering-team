@@ -34,5 +34,19 @@ class GenerationOptions(BaseModel):
     """Knobs passed from agents to the router. Kept minimal and provider-neutral."""
 
     temperature: Optional[float] = None
-    max_tokens: int = 4096
+    #: Ceiling on tokens this one call may generate. `None` — the normal case — means
+    #: "as much as the resolved model window allows", because a literal here is a
+    #: guess about a model the caller has never seen. Providers resolve it against
+    #: their own profile; see `resolve_max_tokens`.
+    max_tokens: Optional[int] = None
     json_mode: bool = False  # ask the provider for JSON output when supported
+    #: The JSON Schema the response must match. Providers that can constrain decoding
+    #: to a schema do; the rest fall back to `json_mode` and the prompt's description,
+    #: with validation and a repair round catching what drifts either way.
+    json_schema: Optional[dict] = None
+
+    def resolve_max_tokens(self, budget: int) -> int:
+        """This call's output ceiling: the caller's ask, never above the model's room."""
+        if self.max_tokens is None or self.max_tokens <= 0:
+            return budget
+        return min(self.max_tokens, budget)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.base import BaseAgent
 from app.core.constants import Phase
+from app.schemas.agent_outputs import ProductManagerOutput
 
 
 class ProductManagerAgent(BaseAgent):
@@ -13,20 +14,7 @@ class ProductManagerAgent(BaseAgent):
         "crisp PRD with user stories and acceptance criteria."
     )
     depends_on = ()
-    output_spec = (
-        "{\n"
-        '  "product_name": "string",\n'
-        '  "problem_statement": "string",\n'
-        '  "target_users": ["string"],\n'
-        '  "mvp_scope": ["string"],\n'
-        '  "out_of_scope": ["string"],\n'
-        '  "features": [{"name": "string", "priority": "P0|P1|P2", "description": "string"}],\n'
-        '  "user_stories": [{"as_a": "string", "i_want": "string", "so_that": "string", '
-        '"acceptance_criteria": ["string"]}],\n'
-        '  "success_metrics": ["string"],\n'
-        '  "roadmap": [{"milestone": "string", "deliverables": ["string"]}]\n'
-        "}"
-    )
+    output_model = ProductManagerOutput
 
     def task_instruction(self) -> str:
         return (

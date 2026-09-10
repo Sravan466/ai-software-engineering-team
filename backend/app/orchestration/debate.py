@@ -38,16 +38,20 @@ def conduct_debate(
     mode: RoutingMode,
     preferred_model: Optional[str],
 ) -> tuple[dict, LLMResponse]:
+    # How much architecture to quote, and how long the verdict may be, both come
+    # from the model that will answer — not from a number chosen against no model.
+    profile = router.profile_for(mode, preferred_model, complexity="medium")
+    budget = max(profile.prompt_char_budget - len(_SYSTEM) - len(topic), 1000)
     user = (
         f"# Decision to debate\n{topic}\n\n"
-        f"# Architecture context\n{context[:5000]}\n\n"
+        f"# Architecture context\n{context[:budget]}\n\n"
         "Run the debate and decide."
     )
     resp = router.complete(
         [ChatMessage(role="system", content=_SYSTEM), ChatMessage(role="user", content=user)],
         mode=mode,
         preferred_model=preferred_model,
-        options=GenerationOptions(max_tokens=2048, json_mode=True),
+        options=GenerationOptions(json_mode=True),
         complexity="medium",
     )
     record = _parse(resp.text, topic)

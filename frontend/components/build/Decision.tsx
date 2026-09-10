@@ -16,6 +16,7 @@ import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
 import MockupFrame from "@/components/preview/MockupFrame";
 import PhaseArtifact from "./PhaseArtifact";
+import SchemaBadge from "./SchemaBadge";
 import FileBrowser from "./FileBrowser";
 import { artifactFiles, latestRow, type PayloadFile } from "./payload";
 
@@ -324,6 +325,7 @@ function PhasePanel({
         <AgentSprite agent={agent} size={30} state="gate" />
         <b className="agent-line-name">{agent?.codename}</b>
         <span className="phase-deliver">{meta?.deliver}</span>
+        <SchemaBadge row={row} />
         <span className="rule" />
         {row.total_tokens > 0 && (
           <span className="phase-tokens mono">{row.total_tokens.toLocaleString()} tok</span>
