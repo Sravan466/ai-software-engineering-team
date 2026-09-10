@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Optional
 
 import json
-import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
@@ -25,6 +24,7 @@ from pydantic import BaseModel, ValidationError
 from app.core.config import settings
 from app.core.constants import RoutingMode, SchemaStatus
 from app.core.logging import get_logger
+from app.core.reading import json_object
 from app.router.model_profile import ModelProfile
 from app.router.router import router
 from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text
@@ -389,22 +389,12 @@ class BaseAgent:
 
     @staticmethod
     def _parse(text: str) -> dict:
-        """Best-effort JSON extraction; fall back to wrapping raw text."""
-        text = text.strip()
-        # Strip ```json fences if present (greedy so nested braces aren't truncated).
-        fence = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", text)
-        candidate = fence.group(1) if fence else text
-        # If still not pure JSON, grab the outermost {...}.
-        if not candidate.lstrip().startswith("{"):
-            brace = re.search(r"\{.*\}", candidate, re.DOTALL)
-            if brace:
-                candidate = brace.group(0)
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
+        """The JSON object in a reply, or the raw text wrapped as a summary."""
+        parsed = json_object(text)
+        if parsed is None:
             log.warning("Agent returned non-JSON output; wrapping raw text as summary.")
-            return {"summary": text}
-        return parsed if isinstance(parsed, dict) else {"summary": text}
+            return {"summary": text.strip()}
+        return parsed
 
     def to_markdown(self, output: dict) -> str:
         """Generic renderer; agents may override for nicer formatting."""
@@ -425,8 +415,12 @@ def _clip(text: str, limit: int) -> str:
 
     A limit of zero means there is no room left, so nothing of the text survives —
     returning all of it, which the inverted guard here used to do, overflows exactly
-    the window this budget exists to respect.
+    the window this budget exists to respect. Empty text is returned untouched: a
+    "this was cut" marker under an empty idea tells the model its brief was
+    truncated when there was never anything there.
     """
+    if not text:
+        return text
     if limit > 0 and len(text) <= limit:
         return text
     # One shape for every cut, zero-length included: the skeleton this budget was

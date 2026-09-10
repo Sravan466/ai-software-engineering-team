@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     #: Ceiling on tokens one call may generate. The resolved window can lower this,
     #: never raise it — half the window is the hard cap.
     max_output_tokens: BlankTolerantInt(4096) = 4096
+    #: Ceiling on tokens one *prompt* may occupy, whatever the window allows. A
+    #: 200k-token cloud window would otherwise let every phase inline every earlier
+    #: phase's full generated source — correct, and roughly forty times the input
+    #: cost per call. Local runs never reach this; it is a bill guard, not a budget.
+    max_prompt_tokens: BlankTolerantInt(24576) = 24576
     #: Characters per token, used to turn a token budget into a truncation length.
     #: An estimate by nature, and the one the whole "the prompt fits the window"
     #: property rests on — so it is set below the ~3.2 break-even for the indented

@@ -103,7 +103,18 @@ class ModelProfile:
         a budget that exactly fills the window is a budget that truncates.
         """
         room = self.context_window - self.max_output_tokens
-        return max(int(room * _PROMPT_SAFETY_MARGIN), _MIN_PROMPT_TOKENS)
+        # Floored so a budget is never absurdly small — but never above the room
+        # that exists. Raising it past `room` is how a 512-token ceiling ended up
+        # with a 512-token prompt budget *plus* 256 tokens of output against a
+        # 512-token window: a 50% overrun, guaranteeing the head truncation this
+        # whole module exists to prevent.
+        budget = max(min(int(room * _PROMPT_SAFETY_MARGIN), room), min(_MIN_PROMPT_TOKENS, room))
+        # A window is permission, not an instruction to fill it. Without this, a
+        # 200k-token cloud model inlines every prior phase in full into every later
+        # one — which is what the window allows and about forty times what the old
+        # literals cost per call.
+        ceiling = settings.max_prompt_tokens
+        return min(budget, ceiling) if ceiling and ceiling > 0 else budget
 
     @property
     def prompt_char_budget(self) -> int:
@@ -215,7 +226,6 @@ def resolve_window(
     *,
     context_limit: Optional[int],
     kv_bytes_per_token: Optional[int],
-    weight_bytes: Optional[int],
     ram_bytes: Optional[int],
 ) -> tuple[int, Optional[str]]:
     """`min(model limit, what RAM holds, configured ceiling)` — and why it landed there.
@@ -234,7 +244,7 @@ def resolve_window(
     limit = context_limit or settings.model_context_fallback_tokens
     candidates: list[tuple[int, Optional[str]]] = [(limit, None)]
 
-    ram_tokens = _tokens_that_fit_in_ram(kv_bytes_per_token, weight_bytes, ram_bytes)
+    ram_tokens = _tokens_that_fit_in_ram(kv_bytes_per_token, ram_bytes)
     if ram_tokens is not None:
         gib = (ram_bytes or 0) / 2**30
         note = (
@@ -275,13 +285,11 @@ def resolve_window(
 
 
 def _tokens_that_fit_in_ram(
-    kv_bytes_per_token: Optional[int],
-    weight_bytes: Optional[int],
-    ram_bytes: Optional[int],
+    kv_bytes_per_token: Optional[int], ram_bytes: Optional[int]
 ) -> Optional[int]:
     """How many tokens of KV cache the machine can hold.
 
-    The weights are deliberately *not* subtracted. Ollama mmaps them, so they are
+    The weights are deliberately not part of this. Ollama mmaps them, so they are
     page-cache backed and evictable rather than a fixed deduction from what is
     available, and on unified-memory machines they may not sit in system RAM at all.
     Subtracting them turned an ordinary 8 GiB laptop running a 7B model into a
@@ -334,7 +342,6 @@ def build_profile(
     provider: str,
     model: str,
     show: dict,
-    weight_bytes: Optional[int],
     supports_schema_format: bool,
     ram_bytes: Optional[int] = None,
 ) -> ModelProfile:
@@ -355,7 +362,6 @@ def build_profile(
     window, clamp_reason = resolve_window(
         context_limit=context_limit,
         kv_bytes_per_token=kv_bytes_per_token(model_info, arch) if arch else None,
-        weight_bytes=weight_bytes,
         ram_bytes=ram_bytes if ram_bytes is not None else total_ram_bytes(),
     )
 

@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from app.core.reading import as_number, has_content
 from app.core.constants import (
     ApprovalMode,
     GateKind,
@@ -54,21 +55,6 @@ def _norm(name: object) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
-def has_content(value: object) -> bool:
-    """Whether a value says anything. `None`, `""` and `[]` do not.
-
-    The distinction matters because every alias group in this module is a set of
-    names for *one* answer: when one of them is empty and another is populated, the
-    populated one is the answer. Zero is content — a build really can cost nothing —
-    and that case is handled where it arises, not by calling it silence.
-    """
-    if value is None:
-        return False
-    if isinstance(value, (str, list, tuple, dict, set)):
-        return bool(value)
-    return True
-
-
 def read_key(source: object, *names: str) -> object:
     """The first of `names` that actually says something, matched by normalised key.
 
@@ -85,7 +71,24 @@ def read_key(source: object, *names: str) -> object:
     """
     if not isinstance(source, dict):
         return None
-    flat = {_norm(k): v for k, v in source.items()}
+
+    # Two spellings of one name collapse to one entry here, and a plain dict
+    # comprehension keeps whichever came last in the payload — so
+    # `{"totalMonthlyHighUsd": 490, "total_monthly_high_usd": 0}` would read as zero
+    # purely because of key order, and a $490 build would pass a $100 cap. Both
+    # spellings routinely coexist, because validation writes the canonical name
+    # beside the drifted one.
+    #
+    # Within one name the tie-break is truthiness, not `has_content`: a zero under
+    # one spelling and a real figure under another is the placeholder-versus-answer
+    # case, and the answer wins. Between *different* names it stays `has_content`,
+    # because there a lone zero is a build that genuinely costs nothing.
+    flat: dict[str, object] = {}
+    for key, value in source.items():
+        norm = _norm(key)
+        if norm not in flat or (value and not flat[norm]):
+            flat[norm] = value
+
     present = [flat[_norm(n)] for n in names if _norm(n) in flat]
     return next((v for v in present if has_content(v)), present[0] if present else None)
 
@@ -126,26 +129,9 @@ def severe_findings(output: object) -> list[dict]:
     ]
 
 
-_MONEY = re.compile(r"-?\d+(?:\.\d+)?")
-
-
 def _number(value: object) -> Optional[float]:
-    """A number, including one a model wrapped in prose: "$1,240/mo" -> 1240.0.
-
-    Validation already coerces these on the way in, so a well-formed phase never
-    needs this. It matters for the phase that *failed* validation and is being read
-    anyway — the gate is the last thing between a drifted estimate and a build that
-    ships over its cap, and refusing to read "$1,240/mo" there is refusing to gate.
-    """
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, str):
-        match = _MONEY.search(value.replace(",", ""))
-        return float(match.group(0)) if match else None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    """A number, including one a model wrapped in prose. See `core.reading`."""
+    return as_number(value)
 
 
 def _sum_rows(rows: object, *fields: str) -> Optional[float]:
@@ -270,13 +256,18 @@ def decide_gate(
         # finished product, one that costs more than you allowed, or one whose cost
         # nobody could read.
         if overrun:
-            return Gate(GateKind.COST.value, overrun)
-        return Gate(GateKind.SHIP.value, unchecked)
+            return Gate(GateKind.COST.value, _both(overrun, unchecked))
+        if unchecked:
+            # The same surface the security half gets, for the same reason: a check
+            # that did not run is not a routine handoff, and rendering it as one is
+            # the confusion this gate kind exists to remove.
+            return Gate(GateKind.UNCHECKED.value, unchecked)
+        return Gate(GateKind.SHIP.value)
 
     if overrun:
         # Reachable only if Ledger stops being the last phase — then an overrun is a
         # real mid-run interrupt, and this is where it fires.
-        return Gate(GateKind.COST.value, overrun)
+        return Gate(GateKind.COST.value, _both(overrun, unchecked))
 
     if phase_key == PLAN_GATE_PHASE.value:
         return Gate(GateKind.PLAN.value)
@@ -284,7 +275,11 @@ def decide_gate(
     if phase_key == Phase.SECURITY_ENGINEER.value:
         severe = severe_findings(output)
         if severe:
-            return Gate(GateKind.SECURITY.value, _security_note(severe))
+            # Both facts, not the louder one. "Warden raised a critical" read alone
+            # invites the reviewer to fix that one thing and move on — when the
+            # report it came from failed its shape, and the findings that did not
+            # survive parsing are exactly the ones nobody is going to look for.
+            return Gate(GateKind.SECURITY.value, _both(_security_note(severe), unchecked))
         if unchecked:
             # Warden's report is unreadable, so "no severe findings" is not a fact —
             # it is the absence of one. Stop rather than infer the reassuring half,
@@ -293,6 +288,11 @@ def decide_gate(
             return Gate(GateKind.UNCHECKED.value, unchecked)
 
     return None
+
+
+def _both(*notes: Optional[str]) -> Optional[str]:
+    """Every reason this stop happened, not whichever was computed last."""
+    return " ".join(n for n in notes if n) or None
 
 
 def unchecked_note(phase_key: str, schema_status: Optional[str]) -> Optional[str]:

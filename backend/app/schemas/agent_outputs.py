@@ -18,9 +18,9 @@ most expensive kind to discover downstream.
 """
 from __future__ import annotations
 
-import re
 from typing import Annotated, Any, Optional, Union, get_args, get_origin
 
+from app.core.reading import as_number, has_content
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -61,22 +61,16 @@ def _as_str_list(value: Any) -> Any:
     return [item if isinstance(item, str) else str(item) for item in items]
 
 
-_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
-
-
 def _as_number(value: Any) -> Any:
-    """Read a number out of the prose models wrap money in: "$1,200/mo" -> 1200.0.
+    """Read a number out of the prose models wrap money in: "$1,240/mo" -> 1200.0.
 
     A string that holds no number at all is passed through untouched, so validation
     fails and a repair round runs — better than inventing a zero for the cost cap to
-    compare against.
+    compare against. See `core.reading`.
     """
-    if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
-        return value
     if isinstance(value, str):
-        match = _NUMBER.search(value.replace(",", ""))
-        if match:
-            return float(match.group(0))
+        number = as_number(value)
+        return value if number is None else number
     return value
 
 
@@ -118,19 +112,16 @@ class _Shape(BaseModel):
             choices = getattr(field.validation_alias, "choices", None)
             if not choices:
                 continue
-            answered = next((c for c in choices if _has_content(out.get(c))), None)
+            answered = next((c for c in choices if has_content(out.get(c))), None)
             if answered is not None and answered != name:
-                out[name] = out[answered]
+                # Moved, not copied. Leaving the drifted key behind means `extra`
+                # keeps a second copy of the same payload: the row stores every
+                # generated file twice, the UI renders the section twice, and the
+                # next agent is handed the duplicate as prior-phase context —
+                # spending the context budget this exists to protect on a verbatim
+                # copy of what is already there.
+                out[name] = out.pop(answered)
         return out
-
-
-def _has_content(value: Any) -> bool:
-    """Whether a value says anything. `None`, `""` and `[]` do not; `0` does."""
-    if value is None:
-        return False
-    if isinstance(value, (str, list, tuple, dict, set)):
-        return bool(value)
-    return True
 
 
 def _list_of(item: type) -> Any:

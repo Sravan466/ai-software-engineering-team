@@ -71,7 +71,6 @@ def test_context_window_comes_from_the_model_not_a_literal():
         provider="ollama",
         model="qwen2.5:7b",
         show=SHOW,
-        weight_bytes=4_683_087_332,
         supports_schema_format=True,
         ram_bytes=64 * 2**30,  # plenty, so the model's own limit is the binding one
     )
@@ -95,7 +94,6 @@ def test_a_small_machine_clamps_the_window_instead_of_swapping(monkeypatch):
     window, reason = resolve_window(
         context_limit=32768,
         kv_bytes_per_token=kv_bytes_per_token(SHOW["model_info"], "qwen2"),
-        weight_bytes=4_683_087_332,
         ram_bytes=2 * 2**30,
     )
     assert window < 32768
@@ -116,7 +114,6 @@ def test_an_ordinary_laptop_is_not_clamped_into_uselessness(monkeypatch):
     window, _ = resolve_window(
         context_limit=32768,
         kv_bytes_per_token=kv_bytes_per_token(SHOW["model_info"], "qwen2"),
-        weight_bytes=4_683_087_332,
         ram_bytes=8 * 2**30,
     )
     assert window == 32768, "an 8 GiB laptop running a 7B model was clamped"
@@ -139,7 +136,6 @@ def test_small_models_are_flagged_rather_than_left_to_puzzle_the_user():
         provider="ollama",
         model="tiny",
         show=tiny,
-        weight_bytes=1_000_000_000,
         supports_schema_format=True,
         ram_bytes=64 * 2**30,
     )
@@ -213,8 +209,8 @@ def test_schema_constrained_decoding_degrades_rather_than_failing(
         "model_info": {"general.architecture": "qwen2", "qwen2.context_length": 8192},
     }
     with patch.object(OllamaProvider, "_show", return_value=show), patch.object(
-        OllamaProvider, "_weight_bytes", return_value=None
-    ), patch.object(OllamaProvider, "server_version", return_value=version):
+        OllamaProvider, "server_version", return_value=version
+    ):
         profile = provider.profile(f"m-{why}")
 
     assert profile.supports_schema_format is expected, why
@@ -600,7 +596,7 @@ _CHEAP = {"summary": "…", "total_monthly_high_usd": 50}
         (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, _PRICEY, "valid", GateKind.COST.value),
         # …and, when a gate's own phase failed its shape, a stop that says so.
         (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _CLEAN, "invalid", GateKind.UNCHECKED.value),
-        (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, {}, "invalid", GateKind.SHIP.value),
+        (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, {}, "invalid", GateKind.UNCHECKED.value),
         # A finding it *could* read outranks "could not read": a known critical is
         # more actionable than an unreadable report.
         (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "invalid", GateKind.SECURITY.value),
@@ -778,7 +774,7 @@ def test_a_configured_ceiling_is_not_overridden_by_a_floor(monkeypatch):
 
     monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", 2048)
     window, reason = model_profile.resolve_window(
-        context_limit=32768, kv_bytes_per_token=None, weight_bytes=None, ram_bytes=None
+        context_limit=32768, kv_bytes_per_token=None, ram_bytes=None
     )
     assert window == 2048
     assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
@@ -796,7 +792,6 @@ def test_a_ram_estimate_below_what_runs_is_floored_and_says_so(monkeypatch):
     window, reason = model_profile.resolve_window(
         context_limit=32768,
         kv_bytes_per_token=57344,
-        weight_bytes=4_683_087_332,
         ram_bytes=128 * 2**20,  # 128 MiB — nothing fits
     )
     assert window == model_profile._MIN_WORKABLE_TOKENS
@@ -822,7 +817,7 @@ def test_a_user_set_ceiling_is_never_floored(monkeypatch):
 
     monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", 1024)
     window, reason = model_profile.resolve_window(
-        context_limit=32768, kv_bytes_per_token=None, weight_bytes=None, ram_bytes=None
+        context_limit=32768, kv_bytes_per_token=None, ram_bytes=None
     )
     assert window == 1024, "the floor overrode a ceiling the user set"
     assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
@@ -860,6 +855,140 @@ def test_an_unreadable_version_is_retried_rather_than_cached():
         assert provider.server_version() is None
         assert provider.server_version() is None
         assert get.call_count == 2, "an unreadable version was cached and never retried"
+
+
+# ── 6. what the third review pass found ──────────────────────────────────────
+def test_the_example_env_agrees_with_the_code_it_configures():
+    """The README says to copy this file, so a value in it is a value that ships.
+
+    `APPROX_CHARS_PER_TOKEN` shipping at 3.5 while the code defaults to 3.0 is not a
+    cosmetic mismatch: above ~3.2 the prompt budget exceeds the window it was sized
+    for, and the head truncation this whole change exists to remove comes back for
+    anyone who followed the setup instructions.
+    """
+    import re
+    from pathlib import Path
+
+    from app.core.config import Settings
+
+    example = Path(__file__).resolve().parents[2] / ".env.example"
+    defaults = Settings(_env_file=None)
+    for line in example.read_text().splitlines():
+        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line.strip())
+        if not match:
+            continue
+        name, raw = match.group(1).lower(), match.group(2).strip()
+        if not raw or not hasattr(defaults, name):
+            continue
+        expected = getattr(defaults, name)
+        if isinstance(expected, bool) or not isinstance(expected, (int, float)):
+            continue
+        assert float(raw) == float(expected), (
+            f".env.example ships {name.upper()}={raw}, but the code defaults to {expected}"
+        )
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"totalMonthlyHighUsd": 490, "total_monthly_high_usd": 0}, 490.0),
+        ({"total_monthly_high_usd": 0, "totalMonthlyHighUsd": 490}, 490.0),
+        ({"total_monthly_high_usd": 0, "totalMonthlyHighUsd": 0}, 0.0),
+        ({"total_monthly_high_usd": 0}, 0.0),
+    ],
+)
+def test_two_spellings_of_one_key_do_not_depend_on_which_came_last(payload, expected):
+    """Normalising keys collapses spellings, and a plain dict keeps the last one.
+
+    Validation writes the canonical name beside the drifted one, so both routinely
+    coexist — and a placeholder zero winning on insertion order alone is a $490
+    build passing a $100 cap.
+    """
+    assert projected_monthly_cost({"summary": "…", **payload}) == expected
+
+
+def test_a_consumed_alias_is_moved_not_copied():
+    """`extra="allow"` would otherwise keep a second copy of the whole payload.
+
+    For a file-carrying field that means the row stores every generated file twice,
+    the UI renders the section twice, and the next agent is handed the duplicate as
+    prior-phase context — spending the context budget on a verbatim copy.
+    """
+    payload = _minimal(DevOpsEngineerOutput)
+    payload.pop("compose_or_manifests")
+    payload["docker_compose"] = [{"path": "compose.yml", "content": "x"}]
+    out = DevOpsEngineerOutput.model_validate(payload).model_dump(mode="json")
+    assert out["compose_or_manifests"]
+    assert "docker_compose" not in out
+
+
+@pytest.mark.parametrize("reply", ["123", '"sorry"', "true", "[1,2,3]", "not json", ""])
+def test_neither_json_extractor_dies_on_a_reply_that_is_not_an_object(reply):
+    """One copy of this had been hardened and the other had not — which is the
+    argument for there being one. The unfixed copy killed the Backend phase."""
+    from app.agents.base import BaseAgent
+    from app.orchestration.debate import _parse
+
+    assert isinstance(BaseAgent._parse(reply), dict)
+    assert isinstance(_parse(reply, "Which database?"), dict)
+
+
+@pytest.mark.parametrize("window", [32768, 8192, 4096, 1024, 512])
+def test_the_prompt_budget_never_exceeds_the_window_it_came_from(window):
+    """The floor used to raise the budget *above* the room available: a 512-token
+    ceiling produced 512 prompt + 256 output against a 512-token window."""
+    profile = ModelProfile(
+        provider="ollama",
+        model="m",
+        context_limit=window,
+        context_window=window,
+        max_output_tokens=max(1, min(4096, window // 2)),
+    )
+    assert profile.prompt_token_budget + profile.max_output_tokens <= window
+
+
+def test_a_large_cloud_window_is_not_an_invitation_to_fill_it():
+    """A 200k window would inline every prior phase in full into every later one —
+    what the window allows, and about forty times the input cost per call."""
+    from app.core.config import settings
+
+    profile = ModelProfile(
+        provider="anthropic",
+        model="claude",
+        context_limit=200_000,
+        context_window=200_000,
+        max_output_tokens=4096,
+    )
+    assert profile.prompt_token_budget <= settings.max_prompt_tokens
+
+
+def test_a_stop_reports_every_reason_it_happened():
+    """"Warden raised a critical" read alone invites fixing that one thing and
+    moving on — when the report it came from failed its shape, and the findings
+    that did not survive parsing are the ones nobody will go looking for."""
+    critical = {
+        "title": "SQLi",
+        "severity": "critical",
+        "category": "authz",
+        "location": "x",
+        "description": "d",
+        "recommendation": "r",
+    }
+    gate = decide_gate(
+        _Project(),
+        Phase.SECURITY_ENGINEER.value,
+        {"findings": [critical]},
+        SchemaStatus.INVALID.value,
+    )
+    assert gate.kind == GateKind.SECURITY.value
+    assert "raised 1 finding" in gate.note and "could not run" in gate.note
+
+
+def test_an_empty_idea_is_not_reported_as_truncated():
+    from app.agents.base import _clip
+
+    assert _clip("", 0) == ""
+    assert _clip("", 100) == ""
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

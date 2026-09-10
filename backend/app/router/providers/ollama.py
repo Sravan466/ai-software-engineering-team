@@ -115,17 +115,6 @@ class OllamaProvider(LLMProvider):
         except Exception:  # noqa: BLE001 - server not running / unexpected payload
             return []
 
-    def _weight_bytes(self, model: str) -> Optional[int]:
-        """On-disk size of the model, which the KV cache has to fit alongside."""
-        base = model.split(":", 1)[0]
-        for entry in self._tags():
-            name = entry.get("name", "")
-            if name == model or name.split(":", 1)[0] == base:
-                size = entry.get("size")
-                if isinstance(size, int) and size > 0:
-                    return size
-        return None
-
     def server_version(self) -> Optional[tuple[int, ...]]:
         """The server's version, asked once — but only remembered once it answers.
 
@@ -189,7 +178,6 @@ class OllamaProvider(LLMProvider):
                 provider=self.name,
                 model=model,
                 show=show,
-                weight_bytes=self._weight_bytes(model),
                 supports_schema_format=supports_schema,
                 ram_bytes=ram,
             ),

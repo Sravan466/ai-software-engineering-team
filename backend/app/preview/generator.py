@@ -125,12 +125,22 @@ def generate_preview(
     preferred_model: Optional[str] = None,
 ) -> Tuple[str, LLMResponse]:
     """Produce a full self-contained HTML preview document. Returns (html, llm_response)."""
-    user = (
-        f"# Product\n{name or idea}\n\n"
-        f"Idea: {idea}\n\n"
-        f"# What the team has designed so far\n{context}\n\n"
-        "Produce the static HTML preview now."
-    )
+    profile = router.profile_for(mode, preferred_model, complexity="high")
+
+    def assemble(brief: str) -> str:
+        return (
+            f"# Product\n{name or idea}\n\n"
+            f"Idea: {idea}\n\n"
+            f"# What the team has designed so far\n{brief}\n\n"
+            "Produce the static HTML preview now."
+        )
+
+    # Measured the same way the agents measure theirs. This was the last caller
+    # sending an unbounded prompt: a long idea plus a whole design brief overruns
+    # the window, and what Ollama drops from the head is `_GENERATE_SYSTEM` — the
+    # instructions telling it to emit a self-contained HTML document at all.
+    overhead = len(_GENERATE_SYSTEM) + len(assemble(""))
+    user = assemble(context[: max(profile.prompt_char_budget - overhead, 0)])
     resp = router.complete(
         [
             ChatMessage(role="system", content=_GENERATE_SYSTEM),
@@ -138,8 +148,9 @@ def generate_preview(
         ],
         mode=mode,
         preferred_model=preferred_model,
-        # No max_tokens: a whole HTML document is exactly the request that a literal
-        # output budget cuts in half. The resolved model window decides.
+        # No max_tokens here: the resolved profile's own output ceiling applies,
+        # which is `min(MAX_OUTPUT_TOKENS, window // 2)` — raise MAX_OUTPUT_TOKENS if
+        # your previews come back cut off mid-document.
         options=GenerationOptions(json_mode=False, temperature=0.4),
         complexity="high",
     )
@@ -154,11 +165,17 @@ def edit_section(
     preferred_model: Optional[str] = None,
 ) -> Tuple[str, LLMResponse]:
     """Rewrite a single section fragment per the instruction. Returns (fragment, response)."""
-    user = (
-        f"# Change request\n{instruction}\n\n"
-        f"# Current fragment\n{fragment}\n\n"
-        "Return the modified fragment only."
-    )
+    profile = router.profile_for(mode, preferred_model, complexity="medium")
+
+    def assemble(html: str) -> str:
+        return (
+            f"# Change request\n{instruction}\n\n"
+            f"# Current fragment\n{html}\n\n"
+            "Return the modified fragment only."
+        )
+
+    overhead = len(_EDIT_SYSTEM) + len(assemble(""))
+    user = assemble(fragment[: max(profile.prompt_char_budget - overhead, 0)])
     resp = router.complete(
         [
             ChatMessage(role="system", content=_EDIT_SYSTEM),

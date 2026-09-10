@@ -10,10 +10,8 @@ a verdict — cheap, deterministic to parse, and good enough to demonstrate the 
 from __future__ import annotations
 from typing import Optional
 
-import json
-import re
-
 from app.core.constants import RoutingMode
+from app.core.reading import json_object
 from app.core.logging import get_logger
 from app.router.router import router
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
@@ -66,22 +64,22 @@ def conduct_debate(
 
 
 def _parse(text: str, topic: str) -> dict:
-    text = text.strip()
-    fence = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", text)
-    candidate = fence.group(1) if fence else text
-    if not candidate.lstrip().startswith("{"):
-        brace = re.search(r"\{.*\}", candidate, re.DOTALL)
-        if brace:
-            candidate = brace.group(0)
-    try:
-        data = json.loads(candidate)
-        data.setdefault("topic", topic)
-        data.setdefault("arguments", [])
-        data.setdefault("decision", "")
-        data.setdefault("rationale", "")
-        return data
-    except (json.JSONDecodeError, ValueError):
+    """The verdict, or a record that carries the raw reply instead of dying on it.
+
+    The extractor is shared with the agents rather than copied — this function used
+    to hold its own near-identical copy, which meant a reply parsing to something
+    other than an object (`123`, `"sorry"`) reached `setdefault` and raised an
+    `AttributeError` that killed the Backend phase. One copy had been fixed; this
+    one had not, which is the argument for there being one.
+    """
+    data = json_object(text)
+    if data is None:
         return {"topic": topic, "arguments": [], "decision": text, "rationale": ""}
+    data.setdefault("topic", topic)
+    data.setdefault("arguments", [])
+    data.setdefault("decision", "")
+    data.setdefault("rationale", "")
+    return data
 
 
 def decision_summary(record: dict) -> str:
