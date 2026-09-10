@@ -370,8 +370,14 @@ def test_every_agent_declares_a_shape_that_prompt_and_schema_agree_on(phase):
             "risk_assessment",
         ),
         (QAEngineerOutput, "estimated_coverage", "coverage_estimate"),
+        (QAEngineerOutput, "estimatedCoverage", "coverage_estimate"),
         (DevOpsEngineerOutput, "docker_compose", "compose_or_manifests"),
+        (DevOpsEngineerOutput, "k8s_manifests", "compose_or_manifests"),
         (DevOpsEngineerOutput, "github_actions", "ci_cd"),
+        (SecurityEngineerOutput, "security_findings", "findings"),
+        (SecurityEngineerOutput, "vulnerabilities", "findings"),
+        (CostEstimationOutput, "totalMonthlyHighUsd", "total_monthly_high_usd"),
+        (CostEstimationOutput, "totalMonthlyLowUsd", "total_monthly_low_usd"),
     ],
 )
 def test_the_names_agents_actually_drifted_to_are_read_as_the_canonical_ones(
