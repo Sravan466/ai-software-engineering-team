@@ -184,6 +184,21 @@ class ModelRouter:
                 resp = prov.generate(messages, model, options)
                 resp.fallback_used = idx > 0
                 resp.attempts = attempts
+                if idx > 0:
+                    # The caller sized its prompt against the head of this chain, and
+                    # this is not that model. Nothing here can re-size a prompt that
+                    # has already been sent, so the least this can do is not let the
+                    # substitution pass unrecorded.
+                    head = chain[0]
+                    log.warning(
+                        "Served %s:%s after %s:%s failed. The prompt was budgeted for "
+                        "the latter's context window, so it may not have fitted this "
+                        "one — check the phase's output before trusting it.",
+                        pname,
+                        model,
+                        head[0],
+                        head[1],
+                    )
                 return resp
             except ProviderError as e:
                 log.warning("Provider %s/%s failed: %s", pname, model, e)

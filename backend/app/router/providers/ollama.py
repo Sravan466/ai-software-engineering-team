@@ -261,6 +261,7 @@ class OllamaProvider(LLMProvider):
 
         latency = int((time.perf_counter() - started) * 1000)
         text = (data.get("message") or {}).get("content", "")
+        self._report_limits(data, model, profile, options)
         usage = Usage(
             prompt_tokens=data.get("prompt_eval_count", 0),
             completion_tokens=data.get("eval_count", 0),
@@ -269,6 +270,41 @@ class OllamaProvider(LLMProvider):
         return LLMResponse(
             text=text, provider=self.name, model=model, usage=usage, latency_ms=latency
         )
+
+    def _report_limits(
+        self, data: dict, model: str, profile: ModelProfile, options: GenerationOptions
+    ) -> None:
+        """Say when a call actually hit a limit, rather than leaving it to be guessed.
+
+        Every character budget upstream rests on an estimate of how many characters
+        make a token, and an estimate can be wrong the expensive way. Ollama reports
+        what really happened — `prompt_eval_count` for what the prompt cost, and
+        `done_reason` for why generation stopped — so the two failures this whole
+        change exists to make visible are read off the response instead of inferred
+        three phases later from a schema that did not match.
+        """
+        prompt_tokens = data.get("prompt_eval_count") or 0
+        if prompt_tokens and prompt_tokens >= profile.context_window * 0.95:
+            log.warning(
+                "Prompt for %s used %s of a %s-token window — at or past the point "
+                "Ollama truncates from the head, which drops the system prompt and "
+                "the required output shape with it. Lower APPROX_CHARS_PER_TOKEN "
+                "(currently %s) so prompts are budgeted more conservatively.",
+                model,
+                f"{prompt_tokens:,}",
+                f"{profile.context_window:,}",
+                settings.approx_chars_per_token,
+            )
+        if data.get("done_reason") == "length":
+            log.warning(
+                "%s stopped at the %s-token output limit rather than finishing. Its "
+                "reply is cut off, so it will not parse as the shape it was asked for. "
+                "Raise MAX_OUTPUT_TOKENS (currently %s) or give the model a larger "
+                "window.",
+                model,
+                f"{options.resolve_max_tokens(profile.max_output_tokens):,}",
+                settings.max_output_tokens,
+            )
 
     def _payload(
         self,

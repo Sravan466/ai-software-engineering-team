@@ -154,9 +154,11 @@ class ModelProfile:
 _PROMPT_SAFETY_MARGIN = 0.9
 #: However the arithmetic lands, an agent needs room for its own instructions.
 _MIN_PROMPT_TOKENS = 512
-#: Below this a window cannot hold a system prompt plus a useful reply. Reaching it
-#: is reported, never corrected: the constraint that got us here is a real one.
-_MIN_WORKABLE_TOKENS = 2048
+#: Below this a window cannot hold an agent's system prompt — which carries the whole
+#: required-output shape — plus a useful reply. Measured, not picked: at 2,048 the
+#: shape sketch alone overruns the budget for every agent in the pipeline, and the
+#: prompt gets truncated from the head exactly as it did before any of this.
+_MIN_WORKABLE_TOKENS = 4096
 
 
 def fallback_profile(
@@ -187,10 +189,16 @@ def fallback_profile(
 
 
 def _apply_ceiling(window: int) -> int:
-    """Lower a window to the configured ceiling, if the user set one."""
+    """Lower a window to the configured ceiling, if the user set one.
+
+    Lower, and only lower. The `max(..., _MIN_PROMPT_TOKENS)` that used to be here
+    quietly doubled a ceiling of 256 — contradicting, on this path, the rule the
+    resolver enforces on the other: a cap someone typed is a fact about what they
+    want, not an estimate to be corrected.
+    """
     ceiling = settings.ollama_context_ceiling
     if ceiling and ceiling > 0:
-        return max(min(window, ceiling), _MIN_PROMPT_TOKENS)
+        return min(window, ceiling)
     return window
 
 
@@ -271,12 +279,18 @@ def _tokens_that_fit_in_ram(
     weight_bytes: Optional[int],
     ram_bytes: Optional[int],
 ) -> Optional[int]:
-    """How many tokens of KV cache the machine can hold after the weights load."""
+    """How many tokens of KV cache the machine can hold.
+
+    The weights are deliberately *not* subtracted. Ollama mmaps them, so they are
+    page-cache backed and evictable rather than a fixed deduction from what is
+    available, and on unified-memory machines they may not sit in system RAM at all.
+    Subtracting them turned an ordinary 8 GiB laptop running a 7B model into a
+    2,048-token window — a worse outcome than having no clamp, which is the wrong
+    way for a safety margin to be wrong. The fraction below the total is the margin.
+    """
     if not kv_bytes_per_token or not ram_bytes:
         return None
-    spare = ram_bytes * settings.ollama_ram_fraction - (weight_bytes or 0)
-    if spare <= 0:
-        return 0
+    spare = ram_bytes * settings.ollama_ram_fraction
     return int(spare // kv_bytes_per_token)
 
 

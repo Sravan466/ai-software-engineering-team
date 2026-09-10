@@ -38,15 +38,22 @@ def conduct_debate(
     mode: RoutingMode,
     preferred_model: Optional[str],
 ) -> tuple[dict, LLMResponse]:
-    # How much architecture to quote, and how long the verdict may be, both come
-    # from the model that will answer — not from a number chosen against no model.
+    # How much architecture to quote comes from the model that will answer — and the
+    # overhead is measured the same way the agents measure theirs, by assembling the
+    # thing with nothing in it. Subtracting a hand-counted `len(_SYSTEM) + len(topic)`
+    # misses the headings and the closing line wrapped around them, which is how a
+    # budget computed here overruns the window it was computed from.
     profile = router.profile_for(mode, preferred_model, complexity="medium")
-    budget = max(profile.prompt_char_budget - len(_SYSTEM) - len(topic), 1000)
-    user = (
-        f"# Decision to debate\n{topic}\n\n"
-        f"# Architecture context\n{context[:budget]}\n\n"
-        "Run the debate and decide."
-    )
+
+    def assemble(quoted: str) -> str:
+        return (
+            f"# Decision to debate\n{topic}\n\n"
+            f"# Architecture context\n{quoted}\n\n"
+            "Run the debate and decide."
+        )
+
+    overhead = len(_SYSTEM) + len(assemble(""))
+    user = assemble(context[: max(profile.prompt_char_budget - overhead, 0)])
     resp = router.complete(
         [ChatMessage(role="system", content=_SYSTEM), ChatMessage(role="user", content=user)],
         mode=mode,

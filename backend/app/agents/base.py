@@ -32,9 +32,16 @@ from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
 log = get_logger(__name__)
 
-#: How the prompt's character budget is divided between the optional sections. The
-#: idea, the task instruction and any human feedback are never cut — they are short,
-#: and they are the parts a person wrote. What is left is shared out below.
+#: What a person wrote gets whatever it needs, up to this share of the budget each.
+#: These are normally a sentence or two, so the cap almost never binds — but `idea`
+#: and `feedback` have no maximum length at the API, and an unbounded section is one
+#: that overruns the window however carefully the rest is measured.
+_PERSON_SHARE = {
+    "idea": 0.25,
+    "feedback": 0.15,
+    "extra": 0.10,
+}
+#: How whatever remains is divided between the sections the pipeline assembles.
 _CONTEXT_SHARE = {
     "depends_on": 0.62,
     "rag": 0.26,
@@ -116,6 +123,7 @@ class BaseAgent:
         resp = self._complete(ask, ctx, options)
         responses = [resp]
         output, errors = self._validate(self._parse(resp.text))
+        best = (output, errors)
 
         rounds = 0
         while errors and rounds < max(settings.schema_repair_rounds, 0):
@@ -137,7 +145,13 @@ class BaseAgent:
             )
             responses.append(resp)
             output, errors = self._validate(self._parse(resp.text))
+            # Fewer things wrong wins. Without this the *last* attempt is kept
+            # whatever it looks like, so a repair that came back worse than the
+            # response it was repairing is what reaches the database and the gates.
+            if len(errors) < len(best[1]):
+                best = (output, errors)
 
+        output, errors = best
         if errors:
             # Repair stops paying after a round or two, and a local model pays
             # wall-clock for every attempt. Keep the best try — and say so, because
@@ -198,26 +212,45 @@ class BaseAgent:
             profile = router.profile_for(
                 ctx.routing_mode, ctx.preferred_model, complexity=self.complexity
             )
+        # Serialised once: the budget pass and the real assembly both read these,
+        # and they can be hundreds of kilobytes of generated source apiece.
+        bodies = {
+            dep: json.dumps(ctx.prior_outputs[dep], indent=2)
+            for dep in self.depends_on
+            if dep in ctx.prior_outputs
+        }
+        budget = self._section_budgets(ctx, profile, reserve, bodies)
         return [
             ChatMessage(role="system", content=self.system_prompt()),
-            ChatMessage(
-                role="user",
-                content=self._user_turn(ctx, self._section_budgets(ctx, profile, reserve)),
-            ),
+            ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies)),
         ]
 
-    def _user_turn(self, ctx: AgentContext, budget: dict[str, int]) -> str:
-        """Everything the agent is given, with each section held to its budget."""
-        parts: list[str] = [f"# Product idea\n{ctx.idea}\n"]
+    def _user_turn(
+        self,
+        ctx: AgentContext,
+        budget: dict[str, int],
+        bodies: Optional[dict[str, str]] = None,
+    ) -> str:
+        """Everything the agent is given, with every section held to its budget.
+
+        `bodies` is the serialised prior-phase context, passed in so that measuring
+        this prompt does not mean `json.dumps`-ing several hundred kilobytes of
+        generated source a second time purely to count its characters.
+        """
+        if bodies is None:
+            bodies = {}
+        parts: list[str] = [
+            f"# Product idea\n{_clip(ctx.idea, budget['idea'])}\n"
+        ]
 
         deps = [d for d in self.depends_on if d in ctx.prior_outputs]
         per_dep = budget["depends_on"] // max(len(deps), 1)
         for dep in deps:
-            body = json.dumps(ctx.prior_outputs[dep], indent=2)
+            body = bodies.get(dep, "")
             # The "this was cut" note goes outside the fence: inside it, the block
             # the next agent is reading as JSON would no longer parse as any.
             clipped = body[:per_dep] if len(body) > per_dep else body
-            note = "" if clipped is body else _TRUNCATED
+            note = "" if len(clipped) == len(body) else _TRUNCATED
             parts.append(_DEP_FRAME.format(dep=dep, body=clipped) + note)
 
         if ctx.rag_context:
@@ -225,11 +258,13 @@ class BaseAgent:
         if ctx.memory_context:
             parts.append(_MEMORY_FRAME.format(body=_clip(ctx.memory_context, budget["memory"])))
         if ctx.extra_context:
-            parts.append(f"# Team decision to honour\n{ctx.extra_context}\n")
+            parts.append(
+                f"# Team decision to honour\n{_clip(ctx.extra_context, budget['extra'])}\n"
+            )
         if ctx.feedback:
             parts.append(
                 "# Reviewer feedback on your previous attempt — address it directly\n"
-                f"{ctx.feedback}\n"
+                f"{_clip(ctx.feedback, budget['feedback'])}\n"
             )
 
         parts.append(self.task_instruction())
@@ -240,43 +275,68 @@ class BaseAgent:
         ctx: AgentContext,
         profile: Optional[ModelProfile],
         reserve: int = 0,
+        bodies: Optional[dict[str, str]] = None,
     ) -> dict[str, int]:
-        """How many characters each optional section may spend.
+        """How many characters each section may spend.
 
         The overhead is *measured*, not estimated: the same assembly runs once with
         every section at zero, which yields the exact cost of the headings, the code
-        fences, the truncation markers and the joins around them. Whatever is left of
-        the window the model reported is then shared out.
+        fences, the truncation markers and the joins around them. Estimating that is
+        how a prompt sized to fill the window ends up thirty characters past it, and
+        past it is where Ollama truncates from the head — taking the system prompt,
+        and the shape it carries, first.
 
-        Estimating that overhead is how a prompt sized to fill the window ends up
-        thirty characters past it, and past it is where Ollama truncates from the
-        head — taking the system prompt, and the shape it carries, first.
-
-        `reserve` is room a caller needs for something it appends afterwards, and the
-        shares renormalise over sections that actually have content, so a quarter of
-        the window is not held back for a knowledge base nobody uploaded.
+        What a person wrote is served first and in full, capped at a share each: the
+        idea and the reviewer's note have no maximum length at the API, so leaving
+        them uncut leaves the window unbounded however carefully the rest is sized.
+        Whatever survives that is shared between the assembled sections, renormalised
+        over the ones that have content — a quarter of the window held back for a
+        knowledge base nobody uploaded is a quarter spent on nothing.
         """
         if profile is None:
             profile = router.profile_for(
                 ctx.routing_mode, ctx.preferred_model, complexity=self.complexity
             )
 
-        empty = dict.fromkeys(_CONTEXT_SHARE, 0)
-        overhead = len(self.system_prompt()) + len(self._user_turn(ctx, empty))
+        empty = dict.fromkeys(list(_PERSON_SHARE) + list(_CONTEXT_SHARE), 0)
+        overhead = len(self.system_prompt()) + len(self._user_turn(ctx, empty, bodies))
+        if overhead > profile.prompt_char_budget:
+            # Nothing can be trimmed to fix this: the overhead *is* the instructions
+            # and the shape they carry. Said out loud, because the alternative is the
+            # original bug — a prompt silently cut from the head, and an agent
+            # generating against a shape it was never shown.
+            log.error(
+                "%s cannot fit its own instructions in %s's %s-token window "
+                "(needs ~%s characters, has %s). Raise the window or use a model with "
+                "a larger one; this phase will be truncated.",
+                self.title,
+                profile.model,
+                f"{profile.context_window:,}",
+                f"{overhead:,}",
+                f"{profile.prompt_char_budget:,}",
+            )
         free = max(profile.prompt_char_budget - overhead - max(reserve, 0), 0)
+
+        # What a person wrote is served first: what it needs, never more than its
+        # share *of what is actually free*. Taking the share off the whole budget
+        # instead double-counts the overhead, and on a small window that alone puts
+        # the prompt back over the top.
+        written = {"idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context}
+        budget = {
+            name: min(len(written[name]), int(free * share))
+            for name, share in _PERSON_SHARE.items()
+        }
+        free = max(free - sum(budget.values()), 0)
 
         present = {
             "depends_on": any(d in ctx.prior_outputs for d in self.depends_on),
             "rag": bool(ctx.rag_context),
             "memory": bool(ctx.memory_context),
         }
-        total_share = sum(_CONTEXT_SHARE[name] for name, has in present.items() if has)
-        if total_share <= 0:
-            return empty
-        return {
-            name: int(free * (_CONTEXT_SHARE[name] / total_share)) if present[name] else 0
-            for name in _CONTEXT_SHARE
-        }
+        share_total = sum(_CONTEXT_SHARE[n] for n, has in present.items() if has)
+        for name, share in _CONTEXT_SHARE.items():
+            budget[name] = int(free * (share / share_total)) if present[name] and share_total else 0
+        return budget
 
     def task_instruction(self) -> str:
         """The concrete ask for this phase. Override per agent."""

@@ -15,17 +15,34 @@ from typing_extensions import Annotated
 def _blank_is_unset(value: object) -> object:
     """`FOO=` in a .env file means "I did not set this", not "parse this as a number".
 
-    Without this an optional numeric setting left blank — which is exactly how
-    `.env.example` ships it, and the README says to copy that file — raises at import
-    of this module and the app never starts.
+    Every knob below is documented in `.env.example` as something to change, so
+    blanking one to put it back to its default is the obvious move — and without
+    this it raises at import of this module instead, and the server never starts.
     """
     if isinstance(value, str) and not value.strip():
         return None
     return value
 
 
-#: An optional integer setting that tolerates being left blank in the environment.
+def _blank_is_default(default):
+    """The same, for a setting that has a real default rather than being optional."""
+
+    def coerce(value: object) -> object:
+        return default if isinstance(value, str) and not value.strip() else value
+
+    return coerce
+
+
+#: Numeric settings that survive being left blank in the environment.
 OptionalInt = Annotated[Optional[int], BeforeValidator(_blank_is_unset)]
+
+
+def BlankTolerantInt(default: int):  # noqa: N802 - reads as a type where it is used
+    return Annotated[int, BeforeValidator(_blank_is_default(default))]
+
+
+def BlankTolerantFloat(default: float):  # noqa: N802
+    return Annotated[float, BeforeValidator(_blank_is_default(default))]
 
 
 class Settings(BaseSettings):
@@ -60,35 +77,37 @@ class Settings(BaseSettings):
     #: model's own limit and RAM decide). Useful for handing memory back.
     ollama_context_ceiling: OptionalInt = None
     #: Share of physical RAM the KV cache may claim once the weights are loaded.
-    ollama_ram_fraction: float = 0.6
+    ollama_ram_fraction: BlankTolerantFloat(0.6) = 0.6
     #: The window assumed *only* when a provider will not report one at all.
-    model_context_fallback_tokens: int = 8192
+    model_context_fallback_tokens: BlankTolerantInt(8192) = 8192
     #: Ceiling on tokens one call may generate. The resolved window can lower this,
     #: never raise it — half the window is the hard cap.
-    max_output_tokens: int = 4096
+    max_output_tokens: BlankTolerantInt(4096) = 4096
     #: Characters per token, used to turn a token budget into a truncation length.
-    #: An estimate by nature; raise it if your prompts are mostly prose, lower it
-    #: if they are mostly code.
-    approx_chars_per_token: float = 3.5
+    #: An estimate by nature, and the one the whole "the prompt fits the window"
+    #: property rests on — so it is set below the ~3.2 break-even for the indented
+    #: JSON and source code these prompts actually carry, not at a prose-like 3.5.
+    #: Raise it if your phases are mostly prose and you want more context inlined.
+    approx_chars_per_token: BlankTolerantFloat(3.0) = 3.0
     #: A model below this many parameters produces thin output whatever the prompt
     #: says. The Settings page says so rather than leaving the user to wonder why.
-    small_model_parameter_count: int = 4_000_000_000
+    small_model_parameter_count: BlankTolerantInt(4_000_000_000) = 4_000_000_000
     #: How many times a schema-invalid agent response is sent back for repair before
     #: the run keeps the best attempt and flags it. Each round is a whole extra call.
-    schema_repair_rounds: int = 1
+    schema_repair_rounds: BlankTolerantInt(1) = 1
 
     # ── Cloud providers ──
     anthropic_api_key: Optional[str] = None
     anthropic_default_model: str = "claude-opus-4-8"
     #: Published context windows. Cloud providers expose no probe, so these are
     #: configuration rather than a guess — override them when a model differs.
-    anthropic_context_tokens: int = 200_000
+    anthropic_context_tokens: BlankTolerantInt(200_000) = 200_000
     openai_api_key: Optional[str] = None
     openai_default_model: str = "gpt-4o"
-    openai_context_tokens: int = 128_000
+    openai_context_tokens: BlankTolerantInt(128_000) = 128_000
     gemini_api_key: Optional[str] = None
     gemini_default_model: str = "gemini-1.5-pro"
-    gemini_context_tokens: int = 1_000_000
+    gemini_context_tokens: BlankTolerantInt(1_000_000) = 1_000_000
 
     # ── GitHub publishing (OAuth "Connect" flow) ──
     # Register a free OAuth App at https://github.com/settings/developers and set

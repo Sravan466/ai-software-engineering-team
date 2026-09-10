@@ -54,26 +54,40 @@ def _norm(name: object) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+def has_content(value: object) -> bool:
+    """Whether a value says anything. `None`, `""` and `[]` do not.
+
+    The distinction matters because every alias group in this module is a set of
+    names for *one* answer: when one of them is empty and another is populated, the
+    populated one is the answer. Zero is content — a build really can cost nothing —
+    and that case is handled where it arises, not by calling it silence.
+    """
+    if value is None:
+        return False
+    if isinstance(value, (str, list, tuple, dict, set)):
+        return bool(value)
+    return True
+
+
 def read_key(source: object, *names: str) -> object:
-    """The first of `names` that actually holds something, matched by normalised key.
+    """The first of `names` that actually says something, matched by normalised key.
 
-    Agents rename keys — that is the drift this whole module now assumes. Matching
-    on the shape of the name rather than its exact spelling costs nothing and turns
-    a class of silent gate failures into a non-event.
+    Agents rename keys — that is the drift this whole module assumes. Matching on the
+    shape of the name rather than its exact spelling costs nothing and turns a class
+    of silent gate failures into a non-event.
 
-    "Holds something" rather than "is present" is the important half. A model that
-    writes `"findings": null` next to a populated `"security_findings"` has reported
-    findings; stopping at the null because the key existed would lose them, which is
-    the whole failure this module is being hardened against.
+    "Says something" rather than "is present" is the important half, and it has to
+    mean more than "is not null". A model that writes `"findings": []` beside a
+    populated `"security_findings"` has reported findings; stopping at the empty list
+    because the key existed loses them just as thoroughly as stopping at a null did.
+    An empty value is still returned when nothing else answers, because "no findings"
+    is itself an answer.
     """
     if not isinstance(source, dict):
         return None
     flat = {_norm(k): v for k, v in source.items()}
-    for name in names:
-        value = flat.get(_norm(name))
-        if value is not None:
-            return value
-    return None
+    present = [flat[_norm(n)] for n in names if _norm(n) in flat]
+    return next((v for v in present if has_content(v)), present[0] if present else None)
 
 
 def _as_rows(value: object) -> list[dict]:
@@ -164,11 +178,19 @@ def projected_monthly_cost(output: object) -> Optional[float]:
     # It cannot short-circuit the other total either: `high: 0, low: 50` is a build
     # that costs 50.
     zero_reported = False
-    for names in (
-        ("total_monthly_high_usd", "total_monthly_cost_usd", "monthly_total_usd"),
-        ("total_monthly_low_usd", "estimated_monthly_cost_usd", "total_monthly_usd"),
+    for name in (
+        # Every spelling is tried *individually*, in order. Grouping them and taking
+        # the first that exists reintroduces exactly the bug below one level up: a
+        # placeholder zero under the first name would win, and the real total sitting
+        # under the second would never be read at all.
+        "total_monthly_high_usd",
+        "total_monthly_cost_usd",
+        "monthly_total_usd",
+        "total_monthly_low_usd",
+        "estimated_monthly_cost_usd",
+        "total_monthly_usd",
     ):
-        value = _number(read_key(output, *names))
+        value = _number(read_key(output, name))
         if value:
             return value
         zero_reported = zero_reported or value is not None

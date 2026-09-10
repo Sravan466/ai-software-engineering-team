@@ -91,24 +91,46 @@ class _Shape(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_nulls(cls, data: Any) -> Any:
-        """Remove keys the model set to null, before anything else looks at them.
+    def _prefer_the_alias_that_answers(cls, data: Any) -> Any:
+        """Pick, among the names for one field, whichever actually carries the answer.
 
-        Two things depend on this, and the second is a security property.
+        `AliasChoices` takes the first alias that is *present*. That is the wrong test
+        twice over, and both wrongs are security properties here:
 
-        `AliasChoices` picks the first alias that is *present*, not the first that
-        holds anything. A model that writes `"findings": null` beside a populated
-        `"security_findings"` would have the null win, and the real findings would
-        survive only as an ignored extra key — a critical vulnerability silently
-        dropped from the list the gate reads, on output marked `valid`.
+          `{"findings": null,  "security_findings": [critical]}`
+          `{"findings": [],    "security_findings": [critical]}`
 
-        And a null on a field with a default is the model declining to answer, which
-        should give the default; a null on a required field is a miss, which should
-        give a repair round. Neither of those is "an empty list".
+        In both, the canonical key wins on presence alone, the populated alias survives
+        only as an ignored extra, and the list the gate reads comes back empty — on
+        output marked `valid`, so the fail-closed path never fires either. A critical
+        vulnerability disappears because a model wrote its answer under a second name.
+
+        So an empty value never beats a populated sibling. It is still *kept* when no
+        sibling answers, because "no findings" and "no cost" are real answers and must
+        not be turned into a repair round. Nulls are dropped outright: a null on a
+        field with a default means take the default, and on a required one it means
+        the model declined, which is a miss.
         """
         if not isinstance(data, dict):
             return data
-        return {k: v for k, v in data.items() if v is not None}
+        out = {key: value for key, value in data.items() if value is not None}
+        for name, field in cls.model_fields.items():
+            choices = getattr(field.validation_alias, "choices", None)
+            if not choices:
+                continue
+            answered = next((c for c in choices if _has_content(out.get(c))), None)
+            if answered is not None and answered != name:
+                out[name] = out[answered]
+        return out
+
+
+def _has_content(value: Any) -> bool:
+    """Whether a value says anything. `None`, `""` and `[]` do not; `0` does."""
+    if value is None:
+        return False
+    if isinstance(value, (str, list, tuple, dict, set)):
+        return bool(value)
+    return True
 
 
 def _list_of(item: type) -> Any:

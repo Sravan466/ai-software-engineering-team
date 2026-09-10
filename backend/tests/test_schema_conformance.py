@@ -83,18 +83,43 @@ def test_context_window_comes_from_the_model_not_a_literal():
     assert profile.prompt_token_budget > 6019
 
 
-def test_a_small_machine_clamps_the_window_instead_of_swapping():
+def test_the_kv_cache_cost_is_computed_from_the_model_not_guessed():
     kv = kv_bytes_per_token(SHOW["model_info"], "qwen2")
     assert kv == 2 * 28 * 4 * (3584 // 28) * 2  # K+V × layers × kv-heads × head-dim × f16
 
+
+def test_a_small_machine_clamps_the_window_instead_of_swapping(monkeypatch):
+    from app.router import model_profile
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
     window, reason = resolve_window(
         context_limit=32768,
-        kv_bytes_per_token=kv,
+        kv_bytes_per_token=kv_bytes_per_token(SHOW["model_info"], "qwen2"),
         weight_bytes=4_683_087_332,
-        ram_bytes=8 * 2**30,
+        ram_bytes=2 * 2**30,
     )
     assert window < 32768
     assert reason and "RAM" in reason
+
+
+def test_an_ordinary_laptop_is_not_clamped_into_uselessness(monkeypatch):
+    """The clamp must not be worse than having no clamp at all.
+
+    Subtracting the model's on-disk size from available RAM turned an 8 GiB laptop
+    running a 7B model into a 2,048-token window — worse than the behaviour this
+    replaced. Ollama mmaps the weights, so they are page-cache backed rather than a
+    fixed deduction, and on unified-memory machines may not sit in system RAM at all.
+    """
+    from app.router import model_profile
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    window, _ = resolve_window(
+        context_limit=32768,
+        kv_bytes_per_token=kv_bytes_per_token(SHOW["model_info"], "qwen2"),
+        weight_bytes=4_683_087_332,
+        ram_bytes=8 * 2**30,
+    )
+    assert window == 32768, "an 8 GiB laptop running a 7B model was clamped"
 
 
 def test_a_model_that_reports_nothing_falls_back_to_a_stated_window():
@@ -399,7 +424,12 @@ def test_extra_keys_survive_validation():
 
 # ── 3. validation, and one repair round ──────────────────────────────────────
 class _ScriptedAgent(BaseAgent):
-    """An agent whose model returns whatever the test queued, one reply per call."""
+    """An agent whose model returns whatever the test queued, one reply per call.
+
+    `_complete` is overridden, but `run()` still asks the router for a profile — so
+    every test using this needs `stub_router`, or it reaches Ollama over HTTP and the
+    budgets it computes depend on whatever the machine happens to have pulled.
+    """
 
     key = "scripted"
     title = "Scripted"
@@ -426,14 +456,14 @@ def _ctx() -> AgentContext:
     return AgentContext(idea="A team standup bot", routing_mode=RoutingMode.LOCAL_ONLY)
 
 
-def test_a_conforming_response_is_kept_as_is():
+def test_a_conforming_response_is_kept_as_is(stub_router):
     agent = _ScriptedAgent([json.dumps(_minimal(SecurityEngineerOutput))])
     result = agent.run(_ctx())
     assert result.schema_status == SchemaStatus.VALID.value
     assert result.repair_rounds == 0
 
 
-def test_a_missing_required_key_triggers_a_repair_call_rather_than_being_persisted():
+def test_a_missing_required_key_triggers_a_repair_call_rather_than_being_persisted(stub_router):
     broken = _minimal(SecurityEngineerOutput)
     broken.pop("findings")
     agent = _ScriptedAgent([json.dumps(broken), json.dumps(_minimal(SecurityEngineerOutput))])
@@ -452,7 +482,7 @@ def test_a_missing_required_key_triggers_a_repair_call_rather_than_being_persist
     assert len(result.calls) == 2
 
 
-def test_output_that_never_conforms_is_flagged_not_silently_used():
+def test_output_that_never_conforms_is_flagged_not_silently_used(stub_router):
     broken = json.dumps({"summary": "I could not do it"})
     agent = _ScriptedAgent([broken, broken])
     result = agent.run(_ctx())
@@ -581,6 +611,87 @@ def test_a_null_on_a_required_list_is_a_repair_not_an_empty_list():
         SecurityEngineerOutput.model_validate(payload)
 
 
+def test_a_placeholder_zero_does_not_hide_the_real_total():
+    """Grouping alias names and taking the first present reintroduced the bug.
+
+    `{"total_monthly_high_usd": 0, "monthly_total_usd": 490}` — the zero is present,
+    so a grouped lookup stops there, and a $490/month build passes a $100 cap. Every
+    spelling has to be tried individually, in order, exactly as the original
+    single-name loop did.
+    """
+    drifted = {"summary": "…", "total_monthly_high_usd": 0, "monthly_total_usd": 490}
+    assert projected_monthly_cost(drifted) == 490
+    gate = decide_gate(_Project(cap=100), Phase.COST_ESTIMATION.value, drifted)
+    assert gate is not None and gate.kind == GateKind.COST.value
+
+
+def test_a_build_that_really_is_free_still_reads_as_free():
+    """The zero fall-through must not turn "costs nothing" into "unknown"."""
+    assert projected_monthly_cost(
+        {"summary": "…", "total_monthly_high_usd": 0, "total_monthly_low_usd": 0}
+    ) == 0.0
+
+
+def test_an_empty_list_does_not_beat_the_alias_that_holds_the_findings():
+    """The null fix, one value-type over — and just as fatal.
+
+    A schema-constrained model *must* emit `findings`, so emitting it empty beside a
+    populated `security_findings` is at least as likely as emitting it null.
+    """
+    critical = {
+        "title": "SQLi",
+        "severity": "critical",
+        "category": "SQL injection",
+        "location": "users.py",
+        "description": "d",
+        "recommendation": "r",
+    }
+    drifted = {"summary": "…", "findings": [], "security_findings": [critical]}
+    assert len(severe_findings(drifted)) == 1
+
+    payload = {**_minimal(SecurityEngineerOutput), **drifted}
+    out = SecurityEngineerOutput.model_validate(payload).model_dump(mode="json")
+    assert len(out["findings"]) == 1, "validation kept the empty list over the real one"
+    assert decide_gate(_Project(), Phase.SECURITY_ENGINEER.value, out) is not None
+
+
+def test_a_clean_security_review_is_still_allowed_to_report_nothing():
+    """"No findings" is an answer, not a drift to be repaired."""
+    payload = {**_minimal(SecurityEngineerOutput), "findings": []}
+    out = SecurityEngineerOutput.model_validate(payload).model_dump(mode="json")
+    assert out["findings"] == []
+    assert severe_findings(out) == []
+    assert decide_gate(_Project(), Phase.SECURITY_ENGINEER.value, out) is None
+
+
+def test_a_blank_severity_does_not_hide_the_one_beside_it():
+    finding = {"title": "SQLi", "category": "SQLi", "severity": "", "risk": "critical"}
+    assert len(severe_findings({"findings": [finding]})) == 1
+
+
+def test_the_repair_that_came_back_worse_is_not_the_one_that_is_kept(stub_router):
+    """`run()` used to persist the last attempt while claiming it kept the best."""
+    nearly = _minimal(SecurityEngineerOutput)
+    nearly.pop("risk_assessment")  # one thing missing
+    worse = {"summary": "I could not do it"}  # four things missing
+
+    agent = _ScriptedAgent([json.dumps(nearly), json.dumps(worse)])
+    result = agent.run(_ctx())
+
+    assert result.schema_status == SchemaStatus.INVALID.value
+    assert result.output.get("findings"), "the worse of the two attempts was persisted"
+    assert "risk_assessment" in (result.schema_note or "")
+
+
+def test_a_long_idea_cannot_push_the_prompt_out_of_the_window():
+    """`idea` and `feedback` have no maximum length at the API."""
+    agent = get_agent(Phase.PRODUCT_MANAGER.value)
+    profile = _profile(8192)
+    ctx = AgentContext(idea="i" * 60_000, feedback="f" * 40_000, extra_context="e" * 20_000)
+    built = sum(len(m.content) for m in agent._build_messages(ctx, profile))
+    assert built <= profile.prompt_char_budget
+
+
 def test_the_gate_reads_past_a_null_to_the_key_that_holds_the_number():
     drifted = {"summary": "…", "total_monthly_high_usd": None, "monthly_total_usd": 640}
     assert projected_monthly_cost(drifted) == 640
@@ -599,26 +710,11 @@ def test_a_configured_ceiling_is_not_overridden_by_a_floor(monkeypatch):
     assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
 
 
-def test_a_machine_that_cannot_hold_the_cache_gets_what_it_can_hold(monkeypatch):
-    from app.router import model_profile
-
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
-    window, reason = model_profile.resolve_window(
-        context_limit=32768,
-        kv_bytes_per_token=57344,
-        weight_bytes=4_683_087_332,
-        ram_bytes=8 * 2**30,
-    )
-    # What RAM allows is what is sent — not inflated back to a comfortable number.
-    assert window < 32768
-    assert reason and "RAM" in reason
-
-
-def test_a_ram_estimate_of_nothing_is_floored_and_says_so(monkeypatch):
+def test_a_ram_estimate_below_what_runs_is_floored_and_says_so(monkeypatch):
     """The RAM figure is an estimate blind to GPU offload, so it alone gets a floor.
 
-    Sending `num_ctx: 0` would fail more confusingly than a tight window, and the
-    reason has to admit the estimate was overruled rather than imply comfort.
+    Sending a window nothing can run in fails more confusingly than a tight one, and
+    the reason has to admit the estimate was overruled rather than imply comfort.
     """
     from app.router import model_profile
 
@@ -626,11 +722,24 @@ def test_a_ram_estimate_of_nothing_is_floored_and_says_so(monkeypatch):
     window, reason = model_profile.resolve_window(
         context_limit=32768,
         kv_bytes_per_token=57344,
-        weight_bytes=7_800_000_000,
-        ram_bytes=8 * 2**30,
+        weight_bytes=4_683_087_332,
+        ram_bytes=128 * 2**20,  # 128 MiB — nothing fits
     )
     assert window == model_profile._MIN_WORKABLE_TOKENS
     assert "held up to" in (reason or "") and "smaller model" in (reason or "")
+
+
+def test_the_floor_is_where_an_agent_prompt_actually_fits():
+    """Not a number picked for looking round: measured against the real prompts."""
+    from app.agents import AGENTS
+    from app.router.model_profile import _MIN_WORKABLE_TOKENS
+
+    profile = _profile(_MIN_WORKABLE_TOKENS)
+    for key, agent in AGENTS.items():
+        overhead = len(agent.system_prompt()) + len(agent.task_instruction())
+        assert overhead < profile.prompt_char_budget, (
+            f"{key} cannot fit its own instructions at the {_MIN_WORKABLE_TOKENS}-token floor"
+        )
 
 
 def test_a_user_set_ceiling_is_never_floored(monkeypatch):
