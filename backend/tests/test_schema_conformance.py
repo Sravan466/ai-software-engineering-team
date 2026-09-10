@@ -295,6 +295,24 @@ def test_money_written_as_prose_still_reads_as_money():
     assert out["total_monthly_high_usd"] == 1240.0
 
 
+def test_a_losing_alias_is_kept_rather_than_dropped():
+    """`AliasChoices` picks one name. The others are not thrown away.
+
+    A model that writes both `docker_compose` and `k8s_manifests` has said two
+    different things; the gate needs one canonical key, but `extra="allow"` means
+    the other still reaches the file browser instead of vanishing on the way in.
+    """
+    payload = {
+        **_minimal(DevOpsEngineerOutput),
+        "docker_compose": [{"path": "compose.yml", "content": "c"}],
+        "k8s_manifests": [{"path": "deploy.yaml", "content": "k"}],
+    }
+    payload.pop("compose_or_manifests")
+    out = DevOpsEngineerOutput.model_validate(payload).model_dump(mode="json")
+    assert [f["path"] for f in out["compose_or_manifests"]] == ["compose.yml"]
+    assert out["k8s_manifests"] == [{"path": "deploy.yaml", "content": "k"}]
+
+
 def test_extra_keys_survive_validation():
     """The shape is a floor. An agent that says more is not corrected into silence."""
     payload = {**_minimal(SecurityEngineerOutput), "threat_model": "STRIDE"}
