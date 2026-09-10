@@ -38,6 +38,11 @@ class GateKind(str, Enum):
     SHIP = "ship"
     #: Warden found something severe enough to stop an otherwise unattended build.
     SECURITY = "security"
+    #: A gate's own phase failed its schema, so the check that gate performs never
+    #: ran. Distinct from SECURITY on purpose: "Warden found something serious" and
+    #: "nobody could read Warden's report" are different facts, and telling the
+    #: reviewer the first when the second happened is the failure this all fixes.
+    UNCHECKED = "unchecked"
     #: Ledger's projected run cost passed the cap set for this build.
     COST = "cost"
     #: A single handoff, in every-phase mode.

@@ -31,6 +31,8 @@ import { artifactFiles, latestRow, type PayloadFile } from "./payload";
  *   ship     — one pass over the finished build: the file tree, the mockup, Warden's
  *              findings and Ledger's numbers, with per-file redo.
  *   security — Warden interrupted an otherwise unattended run over something severe.
+ *   unchecked— a gate's own phase missed its declared shape, so the automatic check
+ *              never ran and the reading falls to a person.
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
  *
  * Whatever the shape, the rule is the same: the work is above the buttons, in the
@@ -62,6 +64,14 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
     title: "Security stop",
     blurb: "Warden found something serious enough to interrupt the build.",
     approve: "Accept and continue",
+    after: "The remaining phases then run without stopping.",
+  },
+  unchecked: {
+    title: "Check that didn't run",
+    blurb:
+      "This agent's report didn't come back in the shape the automatic check reads, " +
+      "so that check couldn't run on it. Reading it is on you.",
+    approve: "I've read it — continue",
     after: "The remaining phases then run without stopping.",
   },
   phase: {
@@ -183,7 +193,9 @@ export default function Decision({
     <section className={`decision decision-${kind}`} aria-labelledby="decision-title">
       <header className="decision-head">
         <span className="decision-mark" aria-hidden="true">
-          {kind === "security" || kind === "cost" ? Icon.alert : Icon.check}
+          {kind === "security" || kind === "cost" || kind === "unchecked"
+            ? Icon.alert
+            : Icon.check}
         </span>
         <div className="decision-headings">
           <h2 id="decision-title">{copy.title}</h2>
@@ -204,7 +216,7 @@ export default function Decision({
 
       <div className="decision-body">
         {kind === "plan" && <PlanReview project={project} onRedo={aim} />}
-        {(kind === "security" || kind === "phase") && (
+        {(kind === "security" || kind === "phase" || kind === "unchecked") && (
           <SinglePhase project={project} phase={gatePhase} onRedo={aim} />
         )}
         {wantsBuild && (

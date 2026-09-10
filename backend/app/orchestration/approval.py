@@ -246,8 +246,10 @@ def decide_gate(
             return Gate(GateKind.SECURITY.value, _security_note(severe))
         if unchecked:
             # Warden's report is unreadable, so "no severe findings" is not a fact —
-            # it is the absence of one. Stop rather than infer the reassuring half.
-            return Gate(GateKind.SECURITY.value, unchecked)
+            # it is the absence of one. Stop rather than infer the reassuring half,
+            # and say which of the two happened: a SECURITY gate would announce a
+            # finding that was never made.
+            return Gate(GateKind.UNCHECKED.value, unchecked)
 
     return None
 

@@ -436,7 +436,10 @@ def test_a_gate_whose_phase_failed_validation_stops_the_run():
         unreadable,
         SchemaStatus.INVALID.value,
     )
-    assert stops is not None and stops.kind == GateKind.SECURITY.value
+    assert stops is not None
+    # Not a SECURITY gate: that one announces a finding Warden made. This stop
+    # happened because nobody could read the report, and the reviewer is told which.
+    assert stops.kind == GateKind.UNCHECKED.value
     assert "could not run" in (stops.note or "")
 
 

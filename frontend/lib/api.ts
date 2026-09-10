@@ -34,7 +34,7 @@ export type PhaseResult = {
 };
 
 export type ApprovalMode = "checkpoints" | "every_phase" | "unattended";
-export type GateKind = "plan" | "ship" | "security" | "cost" | "phase";
+export type GateKind = "plan" | "ship" | "security" | "cost" | "phase" | "unchecked";
 
 export type Project = {
   id: string;
