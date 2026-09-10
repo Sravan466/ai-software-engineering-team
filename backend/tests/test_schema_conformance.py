@@ -270,6 +270,37 @@ def test_an_absent_section_does_not_reserve_room_it_will_never_use():
     assert crowded["rag"] > 0 and crowded["memory"] > 0
 
 
+@pytest.mark.parametrize("window", [32768, 16384, 8192, 4096])
+def test_no_agent_can_build_a_prompt_that_overruns_its_window(window):
+    """The invariant the whole fix rests on, at every size, for every agent.
+
+    Ollama truncates an over-long prompt from the head, so one character past the
+    budget is the system prompt starting to disappear — and the system prompt is
+    where the required output shape is written. Every section is fed far more than
+    it could ever be given, with and without reviewer feedback, and the assembled
+    prompt still has to come in under the budget derived from the window.
+    """
+    from app.agents import AGENTS
+
+    profile = _profile(window)
+    for key, agent in AGENTS.items():
+        for feedback in (None, "Tighten the scope." * 20):
+            ctx = AgentContext(
+                idea="A team standup bot " * 50,
+                prior_outputs={
+                    d: {"files": [{"code": "x" * 400_000}]} for d in agent.depends_on
+                },
+                rag_context="r" * 300_000,
+                memory_context="m" * 300_000,
+                extra_context="Debate decision: use Postgres.",
+                feedback=feedback,
+            )
+            built = sum(len(m.content) for m in agent._build_messages(ctx, profile))
+            assert built <= profile.prompt_char_budget, (
+                f"{key} built {built:,} chars against a {profile.prompt_char_budget:,} budget"
+            )
+
+
 def test_the_repair_round_still_fits_the_window():
     """The one call whose job is to restate the shape must not be cut from the head."""
     agent = get_agent(Phase.SECURITY_ENGINEER.value)
@@ -280,7 +311,7 @@ def test_the_repair_round_still_fits_the_window():
     )
 
     # A rejected attempt as long as anything a model could return.
-    messages = agent._repair_messages(ctx, profile, "y" * 200_000, ["`findings` — Field required"])
+    messages = agent._repair_messages(ctx, profile, "y" * 400_000, ["`findings` — Field required"])
     total = sum(len(m.content) for m in messages)
     assert total <= profile.prompt_char_budget, (
         f"repair prompt is {total:,} chars against a {profile.prompt_char_budget:,} budget"

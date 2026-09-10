@@ -40,12 +40,13 @@ _CONTEXT_SHARE = {
     "rag": 0.26,
     "memory": 0.12,
 }
-#: No section is worth including as a stump.
-_MIN_SECTION_CHARS = 400
-#: What wraps each section that is not its content: the heading, the code fence, the
-#: separator, and the note left behind when the content was cut. Counted against the
-#: budget, because a budget that only measures the payload is one the frame overruns.
-_SECTION_FRAME_CHARS = 160
+#: The text wrapping each optional section. Written once and used twice — to build
+#: the section, and to charge its cost against the budget — because a frame that is
+#: estimated on one side and printed on the other is a frame the prompt overruns by
+#: however far the estimate was off.
+_DEP_FRAME = "# Context — {dep} output\n```json\n{body}\n```\n"
+_RAG_FRAME = "# Reference material (from the uploaded knowledge base)\n{body}\n"
+_MEMORY_FRAME = "# Lessons from past projects (long-term memory)\n{body}\n"
 
 
 @dataclass
@@ -193,7 +194,20 @@ class BaseAgent:
         profile: Optional[ModelProfile] = None,
         reserve: int = 0,
     ) -> list[ChatMessage]:
-        budget = self._section_budgets(ctx, profile, reserve)
+        if profile is None:
+            profile = router.profile_for(
+                ctx.routing_mode, ctx.preferred_model, complexity=self.complexity
+            )
+        return [
+            ChatMessage(role="system", content=self.system_prompt()),
+            ChatMessage(
+                role="user",
+                content=self._user_turn(ctx, self._section_budgets(ctx, profile, reserve)),
+            ),
+        ]
+
+    def _user_turn(self, ctx: AgentContext, budget: dict[str, int]) -> str:
+        """Everything the agent is given, with each section held to its budget."""
         parts: list[str] = [f"# Product idea\n{ctx.idea}\n"]
 
         deps = [d for d in self.depends_on if d in ctx.prior_outputs]
@@ -203,19 +217,13 @@ class BaseAgent:
             # The "this was cut" note goes outside the fence: inside it, the block
             # the next agent is reading as JSON would no longer parse as any.
             clipped = body[:per_dep] if len(body) > per_dep else body
-            note = "" if clipped is body else _TRUNCATED.format(limit=per_dep)
-            parts.append(f"# Context — {dep} output\n```json\n{clipped}\n```\n{note}")
+            note = "" if clipped is body else _TRUNCATED
+            parts.append(_DEP_FRAME.format(dep=dep, body=clipped) + note)
 
         if ctx.rag_context:
-            parts.append(
-                "# Reference material (from the uploaded knowledge base)\n"
-                f"{_clip(ctx.rag_context, budget['rag'])}\n"
-            )
+            parts.append(_RAG_FRAME.format(body=_clip(ctx.rag_context, budget["rag"])))
         if ctx.memory_context:
-            parts.append(
-                "# Lessons from past projects (long-term memory)\n"
-                f"{_clip(ctx.memory_context, budget['memory'])}\n"
-            )
+            parts.append(_MEMORY_FRAME.format(body=_clip(ctx.memory_context, budget["memory"])))
         if ctx.extra_context:
             parts.append(f"# Team decision to honour\n{ctx.extra_context}\n")
         if ctx.feedback:
@@ -225,10 +233,7 @@ class BaseAgent:
             )
 
         parts.append(self.task_instruction())
-        return [
-            ChatMessage(role="system", content=self.system_prompt()),
-            ChatMessage(role="user", content="\n".join(parts)),
-        ]
+        return "\n".join(parts)
 
     def _section_budgets(
         self,
@@ -238,41 +243,38 @@ class BaseAgent:
     ) -> dict[str, int]:
         """How many characters each optional section may spend.
 
-        Derived from the window the model reported, minus what is already committed:
-        the system prompt, the idea, the instruction, anything a person wrote, and
-        `reserve` — room a caller needs for something it will append afterwards.
+        The overhead is *measured*, not estimated: the same assembly runs once with
+        every section at zero, which yields the exact cost of the headings, the code
+        fences, the truncation markers and the joins around them. Whatever is left of
+        the window the model reported is then shared out.
 
-        The shares are renormalised over the sections that actually have content. A
-        fixed 26% held back for reference material nobody uploaded is 26% of the
-        window spent on nothing, and the upstream phase gets cut to make space for
-        it — which is the opposite of the point.
+        Estimating that overhead is how a prompt sized to fill the window ends up
+        thirty characters past it, and past it is where Ollama truncates from the
+        head — taking the system prompt, and the shape it carries, first.
+
+        `reserve` is room a caller needs for something it appends afterwards, and the
+        shares renormalise over sections that actually have content, so a quarter of
+        the window is not held back for a knowledge base nobody uploaded.
         """
         if profile is None:
             profile = router.profile_for(
                 ctx.routing_mode, ctx.preferred_model, complexity=self.complexity
             )
 
-        committed = len(self.system_prompt()) + len(self.task_instruction()) + len(ctx.idea)
-        committed += len(ctx.extra_context) + len(ctx.feedback or "") + max(reserve, 0)
-        deps = [d for d in self.depends_on if d in ctx.prior_outputs]
-        free = max(profile.prompt_char_budget - committed, 0)
+        empty = dict.fromkeys(_CONTEXT_SHARE, 0)
+        overhead = len(self.system_prompt()) + len(self._user_turn(ctx, empty))
+        free = max(profile.prompt_char_budget - overhead - max(reserve, 0), 0)
 
         present = {
-            "depends_on": bool(deps),
+            "depends_on": any(d in ctx.prior_outputs for d in self.depends_on),
             "rag": bool(ctx.rag_context),
             "memory": bool(ctx.memory_context),
         }
-        free -= _SECTION_FRAME_CHARS * (len(deps) + bool(ctx.rag_context) + bool(ctx.memory_context))
-        free = max(free, 0)
         total_share = sum(_CONTEXT_SHARE[name] for name, has in present.items() if has)
         if total_share <= 0:
-            return {name: 0 for name in _CONTEXT_SHARE}
+            return empty
         return {
-            name: (
-                max(int(free * (_CONTEXT_SHARE[name] / total_share)), _MIN_SECTION_CHARS)
-                if present[name]
-                else 0
-            )
+            name: int(free * (_CONTEXT_SHARE[name] / total_share)) if present[name] else 0
             for name in _CONTEXT_SHARE
         }
 
@@ -302,7 +304,7 @@ class BaseAgent:
             "Return the COMPLETE JSON object again — every key from the shape, "
             "not a patch and not an apology. Keep everything that was already correct."
         )
-        echo_budget = max(profile.prompt_char_budget // 4, _MIN_SECTION_CHARS)
+        echo_budget = max(profile.prompt_char_budget // 4, 1000)
         echo = _clip(attempt, echo_budget)
         return [
             *self._build_messages(ctx, profile, reserve=len(echo) + len(instruction)),
@@ -352,7 +354,10 @@ class BaseAgent:
 
 
 #: A cut the reader can see. A silent one reads as a model that simply stopped.
-_TRUNCATED = "… [cut at {limit:,} characters to fit this model's context window]\n"
+#: Deliberately carries no number: the skeleton measured to size the budget has to
+#: cost exactly what the finished prompt costs, and "55,344" is six characters longer
+#: than "0" — which is the whole overshoot, five sections over.
+_TRUNCATED = "… [cut here to fit this model's context window]\n"
 
 
 def _clip(text: str, limit: int) -> str:
@@ -362,11 +367,12 @@ def _clip(text: str, limit: int) -> str:
     returning all of it, which the inverted guard here used to do, overflows exactly
     the window this budget exists to respect.
     """
-    if limit <= 0:
-        return _TRUNCATED.format(limit=0)
-    if len(text) <= limit:
+    if limit > 0 and len(text) <= limit:
         return text
-    return text[:limit] + "\n" + _TRUNCATED.format(limit=limit)
+    # One shape for every cut, zero-length included: the skeleton this budget was
+    # measured from and the prompt finally sent have to cost the same, and a "\n"
+    # present in one and absent in the other is a one-character overrun.
+    return text[: max(limit, 0)] + "\n" + _TRUNCATED
 
 
 def _error_lines(error: ValidationError) -> list[str]:
