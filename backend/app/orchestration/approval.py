@@ -126,10 +126,23 @@ def severe_findings(output: object) -> list[dict]:
     ]
 
 
+_MONEY = re.compile(r"-?\d+(?:\.\d+)?")
+
+
 def _number(value: object) -> Optional[float]:
+    """A number, including one a model wrapped in prose: "$1,240/mo" -> 1240.0.
+
+    Validation already coerces these on the way in, so a well-formed phase never
+    needs this. It matters for the phase that *failed* validation and is being read
+    anyway — the gate is the last thing between a drifted estimate and a build that
+    ships over its cap, and refusing to read "$1,240/mo" there is refusing to gate.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        match = _MONEY.search(value.replace(",", ""))
+        return float(match.group(0)) if match else None
     try:
-        if isinstance(value, bool) or value is None:
-            return None
         return float(value)
     except (TypeError, ValueError):
         return None

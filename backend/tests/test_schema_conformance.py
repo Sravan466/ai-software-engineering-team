@@ -625,6 +625,21 @@ def test_a_placeholder_zero_does_not_hide_the_real_total():
     assert gate is not None and gate.kind == GateKind.COST.value
 
 
+@pytest.mark.parametrize(
+    "reported,expected",
+    [
+        ("$1,240/mo", 1240.0),
+        ("about 490 USD per month", 490.0),
+        ("free tier", None),
+        (0, 0.0),
+    ],
+)
+def test_the_gate_reads_money_a_model_wrapped_in_prose(reported, expected):
+    """Validation coerces these on the way in — but the gate also reads phases that
+    *failed* validation, and refusing to read "$1,240/mo" there is refusing to gate."""
+    assert projected_monthly_cost({"summary": "…", "total_monthly_high_usd": reported}) == expected
+
+
 def test_a_build_that_really_is_free_still_reads_as_free():
     """The zero fall-through must not turn "costs nothing" into "unknown"."""
     assert projected_monthly_cost(
