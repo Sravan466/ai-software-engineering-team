@@ -568,19 +568,50 @@ def test_a_configured_ceiling_is_not_overridden_by_a_floor(monkeypatch):
     assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
 
 
-def test_a_machine_that_cannot_hold_the_cache_is_told_so_not_overruled(monkeypatch):
+def test_a_machine_that_cannot_hold_the_cache_gets_what_it_can_hold(monkeypatch):
     from app.router import model_profile
 
     monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
     window, reason = model_profile.resolve_window(
         context_limit=32768,
         kv_bytes_per_token=57344,
-        weight_bytes=7_000_000_000,
+        weight_bytes=4_683_087_332,
         ram_bytes=8 * 2**30,
     )
-    # Whatever RAM allows is what is sent — never inflated back to a comfortable number.
+    # What RAM allows is what is sent — not inflated back to a comfortable number.
     assert window < 32768
-    assert reason and ("RAM" in reason or "below what an agent prompt needs" in reason)
+    assert reason and "RAM" in reason
+
+
+def test_a_ram_estimate_of_nothing_is_floored_and_says_so(monkeypatch):
+    """The RAM figure is an estimate blind to GPU offload, so it alone gets a floor.
+
+    Sending `num_ctx: 0` would fail more confusingly than a tight window, and the
+    reason has to admit the estimate was overruled rather than imply comfort.
+    """
+    from app.router import model_profile
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    window, reason = model_profile.resolve_window(
+        context_limit=32768,
+        kv_bytes_per_token=57344,
+        weight_bytes=7_800_000_000,
+        ram_bytes=8 * 2**30,
+    )
+    assert window == model_profile._MIN_WORKABLE_TOKENS
+    assert "held up to" in (reason or "") and "smaller model" in (reason or "")
+
+
+def test_a_user_set_ceiling_is_never_floored(monkeypatch):
+    """A cap someone typed is a fact about what they want, not an estimate to correct."""
+    from app.router import model_profile
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", 1024)
+    window, reason = model_profile.resolve_window(
+        context_limit=32768, kv_bytes_per_token=None, weight_bytes=None, ram_bytes=None
+    )
+    assert window == 1024, "the floor overrode a ceiling the user set"
+    assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
 
 
 def test_the_ram_clamp_is_skipped_when_ollama_is_on_another_machine():

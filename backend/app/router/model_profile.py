@@ -217,11 +217,11 @@ def resolve_window(
     ceilings on the same number, so the smallest wins, and the one that actually bound
     it is reported for the log line and the Settings page.
 
-    Every candidate here is a real constraint, so none of them is ever overridden —
-    a floor that raised the window back up would hand a user who capped the window at
-    2,048 a 8,192-token one, and hand a machine that can hold 3,000 tokens of cache a
-    window twice that size, which is precisely the swapping the RAM clamp exists to
-    prevent. A window too small to work in is reported as such, not quietly inflated.
+    The model's limit and a ceiling the user set are facts, and neither is overridden:
+    a floor that raised the window back up would hand someone who capped it at 2,048 a
+    8,192-token window instead. The RAM figure is an *estimate* — it assumes an f16
+    cache and cannot see GPU or unified-memory offload — so that one alone is floored
+    at a window anything can run in, and says so rather than quietly inflating.
     """
     limit = context_limit or settings.model_context_fallback_tokens
     candidates: list[tuple[int, Optional[str]]] = [(limit, None)]
@@ -229,13 +229,27 @@ def resolve_window(
     ram_tokens = _tokens_that_fit_in_ram(kv_bytes_per_token, weight_bytes, ram_bytes)
     if ram_tokens is not None:
         gib = (ram_bytes or 0) / 2**30
-        candidates.append(
-            (
-                ram_tokens,
-                f"clamped to {ram_tokens:,} tokens by RAM — {gib:.0f} GiB total, "
-                f"{settings.ollama_ram_fraction:.0%} of it available to the KV cache",
-            )
+        note = (
+            f"clamped to {{window:,}} tokens by RAM — {gib:.0f} GiB total, "
+            f"{settings.ollama_ram_fraction:.0%} of it available to the KV cache"
         )
+        if ram_tokens < _MIN_WORKABLE_TOKENS:
+            # This one is an *estimate* — f16 cache, and blind to GPU or unified
+            # memory offload — so unlike the two hard limits either side of it, it
+            # gets a floor. Below this nothing runs at all, and a window of 200
+            # tokens fails more confusingly than one that is merely tight. The
+            # reason says the estimate was overruled, so the log does not pretend
+            # the machine is comfortable.
+            candidates.append(
+                (
+                    _MIN_WORKABLE_TOKENS,
+                    note.format(window=ram_tokens)
+                    + f", held up to {_MIN_WORKABLE_TOKENS:,} because nothing runs below "
+                    "that — expect swapping, and use a smaller model",
+                )
+            )
+        else:
+            candidates.append((ram_tokens, note.format(window=ram_tokens)))
 
     ceiling = settings.ollama_context_ceiling
     if ceiling and ceiling > 0:
@@ -246,19 +260,10 @@ def resolve_window(
             )
         )
 
-    window, reason = min(candidates, key=lambda c: c[0])
-
-    if window < _MIN_WORKABLE_TOKENS:
-        # Not raised back up — that would be answering a real constraint with a
-        # wish. `num_ctx` must still be positive, and the reason says what is wrong
-        # so the Settings page can show it rather than the run failing mysteriously.
-        floored = max(window, 1)
-        return floored, (
-            f"{reason or 'resolved to'} — {floored:,} tokens is below what an agent "
-            "prompt needs, so phases will be truncated. Raise OLLAMA_CONTEXT_CEILING, "
-            "free memory, or use a smaller model."
-        )
-    return window, reason
+    # The model's own limit and a ceiling the user typed are both hard facts, and
+    # neither is second-guessed: a cap of 2,048 means 2,048, even though that is a
+    # window agents will find tight. Only the RAM estimate above gets a floor.
+    return min(candidates, key=lambda c: c[0])
 
 
 def _tokens_that_fit_in_ram(
