@@ -15,6 +15,7 @@ from app.analytics import tracker
 from app.api.deps import get_project
 from app.core.constants import RoutingMode
 from app.db.base import get_db
+from app.core.config import settings
 from app.db.models import PreviewRevision, Project
 from app.preview.generator import build_context, edit_section, generate_preview
 from app.preview.html import extract_section, replace_section, scan_sections
@@ -24,10 +25,16 @@ from app.schemas.preview import PreviewEditRequest, PreviewOut
 
 router = APIRouter(prefix="/api/projects", tags=["preview"])
 
-_PROVIDER_HINT = (
-    " If you're running Local-Only, make sure Ollama is running and the model is pulled "
-    "(`ollama pull qwen2.5:7b`)."
-)
+def _provider_hint() -> str:
+    """Advice that names the model this install actually uses.
+
+    A literal here told everyone to pull one particular model; anyone who had set a
+    different default in Settings was given a fix for a model they were not running.
+    """
+    return (
+        " If you're running Local-Only, make sure Ollama is running and the model is "
+        f"pulled (`ollama pull {settings.ollama_default_model}`)."
+    )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -80,7 +87,10 @@ def _preview_out(db: Session, project: Project) -> PreviewOut:
 
 
 def _fail(exc: Exception, what: str) -> HTTPException:
-    return HTTPException(status_code=502, detail=f"A model provider failed while {what}: {exc}.{_PROVIDER_HINT}")
+    return HTTPException(
+        status_code=502,
+        detail=f"A model provider failed while {what}: {exc}.{_provider_hint()}",
+    )
 
 
 # ── routes ───────────────────────────────────────────────────────────────────
