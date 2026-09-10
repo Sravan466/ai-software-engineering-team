@@ -69,6 +69,9 @@ class AgentResult:
     #: What was wrong, when something was. Kept short enough to show a person.
     schema_note: Optional[str] = None
     repair_rounds: int = 0
+    #: Every model call this deliverable took, in order. `response` is their sum;
+    #: analytics records one event per call, because that is what happened.
+    calls: list[LLMResponse] = field(default_factory=list)
 
 
 class BaseAgent:
@@ -153,6 +156,7 @@ class BaseAgent:
             # delimit a field name. A person reads this in a sentence on screen.
             schema_note="; ".join(e.replace("`", "") for e in errors[:3]) or None,
             repair_rounds=rounds,
+            calls=responses,
         )
 
     def _complete(

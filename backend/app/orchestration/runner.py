@@ -759,16 +759,32 @@ class PipelineRunner:
         self._write_memory(project, values)
 
     def _record_usage(self, db: Session, project: Project, lr: dict) -> None:
-        usage = lr.get("usage") or {}
-        resp = LLMResponse(
-            text="",
-            provider=lr.get("provider_used") or "unknown",
-            model=lr.get("model_used") or "unknown",
-            usage=Usage(**usage) if usage else Usage(),
-            latency_ms=lr.get("latency_ms", 0),
-            fallback_used=lr.get("fallback_used", False),
-        )
-        tracker.record(db, response=resp, project_id=project.id, phase=lr["phase"])
+        """One usage event per model call — including a schema repair round.
+
+        A repaired phase is two calls. Recording it as one would leave the token
+        total right and the call count and average latency wrong, which is the kind
+        of quiet inaccuracy this dashboard exists to not have.
+        """
+        calls = lr.get("calls") or [
+            {
+                "provider": lr.get("provider_used"),
+                "model": lr.get("model_used"),
+                "usage": lr.get("usage") or {},
+                "latency_ms": lr.get("latency_ms", 0),
+                "fallback_used": lr.get("fallback_used", False),
+            }
+        ]
+        for call in calls:
+            usage = call.get("usage") or {}
+            resp = LLMResponse(
+                text="",
+                provider=call.get("provider") or "unknown",
+                model=call.get("model") or "unknown",
+                usage=Usage(**usage) if usage else Usage(),
+                latency_ms=call.get("latency_ms", 0),
+                fallback_used=call.get("fallback_used", False),
+            )
+            tracker.record(db, response=resp, project_id=project.id, phase=lr["phase"])
 
     def _persist_new_debates(self, db: Session, project: Project, debates: list[dict]) -> None:
         existing = (

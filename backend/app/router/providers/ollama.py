@@ -266,7 +266,10 @@ class OllamaProvider(LLMProvider):
     def _chat(self, payload: dict) -> dict:
         # Local generation can be slow on CPU; give it room.
         r = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=600.0)
-        if r.status_code >= 400 and isinstance(payload.get("format"), dict):
+        # Only a 400 is worth retrying without the schema. A 404 is a model that is
+        # not pulled and a 5xx is a server in trouble; neither gets better by asking
+        # again, and the second attempt would only delay the real error.
+        if r.status_code == 400 and isinstance(payload.get("format"), dict):
             raise _SchemaFormatRejected(r.text[:200])
         r.raise_for_status()
         return r.json()

@@ -285,8 +285,11 @@ def test_a_missing_required_key_triggers_a_repair_call_rather_than_being_persist
     assert result.output["findings"], "the repaired output is what gets persisted"
     # The repair call names what was wrong, so the model has something to act on.
     assert "findings" in agent.calls[1][-1].content
-    # And the phase reports what the whole exchange cost, not just the last call.
+    # And the phase reports what the whole exchange cost, not just the last call —
+    # while still remembering that it *was* two calls, so analytics does not report
+    # one call that took as long as two.
     assert result.response.usage.total_tokens == 60
+    assert len(result.calls) == 2
 
 
 def test_output_that_never_conforms_is_flagged_not_silently_used():

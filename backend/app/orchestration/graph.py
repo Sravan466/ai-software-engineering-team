@@ -42,6 +42,19 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         "schema_status": result.schema_status,
         "schema_note": result.schema_note,
         "repair_rounds": result.repair_rounds,
+        # One entry per model call. A repaired phase made two, and analytics counts
+        # calls and averages latency across them — folding both into a single event
+        # would report one call that took as long as two.
+        "calls": [
+            {
+                "provider": c.provider,
+                "model": c.model,
+                "usage": c.usage.model_dump(),
+                "latency_ms": c.latency_ms,
+                "fallback_used": c.fallback_used,
+            }
+            for c in (result.calls or [result.response])
+        ],
     }
 
 
