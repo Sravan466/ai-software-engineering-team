@@ -88,31 +88,95 @@ def _resolves(target: str, tree: set[str]) -> bool:
     return False
 
 
+def _jsonc(text: str) -> Optional[dict]:
+    """A tsconfig as data: JSON with the comments and trailing commas tsc allows."""
+    out: list[str] = []
+    i, n, in_string = 0, len(text), False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+        elif text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                i += 1
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        else:
+            out.append(ch)
+            i += 1
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+    try:
+        data = json.loads(cleaned)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _compiler_options(files: dict[str, str], path: str, seen: frozenset = frozenset()) -> dict:
+    """A config's compilerOptions with `extends` followed, as tsc merges them.
+
+    Relative paths in an extended config (`baseUrl`, `paths` targets) are resolved
+    against the config that declares them, and carried as absolute tree paths.
+    """
+    data = _jsonc(files.get(path) or "")
+    if data is None or path in seen:
+        return {}
+    here = posixpath.dirname(path)
+    merged: dict = {}
+    parent = data.get("extends")
+    if isinstance(parent, str) and parent.startswith("."):
+        target = layout.join(here, parent)
+        if not target.endswith(".json"):
+            target += ".json"
+        merged.update(_compiler_options(files, target, seen | {path}))
+    options = data.get("compilerOptions") or {}
+    if isinstance(options, dict):
+        if isinstance(options.get("baseUrl"), str):
+            merged["baseUrl"] = layout.join(here, options["baseUrl"])
+        if isinstance(options.get("paths"), dict):
+            merged["paths"] = options["paths"]
+            merged["pathsBase"] = merged.get("baseUrl") if "baseUrl" in merged else here
+    return merged
+
+
 def aliases_for(files: dict[str, str], side: Optional[str]) -> dict[str, list[str]]:
-    """`{"@/": ["src"]}` — the import aliases one side's own tsconfig/jsconfig define.
+    """`{"@/": ["frontend/src"]}` — the import aliases one side's config defines.
 
     Read from the config in the tree rather than guessed, so the check resolves an
-    alias exactly the way `next build` / `vite build` will: an alias the project does
-    not configure is an import that will not resolve, whatever directory it names.
+    alias the way `next build` / `vite build` will: an alias the project does not
+    configure is an import that will not resolve, whatever directory it names. Targets
+    are tree paths, resolved against `baseUrl` (or the config itself when there is
+    none), with `extends` followed. Longest alias first, as TypeScript matches them.
     """
     if not side:
         return {}
     for name in ("tsconfig.json", "jsconfig.json"):
-        text = files.get(f"{side}/{name}")
-        if not text:
-            continue
-        try:
-            paths = (json.loads(text).get("compilerOptions") or {}).get("paths") or {}
-        except (ValueError, AttributeError):
-            continue
+        options = _compiler_options(files, f"{side}/{name}")
+        paths = options.get("paths")
+        if not isinstance(paths, dict):
+            continue  # a config without paths does not hide one that has them
+        base = options.get("pathsBase") or side
         out: dict[str, list[str]] = {}
         for key, targets in paths.items():
-            if not (isinstance(key, str) and key.endswith("/*") and isinstance(targets, list)):
+            if not (isinstance(key, str) and key.endswith("*") and isinstance(targets, list)):
                 continue
             out[key[:-1]] = [
-                layout.clean(str(t)[:-1]) for t in targets if isinstance(t, str) and t.endswith("*")
+                layout.join(base, str(t)[:-1]) for t in targets if isinstance(t, str) and t.endswith("*")
             ]
-        return out
+        return dict(sorted(out.items(), key=lambda kv: len(kv[0]), reverse=True))
     return {}
 
 
@@ -139,8 +203,8 @@ def _check_js_imports(path: str, content: str, tree: set[str], aliases: dict[str
         if prefix is not None:
             rel = spec[len(prefix):]
             roots = aliases[prefix]
-            if not any(_resolves(layout.join(side or "", root, rel), tree) for root in roots):
-                where = ", ".join(layout.join(side or "", root) or "." for root in roots)
+            if not any(_resolves(layout.join(root, rel), tree) for root in roots):
+                where = ", ".join(roots) or "."
                 problems.append(
                     Problem(path, f"imports `{spec}`, and no file in this build matches it "
                             f"(`{prefix}` points at {where}/).", "import")
@@ -224,9 +288,11 @@ def _check_python(path: str, content: str, tree: set[str], dirs: set[str]) -> li
 
 # ── the JavaScript parser ────────────────────────────────────────────────────
 def _paths_for(files: dict[str, str], side: str) -> dict:
-    """The same aliases, in the form TypeScript's resolver takes them."""
+    """The same aliases, in the form TypeScript's resolver takes them: relative to the
+    side's own root, which is `baseUrl` in the checker's virtual tree."""
+    prefix_len = len(side) + 1
     return {
-        f"{prefix}*": [f"{root}/*" if root else "*" for root in roots]
+        f"{prefix}*": [f"{root[prefix_len:]}/*" if len(root) > len(side) else "*" for root in roots]
         for prefix, roots in aliases_for(files, None if side == "root" else side).items()
     }
 
@@ -373,17 +439,16 @@ def phase_tree(
 
     backend_language = charter.get("language").token if charter is not None and charter.get("language") else None
     files: dict[str, str] = {}
+    placer = layout.Placer(backend_language)
     order = [p.value for p in PHASE_ORDER]
     for key in order:
         if key == phase_key:
             break
-        for placed, _path, content, _lang in layout.place_all(
-            key, iter_files(prior_outputs.get(key) or {}), backend_language
-        ):
+        for placed, _path, content, _lang in placer.place_all(key, iter_files(prior_outputs.get(key) or {})):
             files[placed] = content
     mine: list[str] = []
-    for placed, _path, content, _lang in layout.place_all(
-        phase_key, iter_files(output if isinstance(output, dict) else {}), backend_language
+    for placed, _path, content, _lang in placer.place_all(
+        phase_key, iter_files(output if isinstance(output, dict) else {})
     ):
         files[placed] = content
         mine.append(placed)

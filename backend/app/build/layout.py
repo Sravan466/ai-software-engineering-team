@@ -63,9 +63,10 @@ def common_root(phase: str, paths: Iterable[str]) -> Optional[str]:
     heads = set()
     for path in paths:
         head, _, rest = clean(path).partition("/")
-        if not rest:
-            return None  # a file at the top of the phase: there is no common folder
-        heads.add(head.lower())
+        if rest:
+            heads.add(head.lower())
+        # A file at the top — a README, a Dockerfile beside `client/` — is not code
+        # that imports anything by path, so it does not get a vote.
     if len(heads) == 1:
         head = heads.pop()
         return head if head in aliases else None
@@ -75,11 +76,11 @@ def common_root(phase: str, paths: Iterable[str]) -> Optional[str]:
 def _rooted(path: str, root: str, other_root: str, strip: Optional[str]) -> str:
     head, _, rest = path.partition("/")
     if rest and head.lower() == root:
-        return path
+        return f"{root}/{rest}"  # `Frontend/` is still the frontend
     if rest and head.lower() == other_root:
         # An agent writing into the other side's tree on purpose — a backend that
         # ships a static page, say. Kept there.
-        return path
+        return f"{other_root}/{rest}"
     if rest and strip and head.lower() == strip:
         return f"{root}/{rest}"
     return f"{root}/{path}"
@@ -104,40 +105,64 @@ def place(
     path: str,
     content: str = "",
     backend_language: Optional[str] = None,
-    strip: Optional[str] = None,
+    strip: object = None,
 ) -> str:
     """Where `path`, as the agent for `phase` wrote it, lives in the build.
 
     `strip` is the phase's `common_root`: the agent's own name for its whole side,
-    renamed to the canonical one. Placing a whole phase goes through `place_all`,
-    which works it out.
+    renamed to the canonical one. For QA it is `{side: alias}` — the names the
+    Backend and Frontend phases' folders were renamed from — because a test under
+    `client/` sits beside code that was moved out of `client/`, and has to follow it.
+    Placing whole phases goes through `Placer`, which works all of this out.
     """
     p = clean(path)
     if not p:
         return p
     if phase == Phase.BACKEND_ENGINEER.value:
-        return _rooted(p, BACKEND, FRONTEND, strip)
+        return _rooted(p, BACKEND, FRONTEND, strip if isinstance(strip, str) else None)
     if phase == Phase.FRONTEND_ENGINEER.value:
-        return _rooted(p, FRONTEND, BACKEND, strip)
+        return _rooted(p, FRONTEND, BACKEND, strip if isinstance(strip, str) else None)
     if phase == Phase.QA_ENGINEER.value:
-        head = p.partition("/")[0].lower()
-        if head in (FRONTEND, BACKEND) and "/" in p:
-            return p
+        head, _, rest = p.partition("/")
+        lowered = head.lower()
+        if rest and lowered in (FRONTEND, BACKEND):
+            return f"{lowered}/{rest}"
+        renamed = strip if isinstance(strip, dict) else {}
+        for side, alias in renamed.items():
+            if rest and alias and lowered == alias:
+                return f"{side}/{rest}"
         side = side_of_test(p, content, backend_language)
         return f"{side}/{p}"
     # DevOps and anything else: infrastructure, where it said.
     return p
 
 
-def place_all(
-    phase: str, items: Iterable[tuple], backend_language: Optional[str] = None
-) -> list[tuple]:
-    """`[(placed, path, content, …rest)]` for every `(path, content, …rest)` of one phase."""
-    items = list(items)
-    strip = common_root(phase, [item[0] for item in items])
-    return [
-        (place(phase, item[0], item[1], backend_language, strip), *item) for item in items
-    ]
+class Placer:
+    """Places a build phase by phase, remembering what each code side was renamed from.
+
+    One per build, fed the phases in the order they ran — QA's tests follow the
+    folders the Backend and Frontend phases were actually placed in.
+    """
+
+    def __init__(self, backend_language: Optional[str] = None) -> None:
+        self.backend_language = backend_language
+        self.renamed: dict[str, Optional[str]] = {}
+
+    def place_all(self, phase: str, items: Iterable[tuple]) -> list[tuple]:
+        """`[(placed, path, content, …rest)]` for every `(path, content, …rest)`."""
+        items = list(items)
+        if phase == Phase.QA_ENGINEER.value:
+            strip: object = {side: alias for side, alias in self.renamed.items() if alias}
+        else:
+            strip = common_root(phase, [item[0] for item in items])
+            if phase == Phase.BACKEND_ENGINEER.value:
+                self.renamed[BACKEND] = strip
+            elif phase == Phase.FRONTEND_ENGINEER.value:
+                self.renamed[FRONTEND] = strip
+        return [
+            (place(phase, item[0], item[1], self.backend_language, strip), *item)
+            for item in items
+        ]
 
 
 def side_of(path: str) -> Optional[str]:

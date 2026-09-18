@@ -135,11 +135,12 @@ def assemble(project: Project) -> dict:
     replaced: list[str] = []
 
     phases = current_phases(project)
+    placer = layout.Placer(backend_language)
     for ph in phases:
         out = ph.output if isinstance(ph.output, dict) else {}
         if ph.phase == "system_design":
             design = out
-        for placed, path, content, lang in layout.place_all(ph.phase, iter_files(out), backend_language):
+        for placed, path, content, lang in placer.place_all(ph.phase, iter_files(out)):
             if not placed:
                 continue
             files[placed] = {

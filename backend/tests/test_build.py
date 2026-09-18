@@ -22,14 +22,23 @@ def test_files_are_placed_by_the_side_they_belong_to():
     assert layout.place("frontend_engineer", "./pages/_app.js") == "frontend/pages/_app.js"
     assert layout.place("frontend_engineer", "frontend/app/page.tsx") == "frontend/app/page.tsx"
     # An agent's own name for its whole side is renamed only when every file uses it...
-    placed = [p for p, *_ in layout.place_all(
-        "frontend_engineer", [("client/src/App.jsx", ""), ("client/src/main.jsx", "")])]
-    assert placed == ["frontend/src/App.jsx", "frontend/src/main.jsx"]
-    # ...because `ui/` beside `pages/` is a components folder, and renaming it alone
-    # would break `import Button from '../ui/Button'` in the page.
-    placed = [p for p, *_ in layout.place_all(
+    # (a README beside the folder does not count against it)...
+    placer = layout.Placer("javascript")
+    placed = [p for p, *_ in placer.place_all(
+        "frontend_engineer",
+        [("client/src/App.jsx", ""), ("client/src/main.jsx", ""), ("README.md", "")],
+    )]
+    assert placed == ["frontend/src/App.jsx", "frontend/src/main.jsx", "frontend/README.md"]
+    # ...and QA's tests under the same folder follow the code they test.
+    placed = [p for p, *_ in placer.place_all("qa_engineer", [("client/src/App.test.jsx", "")])]
+    assert placed == ["frontend/src/App.test.jsx"]
+    # `ui/` beside `pages/` is a components folder, and renaming it alone would
+    # break `import Button from '../ui/Button'` in the page.
+    placed = [p for p, *_ in layout.Placer().place_all(
         "frontend_engineer", [("ui/Button.jsx", ""), ("pages/index.jsx", "")])]
     assert placed == ["frontend/ui/Button.jsx", "frontend/pages/index.jsx"]
+    # A side's folder in another case is still that side.
+    assert layout.place("frontend_engineer", "Frontend/src/App.jsx") == "frontend/src/App.jsx"
     assert layout.place("qa_engineer", "tests/test_main.py") == "backend/tests/test_main.py"
     assert (
         layout.place("qa_engineer", "tests/form.test.js", "import { render } from '@testing-library/react'")
