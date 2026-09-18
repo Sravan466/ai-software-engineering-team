@@ -206,13 +206,18 @@ def _check_js_imports(path: str, content: str, tree: set[str], aliases: dict[str
         if prefix is not None:
             rel = spec[len(prefix):]
             roots = aliases[prefix]
-            if not any(_resolves(layout.join(root, rel), tree) for root in roots):
+            if any(_resolves(layout.join(root, rel), tree) for root in roots):
+                continue
+            # tsc falls back to ordinary resolution when a mapping finds nothing, which
+            # is how a catch-all `"*": ["types/*"]` leaves `express` importable. Only a
+            # conventional local alias (`@/`, `~/`, `#`) that misses is a missing file.
+            if spec.startswith(("@/", "~/", "#")):
                 where = ", ".join(roots) or "."
                 problems.append(
                     Problem(path, f"imports `{spec}`, and no file in this build matches it "
                             f"(`{prefix}` points at {where}/).", "import")
                 )
-            continue
+                continue
         if spec.startswith("/") or pkg.is_node_builtin(spec):
             continue
         name = pkg.npm_package(spec)
@@ -229,7 +234,12 @@ def _check_js_imports(path: str, content: str, tree: set[str], aliases: dict[str
 
 
 def _python_roots(path: str) -> list[str]:
-    """Directories a Python file's absolute imports may resolve from."""
+    """Directories a Python file's absolute imports may resolve from.
+
+    The side's root (the backend, run from `backend/`), every directory between it and
+    the file (a test run beside its module), and the project root — code that says
+    `from backend.models import …` is written to run from there, and does.
+    """
     side = layout.side_of(path)
     roots = [side] if side else [""]
     here = posixpath.dirname(path)
@@ -238,12 +248,16 @@ def _python_roots(path: str) -> list[str]:
         if here == side:
             break
         here = posixpath.dirname(here)
+    if "" not in roots:
+        roots.append("")
     return roots
 
 
 def _module_exists(root: str, dotted: str, tree: set[str], dirs: set[str]) -> bool:
-    top = dotted.split(".")[0]
-    stem = f"{root}/{top}" if root else top
+    """Whether `a.b.c` is a module or package under `root` — the whole path, not its
+    first segment: `backend.models` does not exist because `backend/` does."""
+    rel = "/".join(part for part in dotted.split(".") if part)
+    stem = f"{root}/{rel}" if root else rel
     return f"{stem}.py" in tree or stem in dirs
 
 
@@ -276,12 +290,22 @@ def _check_python(path: str, content: str, tree: set[str], dirs: set[str]) -> li
             continue
         if any(_module_exists(root, module, tree, dirs) for root in roots):
             continue
+        top = module.split(".")[0]
+        local_top = next((root for root in roots if _module_exists(root, top, tree, dirs)), None)
+        if local_top is not None:
+            # The package is this build's own; the module inside it is what is missing.
+            where = "/".join(filter(None, [local_top, *module.split(".")]))
+            problems.append(
+                Problem(path, f"imports `{module}`, and no module in this build is at {where}.py. "
+                        "Write that module, or import one that exists.", "import")
+            )
+            continue
         if pkg.pip_requirement(module):
             continue
         problems.append(
             Problem(
                 path,
-                f"imports `{module.split('.')[0]}`, which is neither a module in this build nor "
+                f"imports `{top}`, which is neither a module in this build nor "
                 "a package the platform can install.",
                 "package",
             )

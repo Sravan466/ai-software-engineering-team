@@ -136,8 +136,9 @@ def place(
     """Where `path`, as the agent for `phase` wrote it, lives in the build.
 
     `strip` is what the phase's side was renamed from (`renamed_roots`). For QA it is
-    `{side: names}` for the Backend and Frontend phases, because a test under
-    `client/` sits beside code that was moved out of `client/` and has to follow it.
+    `{"renamed": {side: names}, "folders": {side: top-level folders}}`, because a test
+    under `client/` sits beside code that was moved out of `client/` — or inside a
+    real `client/` folder — and has to follow it.
     Placing whole phases goes through `Placer`, which works all of this out.
     """
     p = clean(path)
@@ -153,9 +154,16 @@ def place(
         lowered = head.lower()
         if rest and lowered in (FRONTEND, BACKEND):
             return f"{lowered}/{rest}"
-        by_side = strip if isinstance(strip, dict) else {}
-        for side, names in by_side.items():
+        known = strip if isinstance(strip, dict) else {}
+        renamed = known.get("renamed", {})
+        folders = known.get("folders", {})
+        for side, names in renamed.items():
             if rest and lowered in names:
+                return f"{side}/{rest}"
+        for side, aliases in ((FRONTEND, _FRONTEND_ROOTS), (BACKEND, _BACKEND_ROOTS)):
+            # A QA agent's `client/` is its name for the frontend's root — unless the
+            # frontend really has a `client/` folder, in which case the test is in it.
+            if rest and lowered in aliases and lowered not in folders.get(side, frozenset()):
                 return f"{side}/{rest}"
         side = side_of_test(p, content, backend_language)
         return f"{side}/{p}"
@@ -172,23 +180,35 @@ class Placer:
 
     def __init__(self, backend_language: Optional[str] = None) -> None:
         self.backend_language = backend_language
+        #: side -> the agent's own names that side was moved out of
         self.renamed: dict[str, frozenset] = {}
+        #: side -> the top-level folders that side really has once placed
+        self.folders: dict[str, frozenset] = {}
 
     def place_all(self, phase: str, items: Iterable[tuple]) -> list[tuple]:
         """`[(placed, path, content, …rest)]` for every `(path, content, …rest)`."""
         items = list(items)
         if phase == Phase.QA_ENGINEER.value:
-            strip: object = {side: names for side, names in self.renamed.items() if names}
+            strip: object = {"renamed": dict(self.renamed), "folders": dict(self.folders)}
         else:
             strip = renamed_roots(phase, [item[0] for item in items])
             if phase == Phase.BACKEND_ENGINEER.value:
                 self.renamed[BACKEND] = strip
             elif phase == Phase.FRONTEND_ENGINEER.value:
                 self.renamed[FRONTEND] = strip
-        return [
+        placed = [
             (place(phase, item[0], item[1], self.backend_language, strip), *item)
             for item in items
         ]
+        # The top-level folders each side really has, so QA can tell a `client/` that
+        # names the frontend from a `client/` folder inside it.
+        for side in (FRONTEND, BACKEND):
+            found = {
+                p.split("/")[1].lower() for p, *_ in placed if p.startswith(f"{side}/") and p.count("/") >= 2
+            }
+            if found:
+                self.folders[side] = self.folders.get(side, frozenset()) | frozenset(found)
+        return placed
 
 
 def side_of(path: str) -> Optional[str]:

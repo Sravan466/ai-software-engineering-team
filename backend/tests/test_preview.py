@@ -334,9 +334,12 @@ def test_the_models_own_section_is_the_wrapper_and_its_binding_survives():
 
     section = SectionPlan(id="signup", kind="form", label="Sign up", brief="", collection="leads")
     inner, classes = unwrap(
-        '<section data-section="signup" data-form="leads" class="py-20 bg-surface"><input name="email"></section>',
+        '<section data-section="signup" data-form="leads" data-success="Thanks!" '
+        'class="py-20 bg-surface"><input name="email"><button type="submit">Go</button></section>',
         section,
     )
-    assert classes == "bg-surface" and inner.startswith('<div data-form="leads">')
+    # The binding lands on a <form> — the only element the runtime binds — with what
+    # belongs to it, and the section id stays on the platform's wrapper alone.
+    assert classes == "bg-surface" and inner.startswith('<form data-form="leads" data-success="Thanks!">')
     html = wrap(section, inner, classes)
     assert html.count('data-section="signup"') == 1 and 'data-form="leads"' in html

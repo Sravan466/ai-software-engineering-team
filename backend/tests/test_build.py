@@ -324,3 +324,36 @@ def test_a_python_backend_is_renamed_file_by_file():
     assert placed == ["backend/app/main.py", "backend/tests/test_main.py"]
     placed = [p for p, *_ in placer.place_all("qa_engineer", [("server/tests/test_api.py", "")])]
     assert placed == ["backend/tests/test_api.py"]
+
+
+def test_a_qa_folder_means_the_side_it_tests():
+    # The frontend wrote `src/…` at its root; QA calls that root `client/`.
+    placer = layout.Placer("javascript")
+    placer.place_all("frontend_engineer", [("src/App.jsx", "")])
+    placed = [p for p, *_ in placer.place_all("qa_engineer", [("client/tests/App.test.jsx", "import App from '../src/App'")])]
+    assert placed == ["frontend/tests/App.test.jsx"]
+    # But when the frontend really has a `client/` folder, the test is in it.
+    placer = layout.Placer("javascript")
+    placer.place_all("frontend_engineer", [("client/App.jsx", ""), ("main.jsx", "")])
+    placed = [p for p, *_ in placer.place_all("qa_engineer", [("client/App.test.jsx", "")])]
+    assert placed == ["frontend/client/App.test.jsx"]
+
+
+def test_python_imports_resolve_along_the_whole_dotted_path():
+    files = {
+        "backend/main.py": "from backend.models import db\nfrom backend.api.routes import bp\n",
+        "backend/api/routes.py": "bp = 1\n",
+    }
+    result = check_tree(files, ["backend/main.py"])
+    [problem] = result.problems  # `backend.api.routes` resolves from the project root
+    assert "backend.models" in problem.message and problem.kind == "import"
+
+
+def test_a_catch_all_path_falls_back_to_packages():
+    files = {
+        "backend/tsconfig.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"*": ["types/*"]}}}',
+        "backend/server.ts": "import express from 'express';\nimport { thing } from '@/missing';\n",
+    }
+    result = check_tree(files, ["backend/server.ts"])
+    messages = " ".join(p.message for p in result.problems)
+    assert "express" not in messages

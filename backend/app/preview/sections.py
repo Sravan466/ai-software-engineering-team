@@ -346,9 +346,10 @@ def check(section: SectionPlan, inner: str, site: SitePlan) -> tuple[list[str], 
             )
 
     if kind == "form" and c is not None:
-        body = H.element_inner(inner, "data-form", c.name)
+        forms = [a for tag, a in H.elements_with(inner, "data-form") if tag == "form" and H.attr(a, "data-form") == c.name]
+        body = H.element_inner(inner, "data-form", c.name) if forms else None
         if body is None:
-            fatal.append(f'there is no <form data-form="{c.name}">')
+            fatal.append(f'there is no <form data-form="{c.name}"> — the binding has to be on the <form> element')
         else:
             named = {v for v in H.attr_values(body, "name")}
             if not named & {f.name for f in c.fields}:
@@ -423,6 +424,8 @@ def repair_in_place(section: SectionPlan, inner: str, site: SitePlan) -> tuple[s
 
 # ── turning a response into a section element ────────────────────────────────
 _PY = re.compile(r"(?:^|\s)(?:sm:|md:|lg:|xl:)?(?:py|pt|pb)-\S+")
+#: What makes an element the section itself — owned by the platform's wrapper.
+_IDENTITY = ("data-section", "data-label", "data-kind", "data-collection", "class")
 #: Attributes the runtime acts on. An element carrying one is never just a wrapper.
 _BINDINGS = (
     "data-list", "data-form", "data-filter", "data-sort", "data-stat", "data-modal",
@@ -444,11 +447,15 @@ def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
         classes = _PY.sub(" ", f" {H.attr(attrs, 'class') or ''}").strip()
         if H.attr(attrs, "data-section") is not None:
             # The element the model was asked for: the platform draws that wrapper
-            # itself. A binding it carried — `data-form` on the section — moves onto
-            # an element inside it, so neither the binding nor the section id is lost
-            # or doubled.
+            # itself. A binding it carried — `data-form` on the section — moves onto an
+            # element inside it, with everything that belongs to the binding
+            # (`data-success`, `data-redirect`, an id), so neither the binding nor the
+            # section id is lost or doubled. A form binding lands on a <form>: the
+            # runtime binds `form[data-form]` and nothing else.
             if bindings:
-                inner = H.wrap(tag if tag != "section" else "div", H.with_attrs("", bindings), inner)
+                kept = H.without_attrs(attrs, _IDENTITY)
+                inner_tag = "form" if "data-form" in bindings else "div"
+                inner = H.wrap(inner_tag, kept, inner)
             return inner.strip(), classes
         # An outer element that *is* a binding — the `data-list` grid itself — is
         # content, not a wrapper; unwrapping it took the binding with it.

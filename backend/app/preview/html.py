@@ -174,6 +174,16 @@ def with_attrs(attrs: str, updates: Dict[str, Optional[str]]) -> str:
     return out
 
 
+def without_attrs(attrs: str, names) -> str:
+    """The attribute string with the named attributes (and any handlers) removed."""
+    drop = {n.lower() for n in names}
+    return "".join(
+        " " + raw
+        for name, raw in _attributes(attrs)
+        if name.lower() not in drop and not name.lower().startswith("on")
+    )
+
+
 def wrap(tag: str, attrs: str, inner: str) -> str:
     return f"<{tag}{attrs}>{inner}</{tag}>"
 
