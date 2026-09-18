@@ -261,15 +261,35 @@ _LINK_A = re.compile(r"<Link\b([^>]*)>\s*<a\b([^>]*)>([\s\S]*?)</a>\s*</Link>")
 
 
 def _client_directive(rel: str, content: str, app_router: bool) -> Optional[str]:
+    """`"use client"` on a module the app router would render on the server.
+
+    Any folder, not only `components/`: a real run's `app/page.tsx` imported a
+    `pages/RecipeList.jsx` that used state, and `next build` failed on it. The
+    directive is inert where the pages router renders a file, so adding it wherever
+    state or handlers appear costs nothing and removes the whole class of failure.
+    """
     if not app_router or not rel.endswith(_JS_EXT) or _is_test(rel):
         return None
-    if not re.match(r"(src/)?(app|components|hooks|context|contexts|providers)/", rel):
+    if re.search(r"(^|/)(next|tailwind|postcss|jest|vite)\.config\.", rel):
         return None
     if _DIRECTIVE.match(content) or _METADATA.search(content):
         return None
-    if _HOOK.search(content) or _HANDLER.search(content):
+    client_only = any(pkg.npm_package(spec) in _CLIENT_ONLY for spec in js_imports(content))
+    if _HOOK.search(content) or _HANDLER.search(content) or client_only:
         return "'use client';\n\n" + content
     return None
+
+
+#: Packages that create React context or touch the browser when imported, so a Server
+#: Component importing one fails `next build` ("createContext is not a function")
+#: whether or not it calls a hook itself.
+_CLIENT_ONLY = frozenset({
+    "react-router-dom", "@headlessui/react", "framer-motion", "react-hot-toast",
+    "react-toastify", "sonner", "zustand", "jotai", "@tanstack/react-query", "swr",
+    "react-redux", "recharts", "react-chartjs-2", "react-hook-form", "formik",
+    "react-datepicker", "styled-components", "@emotion/react", "@emotion/styled",
+    "@mui/material", "@mui/icons-material", "next-auth",
+})
 
 
 def _link_children(content: str) -> Optional[str]:

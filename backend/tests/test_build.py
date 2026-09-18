@@ -357,3 +357,14 @@ def test_a_catch_all_path_falls_back_to_packages():
     result = check_tree(files, ["backend/server.ts"])
     messages = " ".join(p.message for p in result.problems)
     assert "express" not in messages
+
+
+def test_a_stateful_module_anywhere_is_a_client_component_under_the_app_router():
+    tree = {
+        "frontend/app/page.tsx": "import RecipeList from '../pages/RecipeList';\nexport default function Page() { return <RecipeList />; }\n",
+        "frontend/pages/RecipeList.jsx": "import { useState } from 'react';\nexport default function RecipeList() { const [q] = useState(''); return <p>{q}</p>; }\n",
+    }
+    sc = scaffold_build(tree, None, None, "Recipes")
+    fixed, _notes = sc.rewrites["frontend/pages/RecipeList.jsx"]
+    assert fixed.startswith("'use client';")
+    assert "frontend/app/page.tsx" not in sc.rewrites  # no state there, nothing to add
