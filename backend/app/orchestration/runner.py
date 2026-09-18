@@ -45,7 +45,7 @@ from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
 from app.memory.store import memory_store
 from app.orchestration import remediation
 from app.orchestration.approval import Gate, decide_gate
-from app.orchestration.charter import Charter
+from app.orchestration.charter import binding_on
 from app.orchestration.graph import graph
 from app.orchestration.state import PipelineState
 from app.preview.generator import build_context, generate_preview
@@ -327,8 +327,10 @@ class PipelineRunner:
                         # this a redo is the one path through the pipeline where an
                         # agent is free to change database, which is precisely the
                         # divergence the charter exists to prevent — and the phases
-                        # being rebuilt behind it would inherit the disagreement.
-                        charter=Charter.from_dict(values.get("charter")),
+                        # rebuilt behind it would inherit the disagreement. System
+                        # Design is the exception, and `binding_on` is where that
+                        # exception lives rather than here.
+                        charter=binding_on(phase_key, values.get("charter")),
                     )
                     result = agent.run(ctx)
 

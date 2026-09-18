@@ -324,7 +324,7 @@ def _require_models(project: Project) -> None:
     ready = model_router.readiness(
         RoutingMode(project.routing_mode),
         project.preferred_model,
-        roles=[p.value for p in PHASE_ORDER] + [r["role"] for r in model_roles.catalogue()],
+        roles=[r["role"] for r in model_roles.catalogue()],
     )
     if not ready.ok:
         raise HTTPException(status_code=409, detail=ready.reason)

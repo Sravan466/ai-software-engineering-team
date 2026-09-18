@@ -473,6 +473,8 @@ export type LocalStatus = {
 export type RoleRow = {
   role: string;
   label: string;
+  /** What this role is for, in a few words. */
+  what: string;
   kind: "phase" | "support";
   /** The user's choice, or null for "use the default model". */
   assigned: string | null;

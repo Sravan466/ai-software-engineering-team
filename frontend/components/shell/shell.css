@@ -694,6 +694,8 @@
   .composer-hint { display: none; }
   /* Comfortable touch targets on the controls a phone actually uses. */
   .btn, .sb-item, .sb-link, .sb-new, .sb-runtime, .example { min-height: 44px; }
+  /* A dropdown is a tap target too, and the per-agent table is eleven of them. */
+  .select, .input { min-height: 44px; }
   .icon-btn { width: 44px; height: 44px; }
   .tab { min-height: 44px; }
 }

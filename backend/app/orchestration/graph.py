@@ -30,7 +30,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.memory.store import memory_store
 from app.orchestration import debate as debate_step
-from app.orchestration.charter import Charter, freeze
+from app.orchestration.charter import binding_on, freeze
 from app.orchestration.debate import conduct_debate, decision_summary
 from app.orchestration.state import PipelineState
 from app.rag.knowledge_base import knowledge_base
@@ -156,8 +156,8 @@ def _make_node(phase: Phase):
             extra_context=extra,
             # Everything from the Backend Engineer onwards builds against the same
             # frozen stack. System Design is the phase that decides it, so it is the
-            # one phase with none — it cannot be held to a charter it has not written.
-            charter=Charter.from_dict(state.get("charter")),
+            # one phase given none — it cannot be held to a charter it is writing.
+            charter=binding_on(phase.value, state.get("charter")),
         )
         result = agent.run(ctx)
 

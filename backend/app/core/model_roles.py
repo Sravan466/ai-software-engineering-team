@@ -27,13 +27,14 @@ from app.core.constants import PHASE_LABELS, PHASE_ORDER
 # Relative to the backend process cwd, mirroring `sqlite:///./data/aiteam.db`.
 _PATH = Path("data") / "model_roles.local.json"
 
-#: Roles that are not a pipeline phase but still spend a model call. They are listed
-#: because they are otherwise invisible: a run's cost includes a mockup and a pile of
-#: embeddings, and neither had anywhere to be pointed at a smaller model.
-EXTRA_ROLES: tuple[tuple[str, str], ...] = (
-    ("debate", "Debate moderator"),
-    ("preview", "Visual mockup"),
-    ("embeddings", "Embeddings (memory & knowledge base)"),
+#: Roles that are not a pipeline phase but still spend a model call: (role, name,
+#: what it is for). They are listed because they are otherwise invisible — a run's
+#: cost includes a debate, a mockup and a pile of embeddings, and none of the three
+#: had anywhere to be pointed at a smaller model.
+EXTRA_ROLES: tuple[tuple[str, str, str], ...] = (
+    ("debate", "Debate", "Settles the stack before the architecture is drawn"),
+    ("preview", "Mockup", "The visual preview of the front end"),
+    ("embeddings", "Embeddings", "Long-term memory and the knowledge base"),
 )
 
 #: The role a caller names when it has none of its own — spelled once so the router
@@ -48,10 +49,18 @@ def catalogue() -> list[dict]:
     gives it a row here without anyone remembering to add one.
     """
     rows = [
-        {"role": phase.value, "label": PHASE_LABELS.get(phase.value, phase.value), "kind": "phase"}
+        {
+            "role": phase.value,
+            "label": PHASE_LABELS.get(phase.value, phase.value),
+            "what": PHASE_LABELS.get(phase.value, phase.value),
+            "kind": "phase",
+        }
         for phase in PHASE_ORDER
     ]
-    rows += [{"role": role, "label": label, "kind": "support"} for role, label in EXTRA_ROLES]
+    rows += [
+        {"role": role, "label": name, "what": what, "kind": "support"}
+        for role, name, what in EXTRA_ROLES
+    ]
     return rows
 
 

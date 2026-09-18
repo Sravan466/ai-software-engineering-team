@@ -636,7 +636,7 @@ function RoleLine({
         <label htmlFor={id} className="role-name">
           {agent?.codename ?? row.label}
         </label>
-        <span className="role-what">{agent ? agent.deliver : row.label}</span>
+        <span className="role-what">{agent ? agent.deliver : row.what}</span>
       </span>
       <span className="role-pick">
         <select

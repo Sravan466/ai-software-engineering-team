@@ -48,6 +48,21 @@ _SOURCE_PHRASE = {
     SOURCE_IMPLIED: "follows from the choices above",
 }
 
+
+def binding_on(phase_key: str, stored: object) -> Optional["Charter"]:
+    """The charter this phase is held to — which is *none* for System Design.
+
+    System Design is the phase that decides the stack, so handing it the charter
+    frozen from its own previous attempt would tell the architect that the
+    architecture is already settled. On a redo that is exactly backwards: the
+    reviewer sent it back to change something, and the thing they are most likely
+    changing is a technology choice.
+    """
+    if phase_key == Phase.SYSTEM_DESIGN.value:
+        return None
+    return Charter.from_dict(stored)
+
+
 #: Which categories are checked against which phase's output. Scoped, because the
 #: evidence only means something in context: a `.py` file is a contradiction in a
 #: JavaScript project's *test suite* and completely normal in a Python backend, and
