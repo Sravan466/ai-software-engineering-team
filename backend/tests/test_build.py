@@ -288,3 +288,21 @@ def test_an_agents_other_spelling_of_a_platform_file_is_replaced_too():
     assert superseded("frontend/yarn.lock", written)  # pins what the manifest no longer says
     assert not superseded("frontend/jest.config.js", written)  # nothing replaces it
     assert not superseded("backend/tsconfig.json", written)  # another folder, another project
+
+
+def test_only_the_phases_own_code_decides_its_folder_name():
+    placed = [p for p, *_ in layout.Placer().place_all("backend_engineer", [
+        ("server/app.py", ""), ("server/routes/users.py", ""),
+        ("frontend/index.html", ""), ("docs/api.md", ""),
+    ])]
+    assert placed == ["backend/app.py", "backend/routes/users.py", "frontend/index.html", "backend/docs/api.md"]
+
+
+def test_paths_resolve_against_the_final_base_url():
+    from app.build.check import aliases_for
+
+    files = {
+        "frontend/tsconfig.base.json": '{"compilerOptions": {"paths": {"@/*": ["src/*"]}}}',
+        "frontend/tsconfig.json": '{"extends": "./tsconfig.base.json", "compilerOptions": {"baseUrl": "./app"}}',
+    }
+    assert aliases_for(files, "frontend") == {"@/": ["frontend/app/src"]}

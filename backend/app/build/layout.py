@@ -31,6 +31,7 @@ _FRONTEND_ROOTS = frozenset({"frontend", "client", "web", "webapp", "ui", "front
 _BACKEND_ROOTS = frozenset({"backend", "server", "back-end", "back_end", "api-server"})
 
 _JS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_CODE = _JS + (".py", ".vue", ".svelte")
 #: What makes a JavaScript test a *front-end* test: it renders something.
 _FRONTEND_TEST = re.compile(
     r"""@testing-library/(react|dom|user-event)|from\s+['"]react['"]|next/|\.\./components|"""
@@ -60,13 +61,16 @@ def common_root(phase: str, paths: Iterable[str]) -> Optional[str]:
     }.get(phase)
     if not aliases:
         return None
+    canonical = {FRONTEND, BACKEND}
     heads = set()
     for path in paths:
         head, _, rest = clean(path).partition("/")
-        if rest:
+        # Only code votes: it is what imports by relative path. A README or Dockerfile
+        # beside `client/`, a `docs/` or `public/` folder, a static page written into
+        # the other side's canonical tree — none of them is the phase's own code, and
+        # none of them should stop its folder from being renamed.
+        if rest and head.lower() not in canonical and rest.lower().endswith(_CODE):
             heads.add(head.lower())
-        # A file at the top — a README, a Dockerfile beside `client/` — is not code
-        # that imports anything by path, so it does not get a vote.
     if len(heads) == 1:
         head = heads.pop()
         return head if head in aliases else None

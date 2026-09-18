@@ -51,6 +51,9 @@ export default function VisualPreview({ id }: { id: string }) {
       // A blip that the next poll recovered from is not an error worth keeping on screen.
       setError("");
     } catch (e: any) {
+      // The same rule for a failure: an older request failing after a newer one
+      // landed says nothing about the state now on screen.
+      if (ticket < applied.current) return;
       setError(e.message);
     } finally {
       setLoading(false);

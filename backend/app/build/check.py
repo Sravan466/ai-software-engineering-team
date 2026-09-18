@@ -148,7 +148,10 @@ def _compiler_options(files: dict[str, str], path: str, seen: frozenset = frozen
             merged["baseUrl"] = layout.join(here, options["baseUrl"])
         if isinstance(options.get("paths"), dict):
             merged["paths"] = options["paths"]
-            merged["pathsBase"] = merged.get("baseUrl") if "baseUrl" in merged else here
+            # Where `paths` resolve from when no `baseUrl` is set anywhere in the chain:
+            # the config that declared them. A `baseUrl` — including one set later by a
+            # config extending this one — takes over, as it does for tsc.
+            merged["pathsDir"] = here
     return merged
 
 
@@ -168,7 +171,7 @@ def aliases_for(files: dict[str, str], side: Optional[str]) -> dict[str, list[st
         paths = options.get("paths")
         if not isinstance(paths, dict):
             continue  # a config without paths does not hide one that has them
-        base = options.get("pathsBase") or side
+        base = options.get("baseUrl") or options.get("pathsDir") or side
         out: dict[str, list[str]] = {}
         for key, targets in paths.items():
             if not (isinstance(key, str) and key.endswith("*") and isinstance(targets, list)):
