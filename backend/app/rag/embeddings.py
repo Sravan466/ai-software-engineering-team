@@ -13,12 +13,32 @@ from app.core.logging import get_logger
 
 log = get_logger(__name__)
 
+#: The role embeddings run under, so they can be pointed at their own model in
+#: Settings. They are a real share of a run's calls and had nowhere to be chosen —
+#: the model came from `.env` and stayed there.
+ROLE = "embeddings"
+
+
+def _chosen_model() -> str:
+    """The embedding model the user selected, or the configured default.
+
+    A bare tag is what the Settings dropdown writes and what Ollama expects here, so
+    a `provider:model` pair is reduced to its model half rather than being sent as-is.
+    """
+    from app.core import model_roles
+
+    spec = model_roles.get(ROLE)
+    if not spec:
+        return settings.embedding_model
+    provider, _, model = spec.partition(":")
+    return model.strip() if model and provider.strip() == "ollama" else spec
+
 
 class OllamaEmbeddingFunction:
     """Implements Chroma's EmbeddingFunction protocol: __call__(input) -> embeddings."""
 
     def __init__(self, model: Optional[str] = None, base_url: Optional[str] = None) -> None:
-        self.model = model or settings.embedding_model
+        self.model = model or _chosen_model()
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
 
     # Chroma calls this with a list of strings and expects a list of float vectors.

@@ -75,6 +75,21 @@ class Project(Base):
     gate_kind: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     gate_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # ── the stack this build is held to ──────────────────────────────────────
+    #: Frozen once the architecture is settled, and binding on every phase after it:
+    #: language, frameworks, database, test runner, package manager. Mirrored out of
+    #: the graph's own state so the UI can show it without reading a checkpoint, and
+    #: so a run resumed in a new process is still held to the same decisions. Null on
+    #: runs that started before charters existed and on runs whose architecture named
+    #: nothing this pipeline recognises — in both cases nothing is enforced, rather
+    #: than something being invented.
+    charter: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: How many times this build has already been sent back to fix its own severe
+    #: security findings. Bounded, because each round re-runs the owning phase and
+    #: everything after it — and a model that could not fix a finding twice will not
+    #: fix it on the fourth attempt. Past the bound the decision goes to a person.
+    remediation_rounds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -171,6 +186,15 @@ class PhaseResult(Base):
     schema_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     schema_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Where this phase's output contradicts the stack charter, after the repair round
+    # had its chance. Kept apart from `schema_status` deliberately: "nobody could read
+    # this" and "this is written against a different database than the rest of the
+    # build" are different failures, fixed by different people in different ways.
+    # Nullable because rows written before the check existed cannot answer for
+    # themselves — the same reasoning as `schema_status` above.
+    stack_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    stack_note: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="phases")
@@ -234,9 +258,61 @@ class UsageEvent(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    #: Whether `cost_usd` is a price or a placeholder. A model with no published rate
+    #: used to be billed at zero, so pointing a role at an unrecognised cloud model
+    #: produced a dashboard reading $0.00 and a cost cap that could never trip.
+    #: Nullable: rows written before this existed cannot say which of the two they are.
+    cost_known: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     fallback_used: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SecurityDisposition(Base):
+    """What was actually *done* about one security finding.
+
+    Warden's findings used to be terminal. A documented high-severity "No CSRF
+    Protection in Frontend", with a written remediation, went into the archive with
+    the code unchanged, because the report landed in a panel and the pipeline moved
+    on to DevOps. A finding with nowhere to go is a finding nobody acts on.
+
+    This is the somewhere. One row per finding per project, carrying who owns the
+    offending file and what happened next — sent back and fixed, or waived on the
+    record by the reviewer. Neither of those is "shipped silently", which is the
+    only outcome this table exists to remove.
+
+    The key is derived from the finding's own words rather than its position in a
+    list, because the list is regenerated every time the phase re-runs: a waiver has
+    to survive the re-audit that follows it, or waiving a finding would mean being
+    asked about it again on the very next pass.
+    """
+
+    __tablename__ = "security_dispositions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+
+    #: Stable across re-audits: a hash of category + title + location.
+    finding_key: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(Text, default="")
+    severity: Mapped[str] = mapped_column(String(16), default="")
+    category: Mapped[str] = mapped_column(String(128), default="")
+    location: Mapped[str] = mapped_column(Text, default="")
+    recommendation: Mapped[str] = mapped_column(Text, default="")
+
+    #: The phase that wrote the offending file, resolved from the file trees the
+    #: phases produced. Null when the location matches nothing anyone wrote — an
+    #: architectural finding, say — which is exactly when a person has to decide.
+    owner_phase: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
+    #: open | fix_requested | fixed | waived — see `FindingStatus`.
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    #: The reviewer's reason for a waiver, or the note sent back with a fix.
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
 
 
 class KnowledgeDoc(Base):

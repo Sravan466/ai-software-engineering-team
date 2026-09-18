@@ -44,7 +44,9 @@ class GeminiProvider(LLMProvider):
         options: GenerationOptions,
     ) -> LLMResponse:
         if not self.available():
-            raise ProviderError("GEMINI_API_KEY is not set.")
+            # A key that is absent now will be absent on the retry too; asking
+            # three times only delays the sentence that says to add one.
+            raise ProviderError("GEMINI_API_KEY is not set.", retryable=False)
 
         import google.generativeai as genai
 

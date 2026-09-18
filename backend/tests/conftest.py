@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
 from app.router.model_profile import ModelProfile  # noqa: E402
-from app.router.router import router as model_router  # noqa: E402
+from app.router.router import Readiness, router as model_router  # noqa: E402
 from app.schemas.llm import LLMResponse, Usage  # noqa: E402
 
 # What the debate parser reads. Agents get a payload built from their own schema
@@ -86,17 +86,28 @@ def _fake_profile(*_args, **_kwargs) -> ModelProfile:
     return STUB_PROFILE
 
 
+def _fake_readiness(*_args, **_kwargs) -> Readiness:
+    return Readiness(ok=True)
+
+
 @pytest.fixture
 def stub_router(monkeypatch):
     """Replace the LLM router with the deterministic fake (no Ollama / cloud keys).
 
-    Both halves are stubbed. `profile_for` is not a detail: agents call it before
-    every prompt, and left live it reaches out to Ollama over HTTP — so the suite
-    would depend on whether the machine running it has a model pulled, and block on
-    a timeout per phase when nothing is listening.
+    All three halves are stubbed, and none of them is a detail.
+
+    `profile_for` is called before every prompt, and left live it reaches out to
+    Ollama over HTTP — so the suite would depend on whether the machine running it
+    has a model pulled, and would block on a timeout per phase when nothing answers.
+
+    `readiness` is the pre-flight check that refuses to start a run whose model was
+    never downloaded. Left live it asks that same unreachable Ollama and declines to
+    start anything — correct on a machine with no local runtime, and exactly wrong
+    for a suite whose whole point is not to need one.
     """
     monkeypatch.setattr(model_router, "complete", _fake_complete)
     monkeypatch.setattr(model_router, "profile_for", _fake_profile)
+    monkeypatch.setattr(model_router, "readiness", _fake_readiness)
 
 
 @pytest.fixture

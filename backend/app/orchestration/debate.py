@@ -1,8 +1,16 @@
 """Agent debate system.
 
-Before the Backend Engineer commits to an implementation, specialist viewpoints
-(System Design, Backend, Security) argue a key technical decision (e.g. the database
-choice) and the platform records a verdict. The decision is then honoured downstream.
+Specialist viewpoints (System Design, Backend, Security) argue a key technical
+decision — which database, broadly which architecture — and the platform records a
+verdict. That verdict is then the first entry in the stack charter, which every phase
+after it is held to.
+
+It used to run immediately *before the Backend Engineer*, which was too late for it
+to decide anything: the architecture had already chosen a database, the verdict
+arrived in `extra_context` as free prose with no obligation attached, and Backend
+wrote Mongoose against a PostgreSQL design without anything noticing. It now runs
+before **System Design**, so the architecture is drawn around the decision rather
+than the decision being announced after the architecture.
 
 Implemented as a single structured LLM call that role-plays the viewpoints and renders
 a verdict — cheap, deterministic to parse, and good enough to demonstrate the mechanism.
@@ -29,6 +37,15 @@ _SYSTEM = (
 )
 
 
+#: The role this call routes by and bills to, so the moderator can be pointed at a
+#: cheaper model than the ones writing code.
+ROLE = "debate"
+
+#: The question the pipeline always puts to the debate. Named here because two places
+#: need it to be the same string: the node that runs it and the record it writes.
+TOPIC = "Which database and core architecture best fit this MVP?"
+
+
 def conduct_debate(
     topic: str,
     context: str,
@@ -41,7 +58,7 @@ def conduct_debate(
     # thing with nothing in it. Subtracting a hand-counted `len(_SYSTEM) + len(topic)`
     # misses the headings and the closing line wrapped around them, which is how a
     # budget computed here overruns the window it was computed from.
-    profile = router.profile_for(mode, preferred_model, complexity="medium")
+    profile = router.profile_for(mode, preferred_model, complexity="medium", role=ROLE)
 
     def assemble(quoted: str) -> str:
         return (
@@ -58,6 +75,7 @@ def conduct_debate(
         preferred_model=preferred_model,
         options=GenerationOptions(json_mode=True),
         complexity="medium",
+        role=ROLE,
     )
     record = _parse(resp.text, topic)
     return record, resp

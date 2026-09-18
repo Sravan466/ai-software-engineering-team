@@ -9,7 +9,12 @@ the default policy stops twice —
                                     ↳ interrupts on a severe finding or a cost overrun
 
 — and lets the run through everywhere else. `every_phase` keeps the old rhythm for
-anyone who wants it; `unattended` never stops.
+anyone who wants it; `unattended` never stops for a judgement call.
+
+One stop is not a judgement call and happens whatever the policy says: a phase that
+wrote itself against a different stack than the architecture froze. That build is not
+a matter of taste — it is a Postgres architecture with a Mongo backend, and the phases
+after it are written against whichever half they happened to read.
 
 This module owns that decision and nothing else. It reads a finished phase and
 answers one question, so the runner stays a loop and the policy stays legible.
@@ -223,7 +228,11 @@ def projected_monthly_cost(output: object) -> Optional[float]:
 
 # ── the decision ─────────────────────────────────────────────────────────────
 def decide_gate(
-    project, phase_key: str, output: object, schema_status: Optional[str] = None
+    project,
+    phase_key: str,
+    output: object,
+    schema_status: Optional[str] = None,
+    stack_violations: Optional[list] = None,
 ) -> Optional[Gate]:
     """Should the pipeline stop after `phase_key`? Returns the gate, or None.
 
@@ -234,8 +243,20 @@ def decide_gate(
     `schema_status` is what validation made of the agent's output. When a gate's own
     phase failed it, the check that gate performs did not really happen, and the run
     stops so a person does it instead.
+
+    `stack_violations` is where this phase contradicts the architecture it was built
+    on. That one is answered before the review policy is consulted at all — see below.
     """
     mode = project.effective_approval_mode
+
+    # A build that contradicts itself is caught before the policy is read, unattended
+    # runs included. Every other gate in this module is a judgement call somebody may
+    # reasonably have asked not to be interrupted for; this is not one. The phases
+    # after this would be written against a stack half the build does not use, and
+    # `artifacts.assemble` would put both halves in one archive — so the phases saved
+    # by not stopping are phases spent building on something already known to be wrong.
+    if stack_violations:
+        return Gate(GateKind.STACK.value, stack_note(stack_violations))
 
     if mode == ApprovalMode.UNATTENDED.value:
         return None
@@ -293,6 +314,25 @@ def decide_gate(
 def _both(*notes: Optional[str]) -> Optional[str]:
     """Every reason this stop happened, not whichever was computed last."""
     return " ".join(n for n in notes if n) or None
+
+
+def stack_note(violations: list) -> str:
+    """"Prism wrote Mongoose where the charter says PostgreSQL." — the first one, counted.
+
+    One contradiction is shown in full because it is usually the whole story: forty
+    files using the wrong database are one decision made forty times. The count says
+    whether there is more to read below.
+    """
+    lines = [str(v).strip() for v in violations if str(v).strip()]
+    if not lines:
+        return "This phase contradicts the stack the architecture froze."
+    head = lines[0].replace("`", "")
+    if len(lines) == 1:
+        return f"This phase contradicts the stack frozen for this build — {head}"
+    return (
+        f"This phase contradicts the stack frozen for this build in {len(lines)} places. "
+        f"The first: {head}"
+    )
 
 
 def unchecked_note(phase_key: str, schema_status: Optional[str]) -> Optional[str]:

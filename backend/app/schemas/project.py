@@ -67,6 +67,21 @@ class ProjectUpdate(BaseModel):
     clear_cost_cap: bool = False
 
 
+class WaiveRequest(BaseModel):
+    """Accept a security finding deliberately, with the reason on the record.
+
+    The reason is mandatory. A waiver with nothing attached is indistinguishable from
+    the silence this replaces, and it is the only record anyone reading this build
+    later has of why a known issue shipped.
+    """
+
+    reason: str = Field(
+        ...,
+        min_length=3,
+        description="Why this finding is acceptable for this build.",
+    )
+
+
 class RedoRequest(BaseModel):
     """Send one phase back to its agent, from whichever review is on screen."""
 
@@ -91,6 +106,14 @@ class PhaseResultOut(BaseModel):
     #: check existed. The reviewer is told rather than left to spot it.
     schema_status: Optional[str] = None
     schema_note: Optional[str] = None
+
+    #: ok | violated — does this phase agree with the stack the architecture froze?
+    #: A separate answer from `schema_status`: a deliverable can match its declared
+    #: shape perfectly and still be written against a database nothing else uses.
+    #: `None` on rows written before the check existed.
+    stack_status: Optional[str] = None
+    #: Each contradiction, in the words the agent was sent back with.
+    stack_note: Optional[list[str]] = None
 
     # Timing, so a phase in flight can show elapsed time and a finished one can show
     # what it actually cost in wall-clock and tokens.
@@ -124,6 +147,16 @@ class ProjectOut(BaseModel):
     #: Which review to render, and the one line saying why the run stopped here.
     gate_kind: Optional[str] = None
     gate_note: Optional[str] = None
+
+    #: The technology decisions frozen after the architecture was approved, which
+    #: every phase after it is written against and checked against. `None` on a run
+    #: whose architecture hasn't been drawn yet, and on one whose architecture named
+    #: nothing this pipeline recognises — in both cases nothing is being enforced,
+    #: and the UI says so rather than showing an empty table as if it were a stack.
+    charter: Optional[dict] = None
+    #: How many times this build has already been sent back to fix its own severe
+    #: security findings.
+    remediation_rounds: Optional[int] = None
     created_at: UtcDatetime
     updated_at: UtcDatetime
     phases: list[PhaseResultOut] = []

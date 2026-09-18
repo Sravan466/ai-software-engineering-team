@@ -20,6 +20,7 @@ from app.db.models import PreviewRevision, Project
 from app.preview.generator import build_context, edit_section, generate_preview
 from app.preview.html import extract_section, replace_section, scan_sections
 from app.router.base import ProviderError
+from app.router.router import router as model_router
 from app.schemas.llm import LLMResponse
 from app.schemas.preview import PreviewEditRequest, PreviewOut
 
@@ -28,12 +29,15 @@ router = APIRouter(prefix="/api/projects", tags=["preview"])
 def _provider_hint() -> str:
     """Advice that names the model this install actually uses.
 
-    A literal here told everyone to pull one particular model; anyone who had set a
-    different default in Settings was given a fix for a model they were not running.
+    A literal here told everyone to pull one particular model, so anyone who had
+    chosen a different one was handed a fix for a model they were not running. The
+    router is asked rather than the settings object, because a choice made in
+    Settings lands there first — `.env` is only where the default started.
     """
+    model = model_router.default_model("ollama") or "the model you selected"
     return (
         " If you're running Local-Only, make sure Ollama is running and the model is "
-        f"pulled (`ollama pull {settings.ollama_default_model}`)."
+        f"pulled (`ollama pull {model}`)."
     )
 
 

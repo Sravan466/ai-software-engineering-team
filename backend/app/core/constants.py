@@ -25,7 +25,9 @@ class ApprovalMode(str, Enum):
     CHECKPOINTS = "checkpoints"
     #: Stop after every phase. Kept for anyone who wants the old rhythm.
     EVERY_PHASE = "every_phase"
-    #: Never stop.
+    #: Never stop for a judgement call. One thing still stops it: a phase that
+    #: contradicts the stack the architecture froze, which is not a judgement call —
+    #: the build holds two incompatible halves and every phase after it compounds them.
     UNATTENDED = "unattended"
 
 
@@ -45,8 +47,49 @@ class GateKind(str, Enum):
     UNCHECKED = "unchecked"
     #: Ledger's projected run cost passed the cap set for this build.
     COST = "cost"
+    #: A phase wrote itself against a different stack than the architecture froze.
+    #: Distinct from every other kind because it is not a judgement call: the build
+    #: holds two incompatible halves, and approving it ships both in one archive.
+    STACK = "stack"
     #: A single handoff, in every-phase mode.
     PHASE = "phase"
+
+
+class StackStatus(str, Enum):
+    """Whether a phase's output agrees with the stack charter it was built under.
+
+    Recorded per phase because it decides whether a build is one thing or several. A
+    `violated` phase used to reach the archive beside phases written against a
+    different database, and nothing in the pipeline noticed.
+    """
+
+    #: Checked, and it agrees. Also what a phase with no charter to check reports.
+    OK = "ok"
+    #: Still contradicts the charter after being sent back with the contradiction named.
+    VIOLATED = "violated"
+
+
+class FindingStatus(str, Enum):
+    """What was done about one security finding.
+
+    There is deliberately no value for "seen and moved on". A critical or high
+    finding leaves this pipeline either fixed and re-audited, or waived on the record
+    by a person who said why — the only two outcomes the security gate accepts.
+    """
+
+    #: Reported; nothing done about it yet.
+    OPEN = "open"
+    #: Sent back to the agent that owns the file. The re-audit says whether it took.
+    FIX_REQUESTED = "fix_requested"
+    #: A later audit no longer reports it.
+    FIXED = "fixed"
+    #: Accepted deliberately, with a reason attached.
+    WAIVED = "waived"
+
+    @classmethod
+    def settled(cls) -> frozenset[str]:
+        """The states that let a build past the security gate."""
+        return frozenset({cls.FIXED.value, cls.WAIVED.value})
 
 
 class SchemaStatus(str, Enum):

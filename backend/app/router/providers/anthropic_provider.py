@@ -52,7 +52,9 @@ class AnthropicProvider(LLMProvider):
         options: GenerationOptions,
     ) -> LLMResponse:
         if not self.available():
-            raise ProviderError("ANTHROPIC_API_KEY is not set.")
+            # A key that is absent now will be absent on the retry too; asking
+            # three times only delays the sentence that says to add one.
+            raise ProviderError("ANTHROPIC_API_KEY is not set.", retryable=False)
 
         # Anthropic takes `system` separately from the user/assistant turns.
         system_text = "\n\n".join(m.content for m in messages if m.role == "system")

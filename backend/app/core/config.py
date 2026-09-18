@@ -66,8 +66,23 @@ class Settings(BaseSettings):
     # ── Routing ──
     default_routing_mode: str = "local_only"  # auto | manual | local_only
     ollama_base_url: str = "http://localhost:11434"
+    #: The local model every role falls back to — the one place a model name is
+    #: configured at all. Settings writes the user's choice over it at runtime.
     ollama_default_model: str = "qwen2.5:7b"
-    fallback_chain: str = "ollama:qwen2.5:7b"
+    #: Extra `provider:model` links to try after the primary choice, comma-separated.
+    #: Deliberately empty. The router already appends the local default as the last
+    #: link of every chain, so naming a model here as well wrote it down twice —
+    #: change one and the chain still pointed at the other, and the first transient
+    #: failure fell through to a model that was never pulled, erroring in the name of
+    #: a model the user had not chosen.
+    fallback_chain: str = ""
+    #: How many extra times one provider call is retried before the chain moves on.
+    #: A local runtime drops the occasional request while it loads a model, and a
+    #: single hiccup used to fail the whole run.
+    provider_retry_attempts: BlankTolerantInt(2) = 2
+    #: Seconds before the first retry. Each subsequent wait doubles, up to the cap.
+    provider_retry_backoff_seconds: BlankTolerantFloat(1.0) = 1.0
+    provider_retry_max_backoff_seconds: BlankTolerantFloat(8.0) = 8.0
 
     # ── Model capability & prompt budgets ──
     # Nothing below is a context size this app assumes about a local model. That
@@ -100,6 +115,15 @@ class Settings(BaseSettings):
     #: How many times a schema-invalid agent response is sent back for repair before
     #: the run keeps the best attempt and flags it. Each round is a whole extra call.
     schema_repair_rounds: BlankTolerantInt(1) = 1
+    #: Whether the stack charter frozen after System Design is enforced on the phases
+    #: that follow it. Off means the charter is still recorded and shown — it just
+    #: stops failing a phase that contradicts it.
+    enforce_stack_charter: bool = True
+    #: How many times a build is sent back to fix its own severe security findings
+    #: before the reviewer is asked to decide. Each round re-runs the owning phase
+    #: and everything after it, so this is expensive; zero hands every finding
+    #: straight to the gate instead.
+    security_remediation_rounds: BlankTolerantInt(1) = 1
 
     # ── Cloud providers ──
     anthropic_api_key: Optional[str] = None

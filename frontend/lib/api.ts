@@ -31,10 +31,71 @@ export type PhaseResult = {
   schema_status: "valid" | "repaired" | "invalid" | null;
   /** What was wrong, when something was. */
   schema_note: string | null;
+
+  /**
+   * Does this phase agree with the stack the architecture froze? A separate answer
+   * from `schema_status`: a deliverable can match its declared shape perfectly and
+   * still be written against a database nothing else in the build uses.
+   */
+  stack_status: "ok" | "violated" | null;
+  /** Each contradiction, in the words the agent was sent back with. */
+  stack_note: string[] | null;
+};
+
+/** One security finding, and what has actually been done about it. */
+export type SecurityFinding = {
+  key: string;
+  title: string;
+  severity: string;
+  category: string;
+  location: string;
+  recommendation: string;
+  /** The phase that wrote the offending file. Null when nothing owns it. */
+  owner_phase: string | null;
+  status: "open" | "fix_requested" | "fixed" | "waived";
+  /** The reviewer's reason for a waiver. */
+  note: string | null;
+};
+
+export type SecurityState = {
+  findings: SecurityFinding[];
+  /** Critical/high findings neither fixed nor waived — what blocks approval. */
+  unresolved: number;
+  rounds_used: number;
+  rounds_allowed: number;
 };
 
 export type ApprovalMode = "checkpoints" | "every_phase" | "unattended";
-export type GateKind = "plan" | "ship" | "security" | "cost" | "phase" | "unchecked";
+export type GateKind =
+  | "plan"
+  | "ship"
+  | "security"
+  | "cost"
+  | "phase"
+  | "unchecked"
+  | "stack";
+
+/**
+ * One technology decision the whole crew is held to.
+ *
+ * `source` is who decided it — the debate that settled the question, the
+ * architecture that drew it, or an unavoidable consequence of one of those. Shown,
+ * because "PostgreSQL because the team argued it out" and "PostgreSQL because
+ * FastAPI implies it" are different strengths of claim.
+ */
+export type CharterChoice = {
+  token: string;
+  label: string;
+  source: "debate" | "system_design" | "implied";
+};
+export type Charter = Partial<Record<CharterCategory, CharterChoice>>;
+export type CharterCategory =
+  | "language"
+  | "backend_framework"
+  | "frontend_framework"
+  | "database"
+  | "test_runner"
+  | "package_manager";
 
 export type Project = {
   id: string;
@@ -55,6 +116,16 @@ export type Project = {
   gate_kind: GateKind | null;
   /** One line on why the run stopped here — a severe finding, a cost overrun. */
   gate_note: string | null;
+
+  /**
+   * The technology decisions frozen after the architecture was approved. `null`
+   * before System Design has run, and on a build whose architecture named nothing
+   * this pipeline recognises — in both cases nothing is being enforced, and the UI
+   * says so rather than showing an empty table as if it were a stack.
+   */
+  charter: Charter | null;
+  /** How many times this build has been sent back to fix its own security findings. */
+  remediation_rounds: number | null;
 
   created_at: string;
   updated_at: string;
@@ -240,6 +311,31 @@ export const api = {
       body: JSON.stringify(body),
     }),
   getLocalModel: () => req<LocalStatus>("/api/settings/local"),
+  /** Select which model the local runtime runs. The reason the pull button exists. */
+  setLocalModel: (model: string) =>
+    req<LocalStatus>("/api/settings/providers/ollama", {
+      method: "PUT",
+      body: JSON.stringify({ default_model: model }),
+    }),
+
+  // ── Settings: which model each agent runs on ──
+  getRoles: () => req<RoleSettings>("/api/settings/roles"),
+  /** `null` puts the role back on the default model. */
+  setRoleModel: (role: string, model: string | null) =>
+    req<RoleSettings>(`/api/settings/roles/${role}`, {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+
+  // ── Security findings: fix them, or waive them on the record ──
+  getSecurity: (id: string) => req<SecurityState>(`/api/projects/${id}/security`),
+  fixFinding: (id: string, key: string) =>
+    req<RunResponse>(`/api/projects/${id}/security/${key}/fix`, { method: "POST" }),
+  waiveFinding: (id: string, key: string, reason: string) =>
+    req<{ key: string; status: string; note: string; unresolved: number }>(
+      `/api/projects/${id}/security/${key}/waive`,
+      { method: "POST", body: JSON.stringify({ reason }) },
+    ),
 
   // ── GitHub publishing (OAuth "Connect" → push to the user's own account) ──
   githubStatus: () => req<GithubStatus>("/api/github/status"),
@@ -365,6 +461,32 @@ export type LocalStatus = {
   has_default: boolean;
   /** Null while Ollama is unreachable or the default model isn't pulled yet. */
   profile: ModelProfile | null;
+  /**
+   * Pulled models whose name suggests they were trained for code. A suggestion for
+   * the code phases, derived from what you actually have — never a default the
+   * router reaches for, because a name is not a capability.
+   */
+  code_models: string[];
+};
+
+/** One role a model can be chosen for: the eight agents, plus the support tasks. */
+export type RoleRow = {
+  role: string;
+  label: string;
+  kind: "phase" | "support";
+  /** The user's choice, or null for "use the default model". */
+  assigned: string | null;
+  provider: string | null;
+  model: string | null;
+};
+
+export type RoleSettings = {
+  roles: RoleRow[];
+  /** What a role with no choice of its own runs on. */
+  default_model: string;
+  local_models: string[];
+  /** `provider:model` for each cloud provider with a key configured. */
+  cloud_models: string[];
 };
 
 export type PullProgress = {

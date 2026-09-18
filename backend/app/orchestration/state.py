@@ -27,3 +27,11 @@ class PipelineState(TypedDict, total=False):
 
     # Recorded agent debates produced during the run.
     debates: list[dict]
+
+    #: The technology decisions frozen once the architecture was settled — language,
+    #: frameworks, database, test runner, package manager — serialised by
+    #: `charter.Charter.as_dict`. Every phase after System Design is handed it as part
+    #: of its standing instructions and checked against it, which is what stops one
+    #: run shipping a Postgres architecture, a Mongo backend and Python tests aimed at
+    #: JavaScript. Empty until System Design has run; rewritten only when it re-runs.
+    charter: dict

@@ -30,7 +30,7 @@ flowchart LR
     end
 
     subgraph Models["🧠  LLM Providers"]
-        OLLAMA[["Ollama<br/>qwen2.5:7b<br/>(default · local · free)"]]
+        OLLAMA[["Ollama<br/>any model you pull<br/>(default · local · free)"]]
         CLOUD[["Claude · GPT · Gemini<br/>(optional · cloud)"]]
     end
 
@@ -70,7 +70,7 @@ Python packages live under `backend/app/` so they share one import root and one 
 
 ```bash
 # https://ollama.com/download
-ollama pull qwen2.5:7b      # default model used by the router
+ollama pull qwen2.5:7b      # or any other model — Settings can pull and select one for you
 ollama serve                # usually already running as a service
 ```
 
@@ -150,7 +150,7 @@ smaller of the two as `num_ctx` on every call. Settings → **Local runtime** sh
 resolved number, and so does the log:
 
 ```
-Resolved model profile: ollama:qwen2.5:7b — context 32,768 tokens (model limit 32,768,
+Resolved model profile: ollama:<your model> — context 32,768 tokens (model limit 32,768,
 source probe), output ≤ 4,096, schema-constrained decoding on
 ```
 
@@ -184,7 +184,7 @@ flowchart TD
     Run --> Agent["Run current phase agent"]
 
     Agent --> Router{{"Hybrid LLM Router"}}
-    Router -->|default| Ollama[("Ollama · qwen2.5:7b")]
+    Router -->|per-role choice| Ollama[("Ollama · the model you selected")]
     Router -.->|fallback / manual| Cloud[("Claude · GPT · Gemini")]
     Ollama --> Output["Phase deliverable<br/>(stored + token/cost logged)"]
     Cloud --> Output

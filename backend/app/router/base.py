@@ -9,7 +9,19 @@ from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
 
 
 class ProviderError(RuntimeError):
-    """Raised when a provider call fails (network, quota, missing key, bad model)."""
+    """Raised when a provider call fails (network, quota, missing key, bad model).
+
+    `retryable` separates a hiccup from a verdict. A dropped socket, or a 503 from a
+    runtime still loading weights, succeeds on the next attempt; a missing API key, a
+    400, or a model that was never pulled fails identically however many times it is
+    asked, and retrying those only delays the one message that says what to do about
+    it. Anything that does not say otherwise is treated as transient, because that is
+    the failure worth surviving.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class LLMProvider(abc.ABC):

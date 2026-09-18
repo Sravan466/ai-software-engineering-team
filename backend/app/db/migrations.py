@@ -44,6 +44,8 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "cost_cap_usd",
         "gate_kind",
         "gate_note",
+        "charter",
+        "remediation_rounds",
     ),
     "phase_results": (
         "started_at",
@@ -52,7 +54,13 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "latency_ms",
         "schema_status",
         "schema_note",
+        "stack_status",
+        "stack_note",
     ),
+    # `cost_known` is nullable rather than defaulted to true: an existing row cannot
+    # say whether its zero was a price or a gap, and claiming it was a price would
+    # write a fact nobody checked into every historical event.
+    "usage_events": ("cost_known",),
 }
 
 

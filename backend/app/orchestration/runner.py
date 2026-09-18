@@ -31,17 +31,21 @@ from app.analytics import tracker
 from app.core.config import settings
 from app.core.constants import (
     PHASE_ORDER,
+    FindingStatus,
     GateKind,
     Phase,
     PhaseStatus,
     PipelineStatus,
     RoutingMode,
+    StackStatus,
 )
 from app.core.logging import get_logger
 from app.db.base import SessionLocal
 from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
 from app.memory.store import memory_store
+from app.orchestration import remediation
 from app.orchestration.approval import Gate, decide_gate
+from app.orchestration.charter import Charter
 from app.orchestration.graph import graph
 from app.orchestration.state import PipelineState
 from app.preview.generator import build_context, generate_preview
@@ -71,6 +75,7 @@ def _initial_state(project: Project) -> PipelineState:
         prior_outputs={},
         feedback={},
         debates=[],
+        charter={},
     )
 
 
@@ -135,7 +140,11 @@ class PipelineRunner:
 
                 if row is not None and row.status == PhaseStatus.PENDING_APPROVAL.value:
                     gate = decide_gate(
-                        project, row.phase, row.output, row.schema_status
+                        project,
+                        row.phase,
+                        row.output,
+                        row.schema_status,
+                        row.stack_note,
                     )
                     if gate is not None:
                         self._park(db, project, gate)
@@ -163,12 +172,94 @@ class PipelineRunner:
                     return project
 
                 self._run_phase(db, project, phase_key)
+
+                # Warden's findings used to stop here — in a report, with the code
+                # unchanged. They now go back to whoever wrote the offending file,
+                # before anyone is asked to approve anything, so the reviewer is only
+                # ever asked about what a fix could not resolve.
+                if phase_key == Phase.SECURITY_ENGINEER.value and self._remediate(db, project):
+                    return project
         except CancelledRun:
             self._settle_cancelled(db, project)
             return project
         except ProviderError as e:
             self._fail(db, project, str(e))
             return project
+
+    # ── acting on what the security review found ─────────────────────────────
+    def _remediate(self, db: Session, project: Project) -> bool:
+        """Send severe findings back to the agents that own them. True if it fired.
+
+        The mechanism is the one that already exists: `redo` re-runs one phase and
+        rewinds everything built on top of it — which, when the phase being rewound
+        is upstream of Warden, *is* a fix followed by a re-audit. Nothing new had to
+        be invented here; the findings simply had nowhere to go before.
+
+        One owner per round, earliest phase first, because rewinding the Backend
+        Engineer rebuilds the Frontend anyway: sending the same round's findings to
+        both would run the back half of the pipeline twice for one fix.
+
+        Bounded by `security_remediation_rounds`. A model that could not fix a finding
+        with the remediation text in front of it will not fix it on the fourth
+        attempt, and the reviewer is a better use of the next few minutes than another
+        rebuild. What survives the bound reaches the gate, which will not let it ship
+        unfixed and unwaived.
+        """
+        row = self.latest_row(db, project, Phase.SECURITY_ENGINEER.value)
+        if row is None:
+            return False
+
+        outstanding = remediation.unresolved(db, project)
+        if not outstanding:
+            return False
+
+        rounds = project.remediation_rounds or 0
+        if rounds >= max(settings.security_remediation_rounds, 0):
+            log.info(
+                "%d severe finding(s) left after %d remediation round(s) on %s — "
+                "handing the decision to the reviewer.",
+                len(outstanding),
+                rounds,
+                project.id,
+            )
+            return False
+
+        owned = remediation.group_by_owner(
+            remediation.Finding(
+                key=f.finding_key,
+                title=f.title,
+                severity=f.severity,
+                category=f.category,
+                location=f.location,
+                recommendation=f.recommendation,
+                owner_phase=f.owner_phase,
+            )
+            for f in outstanding
+        )
+        if not owned:
+            # Nothing here names a file anyone wrote — an architectural finding, or a
+            # location the model invented. There is no agent to send it to, and
+            # picking one would make a correct phase redo correct work and call the
+            # result a remediation. The reviewer decides these.
+            return False
+
+        phase_key, items = next(iter(owned.items()))
+        keys = {f.key for f in items}
+        for record in outstanding:
+            if record.finding_key in keys:
+                record.status = FindingStatus.FIX_REQUESTED.value
+        project.remediation_rounds = rounds + 1
+        db.commit()
+
+        log.info(
+            "Sending %d severe finding(s) back to %s on %s (remediation round %d).",
+            len(items),
+            phase_key,
+            project.id,
+            rounds + 1,
+        )
+        self.redo(db, project, phase_key, remediation.fix_instruction(items))
+        return True
 
     def reject(self, db: Session, project: Project, feedback: str) -> Project:
         """Send the phase the reviewer is looking at back to its agent.
@@ -205,6 +296,10 @@ class PipelineRunner:
         # agent re-running against the discarded build's outputs is the same defect
         # this rewind exists to fix, one layer down.
         stale = set(self._phases_after(phase_key)) if gate_phase != phase_key else set()
+        #: Set only when the architecture itself is rewritten. Written to the project
+        #: row after the checkpoint patch lands, so the two cannot disagree about
+        #: which stack this build is being held to.
+        charter_update: Optional[dict] = None
 
         # The attempt being sent back keeps its place in the history.
         self._mark_phase(db, project, phase_key, PhaseStatus.REJECTED.value, feedback=feedback)
@@ -228,10 +323,17 @@ class PipelineRunner:
                             if k != phase_key and k not in stale
                         },
                         feedback=feedback,
+                        # Held to the same stack the rest of the build uses. Without
+                        # this a redo is the one path through the pipeline where an
+                        # agent is free to change database, which is precisely the
+                        # divergence the charter exists to prevent — and the phases
+                        # being rebuilt behind it would inherit the disagreement.
+                        charter=Charter.from_dict(values.get("charter")),
                     )
                     result = agent.run(ctx)
 
-                    from app.orchestration.graph import _serialize_result
+                    from app.orchestration.graph import _last_debate, _serialize_result
+                    from app.orchestration.charter import freeze
 
                     last_result = _serialize_result(phase_key, agent.title, result)
                     kept = {
@@ -239,14 +341,22 @@ class PipelineRunner:
                         for key, value in values.get("prior_outputs", {}).items()
                         if key not in stale
                     }
+                    patch = {
+                        "prior_outputs": {**kept, phase_key: result.output},
+                        "last_phase": phase_key,
+                        "last_result": last_result,
+                        "feedback": {**values.get("feedback", {}), phase_key: feedback},
+                    }
+                    if phase_key == Phase.SYSTEM_DESIGN.value:
+                        # The architecture was rewritten, so the charter frozen from
+                        # the old one describes a build that no longer exists. Every
+                        # phase after this is about to re-run against the new one.
+                        rewritten = freeze(result.output, _last_debate(values))
+                        patch["charter"] = rewritten.as_dict() if rewritten else {}
+                        charter_update = patch["charter"]
                     graph.update_state(
                         cfg,
-                        {
-                            "prior_outputs": {**kept, phase_key: result.output},
-                            "last_phase": phase_key,
-                            "last_result": last_result,
-                            "feedback": {**values.get("feedback", {}), phase_key: feedback},
-                        },
+                        patch,
                         # Attribute the correction to the node that made it, so the
                         # graph resumes at the phase *after* it. Redoing the backend
                         # from the Ship review has to rewind to the backend, not
@@ -259,6 +369,10 @@ class PipelineRunner:
             return project
 
         self._complete_row(db, project, row, last_result)
+        if charter_update is not None:
+            project.charter = charter_update or None
+            db.commit()
+            log.info("Stack charter re-frozen for %s after redoing the architecture", project.id)
         if phase_key == Phase.FRONTEND_ENGINEER.value:
             # The front end was rewritten, so the picture of it is of code that no
             # longer exists. `_run_phase`'s hook does not fire on this path.
@@ -284,6 +398,7 @@ class PipelineRunner:
                 phase_key,
                 gate_row.output if gate_row else None,
                 gate_row.schema_status if gate_row else None,
+                gate_row.stack_note if gate_row else None,
             )
             self._park(db, project, gate or fallback)
             return project
@@ -424,6 +539,12 @@ class PipelineRunner:
             self._abandon_row(db, row, "The agent produced no output.")
 
         self._persist_new_debates(db, project, state.get("debates", []))
+        if phase_key == Phase.SYSTEM_DESIGN.value:
+            # Mirrored out of the graph's own state rather than re-derived here, so
+            # there is exactly one charter and the row cannot drift from the
+            # checkpoint the agents are actually reading.
+            project.charter = state.get("charter") or None
+            db.commit()
         self._raise_if_cancelled(db, project)
 
         if phase_key == Phase.FRONTEND_ENGINEER.value and last_result:
@@ -492,10 +613,25 @@ class PipelineRunner:
         row.total_tokens = int(usage.get("total_tokens") or 0)
         row.schema_status = lr.get("schema_status")
         row.schema_note = lr.get("schema_note")
+        # Two facts, recorded separately. A phase can match its declared shape
+        # perfectly and still be written against the wrong database, and a reviewer
+        # told only the first would read a green badge over a build that ships two
+        # incompatible halves.
+        violations = lr.get("stack_violations") or []
+        row.stack_status = (
+            StackStatus.VIOLATED.value if violations else StackStatus.OK.value
+        )
+        row.stack_note = violations or None
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
         db.commit()
         self._record_usage(db, project, lr)
+        if row.phase == Phase.SECURITY_ENGINEER.value:
+            # Every audit, including the re-audit after a fix — which is the one that
+            # decides whether the fix took. Here rather than in `_run_phase` because a
+            # redo of this phase lands here too, and a waiver that only survived one
+            # of the two paths would be a waiver the reviewer is asked about again.
+            remediation.sync_dispositions(db, project, row.output)
         return row
 
     def _park(self, db: Session, project: Project, gate: Gate) -> None:

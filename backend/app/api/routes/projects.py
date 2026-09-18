@@ -22,14 +22,22 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_project
-from app.core import artifacts
+from app.core import artifacts, model_roles
 from app.core.config import settings
-from app.core.constants import PHASE_ORDER, ApprovalMode, PipelineStatus, RoutingMode
+from app.core.constants import (
+    PHASE_ORDER,
+    ApprovalMode,
+    FindingStatus,
+    PipelineStatus,
+    RoutingMode,
+)
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
-from app.db.models import Project
+from app.db.models import Project, SecurityDisposition
+from app.orchestration import remediation
 from app.orchestration.approval import decide_gate
 from app.orchestration.runner import runner
+from app.router.router import router as model_router
 from app.schemas.project import (
     ApprovalRequest,
     ProjectCreate,
@@ -38,6 +46,7 @@ from app.schemas.project import (
     RedoRequest,
     RunResponse,
     StopRequest,
+    WaiveRequest,
 )
 
 log = get_logger(__name__)
@@ -113,7 +122,9 @@ def _rederive_gate(db: Session, project: Project) -> None:
     # would drop the "this check could not run" warning off a parked gate, and the
     # only sign the reviewer had that nothing was actually checked would vanish the
     # moment they adjusted the cost cap.
-    gate = decide_gate(project, row.phase, row.output, row.schema_status)
+    gate = decide_gate(
+        project, row.phase, row.output, row.schema_status, row.stack_note
+    )
     if gate is not None:
         project.gate_kind = gate.kind
         project.gate_note = gate.note
@@ -301,12 +312,31 @@ def _strand(db: Session, project_id: str, message: str) -> None:
         db.rollback()
 
 
+def _require_models(project: Project) -> None:
+    """Refuse to start a run whose models are not actually there.
+
+    Checked before the project is claimed, so a refusal leaves the build exactly as
+    it was — ready to start again once the download finishes. Without this the run
+    went `running`, and then died eight seconds later inside the first agent with a
+    404 from Ollama for a message, having already moved the project into a state the
+    user had to work out how to get back out of.
+    """
+    ready = model_router.readiness(
+        RoutingMode(project.routing_mode),
+        project.preferred_model,
+        roles=[p.value for p in PHASE_ORDER] + [r["role"] for r in model_roles.catalogue()],
+    )
+    if not ready.ok:
+        raise HTTPException(status_code=409, detail=ready.reason)
+
+
 @router.post("/{project_id}/run", response_model=RunResponse)
 def run_pipeline(
     background: BackgroundTasks,
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ) -> RunResponse:
+    _require_models(project)
     if not _claim(db, project, {PipelineStatus.CREATED.value, PipelineStatus.FAILED.value}):
         raise _conflict(project, "start")
 
@@ -323,6 +353,35 @@ def run_pipeline(
     )
 
 
+def _require_findings_settled(db: Session, project: Project) -> None:
+    """Refuse to approve over a severe finding nobody has decided about.
+
+    Warden used to report a high-severity issue, write a remediation for it, and
+    watch the code go into the archive unchanged — because the report was the end of
+    the road. It is not any more: a critical or high finding leaves this build fixed
+    and re-audited, or waived on the record with a reason. This is the sentence that
+    makes the second option a decision rather than an omission.
+    """
+    if project.effective_approval_mode == ApprovalMode.UNATTENDED.value:
+        return
+    outstanding = remediation.unresolved(db, project)
+    if not outstanding:
+        return
+    count = len(outstanding)
+    subject = (
+        "1 security finding at high severity or above is"
+        if count == 1
+        else f"{count} security findings at high severity or above are"
+    )
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{subject} still open. Send each one back to be fixed, or waive it with "
+            "a reason — this build can't ship with them simply unread."
+        ),
+    )
+
+
 @router.post("/{project_id}/approve", response_model=RunResponse)
 def approve_phase(
     background: BackgroundTasks,
@@ -335,6 +394,7 @@ def approve_phase(
             if project.status == PipelineStatus.RUNNING.value
             else HTTPException(400, f"Nothing to approve (status '{project.status}').")
         )
+    _require_findings_settled(db, project)
     if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
         raise _conflict(project, "approve")
 
@@ -378,6 +438,135 @@ def reject_phase(
         current_phase=project.current_phase,
         message="Sent back — the agent is regenerating this phase with your note.",
     )
+
+
+# ── security findings: fix them, or waive them on the record ─────────────────
+@router.get("/{project_id}/security")
+def list_findings(
+    project: Project = Depends(get_project), db: Session = Depends(get_db)
+) -> dict:
+    """Every finding this build is tracking, and what has been done about each.
+
+    Derived from the audit rather than re-read from it: the status is the history of
+    what was sent back, fixed and waived, which the report itself cannot know.
+    """
+    rows = (
+        db.query(SecurityDisposition)
+        .filter(SecurityDisposition.project_id == project.id)
+        .order_by(SecurityDisposition.created_at)
+        .all()
+    )
+    return {
+        "findings": [
+            {
+                "key": row.finding_key,
+                "title": row.title,
+                "severity": row.severity,
+                "category": row.category,
+                "location": row.location,
+                "recommendation": row.recommendation,
+                "owner_phase": row.owner_phase,
+                "status": row.status,
+                "note": row.note,
+            }
+            for row in rows
+        ],
+        "unresolved": len(remediation.unresolved(db, project)),
+        "rounds_used": project.remediation_rounds or 0,
+        "rounds_allowed": max(settings.security_remediation_rounds, 0),
+    }
+
+
+def _finding(db: Session, project: Project, key: str) -> SecurityDisposition:
+    row = (
+        db.query(SecurityDisposition)
+        .filter(
+            SecurityDisposition.project_id == project.id,
+            SecurityDisposition.finding_key == key,
+        )
+        .one_or_none()
+    )
+    if row is None:
+        raise HTTPException(404, "That finding isn't one this build is tracking.")
+    return row
+
+
+@router.post("/{project_id}/security/{key}/fix", response_model=RunResponse)
+def fix_finding(
+    key: str,
+    background: BackgroundTasks,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> RunResponse:
+    """Send one finding back to the agent that wrote the file it is about.
+
+    This is `redo` with the finding's own remediation as the note, which means the
+    phases built on top of the one being fixed are rebuilt — including the security
+    review itself. The re-audit is what decides whether the fix took; nothing here
+    marks a finding fixed on the strength of having asked.
+    """
+    row = _finding(db, project, key)
+    if not row.owner_phase:
+        raise HTTPException(
+            400,
+            "No phase owns this finding — it doesn't point at a file anyone wrote. "
+            "Fix it by sending a phase back with your own note, or waive it.",
+        )
+    if project.status != PipelineStatus.AWAITING_APPROVAL.value:
+        raise (
+            _conflict(project, "fix")
+            if project.status == PipelineStatus.RUNNING.value
+            else HTTPException(400, f"This build isn't waiting for a decision (status '{project.status}').")
+        )
+    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+        raise _conflict(project, "fix")
+
+    row.status = FindingStatus.FIX_REQUESTED.value
+    db.commit()
+    finding = remediation.Finding(
+        key=row.finding_key,
+        title=row.title,
+        severity=row.severity,
+        category=row.category,
+        location=row.location,
+        recommendation=row.recommendation,
+        owner_phase=row.owner_phase,
+    )
+    background.add_task(
+        _drive_redo, project.id, row.owner_phase, remediation.fix_instruction([finding])
+    )
+    return RunResponse(
+        project_id=project.id,
+        status=project.status,
+        current_phase=project.current_phase,
+        message="Sent back — that agent is fixing it, and the review runs again after.",
+    )
+
+
+@router.post("/{project_id}/security/{key}/waive")
+def waive_finding(
+    key: str,
+    payload: WaiveRequest,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Accept a finding deliberately, with the reason recorded beside it.
+
+    A reason is required. "Waived" with nothing attached is indistinguishable from
+    the silence this whole path exists to replace — and it is the one record anyone
+    reading this build later has of why a known issue was shipped.
+    """
+    row = _finding(db, project, key)
+    row.status = FindingStatus.WAIVED.value
+    row.note = payload.reason.strip()
+    db.commit()
+    log.info("Security finding waived on %s: %s — %s", project.id, row.title, row.note)
+    return {
+        "key": row.finding_key,
+        "status": row.status,
+        "note": row.note,
+        "unresolved": len(remediation.unresolved(db, project)),
+    }
 
 
 @router.post("/{project_id}/redo", response_model=RunResponse)
@@ -471,6 +660,10 @@ def resume_pipeline(
             + (" This build is still running — stop it first." if still_running else ""),
         )
 
+    # The same check the first start makes. A run that failed *because* a model was
+    # missing is exactly the run someone reaches for Resume on, and starting it again
+    # into the identical failure teaches nothing.
+    _require_models(project)
     runner.prepare_resume(db, project)
     if not _claim(db, project, resumable):
         raise _conflict(project, "resume")
