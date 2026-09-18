@@ -21,8 +21,10 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
+from app.build import contract as build_contract
+from app.build.check import BuildCheck, check_phase
 from app.core.config import settings
-from app.core.constants import RoutingMode, SchemaStatus
+from app.core.constants import CODE_PHASES, BuildStatus, RoutingMode, SchemaStatus
 from app.core.logging import get_logger
 from app.core.reading import json_object
 from app.orchestration.charter import Charter
@@ -94,6 +96,11 @@ class AgentResult:
     #: that still disagrees with the architecture it was built on stops the run, in
     #: exactly the way a phase that missed its declared shape does.
     stack_violations: list[str] = field(default_factory=list)
+    #: Whether this phase's code compiles — ok | failed | unchecked — and, when it does
+    #: not, `[{path, line, kind, message}]` for what is still wrong after the repair
+    #: round. None for a phase that writes no code.
+    build_status: Optional[str] = None
+    build_problems: list[dict] = field(default_factory=list)
 
 
 class BaseAgent:
@@ -171,7 +178,12 @@ class BaseAgent:
             if settings.enforce_stack_charter
             else []
         )
-        shape_errors = [e for e in errors if e not in stack_errors]
+        # And a third: whether it compiles. Recorded apart from the other two because
+        # "this does not parse" is neither a shape problem nor a stack problem, and
+        # the Ship review says which of the three a build still has.
+        build = self._build_check(ctx, output)
+        build_errors = build.messages() if build else []
+        shape_errors = [e for e in errors if e not in stack_errors and e not in build_errors]
 
         if errors:
             # Repair stops paying after a round or two, and a local model pays
@@ -202,6 +214,8 @@ class BaseAgent:
             repair_rounds=rounds,
             calls=responses,
             stack_violations=stack_errors,
+            build_status=build.status if build else None,
+            build_problems=build.as_list() if build else [],
         )
 
     def _check(self, raw: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
@@ -217,7 +231,25 @@ class BaseAgent:
         output, errors = self._validate(raw)
         if settings.enforce_stack_charter:
             errors = errors + charter_violations(ctx.charter, self.key, output)
+        build = self._build_check(ctx, output)
+        if build is not None:
+            errors = errors + build.messages()
         return output, errors
+
+    def _build_check(self, ctx: AgentContext, output: dict) -> Optional[BuildCheck]:
+        """Compile what this phase wrote, in the build it is joining. None if not code.
+
+        Best effort by construction: a checker that crashes must not fail a phase that
+        may well be correct, so a failure here is logged and the phase is simply not
+        checked — which the status then says, rather than claiming it passed.
+        """
+        if not settings.enforce_build_check or self.key not in CODE_PHASES:
+            return None
+        try:
+            return check_phase(ctx.prior_outputs, self.key, output, ctx.charter)
+        except Exception as e:  # noqa: BLE001 - the gate must not become the failure
+            log.warning("%s: the compile check could not run: %s", self.title, e)
+            return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")
 
     def _complete(
         self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions
@@ -241,11 +273,20 @@ class BaseAgent:
         the one saying which database the rest of the team is building against.
         """
         charter_block = charter.prompt_block() if charter else ""
+        # Where files go, which files are the platform's, and which packages exist —
+        # standing instructions for the phases that write code, for the same reason
+        # the charter is: they cannot be trimmed away to fit a small window.
+        platform_block = (
+            build_contract.prompt_block(self.key, charter)
+            if settings.enforce_build_check and self.key in CODE_PHASES
+            else None
+        )
         return (
             f"You are the {self.title} on an AI software engineering team. {self.role}\n\n"
             "You collaborate with other specialist agents; your output is consumed by the "
             "next agent in the pipeline, so be precise, concrete, and complete.\n\n"
             + (f"{charter_block}\n\n" if charter_block else "")
+            + (f"{platform_block}\n\n" if platform_block else "")
             + "Respond with ONLY a single valid JSON object — no prose, no markdown fences — "
             f"matching this shape:\n{self.output_spec}"
         )

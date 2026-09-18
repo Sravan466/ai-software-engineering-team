@@ -154,7 +154,74 @@
 }
 .artifact-pad { padding: 18px 20px; }
 /* The files view brings its own two-pane frame and scrolls internally. */
-.artifact-files { overflow: hidden; }
+.artifact-files { overflow: hidden; display: flex; flex-direction: column; }
+/* The pane has a definite height, so the tree and the code each scroll inside it
+   rather than growing past it and being clipped — a scaffolded build is forty files. */
+.artifact-files > .files { flex: 1; min-height: 0; }
+.artifact-files .files-tree,
+.artifact-files .files-code { min-height: 0; }
+.artifact-files .files-code-body { flex: 1; min-height: 0; }
+.artifact-files .files-code-body > pre { height: 100%; max-height: none !important; }
+
+/* Whether this build compiles, one line above the tree. */
+.build-line-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0;
+  padding: 9px 16px;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+.build-line-strip > svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.build-line-strip[data-state="ok"] > svg { color: var(--ok); }
+.build-line-strip[data-state="failed"] { background: var(--bad-soft); border-bottom-color: rgba(240, 82, 82, 0.4); color: var(--ink); }
+.build-line-strip[data-state="failed"] > svg { color: var(--bad); }
+.build-line-strip[data-state="unchecked"] > svg { color: var(--ink-3); }
+.build-line-strip code { padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); background: var(--bg-sunken); font-size: var(--t-xs); color: var(--ink); }
+
+/* Above a file's code: what is still broken in it, and what the platform did to it. */
+.file-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 9px 16px;
+  list-style: none;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+.file-strip li { display: flex; gap: 8px; align-items: flex-start; }
+.file-strip svg { width: 14px; height: 14px; flex: none; margin-top: 3px; color: var(--ink-3); }
+.file-strip-bad { background: var(--bad-soft); border-bottom-color: rgba(240, 82, 82, 0.4); color: var(--ink); }
+.file-strip-bad svg { color: var(--bad); }
+.file-strip code,
+.build-msg code { padding: 0 4px; border-radius: 4px; background: var(--bg-sunken); font-size: 0.92em; color: var(--ink); }
+.file-strip .mono { font-size: var(--t-xs); color: var(--ink-3); }
+
+.tree-tag { flex: none; font-family: var(--sans); font-size: 10px; color: var(--ink-3); }
+.treerow .dot { width: 6px; height: 6px; }
+
+/* ── the build gate: what still doesn't compile, file by file ── */
+.build-review { border-bottom: 1px solid var(--line); }
+.build-problems { display: flex; flex-direction: column; gap: 12px; }
+.build-problems-head { display: flex; align-items: center; gap: 10px; }
+.build-files { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.build-file { border: 1px solid rgba(240, 82, 82, 0.35); border-radius: var(--r); background: var(--bg-panel); overflow: hidden; }
+.build-file-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 8px 10px 8px 12px; border-bottom: 1px solid var(--line); }
+.build-file-mark { display: inline-grid; place-items: center; color: var(--bad); }
+.build-file-mark svg { width: 15px; height: 15px; }
+.build-file-path { font-size: var(--t-sm); color: var(--ink); overflow-wrap: anywhere; }
+.build-lines { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 10px 12px; list-style: none; }
+.build-lines li { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: var(--t-sm); line-height: 1.5; }
+.build-line { font-size: var(--t-xs); color: var(--ink-3); }
+.build-msg { color: var(--ink-2); flex: 1; min-width: 220px; }
 
 /* A phase that missed its declared shape. Tinted rather than shouted: the output
    below is still worth reading — it is the reading that now needs a caveat. The

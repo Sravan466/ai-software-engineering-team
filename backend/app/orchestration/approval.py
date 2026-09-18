@@ -233,6 +233,7 @@ def decide_gate(
     output: object,
     schema_status: Optional[str] = None,
     stack_violations: Optional[list] = None,
+    build_problems: Optional[list] = None,
 ) -> Optional[Gate]:
     """Should the pipeline stop after `phase_key`? Returns the gate, or None.
 
@@ -257,6 +258,17 @@ def decide_gate(
     # by not stopping are phases spent building on something already known to be wrong.
     if stack_violations:
         return Gate(GateKind.STACK.value, stack_note(stack_violations))
+
+    # The same holds for a finished build whose code does not compile, and for the
+    # same reason it is decided here rather than by the policy: "ship it" is a
+    # judgement call about a build that runs, and this one does not. It waits for the
+    # end rather than stopping mid-run, because each code phase was already sent back
+    # once with its errors, and the phases after it are not built on a compile error
+    # the way they are built on a stack. `build_problems` is every code phase's
+    # outstanding problems, gathered by the caller at the last phase.
+    if phase_key == SHIP_GATE_PHASE.value and build_problems:
+        overrun = cost_overrun_note(project, output)
+        return Gate(GateKind.BUILD.value, _both(build_note(build_problems), overrun))
 
     if mode == ApprovalMode.UNATTENDED.value:
         return None
@@ -332,6 +344,21 @@ def stack_note(violations: list) -> str:
     return (
         f"This phase contradicts the stack frozen for this build in {len(lines)} places. "
         f"The first: {head}"
+    )
+
+
+def build_note(problems: list) -> str:
+    """"3 files don't compile. The first: `frontend/pages/_app.js` line 8 — …" """
+    rows = [p for p in problems if isinstance(p, dict)]
+    files = list(dict.fromkeys(str(p.get("path") or "") for p in rows if p.get("path")))
+    if not rows:
+        return "This build's code does not compile."
+    first = rows[0]
+    where = f"{first.get('path')}" + (f" line {first.get('line')}" if first.get("line") else "")
+    subject = "file doesn't" if len(files) == 1 else "files don't"
+    return (
+        f"{len(files)} {subject} compile, after each was sent back once with the errors. "
+        f"The first: {where} — {first.get('message')}"
     )
 
 

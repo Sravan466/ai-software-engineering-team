@@ -32,4 +32,4 @@ The backbone is in place and runs end-to-end. Tracking what's done and what's ne
 
 - [ ] Parallel agents where the pipeline allows (frontend ∥ tests)
 - [ ] Pluggable orchestrators (CrewAI / AutoGen) behind the same runner interface
-- [ ] Evaluation harness scoring generated artifacts
+- [x] Evaluation harness scoring generated artifacts (`python -m scripts.eval_harness`)

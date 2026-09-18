@@ -123,7 +123,12 @@ def _rederive_gate(db: Session, project: Project) -> None:
     # only sign the reviewer had that nothing was actually checked would vanish the
     # moment they adjusted the cost cap.
     gate = decide_gate(
-        project, row.phase, row.output, row.schema_status, row.stack_note
+        project,
+        row.phase,
+        row.output,
+        row.schema_status,
+        row.stack_note,
+        artifacts.build_problems(project),
     )
     if gate is not None:
         project.gate_kind = gate.kind

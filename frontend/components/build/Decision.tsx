@@ -20,6 +20,8 @@ import SchemaBadge from "./SchemaBadge";
 import FileBrowser from "./FileBrowser";
 import CharterPanel, { StackViolations } from "./Charter";
 import SecurityFindings from "./SecurityFindings";
+import BuildProblems from "./BuildProblems";
+import BuildProgress from "@/components/preview/BuildProgress";
 import { artifactFiles, latestRow, type PayloadFile } from "./payload";
 
 /**
@@ -38,6 +40,8 @@ import { artifactFiles, latestRow, type PayloadFile } from "./payload";
  *   stack    — a phase wrote itself against a different database, framework or test
  *              runner than the architecture froze. The one stop that is not a
  *              judgement call: the build holds two incompatible halves.
+ *   build    — the finished build's code does not compile, after each broken file
+ *              was sent back once. Reviewed like a ship, with what is broken first.
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
  *
  * Whatever the shape, the rule is the same: the work is above the buttons, in the
@@ -78,6 +82,14 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
       "so that check couldn't run on it. Reading it is on you.",
     approve: "I've read it — continue",
     after: "The remaining phases then run without stopping.",
+  },
+  build: {
+    title: "Build doesn't compile",
+    blurb:
+      "Some files the crew wrote don't parse, use names they never import, or import " +
+      "things that don't exist. Each was sent back once with the errors named.",
+    approve: "Ship it anyway",
+    after: "Approving marks a build that does not compile as complete.",
   },
   stack: {
     title: "Build disagrees with itself",
@@ -138,10 +150,10 @@ export default function Decision({
   // On a whole-build review the findings live behind the Security tab rather than
   // inline, and that tab is not the one open by default — so the reviewer needs
   // telling where to go. Everywhere else the panel is on screen already.
-  const findingsBehindTab = kind === "ship" || kind === "cost";
+  const findingsBehindTab = kind === "ship" || kind === "cost" || kind === "build";
 
   // The build under review, fetched only for the pass that needs all of it.
-  const wantsBuild = kind === "ship" || kind === "cost";
+  const wantsBuild = kind === "ship" || kind === "cost" || kind === "build";
   const [art, setArt] = useState<Artifacts | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [artError, setArtError] = useState("");
@@ -163,24 +175,25 @@ export default function Decision({
     api.getPreview(id).then(setPreview).catch(() => setPreview(null));
   }, [wantsBuild, id, reloads]);
 
-  // The mockup is drawn alongside the pipeline, so on a fast run it can still be
-  // generating when this review opens. Without this the Mockup tab would simply be
-  // missing, and the reviewer would approve a build with no picture — which is the
-  // thing folding it into the Frontend phase was meant to fix.
+  // The mockup is built alongside the pipeline, so it can still be building when this
+  // review opens. Without this the Mockup tab would simply be missing, and the
+  // reviewer would approve a build with no picture — which is the thing folding it
+  // into the Frontend phase was meant to fix.
   //
-  // Bounded: a local model takes 30-60s for this, so past a couple of minutes it did
-  // not fail to arrive in time, it failed. Polling a dead generation for as long as
-  // someone leaves the tab open buys nothing; the Preview tab can draw one on demand.
+  // A build that is running says so, with its progress, for as long as it runs — a
+  // site is minutes of model time on a local model. Before one has been seen at all
+  // the wait is bounded: past a couple of minutes, nothing is coming.
   const [waited, setWaited] = useState(0);
-  const awaitingMockup = wantsBuild && !preview?.html && waited < 15;
+  const mockupBuilding = Boolean(preview?.job?.running);
+  const awaitingMockup = wantsBuild && !preview?.html && (mockupBuilding || waited < 15);
   useEffect(() => {
-    if (!awaitingMockup) return;
+    if (!awaitingMockup && !mockupBuilding) return;
     const timer = setInterval(() => {
       setWaited((n) => n + 1);
       api.getPreview(id).then(setPreview).catch(() => {});
-    }, 8000);
+    }, mockupBuilding ? 3000 : 8000);
     return () => clearInterval(timer);
-  }, [awaitingMockup, id]);
+  }, [awaitingMockup, mockupBuilding, id]);
 
   const files = useMemo(() => (art ? artifactFiles(art.files) : []), [art]);
 
@@ -230,7 +243,7 @@ export default function Decision({
     <section className={`decision decision-${kind}`} aria-labelledby="decision-title">
       <header className="decision-head">
         <span className="decision-mark" aria-hidden="true">
-          {kind === "security" || kind === "cost" || kind === "unchecked"
+          {kind === "security" || kind === "cost" || kind === "unchecked" || kind === "build"
             ? Icon.alert
             : Icon.check}
         </span>
@@ -253,6 +266,11 @@ export default function Decision({
 
       <div className="decision-body">
         {kind === "plan" && <PlanReview project={project} onRedo={aim} />}
+        {kind === "build" && art?.build?.problems?.length ? (
+          <div className="artifact-pad build-review">
+            <BuildProblems problems={art.build.problems} onRedoFile={(phase, path) => aim(phase, path)} />
+          </div>
+        ) : null}
         {kind === "stack" && (
           <div className="stack-review">
             <StackViolations notes={rowFor(project, gatePhase)?.stack_note} />
@@ -280,7 +298,7 @@ export default function Decision({
             shows them, so it shows them here. Approving is what would advance the
             run to a screen that has these controls, and approving is what is
             blocked — there is no other way through. */}
-        {blocked && kind !== "security" && kind !== "ship" && kind !== "cost" && (
+        {blocked && kind !== "security" && !wantsBuild && (
           <SecurityFindings
             id={id}
             busy={busy}
@@ -524,7 +542,8 @@ function ShipReview({
 
   const views: { key: ShipView; label: string; icon: ReactNode; count?: number }[] = [];
   if (files.length) views.push({ key: "files", label: "Files", icon: Icon.file, count: files.length });
-  if (preview?.html) views.push({ key: "mockup", label: "Mockup", icon: Icon.sparkle });
+  if (preview?.html || preview?.job?.running)
+    views.push({ key: "mockup", label: "Mockup", icon: Icon.sparkle });
   if (security)
     views.push({
       key: "security",
@@ -540,6 +559,8 @@ function ShipReview({
   views.push({ key: "stack", label: "Stack", icon: Icon.diagram });
 
   const [view, setView] = useState<ShipView>("files");
+  const platformCount = files.filter((f) => f.platform).length;
+  const buildState = art?.build?.status ?? null;
   const active = views.find((v) => v.key === view) ?? views[0];
 
   if (error) {
@@ -591,12 +612,14 @@ function ShipReview({
           ))}
         </div>
         <span className="artifact-note mono">
-          {art.files.length} files · {art.docs.length} docs
+          {art.files.length} files
+          {platformCount ? ` (${platformCount} from the platform)` : ""} · {art.docs.length} docs
         </span>
       </div>
 
       {active?.key === "files" && (
-        <div className="artifact-view artifact-files" style={{ maxHeight: 520 }}>
+        <div className="artifact-view artifact-files" style={{ height: 560 }}>
+          <BuildLine state={buildState} problems={art.build?.problems.length ?? 0} commands={art.scaffold?.commands ?? []} />
           <FileBrowser
             files={files}
             renderAction={(file) =>
@@ -617,8 +640,15 @@ function ShipReview({
           />
         </div>
       )}
+      {active?.key === "mockup" && !preview?.html && preview?.job && (
+        <div className="artifact-view">
+          <div className="artifact-pad">
+            <BuildProgress job={preview.job} />
+          </div>
+        </div>
+      )}
       {active?.key === "mockup" && preview?.html && (
-        <div className="artifact-view" style={{ maxHeight: 620 }}>
+        <div className="artifact-view" style={{ maxHeight: 660 }}>
           <div className="artifact-pad">
             {stale && (
               <p className="decision-alarm" style={{ borderBottom: 0, marginBottom: 12 }}>
@@ -630,11 +660,13 @@ function ShipReview({
                 </span>
               </p>
             )}
-            <MockupFrame html={preview.html} height={460} />
+            <MockupFrame html={preview.html} routes={preview.routes} height={460} />
             <p className="field-hint" style={{ marginTop: 10 }}>
               {stale
                 ? "Edit it section by section on the Preview tab."
-                : "Drawn by the Frontend phase. Edit it section by section on the Preview tab."}
+                : preview.routes.length > 1
+                  ? "Built when the Frontend phase finished. Click through it — the pages, forms and filters work. Edit it section by section on the Preview tab."
+                  : "Drawn by the Frontend phase. Edit it section by section on the Preview tab."}
             </p>
           </div>
         </div>
@@ -669,6 +701,58 @@ function ShipReview({
         <PhasePanel phase="cost_estimation" row={cost} maxHeight={440} onRedo={onRedo} />
       )}
     </div>
+  );
+}
+
+/**
+ * One line above the file tree saying whether this build compiles, and how to run it.
+ *
+ * Silent about builds from before the check existed (`null`): "not checked" must not
+ * read as "checked and fine", and it must not read as a failure either.
+ */
+function BuildLine({
+  state,
+  problems,
+  commands,
+}: {
+  state: string | null;
+  problems: number;
+  commands: string[];
+}) {
+  if (!state) return null;
+  const run = commands.slice(0, 2).join(" && ");
+  if (state === "failed") {
+    return (
+      <p className="build-line-strip" data-state="failed">
+        {Icon.alert}
+        <span>
+          {problems} compile problem{problems === 1 ? "" : "s"} left after the repair round — marked in the tree
+          below.
+        </span>
+      </p>
+    );
+  }
+  if (state === "unchecked") {
+    return (
+      <p className="build-line-strip" data-state="unchecked">
+        {Icon.info}
+        <span>Some files could not be compiled here, so they are unchecked — not passed.</span>
+      </p>
+    );
+  }
+  return (
+    <p className="build-line-strip" data-state="ok">
+      {Icon.check}
+      <span>
+        Every file parses and every import resolves.
+        {run && (
+          <>
+            {" "}
+            Run it with <code className="mono">{run}</code>.
+          </>
+        )}
+      </span>
+    </p>
   );
 }
 

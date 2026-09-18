@@ -61,6 +61,10 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # rest of the build" are different problems with different fixes, and the
         # reviewer is shown which of the two happened.
         "stack_violations": list(result.stack_violations),
+        # Whether the phase's code compiles, and what is still wrong when it does
+        # not. A third fact beside the two above, with its own fix: the files named.
+        "build_status": result.build_status,
+        "build_problems": list(result.build_problems),
         # One entry per model call. A repaired phase made two, and analytics counts
         # calls and averages latency across them — folding both into a single event
         # would report one call that took as long as two.

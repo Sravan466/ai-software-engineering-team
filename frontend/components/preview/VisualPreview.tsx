@@ -1,10 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, PreviewSection, PreviewState } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
-import MockupFrame from "./MockupFrame";
+import MockupFrame, { type MockupFrameHandle } from "./MockupFrame";
+import BuildProgress from "./BuildProgress";
+import MockupReport from "./MockupReport";
+
+/**
+ * The mockup, and the two things a person does with it: use it, and change it.
+ *
+ * It is a small working site now — pages, sample records, forms that store, lists
+ * that filter — so the default is to *use* it, the way anyone judging a prototype
+ * would. Editing is a mode you switch into: clicks then select a section instead of
+ * following it, and the change request goes to that one section.
+ *
+ * A build is many model calls, so generating no longer holds a request open: it
+ * starts, and this polls the build's progress until the new mockup lands.
+ */
+
+type Mode = "use" | "edit";
+
+const POLL_MS = 2500;
 
 export default function VisualPreview({ id }: { id: string }) {
   const [state, setState] = useState<PreviewState | null>(null);
@@ -13,10 +31,10 @@ export default function VisualPreview({ id }: { id: string }) {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<PreviewSection | null>(null);
   const [instruction, setInstruction] = useState("");
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [mode, setMode] = useState<Mode>("use");
+  const frameRef = useRef<MockupFrameHandle>(null);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
     try {
       setState(await api.getPreview(id));
     } catch (e: any) {
@@ -30,7 +48,16 @@ export default function VisualPreview({ id }: { id: string }) {
     refresh();
   }, [refresh]);
 
-  // Selection clicks coming up from the sandboxed iframe.
+  // While a build runs, follow it. Silent refreshes: no skeleton over a mockup that
+  // is still perfectly readable while its replacement is drawn.
+  const building = Boolean(state?.job?.running);
+  useEffect(() => {
+    if (!building) return;
+    const timer = setTimeout(refresh, POLL_MS);
+    return () => clearTimeout(timer);
+  }, [building, state, refresh]);
+
+  // Selection clicks coming up from the sandboxed iframe (edit mode only).
   useEffect(() => {
     function onMsg(e: MessageEvent) {
       const d = e.data;
@@ -40,16 +67,9 @@ export default function VisualPreview({ id }: { id: string }) {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
-  // Push the current selection into the iframe (on select, and after each (re)load).
-  const highlight = useCallback((sectionId: string | null) => {
-    iframeRef.current?.contentWindow?.postMessage(
-      { __preview: true, type: "highlight", id: sectionId },
-      "*",
-    );
-  }, []);
   useEffect(() => {
-    highlight(selected?.id ?? null);
-  }, [selected, highlight]);
+    frameRef.current?.highlight(mode === "edit" ? selected?.id ?? null : null);
+  }, [selected, mode]);
 
   async function run(fn: () => Promise<PreviewState>, clearSelection: boolean) {
     setBusy(true);
@@ -72,7 +92,40 @@ export default function VisualPreview({ id }: { id: string }) {
     setInstruction("");
   }
 
+  function pick(section: PreviewSection) {
+    setMode("edit");
+    setSelected(section);
+  }
+
+  function switchMode(next: Mode) {
+    setMode(next);
+    if (next === "use") setSelected(null);
+  }
+
   const html = state?.html ?? null;
+  const job = state?.job ?? null;
+  const failed = job && !job.running && job.error ? job.error : null;
+
+  // Sections grouped by the page they are on, shared chrome first.
+  const groups = useMemo(() => {
+    if (!state) return [];
+    const byRoute = new Map<string, PreviewSection[]>();
+    for (const s of state.sections) {
+      const key = s.route ?? "";
+      byRoute.set(key, [...(byRoute.get(key) ?? []), s]);
+    }
+    const out: { key: string; title: string; sections: PreviewSection[] }[] = [];
+    if (!state.routes.length) {
+      return state.sections.length ? [{ key: "all", title: "Sections", sections: state.sections }] : [];
+    }
+    const shared = byRoute.get("");
+    if (shared?.length) out.push({ key: "shared", title: "Every page", sections: shared });
+    for (const r of state.routes) {
+      const list = byRoute.get(r.path);
+      if (list?.length) out.push({ key: r.path, title: r.title, sections: list });
+    }
+    return out;
+  }, [state]);
 
   if (loading && !state) {
     return (
@@ -82,107 +135,142 @@ export default function VisualPreview({ id }: { id: string }) {
     );
   }
 
-  const errorNotice = error ? (
-    <div className="notice notice-bad" role="alert">
-      {Icon.alert}
-      <div className="notice-body">
-        <span className="notice-text">{error}</span>
+  const errorNotice =
+    error || failed ? (
+      <div className="notice notice-bad" role="alert">
+        {Icon.alert}
+        <div className="notice-body">
+          <span className="notice-title">{failed ? "The last build didn't finish" : "That didn't work"}</span>
+          <span className="notice-text">{error || failed}</span>
+          {failed && !error && (
+            <div className="notice-actions">
+              <button className="btn btn-sm btn-primary" disabled={busy || building} onClick={generate}>
+                {Icon.refresh} Build it again
+              </button>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
-  ) : null;
+    ) : null;
 
-  // Empty state — nothing generated yet. It teaches what the tab is for.
-  if (!html) {
+  // Nothing yet, and nothing building — the tab teaches what it is for.
+  if (!html && !building) {
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div className="mk-stack">
         <div className="card empty">
           <h3>{state && !state.has_frontend ? "Prism hasn't built the front end yet" : "No mockup yet"}</h3>
           <p>
             {state && !state.has_frontend
-              ? "The mockup is drawn as part of the Frontend phase, so it appears here on its own once Prism has run. You can draw one early from the design so far."
-              : "The Frontend phase draws this automatically. Something stopped it from landing — draw it now and it will be here for the Ship review."}{" "}
-            Click any section in the result to describe a change in plain language.
+              ? "The mockup is drawn when the Frontend phase finishes. You can build one now from the design so far."
+              : "The Frontend phase builds this on its own. Something stopped it from landing — build it now and it will be here for the Ship review."}{" "}
+            It&apos;s a clickable site: several pages, sample records, forms that validate and store, lists you can
+            search and sort. Switch to Edit to change any section in plain language.
           </p>
           <button className="btn btn-primary" disabled={busy} onClick={generate}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}
-            {busy ? "Generating…" : "Generate mockup"}
+            {busy ? "Starting…" : "Build mockup"}
             {!busy && Icon.sparkle}
           </button>
-          {busy && (
-            <p className="field-hint" style={{ margin: 0 }}>
-              A local model usually takes 30–60 seconds for this.
-            </p>
-          )}
         </div>
         {errorNotice}
       </div>
     );
   }
 
+  if (!html && job) {
+    return (
+      <div className="mk-stack">
+        <BuildProgress job={job} />
+        {errorNotice}
+      </div>
+    );
+  }
+
+  const revisions = state!.revisions.length;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <div className="mk-stack">
       <div className="prev-toolbar">
-        <h3 className="label">Mockup · approximate</h3>
-        <span className="rule" />
+        <h3 className="label">Mockup</h3>
         <span className="badge badge-mono">
-          {state!.revisions.length} rev{state!.revisions.length === 1 ? "" : "s"}
+          {revisions} rev{revisions === 1 ? "" : "s"}
         </span>
-        <button
-          className="btn btn-sm"
-          disabled={busy || state!.revisions.length === 0}
-          onClick={undo}
-        >
+        <span className="rule" />
+        <div className="switcher" role="group" aria-label="What a click in the mockup does">
+          <button
+            type="button"
+            className="seg-btn seg-btn-icon"
+            aria-pressed={mode === "use"}
+            onClick={() => switchMode("use")}
+            title="Click through the prototype: links, forms, filters"
+          >
+            {Icon.pointer} Use
+          </button>
+          <button
+            type="button"
+            className="seg-btn seg-btn-icon"
+            aria-pressed={mode === "edit"}
+            disabled={!state!.sections.length}
+            onClick={() => switchMode("edit")}
+            title="Click a section to describe a change to it"
+          >
+            {Icon.pen} Edit
+          </button>
+        </div>
+        <button className="btn btn-sm" disabled={busy || building || revisions === 0} onClick={undo}>
           {Icon.undo} Undo
         </button>
-        <button className="btn btn-sm" disabled={busy} onClick={generate}>
-          {busy ? <span className="btn-spinner" aria-hidden="true" /> : Icon.refresh}
-          Regenerate
+        <button className="btn btn-sm" disabled={busy || building} onClick={generate}>
+          {busy && !building ? <span className="btn-spinner" aria-hidden="true" /> : Icon.refresh}
+          Rebuild
         </button>
       </div>
 
-      {busy && (
-        <p className="field-hint" aria-live="polite">
-          Working… a local model usually takes 30–60 seconds.
-        </p>
+      {building && job && (
+        <>
+          <BuildProgress job={job} />
+          <p className="field-hint">The mockup below stays until the new one is ready.</p>
+        </>
       )}
       {errorNotice}
+      {state!.report && <MockupReport report={state!.report} />}
 
       <MockupFrame
         key={state!.revisions[0]?.id || "iframe"}
-        ref={iframeRef}
+        ref={frameRef}
         html={html!}
+        routes={state!.routes}
         selectable
-        onLoad={() => highlight(selected?.id ?? null)}
+        mode={mode}
+        onLoad={() => frameRef.current?.highlight(mode === "edit" ? selected?.id ?? null : null)}
       />
 
-      {selected ? (
-        <div className="card" style={{ borderColor: "var(--accent-line)", background: "var(--warn-soft)" }}>
+      {mode === "edit" && selected ? (
+        <div className="card mk-edit">
           <div className="sec-head">
             <h3 className="label" style={{ color: "var(--accent)" }}>
               Editing
             </h3>
-            <span style={{ fontSize: "var(--t-base)", fontWeight: 600 }}>{selected.label}</span>
+            <span className="mk-edit-name">{selected.label}</span>
             <span className="rule" />
           </div>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
-            <div className="field" style={{ flex: 1, minWidth: 240 }}>
+          <div className="mk-edit-row">
+            <div className="field mk-edit-field">
               <label htmlFor="prev-instruction">What should change?</label>
               <input
                 id="prev-instruction"
                 className="input"
                 placeholder="e.g. make the headline bigger and add a Get started button"
                 value={instruction}
+                disabled={busy}
                 onChange={(e) => setInstruction(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") applyEdit();
+                  if (e.key === "Escape") setSelected(null);
                 }}
               />
             </div>
-            <button
-              className="btn btn-accent"
-              disabled={busy || !instruction.trim()}
-              onClick={applyEdit}
-            >
+            <button className="btn btn-accent" disabled={busy || building || !instruction.trim()} onClick={applyEdit}>
               {busy && <span className="btn-spinner" aria-hidden="true" />}
               Apply change
             </button>
@@ -197,24 +285,39 @@ export default function VisualPreview({ id }: { id: string }) {
               Done
             </button>
           </div>
+          {busy && (
+            <p className="field-hint" aria-live="polite">
+              Rewriting this one section — a second call if the first loses what makes it work.
+            </p>
+          )}
         </div>
       ) : (
         <p className="field-hint">
-          Click any section in the mockup to select it, then describe the change you want.
+          {mode === "use"
+            ? "Click through it like a user: the pages, forms and filters work. Switch to Edit to change a section."
+            : "Click any section in the mockup — or pick one below — then describe the change you want."}
         </p>
       )}
 
-      {state!.sections.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-          {state!.sections.map((s) => (
-            <button
-              key={s.id}
-              className={"badge" + (selected?.id === s.id ? " badge-warn" : "")}
-              style={{ cursor: "pointer" }}
-              onClick={() => setSelected(s)}
-            >
-              {s.label}
-            </button>
+      {groups.length > 0 && (
+        <div className="mk-groups" aria-label="Sections">
+          {groups.map((g) => (
+            <div key={g.key} className="mk-group">
+              <span className="mk-group-title">{g.title}</span>
+              <div className="mk-chips">
+                {g.sections.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={"badge mk-chip" + (selected?.id === s.id && mode === "edit" ? " badge-warn" : "")}
+                    aria-pressed={selected?.id === s.id && mode === "edit"}
+                    onClick={() => pick(s)}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       )}

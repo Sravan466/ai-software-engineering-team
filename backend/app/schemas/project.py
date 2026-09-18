@@ -115,6 +115,13 @@ class PhaseResultOut(BaseModel):
     #: Each contradiction, in the words the agent was sent back with.
     stack_note: Optional[list[str]] = None
 
+    #: ok | failed | unchecked — does this phase's code compile? A third answer, apart
+    #: from shape and stack. `None` for rows from before the check, and for phases
+    #: that write no code.
+    build_status: Optional[str] = None
+    #: `[{path, line, kind, message}]` for what still does not compile.
+    build_note: Optional[list[dict]] = None
+
     # Timing, so a phase in flight can show elapsed time and a finished one can show
     # what it actually cost in wall-clock and tokens.
     started_at: Optional[UtcDatetime] = None

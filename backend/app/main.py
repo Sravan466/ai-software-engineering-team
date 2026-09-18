@@ -18,6 +18,11 @@ async def lifespan(app: FastAPI):
     log.info("Starting AI Software Engineering Team (env=%s)", settings.app_env)
     init_db()
     log.info("Database initialised. Default routing mode: %s", settings.default_routing_mode)
+    # The compile gate reads JavaScript with TypeScript's parser; fetch it now rather
+    # than inside the first Frontend phase that needs it.
+    from app.build import toolchain
+
+    toolchain.warm_up()
     yield
     log.info("Shutting down.")
 

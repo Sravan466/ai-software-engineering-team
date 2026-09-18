@@ -51,8 +51,29 @@ class GateKind(str, Enum):
     #: Distinct from every other kind because it is not a judgement call: the build
     #: holds two incompatible halves, and approving it ships both in one archive.
     STACK = "stack"
+    #: The finished build's code does not compile — a file that does not parse, a
+    #: name nothing declares, an import of something that does not exist — after
+    #: each was sent back once with the errors named. Takes the place of SHIP: a
+    #: build that cannot run is not reviewed as though it were finished.
+    BUILD = "build"
     #: A single handoff, in every-phase mode.
     PHASE = "phase"
+
+
+class BuildStatus(str, Enum):
+    """Whether a phase's generated code parses and everything it imports exists."""
+
+    #: Checked, and it compiles. Also what a phase that wrote no code reports.
+    OK = "ok"
+    #: Still does not compile after being sent back with the errors named.
+    FAILED = "failed"
+    #: Nothing here could read it — no Node for JavaScript, say. Not a pass.
+    UNCHECKED = "unchecked"
+
+
+#: The phases that write code the build must compile. DevOps writes configuration,
+#: and the rest write documents.
+CODE_PHASES = frozenset({"backend_engineer", "frontend_engineer", "qa_engineer"})
 
 
 class StackStatus(str, Enum):
