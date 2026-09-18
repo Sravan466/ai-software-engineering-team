@@ -540,8 +540,13 @@ def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str)
         updated = content
         directive = _client_directive(rel, updated, app_router)
         if directive is not None:
+            reason = (
+                "uses React state or event handlers"
+                if _HOOK.search(updated) or _HANDLER.search(updated)
+                else "imports a library that only runs in the browser"
+            )
             updated = directive
-            notes.append("added 'use client' — it uses React state or event handlers in the app router")
+            notes.append(f"added 'use client' — it {reason}, and the app router would render it on the server")
         linked = _link_children(updated)
         if linked is not None:
             updated = linked
