@@ -511,6 +511,9 @@ def _scaffold_vite(sc: Scaffold, files: dict[str, str], slug: str, product: str,
     if ts:
         dev["typescript"] = pkg.NPM_FRAMEWORK["typescript"]
     import_name = "svelte" if framework == "svelte" else plugin_fn
+    # The `@/` alias, configured once and written twice — for Vite, which resolves
+    # it, and for the editor and the compile gate, which read it from the config.
+    alias_root = "src" if any(p.startswith("src/") for p in files) else "."
     sc.add(
         fe("package.json"),
         _json({
@@ -524,15 +527,40 @@ def _scaffold_vite(sc: Scaffold, files: dict[str, str], slug: str, product: str,
         }),
         "Dependencies derived from what the frontend imports, pinned to known-good ranges.",
     )
+    plugin_import = (
+        "import { svelte } from '@sveltejs/vite-plugin-svelte';"
+        if import_name == "svelte"
+        else f"import {plugin_fn} from '{plugin_pkg}';"
+    )
+    plugin_call = "svelte()" if import_name == "svelte" else f"{plugin_fn}()"
     sc.add(
         fe("vite.config.js"),
-        f"import {{ defineConfig }} from 'vite';\n"
-        + (
-            "import { svelte } from '@sveltejs/vite-plugin-svelte';\n\nexport default defineConfig({ plugins: [svelte()] });\n"
-            if import_name == "svelte"
-            else f"import {plugin_fn} from '{plugin_pkg}';\n\nexport default defineConfig({{ plugins: [{plugin_fn}()] }});\n"
-        ),
-        "Vite configuration.",
+        "import { fileURLToPath, URL } from 'node:url';\n"
+        "import { defineConfig } from 'vite';\n"
+        f"{plugin_import}\n\n"
+        "export default defineConfig({\n"
+        f"  plugins: [{plugin_call}],\n"
+        f"  resolve: {{ alias: {{ '@': fileURLToPath(new URL('./{alias_root}', import.meta.url)) }} }},\n"
+        "});\n",
+        "Vite configuration, with the @/ import alias.",
+    )
+    alias_target = "./src/*" if alias_root == "src" else "./*"
+    options = {"baseUrl": ".", "paths": {"@/*": [alias_target]}}
+    if ts:
+        options = {
+            "target": "ES2020",
+            "module": "ESNext",
+            "moduleResolution": "bundler",
+            "skipLibCheck": True,
+            "strict": False,
+            "noEmit": True,
+            **({"jsx": "react-jsx"} if framework == "react" else {}),
+            **options,
+        }
+    sc.add(
+        fe("tsconfig.json" if ts else "jsconfig.json"),
+        _json({"compilerOptions": options, **({"include": ["src"]} if ts else {})}),
+        "The @/ import alias, for the editor and the compile check.",
     )
     sc.add(
         fe("tailwind.config.js"),

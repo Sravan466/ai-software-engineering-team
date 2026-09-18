@@ -188,7 +188,12 @@ _STRIP_BLOCKS = re.compile(
     re.IGNORECASE,
 )
 _DOC_TAGS = re.compile(r"</?(html|head|body)\b[^>]*>|<!doctype[^>]*>", re.IGNORECASE)
-_ON_ATTR = re.compile(r"""\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
+#: An event handler however it is attached: after whitespace, after the `/` of
+#: `<svg/onload=…>`, or straight after a closing quote — `href="#"onclick="…"` is
+#: invalid HTML that every browser parses as an attribute anyway.
+_ON_ATTR = re.compile(r"""(?:\s+|(?<=[/"']))on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
+#: The same shape, for asking whether markup still carries one.
+HANDLER = re.compile(r"""<[a-zA-Z][^>]*?(?:\s|[/"'])on[a-z]+\s*=""", re.IGNORECASE)
 _JS_URL = re.compile(r"""(href|src|action|formaction)\s*=\s*(["'])\s*javascript:[^"']*\2""", re.IGNORECASE)
 _FORM_ACTION = re.compile(r"""(<form\b[^>]*?)\s+(action|method|target)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
 #: Every other way a fragment can ask the network for a picture. Each is a guess at a
@@ -208,8 +213,9 @@ def clean_fragment(text: str) -> str:
     """Trim a model response to markup, and remove anything that could run or escape.
 
     Cleaned, not rejected: a hero with a stray `onclick` is a perfectly good hero once
-    the handler is gone, and the sandbox would have blocked it anyway — with a console
-    error, which is the one thing the finished page must not have.
+    the handler is gone. It has to go — the frame runs scripts, so a handler would
+    run too (in a null origin, unable to reach the app, but able to throw a console
+    error or post a message the Preview tab would have to know to ignore).
     """
     t = (text or "").strip()
     fence = _FENCE.search(t)

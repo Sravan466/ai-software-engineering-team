@@ -84,6 +84,7 @@ export default function VisualPreview({ id }: { id: string }) {
   // Selection clicks coming up from the sandboxed iframe (edit mode only).
   useEffect(() => {
     function onMsg(e: MessageEvent) {
+      if (!frameRef.current?.owns(e.source)) return;
       const d = e.data;
       if (d && d.__preview && d.type === "select") setSelected({ id: d.id, label: d.label });
     }

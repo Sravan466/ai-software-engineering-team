@@ -55,13 +55,11 @@ def site_data(html: str) -> Optional[dict]:
 
 
 def _json_for_script(value: object) -> str:
-    # `</` would close the <script> it sits in; `<!--` would open a comment the
-    # HTML parser honours inside script data.
-    return (
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        .replace("</", "<\\/")
-        .replace("<!--", "<\\!--")
-    )
+    # `</` would close the <script> it sits in, and `<!--` opens a comment the HTML
+    # parser honours inside script data. Escaping every `<` as `<` removes both
+    # and is still valid JSON — `<\!--` is not, and a record containing it used to
+    # leave the whole site with no data at all.
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
 
 
 # ── pictures ─────────────────────────────────────────────────────────────────

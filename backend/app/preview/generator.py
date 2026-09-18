@@ -287,8 +287,18 @@ def build_site(
     """
     progress = progress or NullReporter()
     today = today or date.today()
-    started = time.monotonic()
     calls = _Calls(mode, preferred_model)
+    try:
+        return _build(brief, calls, progress, today)
+    except ProviderError as e:
+        # The calls before the failure happened and cost what they cost; the caller
+        # bills them even though there is nothing to save.
+        e.responses = list(calls.responses)  # type: ignore[attr-defined]
+        raise
+
+
+def _build(brief: SiteBrief, calls: "_Calls", progress: Reporter, today: date) -> BuildResult:
+    started = time.monotonic()
 
     progress.stage("design")
     ds = _design(calls, brief)

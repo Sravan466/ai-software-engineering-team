@@ -88,7 +88,35 @@ def _resolves(target: str, tree: set[str]) -> bool:
     return False
 
 
-def _check_js_imports(path: str, content: str, tree: set[str]) -> list[Problem]:
+def aliases_for(files: dict[str, str], side: Optional[str]) -> dict[str, list[str]]:
+    """`{"@/": ["src"]}` — the import aliases one side's own tsconfig/jsconfig define.
+
+    Read from the config in the tree rather than guessed, so the check resolves an
+    alias exactly the way `next build` / `vite build` will: an alias the project does
+    not configure is an import that will not resolve, whatever directory it names.
+    """
+    if not side:
+        return {}
+    for name in ("tsconfig.json", "jsconfig.json"):
+        text = files.get(f"{side}/{name}")
+        if not text:
+            continue
+        try:
+            paths = (json.loads(text).get("compilerOptions") or {}).get("paths") or {}
+        except (ValueError, AttributeError):
+            continue
+        out: dict[str, list[str]] = {}
+        for key, targets in paths.items():
+            if not (isinstance(key, str) and key.endswith("/*") and isinstance(targets, list)):
+                continue
+            out[key[:-1]] = [
+                layout.clean(str(t)[:-1]) for t in targets if isinstance(t, str) and t.endswith("*")
+            ]
+        return out
+    return {}
+
+
+def _check_js_imports(path: str, content: str, tree: set[str], aliases: dict[str, list[str]]) -> list[Problem]:
     problems: list[Problem] = []
     side = layout.side_of(path)
     base = posixpath.dirname(path)
@@ -101,11 +129,21 @@ def _check_js_imports(path: str, content: str, tree: set[str]) -> list[Problem]:
                             "Write that file, or import one that exists.", "import")
                 )
             continue
-        if spec.startswith(("@/", "~/")) and side:
-            rel = spec[2:]
-            if not (_resolves(f"{side}/{rel}", tree) or _resolves(f"{side}/src/{rel}", tree)):
+        prefix = next((p for p in aliases if spec.startswith(p)), None)
+        if prefix is None and spec.startswith(("@/", "~/")):
+            problems.append(
+                Problem(path, f"imports `{spec}`, but this build defines no `{spec[:2]}` alias. "
+                        "Use a relative import.", "import")
+            )
+            continue
+        if prefix is not None:
+            rel = spec[len(prefix):]
+            roots = aliases[prefix]
+            if not any(_resolves(layout.join(side or "", root, rel), tree) for root in roots):
+                where = ", ".join(layout.join(side or "", root) or "." for root in roots)
                 problems.append(
-                    Problem(path, f"imports `{spec}`, and no file in this build matches it.", "import")
+                    Problem(path, f"imports `{spec}`, and no file in this build matches it "
+                            f"(`{prefix}` points at {where}/).", "import")
                 )
             continue
         if spec.startswith("/") or pkg.is_node_builtin(spec):
@@ -185,9 +223,12 @@ def _check_python(path: str, content: str, tree: set[str], dirs: set[str]) -> li
 
 
 # ── the JavaScript parser ────────────────────────────────────────────────────
-def _paths_for(side_files: dict[str, str]) -> dict:
-    src = any(p.startswith("src/") for p in side_files)
-    return {"@/*": ["src/*", "*"] if src else ["*"], "~/*": ["src/*", "*"] if src else ["*"]}
+def _paths_for(files: dict[str, str], side: str) -> dict:
+    """The same aliases, in the form TypeScript's resolver takes them."""
+    return {
+        f"{prefix}*": [f"{root}/*" if root else "*" for root in roots]
+        for prefix, roots in aliases_for(files, None if side == "root" else side).items()
+    }
 
 
 def _run_js(groups: list[dict]) -> tuple[Optional[list[dict]], Optional[str]]:
@@ -260,7 +301,7 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
                 problems.append(Problem(path, f"is not valid JSON: {e.msg}", "syntax", e.lineno))
         elif path.endswith(_JS_EXT):
             out.checked += 1
-            problems += _check_js_imports(path, content, tree)
+            problems += _check_js_imports(path, content, tree, aliases_for(files, layout.side_of(path)))
             js_targets.append(path)
 
     if js_targets:
@@ -277,7 +318,7 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
                     "name": side,
                     "files": side_files,
                     "report": [p[len(prefix):] for p in js_targets if (layout.side_of(p) or "root") == side],
-                    "paths": _paths_for(side_files),
+                    "paths": _paths_for(files, side),
                 }
             )
         diagnostics, reason = _run_js(groups)
@@ -336,18 +377,23 @@ def phase_tree(
     for key in order:
         if key == phase_key:
             break
-        for path, content, _lang in iter_files(prior_outputs.get(key) or {}):
-            files[layout.place(key, path, content, backend_language)] = content
+        for placed, _path, content, _lang in layout.place_all(
+            key, iter_files(prior_outputs.get(key) or {}), backend_language
+        ):
+            files[placed] = content
     mine: list[str] = []
-    for path, content, _lang in iter_files(output if isinstance(output, dict) else {}):
-        placed = layout.place(phase_key, path, content, backend_language)
+    for placed, _path, content, _lang in layout.place_all(
+        phase_key, iter_files(output if isinstance(output, dict) else {}), backend_language
+    ):
         files[placed] = content
         mine.append(placed)
 
     design = prior_outputs.get("system_design") if isinstance(prior_outputs, dict) else None
     scaffold = scaffold_build(files, charter, design if isinstance(design, dict) else None)
+    # What the scaffold writes replaces the agent's copy, here as in the archive — the
+    # check has to resolve imports against the config that will actually ship.
     for f in scaffold.files:
-        files.setdefault(f.path, f.content)
+        files[f.path] = f.content
     return files, mine
 
 

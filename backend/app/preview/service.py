@@ -7,7 +7,7 @@ was replaced while it was drawing — passed in as a question to ask before savi
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,8 @@ from app.db.models import PreviewRevision, Project
 from app.preview.brief import site_brief
 from app.preview.generator import BuildResult, build_site
 from app.preview.jobs import Reporter
+from app.router.base import ProviderError
+from app.schemas.llm import LLMResponse
 
 
 def build_for(project: Project, reporter: Optional[Reporter] = None) -> BuildResult:
@@ -26,6 +28,12 @@ def build_for(project: Project, reporter: Optional[Reporter] = None) -> BuildRes
         preferred_model=project.preferred_model,
         progress=reporter,
     )
+
+
+def bill(db: Session, project: Project, responses: Iterable[LLMResponse]) -> None:
+    """One usage event per call — whether or not the build it was part of was kept."""
+    for resp in responses:
+        tracker.record(db, response=resp, project_id=project.id, phase="preview")
 
 
 def save(db: Session, project: Project, result: BuildResult) -> PreviewRevision:
@@ -41,8 +49,7 @@ def save(db: Session, project: Project, result: BuildResult) -> PreviewRevision:
     db.add(row)
     db.commit()
     db.refresh(row)
-    for resp in result.responses:
-        tracker.record(db, response=resp, project_id=project.id, phase="preview")
+    bill(db, project, result.responses)
     return row
 
 
@@ -53,9 +60,19 @@ def build_and_save(
     *,
     still_wanted: Callable[[Session, Project], bool] = lambda _db, _project: True,
 ) -> Optional[PreviewRevision]:
-    """Build, then save only if `still_wanted` says the picture is still of something."""
-    result = build_for(project, reporter)
+    """Build, then save only if `still_wanted` says the picture is still of something.
+
+    Every call is billed on every path out. A build thrown away because the front end
+    was replaced mid-draw, or cut short by a provider failure, spent real tokens —
+    and those are the most expensive builds to leave out of a project's cost.
+    """
+    try:
+        result = build_for(project, reporter)
+    except ProviderError as e:
+        bill(db, project, getattr(e, "responses", []))
+        raise
     db.refresh(project)
     if not still_wanted(db, project):
+        bill(db, project, result.responses)
         return None
     return save(db, project, result)

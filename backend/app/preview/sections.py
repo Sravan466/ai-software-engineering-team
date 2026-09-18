@@ -423,6 +423,11 @@ def repair_in_place(section: SectionPlan, inner: str, site: SitePlan) -> tuple[s
 
 # ── turning a response into a section element ────────────────────────────────
 _PY = re.compile(r"(?:^|\s)(?:sm:|md:|lg:|xl:)?(?:py|pt|pb)-\S+")
+#: Attributes the runtime acts on. An element carrying one is never just a wrapper.
+_BINDINGS = (
+    "data-list", "data-form", "data-filter", "data-sort", "data-stat", "data-modal",
+    "data-empty", "data-count", "data-to",
+)
 
 
 def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
@@ -435,7 +440,11 @@ def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
     outer = H.outer_element(fragment)
     if outer is not None:
         tag, attrs, inner = outer
-        if tag in ("section", "header", "footer", "div", "nav", "main", "article") and (
+        # An outer element that *is* a binding — the `data-list` grid itself, the
+        # `data-form` — is content, not a wrapper. Unwrapping it took the binding with
+        # it and failed a correct list for having no list.
+        bound = any(H.attr(attrs, name) is not None for name in _BINDINGS)
+        if not bound and tag in ("section", "header", "footer", "div", "nav", "main", "article") and (
             tag != "nav" or section.kind != "nav"
         ):
             classes = H.attr(attrs, "class") or ""

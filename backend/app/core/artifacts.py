@@ -139,8 +139,7 @@ def assemble(project: Project) -> dict:
         out = ph.output if isinstance(ph.output, dict) else {}
         if ph.phase == "system_design":
             design = out
-        for path, content, lang in iter_files(out):
-            placed = layout.place(ph.phase, path, content, backend_language)
+        for placed, path, content, lang in layout.place_all(ph.phase, iter_files(out), backend_language):
             if not placed:
                 continue
             files[placed] = {

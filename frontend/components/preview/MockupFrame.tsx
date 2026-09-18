@@ -75,6 +75,10 @@ function inject(html: string, scripts: string): string {
 export type MockupFrameHandle = {
   /** Outline the section, switching to its page first when it is on another. */
   highlight: (sectionId: string | null) => void;
+  /** Whether a message came from this frame's document rather than any other window
+   *  that can post to the page. (Script inside the frame is kept out by the server:
+   *  model-written handlers are stripped before a section is saved.) */
+  owns: (source: MessageEventSource | null) => boolean;
 };
 
 type Props = {
@@ -109,7 +113,10 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
 
   useImperativeHandle(
     ref,
-    () => ({ highlight: (sectionId) => post({ type: "highlight", id: sectionId }) }),
+    () => ({
+      highlight: (sectionId) => post({ type: "highlight", id: sectionId }),
+      owns: (source) => Boolean(source) && source === frameRef.current?.contentWindow,
+    }),
     [post],
   );
 

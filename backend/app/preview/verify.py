@@ -96,7 +96,7 @@ def static_checks(html: str, site: SitePlan) -> list[dict]:
         if not _platform_script(attrs, body)
     ]
     markup = re.sub(r"<script\b[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
-    handlers = re.findall(r"<[a-zA-Z][^>]*\son[a-z]+\s*=", markup)
+    handlers = H.HANDLER.findall(markup)
     checks.append(
         _check(
             "No model-written scripts or handlers",

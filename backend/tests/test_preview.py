@@ -289,3 +289,32 @@ def test_the_document_carries_what_edits_are_checked_against(client, monkeypatch
     # The JSON block cannot close the <script> it lives in, whatever the records say.
     block = html.split('id="app-data">', 1)[1].split("</script>", 1)[0]
     assert "</" not in block and json.loads(block.replace("<\\/", "</")) == data
+
+
+def test_the_sites_data_survives_any_text_in_its_records():
+    from app.preview.document import _json_for_script
+
+    data = {"rows": [{"note": "<!-- not a comment -->", "html": "</script><b>"}]}
+    encoded = _json_for_script(data)
+    assert "<" not in encoded
+    assert json.loads(encoded) == data
+
+
+def test_an_outer_element_that_is_the_binding_is_not_unwrapped():
+    from app.preview.plan import SectionPlan
+    from app.preview.sections import unwrap
+
+    section = SectionPlan(id="items", kind="list", label="Items", brief="", collection="items")
+    inner, classes = unwrap('<div data-list="items" class="grid"><template><p data-field="name"></p></template></div>', section)
+    assert inner.startswith('<div data-list="items"') and classes == ""
+    inner, classes = unwrap('<section class="py-10 bg-surface"><h2>Items</h2></section>', section)
+    assert inner == "<h2>Items</h2>" and classes == "bg-surface"
+
+
+def test_handlers_are_stripped_however_they_are_attached():
+    from app.preview.html import HANDLER
+
+    for dirty in ('<svg/onload=alert(1)>', '<a href="#"onclick="x()">x</a>', "<b onmouseover='y()'>b</b>"):
+        clean = clean_fragment(f"<div>{dirty}</div>")
+        assert "alert" not in clean and "x()" not in clean and "y()" not in clean, clean
+        assert not HANDLER.search(clean)

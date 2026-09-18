@@ -19,9 +19,17 @@ needs_parser = pytest.mark.skipif(not _parser, reason="no TypeScript parser avai
 # ── layout ───────────────────────────────────────────────────────────────────
 def test_files_are_placed_by_the_side_they_belong_to():
     assert layout.place("backend_engineer", "./main.py") == "backend/main.py"
-    assert layout.place("backend_engineer", "server/app.js") == "backend/app.js"
     assert layout.place("frontend_engineer", "./pages/_app.js") == "frontend/pages/_app.js"
-    assert layout.place("frontend_engineer", "client/src/App.jsx") == "frontend/src/App.jsx"
+    assert layout.place("frontend_engineer", "frontend/app/page.tsx") == "frontend/app/page.tsx"
+    # An agent's own name for its whole side is renamed only when every file uses it...
+    placed = [p for p, *_ in layout.place_all(
+        "frontend_engineer", [("client/src/App.jsx", ""), ("client/src/main.jsx", "")])]
+    assert placed == ["frontend/src/App.jsx", "frontend/src/main.jsx"]
+    # ...because `ui/` beside `pages/` is a components folder, and renaming it alone
+    # would break `import Button from '../ui/Button'` in the page.
+    placed = [p for p, *_ in layout.place_all(
+        "frontend_engineer", [("ui/Button.jsx", ""), ("pages/index.jsx", "")])]
+    assert placed == ["frontend/ui/Button.jsx", "frontend/pages/index.jsx"]
     assert layout.place("qa_engineer", "tests/test_main.py") == "backend/tests/test_main.py"
     assert (
         layout.place("qa_engineer", "tests/form.test.js", "import { render } from '@testing-library/react'")
@@ -230,17 +238,33 @@ def test_files_the_platform_claims_but_does_not_write_are_kept():
             phase("frontend_engineer", {
                 "src/main.tsx": "import React from 'react';\n",
                 "tsconfig.json": '{"compilerOptions": {"strict": true}}',
+                "jest.config.js": "module.exports = {};\n",
                 "package-lock.json": "{}",
             }),
         ],
     )
     art = assemble(project)
     by_path = {f["path"]: f for f in art["files"]}
-    # Kept: the scaffold writes no tsconfig for Vite and no runner for a backend
+    # Kept: the scaffold writes no Jest config for Vite and no runner for a backend
     # that brings its own migrations.
-    assert by_path["frontend/tsconfig.json"]["phase"] == "frontend_engineer"
+    assert by_path["frontend/jest.config.js"]["phase"] == "frontend_engineer"
     assert by_path["backend/migrate.py"]["phase"] == "backend_engineer"
-    # Replaced: the manifest is the platform's, so the lockfile beside it goes.
+    # Replaced: files the scaffold does write, and the lockfile beside its manifest.
     assert by_path["frontend/package.json"]["phase"] == "platform"
+    assert by_path["frontend/tsconfig.json"]["phase"] == "platform"
     assert "frontend/package-lock.json" not in by_path
-    assert art["scaffold"]["replaced"] == ["frontend/package-lock.json"]
+    assert art["scaffold"]["replaced"] == ["frontend/package-lock.json", "frontend/tsconfig.json"]
+
+
+def test_an_alias_resolves_only_the_way_the_generated_config_says():
+    """`@/` means what the scaffold's jsconfig says — not every directory it might."""
+    from app.build.check import check_phase
+
+    output = {"files": [
+        {"path": "src/app/page.jsx", "code": "import Header from '@/components/Header';\nexport default () => <Header />;\n"},
+        {"path": "components/Header.jsx", "code": "export default () => <h1>Hi</h1>;\n"},
+    ]}
+    result = check_phase({}, "frontend_engineer", output, None)
+    # The app lives under src/, so the scaffold maps @/ to ./src/* — and there is no
+    # src/components/Header. `next build` would say "Module not found"; so does this.
+    assert any(p.kind == "import" and "@/components/Header" in p.message for p in result.problems)
