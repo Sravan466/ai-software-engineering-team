@@ -307,6 +307,11 @@ class PipelineRunner:
         # has replaced it — see the failure path below.
         superseded = self.latest_row(db, project, phase_key)
         was = superseded.status if superseded is not None else None
+        # Its note too. `_mark_phase` is about to overwrite `feedback` with this
+        # redo's, and if the attempt being superseded was itself a rejection, that
+        # note is the record of why — restoring the row without it would put the
+        # attempt back and drop the reason it was sent back in the first place.
+        was_feedback = superseded.feedback if superseded is not None else None
         self._mark_phase(db, project, phase_key, PhaseStatus.REJECTED.value, feedback=feedback)
         row = self._begin_phase(db, project, phase_key)
 
@@ -380,7 +385,7 @@ class PipelineRunner:
             # work is the best thing anyone has until new work replaces it.
             if superseded is not None and was is not None:
                 superseded.status = was
-                superseded.feedback = None
+                superseded.feedback = was_feedback
                 db.commit()
                 log.info(
                     "Restored the previous %s attempt on %s — its replacement never "
