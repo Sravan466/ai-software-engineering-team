@@ -440,15 +440,22 @@ def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
     outer = H.outer_element(fragment)
     if outer is not None:
         tag, attrs, inner = outer
-        # An outer element that *is* a binding — the `data-list` grid itself, the
-        # `data-form` — is content, not a wrapper. Unwrapping it took the binding with
-        # it and failed a correct list for having no list.
-        bound = any(H.attr(attrs, name) is not None for name in _BINDINGS)
-        if not bound and tag in ("section", "header", "footer", "div", "nav", "main", "article") and (
+        bindings = {name: H.attr(attrs, name) for name in _BINDINGS if H.attr(attrs, name) is not None}
+        classes = _PY.sub(" ", f" {H.attr(attrs, 'class') or ''}").strip()
+        if H.attr(attrs, "data-section") is not None:
+            # The element the model was asked for: the platform draws that wrapper
+            # itself. A binding it carried — `data-form` on the section — moves onto
+            # an element inside it, so neither the binding nor the section id is lost
+            # or doubled.
+            if bindings:
+                inner = H.wrap(tag if tag != "section" else "div", H.with_attrs("", bindings), inner)
+            return inner.strip(), classes
+        # An outer element that *is* a binding — the `data-list` grid itself — is
+        # content, not a wrapper; unwrapping it took the binding with it.
+        if not bindings and tag in ("section", "header", "footer", "div", "nav", "main", "article") and (
             tag != "nav" or section.kind != "nav"
         ):
-            classes = H.attr(attrs, "class") or ""
-            return inner.strip(), _PY.sub(" ", f" {classes}").strip()
+            return inner.strip(), classes
     return fragment.strip(), ""
 
 

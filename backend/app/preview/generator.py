@@ -290,9 +290,9 @@ def build_site(
     calls = _Calls(mode, preferred_model)
     try:
         return _build(brief, calls, progress, today)
-    except ProviderError as e:
-        # The calls before the failure happened and cost what they cost; the caller
-        # bills them even though there is nothing to save.
+    except Exception as e:  # noqa: BLE001 - re-raised; only annotated on the way out
+        # The calls before the failure happened and cost what they cost, whatever
+        # failed; the caller bills them even though there is nothing to save.
         e.responses = list(calls.responses)  # type: ignore[attr-defined]
         raise
 

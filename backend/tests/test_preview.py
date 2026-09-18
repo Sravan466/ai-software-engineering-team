@@ -312,9 +312,31 @@ def test_an_outer_element_that_is_the_binding_is_not_unwrapped():
 
 
 def test_handlers_are_stripped_however_they_are_attached():
-    from app.preview.html import HANDLER
+    from app.preview.html import has_handlers
 
     for dirty in ('<svg/onload=alert(1)>', '<a href="#"onclick="x()">x</a>', "<b onmouseover='y()'>b</b>"):
+        assert has_handlers(dirty)
         clean = clean_fragment(f"<div>{dirty}</div>")
         assert "alert" not in clean and "x()" not in clean and "y()" not in clean, clean
-        assert not HANDLER.search(clean)
+        assert not has_handlers(clean)
+
+
+def test_text_that_looks_like_an_attribute_is_left_alone():
+    from app.preview.html import has_handlers
+
+    clean = clean_fragment('<p>Use code "ONSALE=20" at checkout</p><a href="#/">Go</a>')
+    assert '"ONSALE=20" at checkout</p>' in clean and not has_handlers(clean)
+
+
+def test_the_models_own_section_is_the_wrapper_and_its_binding_survives():
+    from app.preview.plan import SectionPlan
+    from app.preview.sections import unwrap, wrap
+
+    section = SectionPlan(id="signup", kind="form", label="Sign up", brief="", collection="leads")
+    inner, classes = unwrap(
+        '<section data-section="signup" data-form="leads" class="py-20 bg-surface"><input name="email"></section>',
+        section,
+    )
+    assert classes == "bg-surface" and inner.startswith('<div data-form="leads">')
+    html = wrap(section, inner, classes)
+    assert html.count('data-section="signup"') == 1 and 'data-form="leads"' in html

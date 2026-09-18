@@ -306,3 +306,21 @@ def test_paths_resolve_against_the_final_base_url():
         "frontend/tsconfig.json": '{"extends": "./tsconfig.base.json", "compilerOptions": {"baseUrl": "./app"}}',
     }
     assert aliases_for(files, "frontend") == {"@/": ["frontend/app/src"]}
+
+
+def test_a_top_level_module_keeps_its_imports():
+    placed = [p for p, *_ in layout.Placer().place_all("frontend_engineer", [
+        ("main.jsx", "import B from './ui/Button'"), ("ui/Button.jsx", ""),
+    ])]
+    assert placed == ["frontend/main.jsx", "frontend/ui/Button.jsx"]
+
+
+def test_a_python_backend_is_renamed_file_by_file():
+    """Python imports by package: `server/` is the backend root wherever it appears."""
+    placer = layout.Placer("python")
+    placed = [p for p, *_ in placer.place_all("backend_engineer", [
+        ("server/app/main.py", ""), ("tests/test_main.py", "from app.main import app"),
+    ])]
+    assert placed == ["backend/app/main.py", "backend/tests/test_main.py"]
+    placed = [p for p, *_ in placer.place_all("qa_engineer", [("server/tests/test_api.py", "")])]
+    assert placed == ["backend/tests/test_api.py"]

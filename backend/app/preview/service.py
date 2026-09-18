@@ -17,7 +17,6 @@ from app.db.models import PreviewRevision, Project
 from app.preview.brief import site_brief
 from app.preview.generator import BuildResult, build_site
 from app.preview.jobs import Reporter
-from app.router.base import ProviderError
 from app.schemas.llm import LLMResponse
 
 
@@ -68,7 +67,7 @@ def build_and_save(
     """
     try:
         result = build_for(project, reporter)
-    except ProviderError as e:
+    except Exception as e:  # noqa: BLE001 - billed, then re-raised to the job
         bill(db, project, getattr(e, "responses", []))
         raise
     db.refresh(project)

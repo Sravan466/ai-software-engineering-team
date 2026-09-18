@@ -96,12 +96,14 @@ def static_checks(html: str, site: SitePlan) -> list[dict]:
         if not _platform_script(attrs, body)
     ]
     markup = re.sub(r"<script\b[\s\S]*?</script>", "", html, flags=re.IGNORECASE)
-    handlers = H.HANDLER.findall(markup)
+    handlers = H.has_handlers(markup)
     checks.append(
         _check(
             "No model-written scripts or handlers",
             not stray and not handlers,
-            f"{len(stray)} script(s), {len(handlers)} handler(s)" if stray or handlers else "",
+            f"{len(stray)} script(s)" + (", event handlers present" if handlers else "")
+            if stray or handlers
+            else "",
         )
     )
     checks.append(_check("Logic runtime present", is_site(html), ""))

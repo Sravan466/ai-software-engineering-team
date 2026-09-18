@@ -188,12 +188,33 @@ _STRIP_BLOCKS = re.compile(
     re.IGNORECASE,
 )
 _DOC_TAGS = re.compile(r"</?(html|head|body)\b[^>]*>|<!doctype[^>]*>", re.IGNORECASE)
-#: An event handler however it is attached: after whitespace, after the `/` of
-#: `<svg/onload=…>`, or straight after a closing quote — `href="#"onclick="…"` is
-#: invalid HTML that every browser parses as an attribute anyway.
-_ON_ATTR = re.compile(r"""(?:\s+|(?<=[/"']))on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
-#: The same shape, for asking whether markup still carries one.
-HANDLER = re.compile(r"""<[a-zA-Z][^>]*?(?:\s|[/"'])on[a-z]+\s*=""", re.IGNORECASE)
+#: One attribute inside a start tag: a name, and optionally `=` and a value. Browsers
+#: accept attributes with no space between them (`href="#"onclick="…"`) and after
+#: the `/` of `<svg/onload=…>`, so the name is found wherever it starts, not only
+#: after whitespace — and only inside a tag, so text like `"ONSALE=20"` is left alone.
+_ATTR = re.compile(r"""([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]+))?""")
+
+
+def _attributes(attrs: str) -> List[Tuple[str, str]]:
+    """`[(name, raw_text)]` for every attribute in a start tag's attribute string."""
+    return [(m.group(1), m.group(0)) for m in _ATTR.finditer(attrs or "")]
+
+
+def _without_handlers(match: "re.Match") -> str:
+    name, attrs, closing = match.group(1), match.group(2), match.group(3)
+    kept = [raw for attr_name, raw in _attributes(attrs) if not attr_name.lower().startswith("on")]
+    if len(kept) == len(_attributes(attrs)):
+        return match.group(0)
+    return f"<{name}{''.join(' ' + raw for raw in kept)}{' /' if closing else ''}>"
+
+
+def has_handlers(html: str) -> bool:
+    """Whether any start tag in the markup still carries an event handler."""
+    return any(
+        name.lower().startswith("on")
+        for m in re.finditer(_TAG, html or "", re.DOTALL)
+        for name, _raw in _attributes(m.group(2))
+    )
 _JS_URL = re.compile(r"""(href|src|action|formaction)\s*=\s*(["'])\s*javascript:[^"']*\2""", re.IGNORECASE)
 _FORM_ACTION = re.compile(r"""(<form\b[^>]*?)\s+(action|method|target)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
 #: Every other way a fragment can ask the network for a picture. Each is a guess at a
@@ -227,7 +248,7 @@ def clean_fragment(text: str) -> str:
     t = t[first: last + 1]
     t = _STRIP_BLOCKS.sub("", t)
     t = _DOC_TAGS.sub("", t)
-    t = _ON_ATTR.sub("", t)
+    t = re.sub(_TAG, _without_handlers, t, flags=re.DOTALL)
     t = _JS_URL.sub(r'\1="#"', t)
     t = _MEDIA.sub("", t)
     t = _SRCSET.sub("", t)
