@@ -368,3 +368,23 @@ def test_a_stateful_module_anywhere_is_a_client_component_under_the_app_router()
     fixed, _notes = sc.rewrites["frontend/pages/RecipeList.jsx"]
     assert fixed.startswith("'use client';")
     assert "frontend/app/page.tsx" not in sc.rewrites  # no state there, nothing to add
+
+
+def test_server_only_modules_are_never_marked_client():
+    tree = {
+        "frontend/app/page.tsx": "export default function Page() { return <p>hi</p>; }\n",
+        "frontend/app/api/auth/[...nextauth]/route.js": "import NextAuth from 'next-auth';\nexport const GET = NextAuth({});\n",
+        "frontend/lib/auth.js": "import Credentials from 'next-auth/providers/credentials';\nexport const authOptions = { providers: [Credentials({})] };\n",
+        "frontend/app/dashboard/page.jsx": "import { motion } from 'framer-motion';\nexport default async function Page() { return <div />; }\n",
+        "frontend/components/Session.jsx": "import { SessionProvider } from 'next-auth/react';\nexport default function S({ children }) { return <SessionProvider>{children}</SessionProvider>; }\n",
+    }
+    sc = scaffold_build(tree, None, None, "Auth")
+    assert set(sc.rewrites) == {"frontend/components/Session.jsx"}
+
+
+def test_an_installed_package_beats_a_same_named_local_file():
+    files = {
+        "backend/app/core/redis.py": "import redis.asyncio\n",
+        "backend/app/core/__init__.py": "",
+    }
+    assert check_tree(files, ["backend/app/core/redis.py"]).problems == []

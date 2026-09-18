@@ -291,6 +291,11 @@ def _check_python(path: str, content: str, tree: set[str], dirs: set[str]) -> li
         if any(_module_exists(root, module, tree, dirs) for root in roots):
             continue
         top = module.split(".")[0]
+        if pkg.pip_requirement(module):
+            # An installed package wins over a same-named local file the way Python
+            # resolves it in practice: `import redis.asyncio` beside an app/core/redis.py
+            # is the library, not a missing module.
+            continue
         local_top = next((root for root in roots if _module_exists(root, top, tree, dirs)), None)
         if local_top is not None:
             # The package is this build's own; the module inside it is what is missing.
@@ -299,8 +304,6 @@ def _check_python(path: str, content: str, tree: set[str], dirs: set[str]) -> li
                 Problem(path, f"imports `{module}`, and no module in this build is at {where}.py. "
                         "Write that module, or import one that exists.", "import")
             )
-            continue
-        if pkg.pip_requirement(module):
             continue
         problems.append(
             Problem(

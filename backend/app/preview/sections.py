@@ -445,6 +445,12 @@ def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
         tag, attrs, inner = outer
         bindings = {name: H.attr(attrs, name) for name in _BINDINGS if H.attr(attrs, name) is not None}
         classes = _PY.sub(" ", f" {H.attr(attrs, 'class') or ''}").strip()
+        if tag == "nav" and section.kind == "nav":
+            # The header's <nav> is content — the navigation landmark — whatever the
+            # model put on it. Only the section's identity comes off, so the id is not
+            # doubled inside the platform's <header>.
+            kept = H.without_attrs(attrs, [a for a in _IDENTITY if a != "class"])
+            return H.wrap("nav", kept, inner), ""
         if H.attr(attrs, "data-section") is not None:
             # The element the model was asked for: the platform draws that wrapper
             # itself. A binding it carried — `data-form` on the section — moves onto an
@@ -459,9 +465,7 @@ def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
             return inner.strip(), classes
         # An outer element that *is* a binding — the `data-list` grid itself — is
         # content, not a wrapper; unwrapping it took the binding with it.
-        if not bindings and tag in ("section", "header", "footer", "div", "nav", "main", "article") and (
-            tag != "nav" or section.kind != "nav"
-        ):
+        if not bindings and tag in ("section", "header", "footer", "div", "nav", "main", "article"):
             return inner.strip(), classes
     return fragment.strip(), ""
 

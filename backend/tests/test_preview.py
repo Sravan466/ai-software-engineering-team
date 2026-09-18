@@ -343,3 +343,13 @@ def test_the_models_own_section_is_the_wrapper_and_its_binding_survives():
     assert classes == "bg-surface" and inner.startswith('<form data-form="leads" data-success="Thanks!">')
     html = wrap(section, inner, classes)
     assert html.count('data-section="signup"') == 1 and 'data-form="leads"' in html
+
+
+def test_the_header_keeps_its_navigation_landmark():
+    from app.preview.plan import SectionPlan
+    from app.preview.sections import unwrap, wrap
+
+    section = SectionPlan(id="site-nav", kind="nav", label="Navigation", brief="")
+    inner, classes = unwrap('<nav data-section="site-nav" class="flex gap-4"><a href="#/">Home</a></nav>', section)
+    html = wrap(section, inner, classes)
+    assert '<nav class="flex gap-4">' in html and html.count('data-section="site-nav"') == 1

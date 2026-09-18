@@ -272,9 +272,17 @@ def _client_directive(rel: str, content: str, app_router: bool) -> Optional[str]
         return None
     if re.search(r"(^|/)(next|tailwind|postcss|jest|vite)\.config\.", rel):
         return None
+    # Never on what only runs on the server: route handlers and middleware export
+    # functions Next calls there, and an async component cannot be a client one.
+    if re.search(r"(^|/)(route|middleware)\.[cm]?[jt]sx?$", rel):
+        return None
+    if re.search(r"export\s+default\s+async\s+function|export\s+default\s+async\s*\(", content):
+        return None
     if _DIRECTIVE.match(content) or _METADATA.search(content):
         return None
-    client_only = any(pkg.npm_package(spec) in _CLIENT_ONLY for spec in js_imports(content))
+    client_only = any(
+        spec in _CLIENT_ONLY or pkg.npm_package(spec) in _CLIENT_ONLY for spec in js_imports(content)
+    )
     if _HOOK.search(content) or _HANDLER.search(content) or client_only:
         return "'use client';\n\n" + content
     return None
@@ -288,7 +296,10 @@ _CLIENT_ONLY = frozenset({
     "react-toastify", "sonner", "zustand", "jotai", "@tanstack/react-query", "swr",
     "react-redux", "recharts", "react-chartjs-2", "react-hook-form", "formik",
     "react-datepicker", "styled-components", "@emotion/react", "@emotion/styled",
-    "@mui/material", "@mui/icons-material", "next-auth",
+    "@mui/material", "@mui/icons-material",
+    # next-auth is mostly server code (handlers, providers, middleware); only its
+    # React bindings are client-only, so the subpath is listed rather than the package.
+    "next-auth/react",
 })
 
 
