@@ -374,6 +374,11 @@
   .artifact-bar { padding: 10px 12px; }
   .artifact-pad { padding: 14px; }
   .facts { grid-template-columns: minmax(0, 1fr); }
+  .charter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px 12px; }
+  .stack-review { padding: 12px 12px 0; }
+  .finding-list { padding: 0 12px 12px; }
+  .findings-head { padding: 12px 12px 8px; }
+  .finding-waive .field { min-width: 0; }
   .confirm { padding: 10px 12px; }
   .confirm-text { flex-basis: 100%; }
 }
@@ -646,3 +651,174 @@
   .run-settings { padding: 14px; }
   .settings-grid { gap: 20px; }
 }
+
+/* ===========================================================================
+   STACK CHARTER — the decisions the whole crew is held to
+   ===========================================================================
+   Six facts, not six cards. The reviewer's question here is "what did this build
+   commit to?", which is one scan — and the `source` line under each value is the
+   strength of the claim, because "settled by the debate" and "follows from
+   FastAPI" are both decisions and only one of them was argued. */
+.charter { padding: 0; }
+.charter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+.charter-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.charter-item dt {
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  letter-spacing: 0.02em;
+}
+.charter-item dd { margin: 0; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.charter-value {
+  font-size: var(--t-base);
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.charter-source { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.4; }
+/* A decision the team actually argued reads louder than one this platform inferred. */
+.charter-item[data-source="debate"] .charter-value { color: var(--accent); }
+.charter-item[data-source="implied"] .charter-value { color: var(--ink-2); font-weight: 500; }
+
+.charter-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--r);
+  border: 1px solid var(--accent-line);
+  background: var(--warn-soft);
+}
+.charter-empty > svg { width: 17px; height: 17px; flex: none; margin-top: 1px; color: var(--accent); }
+.charter-empty p {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  line-height: 1.55;
+  max-width: 62ch;
+}
+
+.stack-review { display: flex; flex-direction: column; gap: 14px; padding: 16px 16px 0; }
+.stack-violations { margin: 0; }
+.stack-violation-list {
+  margin: 6px 0 4px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: var(--t-sm);
+  color: var(--ink);
+  line-height: 1.5;
+}
+.stack-violation-list li::marker { color: var(--bad); }
+
+/* ===========================================================================
+   SECURITY FINDINGS — what was done, not just what was found
+   ===========================================================================
+   Findings used to end in a report. Each row now carries the two things that let
+   one leave this build honestly: the agent that can fix it, and the reason it was
+   waived if it wasn't. */
+.security-review { display: flex; flex-direction: column; }
+.findings { display: flex; flex-direction: column; }
+.findings-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px 10px;
+}
+.findings-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.finding-list { margin: 0; padding: 0 16px 16px; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.finding {
+  padding: 12px 14px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+/* Something still owed a decision sits forward of something already settled. */
+.finding[data-status="open"][data-severity="critical"],
+.finding[data-status="open"][data-severity="high"] {
+  border-color: rgba(240, 82, 82, 0.4);
+  background: var(--bad-soft);
+}
+.finding[data-status="fixed"],
+.finding[data-status="waived"] { opacity: 0.72; }
+
+.finding-top { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.finding-title {
+  font-size: var(--t-base);
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.35;
+}
+.finding-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px 14px;
+  flex-wrap: wrap;
+  margin-top: 7px;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.finding-meta code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.finding-owner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--agent, var(--ink-2));
+}
+.finding-owner > svg { width: 13px; height: 13px; }
+.finding-owner-none { color: var(--ink-3); }
+
+.finding-fix {
+  margin: 9px 0 0;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  line-height: 1.55;
+  max-width: 72ch;
+}
+.finding-note {
+  margin: 9px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--accent-line);
+  background: var(--warn-soft);
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+.finding-note b { color: var(--ink); }
+
+.finding-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 11px; }
+.finding-waive {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line-2);
+}
+.finding-waive .field { flex: 1; min-width: 240px; }

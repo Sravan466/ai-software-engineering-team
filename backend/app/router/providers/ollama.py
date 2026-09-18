@@ -68,13 +68,24 @@ class _SchemaFormatRejected(RuntimeError):
     """The server would not take a JSON Schema in `format`; retry in plain JSON mode."""
 
 
+#: Status codes worth asking again for. Everything else in the 4xx range is a
+#: statement about the request — a model that is not pulled, a malformed body — and
+#: will say exactly the same thing on the third attempt as it did on the first.
+_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
 def _as_provider_error(error: Exception, model: str) -> ProviderError:
     """Normalise a failed call, keeping the one hint that usually resolves it."""
     if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
         return ProviderError(
-            f"Ollama returned {error.response.status_code}: {error.response.text[:200]}. "
-            f"Is the model '{model}' pulled? Try `ollama pull {model}`."
+            f"Ollama returned {status}: {error.response.text[:200]}. "
+            f"Is the model '{model}' pulled? Try `ollama pull {model}`.",
+            retryable=status in _RETRYABLE_STATUS,
         )
+    # A timeout, a refused connection, a half-closed socket. A local runtime does all
+    # three while it swaps a model into memory, and each one used to end the whole
+    # run — these are the failures retrying exists for.
     return ProviderError(f"Ollama call failed: {error}")
 
 

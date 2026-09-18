@@ -7,8 +7,9 @@ services:
       - "11434:11434"
     volumes:
       - ollama:/root/.ollama
-    # After first start, pull models:
-    #   docker compose exec ollama ollama pull qwen2.5:7b
+    # After first start, pull the model you want to run — any Ollama model works,
+    # and Settings can pull and select one for you without touching this file:
+    #   docker compose exec ollama ollama pull <model>
     #   docker compose exec ollama ollama pull nomic-embed-text
 
   backend:

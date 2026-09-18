@@ -2,12 +2,24 @@
 
 Compiled with a SQLite checkpointer and `interrupt_after` on every phase node, so each
 `invoke`/resume executes exactly one phase and then pauses — the mechanism behind the
-human-approval gates. The Backend phase additionally runs an agent debate first.
+human-approval gates.
+
+Two things happen here that make the eight agents one team rather than eight authors:
+
+  **The debate runs before System Design**, not before Backend. A verdict delivered
+  after the architecture had already picked a database was a verdict about nothing,
+  and the Backend Engineer — the phase it was injected into — ignored it, because it
+  arrived as prose with no obligation attached.
+
+  **The charter is frozen once System Design returns**, and from then on it is part of
+  every downstream agent's standing instructions and checked against everything they
+  write. That is the difference between eight plausible phases and one build.
 """
 from __future__ import annotations
 
 import os
 import sqlite3
+from typing import Optional
 
 from langgraph.graph import END, START, StateGraph
 
@@ -17,6 +29,8 @@ from app.core.constants import PHASE_ORDER, RoutingMode, Phase, PHASE_LABELS
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.memory.store import memory_store
+from app.orchestration import debate as debate_step
+from app.orchestration.charter import binding_on, freeze
 from app.orchestration.debate import conduct_debate, decision_summary
 from app.orchestration.state import PipelineState
 from app.rag.knowledge_base import knowledge_base
@@ -41,6 +55,12 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # a missing one means "nothing to report" or "nobody could read the report".
         "schema_status": result.schema_status,
         "schema_note": result.schema_note,
+        # Where this deliverable contradicts the stack the architecture froze. A
+        # separate fact from the schema status on purpose: "nobody could read this
+        # report" and "this report is written against a different database than the
+        # rest of the build" are different problems with different fixes, and the
+        # reviewer is shown which of the two happened.
+        "stack_violations": list(result.stack_violations),
         # One entry per model call. A repaired phase made two, and analytics counts
         # calls and averages latency across them — folding both into a single event
         # would report one call that took as long as two.
@@ -57,6 +77,18 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
     }
 
 
+def _last_debate(state: PipelineState) -> Optional[dict]:
+    """The most recent recorded verdict — what a re-run of System Design freezes on.
+
+    A redo of the architecture does not re-run the debate (the team settled that
+    question once), so without this the second charter would lose the decision the
+    first one recorded and the rebuild could land on a different database than the
+    phases that survived the rewind.
+    """
+    debates = state.get("debates") or []
+    return debates[-1] if debates else None
+
+
 def _gather_context(state: PipelineState, phase_key: str) -> tuple[str, str]:
     """(rag_context, memory_context) — both degrade to '' when stores are unavailable."""
     idea = state["idea"]
@@ -66,6 +98,38 @@ def _gather_context(state: PipelineState, phase_key: str) -> tuple[str, str]:
     return rag, mem
 
 
+def run_debate(state: PipelineState) -> tuple[Optional[dict], str]:
+    """Settle the architecture question, before the architecture is drawn.
+
+    Returns (record, summary). Both are empty when the debate is switched off or the
+    call failed — it is best effort, and a moderator that cannot answer must not stop
+    a build. What it must not do is answer *late*, which is what it used to do.
+    """
+    if not settings.enable_debate:
+        return None, ""
+    brief = state.get("prior_outputs", {}).get(Phase.PRODUCT_MANAGER.value, {})
+    context = (
+        f"Product: {brief.get('product_name')}\n"
+        f"Problem: {brief.get('problem_statement')}\n"
+        f"MVP scope: {brief.get('mvp_scope')}\n"
+        f"Features: {brief.get('features')}"
+    )
+    try:
+        record, resp = conduct_debate(
+            topic=debate_step.TOPIC,
+            context=context,
+            mode=RoutingMode(state.get("routing_mode", "local_only")),
+            preferred_model=state.get("preferred_model"),
+        )
+    except Exception as e:  # noqa: BLE001 - debate is best-effort
+        log.warning("Debate step failed (continuing without it): %s", e)
+        return None, ""
+    record["_usage"] = resp.usage.model_dump()
+    record["_provider"] = resp.provider
+    record["_model"] = resp.model
+    return record, decision_summary(record)
+
+
 def _make_node(phase: Phase):
     agent = get_agent(phase.value)
 
@@ -73,28 +137,13 @@ def _make_node(phase: Phase):
         rag_ctx, mem_ctx = _gather_context(state, phase.value)
         extra = ""
         updates: dict = {}
+        verdict: Optional[dict] = None
 
-        # Agent debate runs once, immediately before the Backend phase.
-        if phase == Phase.BACKEND_ENGINEER and settings.enable_debate:
-            design = state.get("prior_outputs", {}).get(Phase.SYSTEM_DESIGN.value, {})
-            context = (
-                f"Proposed tech stack: {design.get('tech_stack')}\n"
-                f"Data model: {design.get('data_model')}"
-            )
-            try:
-                record, resp = conduct_debate(
-                    topic="Which database and core architecture best fit this MVP?",
-                    context=context,
-                    mode=RoutingMode(state.get("routing_mode", "local_only")),
-                    preferred_model=state.get("preferred_model"),
-                )
-                extra = decision_summary(record)
-                record["_usage"] = resp.usage.model_dump()
-                record["_provider"] = resp.provider
-                record["_model"] = resp.model
-                updates["debates"] = [*state.get("debates", []), record]
-            except Exception as e:  # noqa: BLE001 - debate is best-effort
-                log.warning("Debate step failed (continuing without it): %s", e)
+        # The debate runs once, immediately before the architecture it is about.
+        if phase == Phase.SYSTEM_DESIGN:
+            verdict, extra = run_debate(state)
+            if verdict is not None:
+                updates["debates"] = [*state.get("debates", []), verdict]
 
         ctx = AgentContext(
             idea=state["idea"],
@@ -105,10 +154,21 @@ def _make_node(phase: Phase):
             memory_context=mem_ctx,
             feedback=(state.get("feedback") or {}).get(phase.value),
             extra_context=extra,
+            # Everything from the Backend Engineer onwards builds against the same
+            # frozen stack. System Design is the phase that decides it, so it is the
+            # one phase given none — it cannot be held to a charter it is writing.
+            charter=binding_on(phase.value, state.get("charter")),
         )
         result = agent.run(ctx)
 
         outputs = {**state.get("prior_outputs", {}), phase.value: result.output}
+        if phase == Phase.SYSTEM_DESIGN:
+            # Frozen here and never rewritten by a later phase. A charter a phase
+            # could edit on its way past is a charter that says whatever the last
+            # agent to run believed, which is the situation this replaces.
+            charter = freeze(result.output, verdict or _last_debate(state))
+            updates["charter"] = charter.as_dict() if charter else {}
+
         updates.update(
             {
                 "prior_outputs": outputs,

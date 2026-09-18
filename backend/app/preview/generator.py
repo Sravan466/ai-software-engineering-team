@@ -17,6 +17,11 @@ from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
 
 _TAILWIND = "https://cdn.tailwindcss.com"
 
+#: The role these calls route by and bill to. The mockup is a whole model call per
+#: build and used to be invisible in Settings — there was nowhere to point it at a
+#: smaller model even when every code phase was running on a large one.
+ROLE = "preview"
+
 _GENERATE_SYSTEM = (
     "You are a senior product/UI designer. Output a SINGLE, self-contained, static HTML "
     "document that visually previews the described web product.\n\n"
@@ -125,7 +130,7 @@ def generate_preview(
     preferred_model: Optional[str] = None,
 ) -> Tuple[str, LLMResponse]:
     """Produce a full self-contained HTML preview document. Returns (html, llm_response)."""
-    profile = router.profile_for(mode, preferred_model, complexity="high")
+    profile = router.profile_for(mode, preferred_model, complexity="high", role=ROLE)
 
     def assemble(brief: str) -> str:
         return (
@@ -153,6 +158,7 @@ def generate_preview(
         # your previews come back cut off mid-document.
         options=GenerationOptions(json_mode=False, temperature=0.4),
         complexity="high",
+        role=ROLE,
     )
     return _clean_document(resp.text), resp
 
@@ -165,7 +171,7 @@ def edit_section(
     preferred_model: Optional[str] = None,
 ) -> Tuple[str, LLMResponse]:
     """Rewrite a single section fragment per the instruction. Returns (fragment, response)."""
-    profile = router.profile_for(mode, preferred_model, complexity="medium")
+    profile = router.profile_for(mode, preferred_model, complexity="medium", role=ROLE)
 
     def assemble(html: str) -> str:
         return (
@@ -185,5 +191,6 @@ def edit_section(
         preferred_model=preferred_model,
         options=GenerationOptions(json_mode=False, temperature=0.3),
         complexity="medium",
+        role=ROLE,
     )
     return _clean_fragment(resp.text), resp

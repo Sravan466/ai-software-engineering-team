@@ -1,7 +1,15 @@
-"""Runtime settings: cloud API keys (self-host) + local Ollama model management.
+"""Runtime settings: provider keys, the local model, and which model each role runs on.
 
 Keys are stored on this backend only (gitignored `data/providers.local.json`), never
 returned to the client in full, and used immediately by the router.
+
+Two things here used to contradict each other. `POST /local/pull` would download any
+model the user named, progress bar and all — and the only way to *select* one went
+through `PUT /providers/{provider}`, which rejected the local provider outright. So a
+user could pull `llama3.1:8b`, watch it finish, and every agent would carry on running
+on whatever `OLLAMA_DEFAULT_MODEL` said in `.env`. Selecting a model is now valid for
+every provider, and `/roles` goes further: one model per agent, chosen from what has
+actually been pulled.
 """
 from __future__ import annotations
 
@@ -29,6 +37,17 @@ class PullRequest(BaseModel):
     model: Optional[str] = None
 
 
+class RoleModelUpdate(BaseModel):
+    """Point one role at a model. Blank or null puts it back on the default.
+
+    The value is a `provider:model` pair, or a bare tag meaning the local runtime —
+    the same spelling `FALLBACK_CHAIN` uses, parsed by the same function, so a tag
+    with a colon in it survives intact.
+    """
+
+    model: Optional[str] = None
+
+
 # ── Cloud provider API keys ──────────────────────────────────────────────────
 @router.get("/providers")
 def get_providers() -> dict:
@@ -40,13 +59,36 @@ def get_providers() -> dict:
 
 @router.put("/providers/{provider}")
 def set_provider(provider: str, body: ProviderKeyUpdate) -> dict:
+    """Set a provider's API key, its default model, or both.
+
+    `ollama` is a valid provider here for the model half. It was not, which is why a
+    model downloaded through this very page could never be the one the agents ran on.
+    """
     try:
         model_router.set_provider_key(
             provider, api_key=body.api_key, default_model=body.default_model
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if provider == "ollama":
+        return model_router.local_status()
     return model_router.provider_settings()[provider]
+
+
+# ── which model each role runs on ────────────────────────────────────────────
+@router.get("/roles")
+def get_roles() -> dict:
+    """Every agent (plus the debate, the mockup and embeddings) and its model."""
+    return model_router.role_settings()
+
+
+@router.put("/roles/{role}")
+def set_role(role: str, body: RoleModelUpdate) -> dict:
+    try:
+        model_router.set_role_model(role, body.model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return model_router.role_settings()
 
 
 # ── Local model (Ollama) ─────────────────────────────────────────────────────
@@ -62,7 +104,10 @@ def pull_local(body: PullRequest):
     Streams NDJSON lines straight from Ollama, e.g.
     {"status":"pulling ...","total":...,"completed":...} ... {"status":"success"}.
     """
-    model = body.model or settings.ollama_default_model
+    # The router's current default, not the one `.env` was started with: the two
+    # differ the moment anyone selects a model on this page, and pulling the older of
+    # them would download something nothing is going to run.
+    model = body.model or model_router.default_model("ollama")
     base = settings.ollama_base_url.rstrip("/")
 
     def stream():

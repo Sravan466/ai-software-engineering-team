@@ -576,6 +576,91 @@
 .progress { height: 6px; border-radius: 99px; background: var(--bg-raised); overflow: hidden; }
 .progress span { display: block; height: 100%; border-radius: 99px; background: var(--accent); transition: width var(--tr); }
 
+/* ── Downloaded models ──────────────────────────────────────────────────────
+   This used to be a row of badges: proof a model was on disk, and no way to run
+   anything on it. Each row is now the selection, so the name and the act of
+   choosing it are the same object. */
+.model-rows { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  transition: background var(--tr), border-color var(--tr);
+}
+.model-row:hover { background: var(--bg-raised); }
+/* The model in use is marked by surface and border, never by colour alone. */
+.model-row[data-current] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.model-row-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--t-sm);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+/* The button only resolves on hover or focus; eight of them shouting at once is
+   how a list of names turns into a wall of controls. */
+.model-row .btn { opacity: 0.55; transition: opacity var(--tr); }
+.model-row:hover .btn,
+.model-row .btn:focus-visible { opacity: 1; }
+
+/* ── Which model each agent runs on ─────────────────────────────────────────
+   A table, not eight cards: the question is "what is each of these set to?",
+   which is a scan down one column. The sprite carries the identity, so the row
+   needs no coloured rule to say whose it is. */
+.role-rows { display: flex; flex-direction: column; margin: 6px 0 0; padding: 0; list-style: none; }
+.role-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) minmax(180px, 15rem);
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+.role-row:first-child { border-top: 0; }
+.role-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  color: var(--agent, var(--ink-3));
+}
+.role-mark > svg { width: 18px; height: 18px; }
+.role-id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.role-name {
+  font-size: var(--t-base);
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+.role-what {
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.role-pick { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.role-pick .select { width: 100%; min-width: 0; }
+.role-warn {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: var(--t-xs);
+  line-height: 1.45;
+  color: var(--warn);
+}
+.role-warn > svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+
 /* ===========================================================================
    RESPONSIVE — structural, not fluid type
    =========================================================================== */
@@ -593,6 +678,12 @@
 }
 @media (max-width: 640px) {
   .build-wrap, .settings-wrap { padding: 18px 16px 64px; }
+  /* The select needs the full width to show a model tag; stacking beats truncating. */
+  .role-row { grid-template-columns: 30px minmax(0, 1fr); row-gap: 8px; }
+  .role-pick { grid-column: 2 / -1; }
+  .role-what { white-space: normal; }
+  /* No hover on a touch device, so a control that resolves on hover never does. */
+  .model-row .btn { opacity: 1; }
   .composer-page { padding: 5vh 16px 56px; }
   .composer-h1 { line-height: 1.4; }
   .build-head h1 { font-size: var(--t-xl); }
@@ -603,6 +694,8 @@
   .composer-hint { display: none; }
   /* Comfortable touch targets on the controls a phone actually uses. */
   .btn, .sb-item, .sb-link, .sb-new, .sb-runtime, .example { min-height: 44px; }
+  /* A dropdown is a tap target too, and the per-agent table is eleven of them. */
+  .select, .input { min-height: 44px; }
   .icon-btn { width: 44px; height: 44px; }
   .tab { min-height: 44px; }
 }

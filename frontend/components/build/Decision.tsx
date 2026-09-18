@@ -18,6 +18,8 @@ import MockupFrame from "@/components/preview/MockupFrame";
 import PhaseArtifact from "./PhaseArtifact";
 import SchemaBadge from "./SchemaBadge";
 import FileBrowser from "./FileBrowser";
+import CharterPanel, { StackViolations } from "./Charter";
+import SecurityFindings from "./SecurityFindings";
 import { artifactFiles, latestRow, type PayloadFile } from "./payload";
 
 /**
@@ -33,6 +35,9 @@ import { artifactFiles, latestRow, type PayloadFile } from "./payload";
  *   security — Warden interrupted an otherwise unattended run over something severe.
  *   unchecked— a gate's own phase missed its declared shape, so the automatic check
  *              never ran and the reading falls to a person.
+ *   stack    — a phase wrote itself against a different database, framework or test
+ *              runner than the architecture froze. The one stop that is not a
+ *              judgement call: the build holds two incompatible halves.
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
  *
  * Whatever the shape, the rule is the same: the work is above the buttons, in the
@@ -74,6 +79,14 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
     approve: "I've read it — continue",
     after: "The remaining phases then run without stopping.",
   },
+  stack: {
+    title: "Build disagrees with itself",
+    blurb:
+      "This phase was written against a different stack than the architecture froze. " +
+      "It was already sent back once with the contradiction named.",
+    approve: "Ship both halves anyway",
+    after: "Approving puts code written against two different stacks in one archive.",
+  },
   phase: {
     title: "Handoff",
     blurb: "One agent has finished and is passing its work on.",
@@ -102,6 +115,32 @@ export default function Decision({
   const [target, setTarget] = useState<Target | null>(null);
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
+
+  // Whether anything severe is still waiting on a decision.
+  //
+  // Asked at *every* gate, not only the ones that show the findings panel. The
+  // server refuses an approve over an unsettled critical finding whatever gate the
+  // run is parked on, and a run can easily be parked on a later one — a stack gate
+  // at DevOps, a per-phase handoff. Gating the question on the panel left those
+  // showing a live Ship button that returned a 409 on click.
+  const [unresolved, setUnresolved] = useState(0);
+  const [findingsTick, setFindingsTick] = useState(0);
+  useEffect(() => {
+    api
+      .getSecurity(id)
+      .then((s) => setUnresolved(s.unresolved))
+      .catch(() => setUnresolved(0));
+  }, [id, findingsTick, project.updated_at]);
+
+  // An unattended run is never asked about findings — the server exempts it, so the
+  // button must too, or the one mode that promises not to stop would stop hardest.
+  const blocked = unresolved > 0 && project.approval_mode !== "unattended";
+  // Whichever gate the run is parked on, if findings are what is holding it there
+  // then this is the screen that has to offer the way out. Rendering the panel only
+  // for the gate kinds that happen to be *about* security left every-phase mode a
+  // dead end: the security gate never fires in that mode, so the reviewer met a
+  // disabled button, a 409, and a hint pointing at a screen they could not reach.
+  const showsFindings = kind === "security" || kind === "ship" || kind === "cost" || blocked;
 
   // The build under review, fetched only for the pass that needs all of it.
   const wantsBuild = kind === "ship" || kind === "cost";
@@ -216,17 +255,57 @@ export default function Decision({
 
       <div className="decision-body">
         {kind === "plan" && <PlanReview project={project} onRedo={aim} />}
-        {(kind === "security" || kind === "phase" || kind === "unchecked") && (
+        {kind === "stack" && (
+          <div className="stack-review">
+            <StackViolations notes={rowFor(project, gatePhase)?.stack_note} />
+            <CharterPanel charter={project.charter} />
+            <SinglePhase project={project} phase={gatePhase} onRedo={aim} />
+          </div>
+        )}
+        {kind === "security" && (
+          <div className="security-review">
+            <SecurityFindings
+              id={id}
+              busy={busy}
+              act={act}
+              onChange={() => setFindingsTick((n) => n + 1)}
+            />
+            <SinglePhase project={project} phase={gatePhase} onRedo={aim} />
+          </div>
+        )}
+        {kind === "plan" && project.charter && (
+          <div className="artifact-pad">
+            <CharterPanel charter={project.charter} />
+          </div>
+        )}
+        {/* The gate is being held by findings but is not one of the surfaces that
+            shows them, so it shows them here. Approving is what would advance the
+            run to a screen that has these controls, and approving is what is
+            blocked — there is no other way through. */}
+        {blocked && kind !== "security" && kind !== "ship" && kind !== "cost" && (
+          <SecurityFindings
+            id={id}
+            busy={busy}
+            act={act}
+            onChange={() => setFindingsTick((n) => n + 1)}
+          />
+        )}
+        {(kind === "phase" || kind === "unchecked") && (
           <SinglePhase project={project} phase={gatePhase} onRedo={aim} />
         )}
         {wantsBuild && (
           <ShipReview
             project={project}
+            id={id}
+            busy={busy}
+            act={act}
             art={art}
             error={artError}
             onRetry={() => setReloads((n) => n + 1)}
             files={files}
             preview={preview}
+            unresolved={unresolved}
+            onFindingsChanged={() => setFindingsTick((n) => n + 1)}
             onRedo={aim}
             onRedoFile={(file) => file.phase && aim(file.phase, file.path)}
           />
@@ -237,13 +316,19 @@ export default function Decision({
         <div className="decision-approve">
           <button
             className="btn btn-lg btn-accent"
-            disabled={busy}
+            disabled={busy || blocked}
             onClick={() => act(() => api.approve(id))}
           >
             {busy && !sending && <span className="btn-spinner" aria-hidden="true" />}
             {Icon.check} {copy.approve}
           </button>
-          <span className="field-hint">{copy.after}</span>
+          <span className="field-hint">
+            {blocked
+              ? `${unresolved} finding${unresolved === 1 ? "" : "s"} at high severity or above ` +
+                (unresolved === 1 ? "still needs" : "still need") +
+                " a decision. Send each one back to be fixed, or waive it with a reason."
+              : copy.after}
+          </span>
         </div>
 
         <div className="decision-send">
@@ -393,7 +478,7 @@ function SinglePhase({
 }
 
 // ── ship: the whole build in one pass ────────────────────────────────────────
-type ShipView = "files" | "mockup" | "security" | "cost";
+type ShipView = "files" | "mockup" | "security" | "cost" | "stack";
 
 /** True when the picture was drawn before the front end it is captioned as showing. */
 function mockupIsStale(project: Project, preview: PreviewState | null): boolean {
@@ -405,20 +490,30 @@ function mockupIsStale(project: Project, preview: PreviewState | null): boolean 
 
 function ShipReview({
   project,
+  id,
+  busy,
+  act,
   art,
   error,
   onRetry,
   files,
   preview,
+  unresolved,
+  onFindingsChanged,
   onRedo,
   onRedoFile,
 }: {
   project: Project;
+  id: string;
+  busy: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
   art: Artifacts | null;
   error: string;
   onRetry: () => void;
   files: PayloadFile[];
   preview: PreviewState | null;
+  unresolved: number;
+  onFindingsChanged: () => void;
   onRedo: (phase: string) => void;
   onRedoFile: (file: PayloadFile) => void;
 }) {
@@ -429,8 +524,19 @@ function ShipReview({
   const views: { key: ShipView; label: string; icon: ReactNode; count?: number }[] = [];
   if (files.length) views.push({ key: "files", label: "Files", icon: Icon.file, count: files.length });
   if (preview?.html) views.push({ key: "mockup", label: "Mockup", icon: Icon.sparkle });
-  if (security) views.push({ key: "security", label: "Security", icon: Icon.alert });
+  if (security)
+    views.push({
+      key: "security",
+      label: "Security",
+      icon: Icon.alert,
+      // The count is what is left to decide, not what was found: a reviewer who has
+      // already settled six of seven should see a 1, not a 7 they have to re-derive.
+      count: unresolved || undefined,
+    });
   if (cost) views.push({ key: "cost", label: "Cost", icon: Icon.list });
+  // Last, because it is the one tab that is context rather than a deliverable —
+  // but present, because a stack nobody can see is a stack nobody can disagree with.
+  views.push({ key: "stack", label: "Stack", icon: Icon.diagram });
 
   const [view, setView] = useState<ShipView>("files");
   const active = views.find((v) => v.key === view) ?? views[0];
@@ -536,12 +642,27 @@ function ShipReview({
           costs as figures — so the phase panel nests here rather than being flattened
           into a wall of prose. */}
       {active?.key === "security" && security && (
-        <PhasePanel
-          phase="security_engineer"
-          row={security}
-          maxHeight={440}
-          onRedo={onRedo}
-        />
+        <div className="artifact-view" style={{ maxHeight: 560 }}>
+          <SecurityFindings id={id} busy={busy} act={act} onChange={onFindingsChanged} />
+          <PhasePanel
+            phase="security_engineer"
+            row={security}
+            maxHeight={380}
+            onRedo={onRedo}
+          />
+        </div>
+      )}
+      {active?.key === "stack" && (
+        <div className="artifact-view" style={{ maxHeight: 440 }}>
+          <div className="artifact-pad">
+            <CharterPanel charter={project.charter} compact />
+            <p className="field-hint" style={{ marginTop: 14 }}>
+              Frozen when the architecture was approved. Every phase after it was written against
+              these choices and checked against them — a contradiction stops the run rather than
+              reaching the archive.
+            </p>
+          </div>
+        </div>
       )}
       {active?.key === "cost" && cost && (
         <PhasePanel phase="cost_estimation" row={cost} maxHeight={440} onRedo={onRedo} />

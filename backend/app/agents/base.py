@@ -25,6 +25,8 @@ from app.core.config import settings
 from app.core.constants import RoutingMode, SchemaStatus
 from app.core.logging import get_logger
 from app.core.reading import json_object
+from app.orchestration.charter import Charter
+from app.orchestration.charter import violations as charter_violations
 from app.router.model_profile import ModelProfile
 from app.router.router import router
 from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text
@@ -68,6 +70,9 @@ class AgentContext:
     memory_context: str = ""
     feedback: Optional[str] = None  # human guidance when a phase is re-run after rejection
     extra_context: str = ""  # e.g. an agent-debate decision injected before a phase
+    #: The technology decisions frozen after the architecture was settled. Printed
+    #: into this agent's system prompt and checked against what it writes.
+    charter: Optional[Charter] = None
 
 
 @dataclass
@@ -84,6 +89,11 @@ class AgentResult:
     #: Every model call this deliverable took, in order. `response` is their sum;
     #: analytics records one event per call, because that is what happened.
     calls: list[LLMResponse] = field(default_factory=list)
+    #: Where this deliverable contradicts the stack charter, after every repair round
+    #: had its chance. Empty is the normal case and the only shippable one — a phase
+    #: that still disagrees with the architecture it was built on stops the run, in
+    #: exactly the way a phase that missed its declared shape does.
+    stack_violations: list[str] = field(default_factory=list)
 
 
 class BaseAgent:
@@ -115,14 +125,14 @@ class BaseAgent:
     # ── public entrypoint ───────────────────────────────────────────────────
     def run(self, ctx: AgentContext) -> AgentResult:
         profile = router.profile_for(
-            ctx.routing_mode, ctx.preferred_model, complexity=self.complexity
+            ctx.routing_mode, ctx.preferred_model, complexity=self.complexity, role=self.key
         )
         ask = self._build_messages(ctx, profile)
         options = GenerationOptions(json_mode=True, json_schema=self.response_schema())
 
         resp = self._complete(ask, ctx, options)
         responses = [resp]
-        output, errors = self._validate(self._parse(resp.text))
+        output, errors = self._check(self._parse(resp.text), ctx)
         best = (output, errors)
 
         rounds = 0
@@ -144,7 +154,7 @@ class BaseAgent:
                 self._repair_messages(ctx, profile, resp.text, errors), ctx, options
             )
             responses.append(resp)
-            output, errors = self._validate(self._parse(resp.text))
+            output, errors = self._check(self._parse(resp.text), ctx)
             # Fewer things wrong wins. Without this the *last* attempt is kept
             # whatever it looks like, so a repair that came back worse than the
             # response it was repairing is what reaches the database and the gates.
@@ -152,21 +162,33 @@ class BaseAgent:
                 best = (output, errors)
 
         output, errors = best
+        # Two different failures, kept apart all the way to the reviewer. "This did
+        # not match its declared shape" and "this contradicts the stack everyone else
+        # is building against" are fixed by different people in different ways, and
+        # the panels downstream say which happened.
+        stack_errors = (
+            charter_violations(ctx.charter, self.key, output)
+            if settings.enforce_stack_charter
+            else []
+        )
+        shape_errors = [e for e in errors if e not in stack_errors]
+
         if errors:
             # Repair stops paying after a round or two, and a local model pays
             # wall-clock for every attempt. Keep the best try — and say so, because
             # the cost and security gates downstream read these keys, and a gate that
             # cannot find them is a gate that silently stops gating.
             log.error(
-                "%s output still does not match its shape after %d repair round(s): %s",
+                "%s output still has %d problem(s) after %d repair round(s): %s",
                 self.title,
+                len(errors),
                 rounds,
                 "; ".join(errors[:3]),
             )
 
         status = (
             SchemaStatus.INVALID.value
-            if errors
+            if shape_errors
             else (SchemaStatus.REPAIRED.value if rounds else SchemaStatus.VALID.value)
         )
         return AgentResult(
@@ -176,10 +198,26 @@ class BaseAgent:
             schema_status=status,
             # The model gets the backticked form in the repair prompt, where they
             # delimit a field name. A person reads this in a sentence on screen.
-            schema_note="; ".join(e.replace("`", "") for e in errors[:3]) or None,
+            schema_note="; ".join(e.replace("`", "") for e in shape_errors[:3]) or None,
             repair_rounds=rounds,
             calls=responses,
+            stack_violations=stack_errors,
         )
+
+    def _check(self, raw: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
+        """Everything wrong with one attempt: its shape, and its stack.
+
+        Both go into the same list because both get the same treatment — one repair
+        round with the problems named — and because they are genuinely one question
+        to the model: *this is not the deliverable that was asked for, here is why.*
+        Running the charter check as a separate pass afterwards would mean an agent
+        that wrote Mongoose under a Postgres charter is only ever told so by a
+        security review three phases later, which is where this started.
+        """
+        output, errors = self._validate(raw)
+        if settings.enforce_stack_charter:
+            errors = errors + charter_violations(ctx.charter, self.key, output)
+        return output, errors
 
     def _complete(
         self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions
@@ -190,15 +228,25 @@ class BaseAgent:
             preferred_model=ctx.preferred_model,
             options=options,
             complexity=self.complexity,
+            role=self.key,
         )
 
     # ── prompt construction ─────────────────────────────────────────────────
-    def system_prompt(self) -> str:
+    def system_prompt(self, charter: Optional[Charter] = None) -> str:
+        """The agent's standing instructions, including the stack it is held to.
+
+        The charter belongs *here* rather than in the user turn, and verbatim rather
+        than summarised. Everything in the user turn is sized against a budget and
+        can be cut to fit; the one instruction that must survive a small window is
+        the one saying which database the rest of the team is building against.
+        """
+        charter_block = charter.prompt_block() if charter else ""
         return (
             f"You are the {self.title} on an AI software engineering team. {self.role}\n\n"
             "You collaborate with other specialist agents; your output is consumed by the "
             "next agent in the pipeline, so be precise, concrete, and complete.\n\n"
-            "Respond with ONLY a single valid JSON object — no prose, no markdown fences — "
+            + (f"{charter_block}\n\n" if charter_block else "")
+            + "Respond with ONLY a single valid JSON object — no prose, no markdown fences — "
             f"matching this shape:\n{self.output_spec}"
         )
 
@@ -210,7 +258,7 @@ class BaseAgent:
     ) -> list[ChatMessage]:
         if profile is None:
             profile = router.profile_for(
-                ctx.routing_mode, ctx.preferred_model, complexity=self.complexity
+                ctx.routing_mode, ctx.preferred_model, complexity=self.complexity, role=self.key
             )
         # Serialised once: the budget pass and the real assembly both read these,
         # and they can be hundreds of kilobytes of generated source apiece.
@@ -221,7 +269,7 @@ class BaseAgent:
         }
         budget = self._section_budgets(ctx, profile, reserve, bodies)
         return [
-            ChatMessage(role="system", content=self.system_prompt()),
+            ChatMessage(role="system", content=self.system_prompt(ctx.charter)),
             ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies)),
         ]
 
@@ -295,11 +343,16 @@ class BaseAgent:
         """
         if profile is None:
             profile = router.profile_for(
-                ctx.routing_mode, ctx.preferred_model, complexity=self.complexity
+                ctx.routing_mode, ctx.preferred_model, complexity=self.complexity, role=self.key
             )
 
         empty = dict.fromkeys(list(_PERSON_SHARE) + list(_CONTEXT_SHARE), 0)
-        overhead = len(self.system_prompt()) + len(self._user_turn(ctx, empty, bodies))
+        # The charter is part of the overhead, not part of the context: it is printed
+        # in full or the phase is not really bound by it, so it is counted here at its
+        # real cost rather than being sized like a section that can be trimmed.
+        overhead = len(self.system_prompt(ctx.charter)) + len(
+            self._user_turn(ctx, empty, bodies)
+        )
         if overhead > profile.prompt_char_budget:
             # Nothing can be trimmed to fix this: the overhead *is* the instructions
             # and the shape they carry. Said out loud, because the alternative is the
@@ -359,8 +412,8 @@ class BaseAgent:
         """
         problems = "\n".join(f"- {e}" for e in errors[:12])
         instruction = (
-            "That response does not match the required shape. Fix exactly these "
-            f"problems:\n{problems}\n\n"
+            "That response is not the deliverable that was asked for. Fix exactly "
+            f"these problems:\n{problems}\n\n"
             "Return the COMPLETE JSON object again — every key from the shape, "
             "not a patch and not an apology. Keep everything that was already correct."
         )

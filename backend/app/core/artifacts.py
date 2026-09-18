@@ -16,7 +16,7 @@ from app.core.constants import PHASE_LABELS, PhaseStatus
 from app.db.models import Project
 
 
-def _iter_files(output: dict) -> Iterator[Tuple[str, str, str]]:
+def iter_files(output: dict) -> Iterator[Tuple[str, str, str]]:
     """Yield (path, content, language) for every file-like item in an agent output."""
     if not isinstance(output, dict):
         return
@@ -67,7 +67,7 @@ def assemble(project: Project) -> dict:
 
     for ph in current_phases(project):
         out = ph.output if isinstance(ph.output, dict) else {}
-        for path, content, lang in _iter_files(out):
+        for path, content, lang in iter_files(out):
             files[path] = {"path": path, "content": content, "language": lang, "phase": ph.phase}
 
         instructions = out.get("setup_instructions")

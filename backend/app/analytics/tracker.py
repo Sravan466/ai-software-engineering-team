@@ -21,8 +21,14 @@ def record(
     project_id: Optional[str] = None,
     phase: Optional[str] = None,
 ) -> UsageEvent:
+    # None means nobody knows what this model costs, which is emphatically not the
+    # same as free. The column keeps 0.0 so every existing sum still works; the flag
+    # beside it is what says whether that zero is a price or a gap.
     cost = estimate_cost(
-        response.model, response.usage.prompt_tokens, response.usage.completion_tokens
+        response.model,
+        response.usage.prompt_tokens,
+        response.usage.completion_tokens,
+        provider=response.provider,
     )
     event = UsageEvent(
         project_id=project_id,
@@ -32,7 +38,8 @@ def record(
         prompt_tokens=response.usage.prompt_tokens,
         completion_tokens=response.usage.completion_tokens,
         total_tokens=response.usage.total_tokens,
-        cost_usd=cost,
+        cost_usd=cost if cost is not None else 0.0,
+        cost_known=cost is not None,
         latency_ms=response.latency_ms,
         fallback_used=response.fallback_used,
     )
@@ -55,18 +62,32 @@ def summary(db: Session, project_id: Optional[str] = None) -> dict:
     fallback_calls = sum(1 for e in events if e.fallback_used)
     avg_latency = round(sum(e.latency_ms for e in events) / calls, 1) if calls else 0.0
 
+    # Calls whose model has no published price. Their `cost_usd` is zero because the
+    # column has to hold a number, not because they were free — so the total below is
+    # a floor, and saying which models it is missing is what stops "$0.00" reading as
+    # "this cost nothing" when it means "nobody priced it".
+    unpriced = [e for e in events if e.cost_known is False]
+
     by_provider: dict[str, dict] = {}
     by_model: dict[str, dict] = {}
     for e in events:
-        p = by_provider.setdefault(e.provider, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+        p = by_provider.setdefault(
+            e.provider, {"calls": 0, "tokens": 0, "cost_usd": 0.0, "unpriced_calls": 0}
+        )
         p["calls"] += 1
         p["tokens"] += e.total_tokens
         p["cost_usd"] = round(p["cost_usd"] + e.cost_usd, 6)
+        if e.cost_known is False:
+            p["unpriced_calls"] += 1
 
-        m = by_model.setdefault(e.model, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+        m = by_model.setdefault(
+            e.model, {"calls": 0, "tokens": 0, "cost_usd": 0.0, "unpriced_calls": 0}
+        )
         m["calls"] += 1
         m["tokens"] += e.total_tokens
         m["cost_usd"] = round(m["cost_usd"] + e.cost_usd, 6)
+        if e.cost_known is False:
+            m["unpriced_calls"] += 1
 
     return {
         "calls": calls,
@@ -76,6 +97,10 @@ def summary(db: Session, project_id: Optional[str] = None) -> dict:
         "fallback_rate": round(fallback_calls / calls, 3) if calls else 0.0,
         "by_provider": by_provider,
         "by_model": by_model,
+        #: How many calls the total above could not price, and on which models. When
+        #: this is non-empty the total is a lower bound, and the UI says so.
+        "unpriced_calls": len(unpriced),
+        "unpriced_models": sorted({e.model for e in unpriced}),
     }
 
 

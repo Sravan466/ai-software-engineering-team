@@ -6,7 +6,7 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError
+from app.router.base import LLMProvider, ProviderError, status_is_retryable
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
 log = get_logger(__name__)
@@ -44,7 +44,9 @@ class OpenAIProvider(LLMProvider):
         options: GenerationOptions,
     ) -> LLMResponse:
         if not self.available():
-            raise ProviderError("OPENAI_API_KEY is not set.")
+            # A key that is absent now will be absent on the retry too; asking
+            # three times only delays the sentence that says to add one.
+            raise ProviderError("OPENAI_API_KEY is not set.", retryable=False)
 
         kwargs: dict = {
             "model": model,
@@ -60,7 +62,9 @@ class OpenAIProvider(LLMProvider):
         try:
             resp = self._get_client().chat.completions.create(**kwargs)
         except Exception as e:  # noqa: BLE001
-            raise ProviderError(f"OpenAI call failed: {e}") from e
+            raise ProviderError(
+                f"OpenAI call failed: {e}", retryable=status_is_retryable(e)
+            ) from e
 
         latency = int((time.perf_counter() - started) * 1000)
         text = resp.choices[0].message.content or ""
