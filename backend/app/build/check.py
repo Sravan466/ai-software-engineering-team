@@ -171,7 +171,8 @@ def aliases_for(files: dict[str, str], side: Optional[str]) -> dict[str, list[st
         paths = options.get("paths")
         if not isinstance(paths, dict):
             continue  # a config without paths does not hide one that has them
-        base = options.get("baseUrl") or options.get("pathsDir") or side
+        # `""` is the project root — a real base, not a missing one.
+        base = next((options[k] for k in ("baseUrl", "pathsDir") if options.get(k) is not None), side)
         out: dict[str, list[str]] = {}
         for key, targets in paths.items():
             if not (isinstance(key, str) and key.endswith("*") and isinstance(targets, list)):
@@ -319,12 +320,22 @@ def _check_python(path: str, content: str, tree: set[str], dirs: set[str]) -> li
 # ── the JavaScript parser ────────────────────────────────────────────────────
 def _paths_for(files: dict[str, str], side: str) -> dict:
     """The same aliases, in the form TypeScript's resolver takes them: relative to the
-    side's own root, which is `baseUrl` in the checker's virtual tree."""
-    prefix_len = len(side) + 1
-    return {
-        f"{prefix}*": [f"{root[prefix_len:]}/*" if len(root) > len(side) else "*" for root in roots]
-        for prefix, roots in aliases_for(files, None if side == "root" else side).items()
-    }
+    side's own root, which is `baseUrl` in the checker's virtual tree.
+
+    A target outside the side (`../shared/*`) is left out: that tree holds only the
+    side's own files, so TypeScript could only find a wrong one there. Whether such an
+    import exists is `_check_js_imports`' question, answered against the whole tree.
+    """
+    out: dict[str, list[str]] = {}
+    for prefix, roots in aliases_for(files, None if side == "root" else side).items():
+        inside = [
+            "*" if root == side else f"{root[len(side) + 1:]}/*"
+            for root in roots
+            if root == side or root.startswith(f"{side}/")
+        ]
+        if inside:
+            out[f"{prefix}*"] = inside
+    return out
 
 
 def _run_js(groups: list[dict]) -> tuple[Optional[list[dict]], Optional[str]]:

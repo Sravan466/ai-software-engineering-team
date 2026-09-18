@@ -415,3 +415,27 @@ def test_a_shared_helper_is_never_marked_client():
         "frontend/lib/utils.js": "import { useEffect, useState } from 'react';\nexport function useDebounce(v) { const [x, set] = useState(v); useEffect(() => set(v), [v]); return x; }\nexport const formatPrice = (n) => `$${n}`;\n",
     }
     assert "frontend/lib/utils.js" not in scaffold_build(tree, None, None, "Shop").rewrites
+
+
+def test_aliases_from_a_root_config_resolve_from_the_root():
+    from app.build.check import _paths_for, aliases_for
+
+    files = {
+        "tsconfig.base.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["frontend/src/*"]}}}',
+        "frontend/tsconfig.json": '{"extends": "../tsconfig.base.json"}',
+    }
+    assert aliases_for(files, "frontend") == {"@/": ["frontend/src"]}
+    del files["tsconfig.base.json"]
+    files["tsconfig.base.json"] = '{"compilerOptions": {"paths": {"@/*": ["frontend/src/*"]}}}'
+    assert aliases_for(files, "frontend") == {"@/": ["frontend/src"]}
+    assert _paths_for(files, "frontend") == {"@/*": ["src/*"]}
+
+
+def test_an_alias_outside_the_side_is_not_handed_to_the_side_checker():
+    from app.build.check import _paths_for
+
+    files = {
+        "frontend/tsconfig.json": '{"compilerOptions": {"baseUrl": ".", "paths": '
+        '{"@shared/*": ["../shared/*"], "@api/*": ["../backend/src/*"], "~/*": ["./*"]}}}',
+    }
+    assert _paths_for(files, "frontend") == {"~/*": ["*"]}
