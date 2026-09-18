@@ -407,3 +407,11 @@ def test_a_qa_test_in_a_real_frontend_folder_stays_there():
     placer.place_all("frontend_engineer", [("src/main.jsx", ""), ("client/api.js", "")])
     placed = [p for p, *_ in placer.place_all("qa_engineer", [("client/api.test.js", "import api from './api'")])]
     assert placed == ["frontend/client/api.test.js"]
+
+
+def test_a_shared_helper_is_never_marked_client():
+    tree = {
+        "frontend/app/page.jsx": "import { formatPrice } from '../lib/utils';\nexport default function Page() { return <p>{formatPrice(1)}</p>; }\n",
+        "frontend/lib/utils.js": "import { useEffect, useState } from 'react';\nexport function useDebounce(v) { const [x, set] = useState(v); useEffect(() => set(v), [v]); return x; }\nexport const formatPrice = (n) => `$${n}`;\n",
+    }
+    assert "frontend/lib/utils.js" not in scaffold_build(tree, None, None, "Shop").rewrites

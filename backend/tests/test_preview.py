@@ -363,3 +363,15 @@ def test_copy_that_mentions_url_is_left_alone():
 def test_copy_that_reads_like_an_attribute_keeps_its_words():
     clean = clean_fragment('<p>Choose from three sizes = small, medium or large.</p><img src="a.jpg" srcset="a.jpg 2x" alt="A">')
     assert "three sizes = small, medium or large." in clean and "srcset" not in clean
+
+
+def test_a_content_element_carrying_the_section_id_keeps_its_tag():
+    from app.preview.plan import SectionPlan
+    from app.preview.sections import unwrap
+
+    section = SectionPlan(id="items", kind="list", label="Items", brief="", collection="items")
+    inner, _ = unwrap('<ul data-section="items" data-list="items"><template><li data-field="name"></li></template></ul>', section)
+    assert inner.startswith('<ul data-list="items">')
+    cta = SectionPlan(id="cta", kind="cta", label="CTA", brief="")
+    inner, _ = unwrap('<a data-section="cta" href="#/signup" class="btn">Join</a>', cta)
+    assert inner == '<a href="#/signup" class="btn">Join</a>'

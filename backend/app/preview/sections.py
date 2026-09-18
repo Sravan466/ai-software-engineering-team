@@ -424,6 +424,8 @@ def repair_in_place(section: SectionPlan, inner: str, site: SitePlan) -> tuple[s
 
 # ── turning a response into a section element ────────────────────────────────
 _PY = re.compile(r"(?:^|\s)(?:sm:|md:|lg:|xl:)?(?:py|pt|pb)-\S+")
+#: Tags that only ever wrap a section's content; anything else is content itself.
+_CONTAINERS = ("section", "header", "footer", "div", "nav", "main", "article")
 #: What makes an element the section itself — owned by the platform's wrapper.
 _IDENTITY = ("data-section", "data-label", "data-kind", "data-collection", "class")
 #: Attributes the runtime acts on. An element carrying one is never just a wrapper.
@@ -452,6 +454,12 @@ def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
             kept = H.without_attrs(attrs, [a for a in _IDENTITY if a != "class"])
             return H.wrap("nav", kept, inner), ""
         if H.attr(attrs, "data-section") is not None:
+            if tag not in _CONTAINERS:
+                # A <ul> or an <a> that happens to carry the section id is content:
+                # its tag is what makes its children valid and its link a link. Only
+                # the identity comes off; the platform's wrapper carries that.
+                kept = H.without_attrs(attrs, [a for a in _IDENTITY if a != "class"])
+                return H.wrap(tag, kept, inner), ""
             # The element the model was asked for: the platform draws that wrapper
             # itself. A binding it carried — `data-form` on the section — moves onto an
             # element inside it, with everything that belongs to the binding
@@ -465,7 +473,7 @@ def unwrap(fragment: str, section: SectionPlan) -> tuple[str, str]:
             return inner.strip(), classes
         # An outer element that *is* a binding — the `data-list` grid itself — is
         # content, not a wrapper; unwrapping it took the binding with it.
-        if not bindings and tag in ("section", "header", "footer", "div", "nav", "main", "article"):
+        if not bindings and tag in _CONTAINERS:
             return inner.strip(), classes
     return fragment.strip(), ""
 

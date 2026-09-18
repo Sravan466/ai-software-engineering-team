@@ -257,16 +257,18 @@ _HOOK = re.compile(
 _HANDLER = re.compile(r"\son[A-Z]\w*=\{")
 _DIRECTIVE = re.compile(r"""^\s*(?:(?://[^\n]*\n|/\*[\s\S]*?\*/)\s*)*['"]use (client|server)['"]""")
 _METADATA = re.compile(r"\bexport\s+(const\s+metadata\b|async\s+function\s+generateMetadata\b|function\s+generateMetadata\b)")
+_RENDERS_JSX = re.compile(r"return\s*\(?\s*<[A-Za-z>]|=>\s*\(?\s*<[A-Za-z>]")
 _LINK_A = re.compile(r"<Link\b([^>]*)>\s*<a\b([^>]*)>([\s\S]*?)</a>\s*</Link>")
 
 
 def _client_directive(rel: str, content: str, app_router: bool) -> Optional[str]:
-    """`"use client"` on a module the app router would render on the server.
+    """`"use client"` on a component the app router would render on the server.
 
     Any folder, not only `components/`: a real run's `app/page.tsx` imported a
     `pages/RecipeList.jsx` that used state, and `next build` failed on it. The
-    directive is inert where the pages router renders a file, so adding it wherever
-    state or handlers appear costs nothing and removes the whole class of failure.
+    directive is inert where the pages router renders a file. It goes only on modules
+    that render JSX — never on a shared helper, whose other exports a Server Component
+    may still import.
     """
     if not app_router or not rel.endswith(_JS_EXT) or _is_test(rel):
         return None
@@ -279,6 +281,12 @@ def _client_directive(rel: str, content: str, app_router: bool) -> Optional[str]
     if re.search(r"export\s+default\s+async\s+function|export\s+default\s+async\s*\(", content):
         return None
     if _DIRECTIVE.match(content) or _METADATA.search(content):
+        return None
+    # Components only. A helper module (`lib/utils.js` exporting a hook beside a
+    # plain `formatPrice`) must stay importable from a Server Component, and marking
+    # it client would turn every export into a client reference. A client component
+    # importing it pulls it into the client graph without the directive anyway.
+    if not (rel.endswith((".jsx", ".tsx")) or _RENDERS_JSX.search(content)):
         return None
     client_only = any(
         spec in _CLIENT_ONLY or pkg.npm_package(spec) in _CLIENT_ONLY for spec in js_imports(content)
