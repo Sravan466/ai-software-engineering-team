@@ -179,7 +179,9 @@ def place(
         for side, aliases in ((FRONTEND, _FRONTEND_ROOTS), (BACKEND, _BACKEND_ROOTS)):
             # A QA agent's `client/` is its name for the frontend's root — unless the
             # frontend really has a `client/` folder, in which case the test is in it.
-            if rest and lowered in aliases and lowered not in folders.get(side, frozenset()):
+            if rest and lowered in aliases:
+                if lowered in folders.get(side, frozenset()):
+                    return f"{side}/{p}"
                 return f"{side}/{rest}"
         side = side_of_test(p, content, backend_language)
         return f"{side}/{p}"

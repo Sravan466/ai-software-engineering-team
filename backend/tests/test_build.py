@@ -399,3 +399,11 @@ def test_tooling_config_and_the_other_sides_folders_do_not_block_a_rename():
         "frontend/src/main.jsx", "frontend/src/App.jsx", "frontend/index.html",
         "frontend/tailwind.config.js", "backend/index.js",
     ]
+
+
+def test_a_qa_test_in_a_real_frontend_folder_stays_there():
+    placer = layout.Placer("javascript")
+    placer.place_all("backend_engineer", [("index.js", "")])
+    placer.place_all("frontend_engineer", [("src/main.jsx", ""), ("client/api.js", "")])
+    placed = [p for p, *_ in placer.place_all("qa_engineer", [("client/api.test.js", "import api from './api'")])]
+    assert placed == ["frontend/client/api.test.js"]

@@ -358,3 +358,8 @@ def test_the_header_keeps_its_navigation_landmark():
 def test_copy_that_mentions_url_is_left_alone():
     clean = clean_fragment('<p style="background:url(https://x/y.png)">Paste the url(s) of your feeds.</p>')
     assert "Paste the url(s) of your feeds." in clean and "https://x" not in clean
+
+
+def test_copy_that_reads_like_an_attribute_keeps_its_words():
+    clean = clean_fragment('<p>Choose from three sizes = small, medium or large.</p><img src="a.jpg" srcset="a.jpg 2x" alt="A">')
+    assert "three sizes = small, medium or large." in clean and "srcset" not in clean

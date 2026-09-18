@@ -210,10 +210,21 @@ def _attributes(attrs: str) -> List[Tuple[str, str]]:
     return [(m.group(1), m.group(0)) for m in _ATTR.finditer(attrs or "")]
 
 
+#: Attributes that ask the network for a picture, which the platform cannot redraw.
+_MEDIA_ATTRS = frozenset({"srcset", "sizes", "poster"})
+
+
+def _dropped(attr_name: str) -> bool:
+    lowered = attr_name.lower()
+    return lowered.startswith("on") or lowered in _MEDIA_ATTRS
+
+
 def _without_handlers(match: "re.Match") -> str:
+    """A start tag without event handlers or network-picture attributes."""
     name, attrs, closing = match.group(1), match.group(2), match.group(3)
-    kept = [raw for attr_name, raw in _attributes(attrs) if not attr_name.lower().startswith("on")]
-    if len(kept) == len(_attributes(attrs)):
+    parsed = _attributes(attrs)
+    kept = [raw for attr_name, raw in parsed if not _dropped(attr_name)]
+    if len(kept) == len(parsed):
         return match.group(0)
     return f"<{name}{''.join(' ' + raw for raw in kept)}{' /' if closing else ''}>"
 
@@ -230,7 +241,6 @@ _FORM_ACTION = re.compile(r"""(<form\b[^>]*?)\s+(action|method|target)\s*=\s*("[
 #: Every other way a fragment can ask the network for a picture. Each is a guess at a
 #: URL, and a guess that 404s is a console error on load — <img src> is redrawn by
 #: the platform; these have no platform version, so they go.
-_SRCSET = re.compile(r"""\s+(srcset|sizes|poster)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
 #: Video and audio go whole — there is no platform version of either. A <picture>
 #: loses only its wrapper and its <source>s: the <img> inside is its fallback, and the
 #: platform redraws that like any other.
@@ -261,7 +271,6 @@ def clean_fragment(text: str) -> str:
     t = re.sub(_TAG, _without_handlers, t, flags=re.DOTALL)
     t = _JS_URL.sub(r'\1="#"', t)
     t = _MEDIA.sub("", t)
-    t = _SRCSET.sub("", t)
     # Only inside a style attribute: "Paste the url(s) of your feeds" is copy.
     t = re.sub(
         r"""(\sstyle\s*=\s*)(["'])(.*?)\2""",
