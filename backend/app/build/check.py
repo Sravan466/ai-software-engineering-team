@@ -433,7 +433,7 @@ def phase_tree(
     an earlier phase wrote, and at the scaffold the platform will add — a layout
     importing `./globals.css` is fine when the platform is about to write it.
     """
-    from app.build.scaffold import build as scaffold_build
+    from app.build.scaffold import build as scaffold_build, platform_owned, superseded
     from app.core.artifacts import iter_files
     from app.core.constants import PHASE_ORDER
 
@@ -457,6 +457,9 @@ def phase_tree(
     scaffold = scaffold_build(files, charter, design if isinstance(design, dict) else None)
     # What the scaffold writes replaces the agent's copy, here as in the archive — the
     # check has to resolve imports against the config that will actually ship.
+    written = scaffold.paths()
+    for path in [p for p in files if platform_owned(p) and superseded(p, written)]:
+        del files[path]
     for f in scaffold.files:
         files[f.path] = f.content
     return files, mine

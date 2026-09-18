@@ -50,6 +50,41 @@ def platform_owned(path: str) -> bool:
     return bool(_OWNED_ROOT.match(p))
 
 
+#: Files that are one file under several names. When the platform writes one of a
+#: family, an agent's other spelling beside it is not an extra file but a second,
+#: contradicting copy — a tsconfig.json beside the platform's jsconfig.json makes
+#: `next build` demand TypeScript, and two next.configs leave Next to pick one.
+_FAMILIES = (
+    re.compile(r"^[tj]sconfig\.json$"),
+    re.compile(r"^next\.config\.[cm]?[jt]s$"),
+    re.compile(r"^tailwind\.config\.[cm]?[jt]s$"),
+    re.compile(r"^postcss\.config\.[cm]?[jt]s$"),
+    re.compile(r"^vite\.config\.[cm]?[jt]s$"),
+    re.compile(r"^jest\.config\.[cm]?[jt]s$"),
+    re.compile(r"^(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|package\.json)$"),
+)
+
+
+def superseded(path: str, written: set[str]) -> bool:
+    """Whether an agent's copy of `path` is replaced by what the platform wrote.
+
+    True for the path the scaffold wrote itself, and for any other name in the same
+    family in the same folder — the platform's manifest replaces the lockfile beside
+    it, its jsconfig replaces a tsconfig. A platform-owned file the scaffold did not
+    touch at all (a Vite project's jest.config) is the only copy there is, and stays.
+    """
+    p = layout.clean(path)
+    if p in written:
+        return True
+    folder, _, name = p.rpartition("/")
+    for family in _FAMILIES:
+        if family.match(name) and any(
+            w.rpartition("/")[0] == folder and family.match(w.rpartition("/")[2]) for w in written
+        ):
+            return True
+    return False
+
+
 @dataclass
 class ScaffoldFile:
     path: str

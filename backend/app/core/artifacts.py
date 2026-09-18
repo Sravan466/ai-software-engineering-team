@@ -18,13 +18,12 @@ import re
 import zipfile
 from typing import Iterator, Optional, Tuple
 
-from app.core.constants import CODE_PHASES, PHASE_LABELS, BuildStatus, PhaseStatus
+from app.core.constants import CODE_PHASES, PHASE_LABELS, PHASE_ORDER, BuildStatus, PhaseStatus
 from app.db.models import Project
 
 #: The phase name the platform's own files are attributed to.
 PLATFORM = "platform"
 
-_LOCKFILE = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$")
 
 
 def iter_files(output: dict) -> Iterator[Tuple[str, str, str]]:
@@ -122,7 +121,7 @@ def _language(path: str, given: str) -> str:
 def assemble(project: Project) -> dict:
     """Collapse the current attempt at each phase into a placed, scaffolded build."""
     from app.build import layout
-    from app.build.scaffold import build as scaffold_build, platform_owned
+    from app.build.scaffold import build as scaffold_build, platform_owned, superseded
     from app.orchestration.charter import Charter
 
     charter = Charter.from_dict(project.charter)
@@ -134,7 +133,11 @@ def assemble(project: Project) -> dict:
     design: Optional[dict] = None
     replaced: list[str] = []
 
-    phases = current_phases(project)
+    # Placed in pipeline order, not the order the rows were written: QA's tests follow
+    # the folders the Frontend phase was placed in, and a Frontend re-run is newer
+    # than the QA it came before. The compile check places them the same way.
+    order = {p.value: i for i, p in enumerate(PHASE_ORDER)}
+    phases = sorted(current_phases(project), key=lambda ph: order.get(ph.phase, len(order)))
     placer = layout.Placer(backend_language)
     for ph in phases:
         out = ph.output if isinstance(ph.output, dict) else {}
@@ -191,15 +194,15 @@ def assemble(project: Project) -> dict:
             "notes": [f.purpose]
             + (["Replaces the copy an agent wrote — the platform owns this file."] if existing else []),
         }
-    # An agent's lockfile beside a manifest the platform rewrote pins what the manifest
-    # no longer says, so it goes with it. Nothing else the platform merely *claims* is
-    # dropped: a file the scaffold did not write — a Vite project's tsconfig, a
-    # backend's own migrate.py — is the only copy there is, and deleting it would
-    # lose it from the archive while reporting it as replaced.
+    # An agent's lockfile beside a manifest the platform rewrote, or its tsconfig
+    # beside the platform's jsconfig, is a second copy that contradicts the first, so
+    # it goes. Nothing else the platform merely *claims* is dropped: a file the
+    # scaffold did not write — a Vite project's jest.config, a backend's own
+    # migrate.py — is the only copy there is, and deleting it would lose it from the
+    # archive while reporting it as replaced.
     written = scaffold.paths()
     for path in [p for p, f in files.items() if f["phase"] != PLATFORM and platform_owned(p)]:
-        folder = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
-        if _LOCKFILE.search(path) and f"{folder}package.json" in written:
+        if superseded(path, written):
             replaced.append(path)
             del files[path]
 

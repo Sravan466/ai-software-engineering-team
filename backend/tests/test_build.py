@@ -277,3 +277,14 @@ def test_an_alias_resolves_only_the_way_the_generated_config_says():
     # The app lives under src/, so the scaffold maps @/ to ./src/* — and there is no
     # src/components/Header. `next build` would say "Module not found"; so does this.
     assert any(p.kind == "import" and "@/components/Header" in p.message for p in result.problems)
+
+
+def test_an_agents_other_spelling_of_a_platform_file_is_replaced_too():
+    from app.build.scaffold import superseded
+
+    written = {"frontend/jsconfig.json", "frontend/next.config.js", "frontend/package.json"}
+    assert superseded("frontend/tsconfig.json", written)  # the other name for the same file
+    assert superseded("frontend/next.config.mjs", written)
+    assert superseded("frontend/yarn.lock", written)  # pins what the manifest no longer says
+    assert not superseded("frontend/jest.config.js", written)  # nothing replaces it
+    assert not superseded("backend/tsconfig.json", written)  # another folder, another project
