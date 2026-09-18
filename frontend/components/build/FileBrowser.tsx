@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactElement, type ReactNode } from "react";
 import CodeBlock from "@/components/preview/CodeBlock";
 import { Icon } from "@/components/shell/icons";
 import { fileSummary, type PayloadFile } from "./payload";
+import { withCode } from "./BuildProblems";
 
 /**
  * A file tree beside the file's contents — the thing the approval gate was missing.
@@ -12,6 +13,11 @@ import { fileSummary, type PayloadFile } from "./payload";
  * flat list of forty paths is technically possible and practically nobody does it, so
  * paths are folded back into directories and the deepest common prefix is opened by
  * default: the reviewer lands on real code, not on a closed root folder.
+ *
+ * Two marks in the tree, both quiet until they matter: a file that still does not
+ * compile carries a red dot, and a file the platform wrote rather than an agent says
+ * so — it is boilerplate derived from the build, with nobody to send it back to.
+ * Opening either shows why, above the code.
  */
 
 type Node = {
@@ -76,10 +82,15 @@ export default function FileBrowser({
 }) {
   const tree = useMemo(() => buildTree(files), [files]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState(files[0]?.path ?? "");
+  // Open on the first file with a problem, when there is one: that is the file the
+  // reviewer is here to read.
+  const [selected, setSelected] = useState(
+    () => (files.find((f) => f.problems?.length) ?? files[0])?.path ?? "",
+  );
 
   const current = files.find((f) => f.path === selected) ?? files[0];
   if (!current) return null;
+  const broken = files.filter((f) => f.problems?.length).length;
 
   const toggle = (path: string) =>
     setCollapsed((prev) => {
@@ -127,7 +138,14 @@ export default function FileBrowser({
           onClick={() => setSelected(node.path)}
           title={node.path}
         >
+          {node.file?.problems?.length ? (
+            <span className="dot dot-bad" aria-hidden="true" />
+          ) : null}
           <span className="tree-name">{node.name}</span>
+          {node.file?.problems?.length ? (
+            <span className="sr-only"> — does not compile</span>
+          ) : null}
+          {node.file?.platform ? <span className="tree-tag">platform</span> : null}
           <span className="tree-lines">{node.file?.lines}</span>
         </button>,
       );
@@ -139,7 +157,10 @@ export default function FileBrowser({
     <div className="files">
       <div className="files-tree">
         <div className="files-tree-head">
-          <span className="label">{fileSummary(files)}</span>
+          <span className="label">
+            {fileSummary(files)}
+            {broken ? ` · ${broken} don't compile` : ""}
+          </span>
           <button
             className="btn btn-sm btn-ghost"
             onClick={() =>
@@ -158,12 +179,38 @@ export default function FileBrowser({
         <div className="code-pane-head">
           <span className="mono file-path">{current.path}</span>
           <span className="file-facts">
+            {current.platform && <span className="badge">Written by the platform</span>}
             <span className="badge badge-mono">{current.language || "code"}</span>
             <span className="mono dim">{current.lines} lines</span>
             {renderAction?.(current)}
           </span>
         </div>
-        <CodeBlock code={current.content} path={current.path} tag={current.language} />
+        {current.problems?.length ? (
+          <ul className="file-strip file-strip-bad" aria-label="Compile problems">
+            {current.problems.map((p, i) => (
+              <li key={i}>
+                {Icon.alert}
+                <span>
+                  {p.line ? <span className="mono">line {p.line} · </span> : null}
+                  {withCode(p.message)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {current.notes?.length ? (
+          <ul className="file-strip" aria-label="About this file">
+            {current.notes.map((note, i) => (
+              <li key={i}>
+                {Icon.info}
+                <span>{withCode(note)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="files-code-body">
+          <CodeBlock code={current.content} path={current.path} tag={current.language} />
+        </div>
       </div>
     </div>
   );

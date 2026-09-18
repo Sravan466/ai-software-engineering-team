@@ -541,6 +541,167 @@
 }
 .prev-frame iframe { width: 100%; height: 600px; border: 0; display: block; background: #fff; }
 
+/* The prototype's pages, beside its address bar: the frame is a browser around a
+   site now, and these are its tabs. Quiet until current, like the app's own tabs. */
+.prev-pages { display: flex; gap: 2px; flex: none; max-width: 55%; overflow-x: auto; scrollbar-width: none; }
+.prev-pages::-webkit-scrollbar { display: none; }
+.prev-page {
+  flex: none;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--tr), color var(--tr);
+}
+.prev-page:hover { color: var(--ink); background: var(--bg); }
+.prev-page[aria-current="page"] { color: var(--ink); background: var(--bg); box-shadow: var(--shadow-1); }
+.prev-page:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 720px) {
+  .prev-chrome { flex-wrap: wrap; }
+  .prev-pages { max-width: 100%; order: 3; width: 100%; }
+}
+@media (hover: none) {
+  .prev-page { min-height: 40px; padding: 0 14px; }
+}
+
+.mk-stack { display: flex; flex-direction: column; gap: 14px; }
+
+/* ── a build in flight ── */
+.mk-build {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: var(--r-lg);
+  border: 1px solid rgba(34, 184, 207, 0.32);
+  background: linear-gradient(180deg, var(--run-soft), transparent 70%), var(--bg-panel);
+  animation: rise var(--tr) ease both;
+}
+.mk-build-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mk-build-title { font-size: var(--t-base); font-weight: 600; color: var(--ink); }
+.mk-build-time { font-size: var(--t-xs); color: var(--run); }
+.mk-build-detail { margin: 0; font-size: var(--t-sm); color: var(--ink-2); line-height: 1.55; max-width: 72ch; }
+
+/* The passes, left to right. The current step is the only thing that moves. */
+.mk-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mk-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--ink-3);
+  font-size: var(--t-sm);
+  transition: border-color var(--tr-slow), color var(--tr-slow), background var(--tr-slow);
+}
+.mk-step-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mk-step-count { font-size: var(--t-xs); color: var(--ink-3); }
+.mk-step-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-3);
+}
+.mk-step-mark svg { width: 10px; height: 10px; }
+.mk-step[data-state="done"] { color: var(--ink-2); }
+.mk-step[data-state="done"] .mk-step-mark { border-color: var(--ok); background: var(--ok); color: var(--bg); }
+.mk-step[data-state="active"] { color: var(--ink); border-color: rgba(34, 184, 207, 0.45); background: var(--run-soft); }
+.mk-step[data-state="active"] .mk-step-mark { border-color: var(--run); border-top-color: transparent; animation: spin 0.9s linear infinite; }
+.mk-step[data-state="active"] .mk-step-count { color: var(--run); }
+@media (max-width: 720px) {
+  .mk-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.mk-meter { height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.mk-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--run); transform-origin: left center; transition: transform var(--tr-slow); }
+
+/* ── what the build found ── */
+.mk-report { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-panel); }
+.mk-report > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: var(--r-lg);
+}
+.mk-report > summary::-webkit-details-marker { display: none; }
+.mk-report > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mk-facts { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; flex: 1; min-width: 0; font-size: var(--t-sm); color: var(--ink-3); }
+.mk-facts b { color: var(--ink); font-weight: 600; }
+.mk-facts .mono { font-size: var(--t-xs); }
+.mk-facts .badge svg { width: 12px; height: 12px; }
+.mk-report-more { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: var(--t-xs); color: var(--ink-3); }
+.mk-chev { display: inline-grid; place-items: center; transition: transform var(--tr); }
+.mk-chev svg { width: 12px; height: 12px; }
+.mk-report[open] .mk-chev { transform: rotate(90deg); }
+.mk-report > summary:hover .mk-report-more { color: var(--ink); }
+.mk-report-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 22px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+}
+@media (max-width: 820px) { .mk-report-body { grid-template-columns: 1fr; } }
+.mk-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.mk-col .label { margin: 0; }
+.mk-checks { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; list-style: none; font-size: var(--t-sm); color: var(--ink-2); }
+.mk-checks li { display: flex; gap: 8px; align-items: flex-start; line-height: 1.45; }
+.mk-check-mark { display: inline-grid; place-items: center; flex: none; margin-top: 2px; color: var(--ink-3); }
+.mk-check-mark svg { width: 13px; height: 13px; }
+.mk-checks li[data-ok="true"] .mk-check-mark { color: var(--ok); }
+.mk-checks li[data-ok="false"] { color: var(--ink); }
+.mk-checks li[data-ok="false"] .mk-check-mark { color: var(--bad); }
+.mk-check-detail { color: var(--ink-3); font-size: var(--t-xs); }
+.mk-passes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin: 0; }
+.mk-passes div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mk-passes dt { font-size: var(--t-xs); color: var(--ink-3); }
+.mk-passes dd { margin: 0; font-size: var(--t-sm); color: var(--ink); overflow-wrap: anywhere; }
+.mk-passes dd.mono { font-size: var(--t-xs); }
+.mk-sections { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 0; padding: 0; list-style: none; }
+.mk-sections li { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: var(--t-sm); }
+.mk-section-name { color: var(--ink); }
+
+/* ── editing one section ── */
+.mk-edit { border-color: var(--accent-line); background: var(--warn-soft); }
+.mk-edit-name { font-size: var(--t-base); font-weight: 600; }
+.mk-edit-row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.mk-edit-field { flex: 1; min-width: 240px; }
+
+/* Sections, by the page they are on — a map of the site as much as a picker. */
+.mk-groups { display: flex; flex-direction: column; gap: 10px; }
+.mk-group { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.mk-group-title { font-size: var(--t-xs); color: var(--ink-3); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mk-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.mk-chip { cursor: pointer; font-family: var(--sans); transition: border-color var(--tr), color var(--tr); }
+.mk-chip:hover { color: var(--ink); border-color: var(--line-3); }
+.mk-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 560px) { .mk-group { grid-template-columns: 1fr; gap: 6px; } }
+@media (hover: none) { .mk-chip { min-height: 40px; padding: 0 14px; } }
+
 .code-pane-head {
   display: flex;
   align-items: center;

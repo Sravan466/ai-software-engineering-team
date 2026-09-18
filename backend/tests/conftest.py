@@ -15,6 +15,13 @@ _tmp = tempfile.mkdtemp(prefix="aiteam_test_")
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DEFAULT_ROUTING_MODE"] = "local_only"
 os.environ["ENABLE_DEBATE"] = "true"
+# The compile gate never installs anything from a test. If this checkout's frontend
+# has TypeScript installed, the gate reads JavaScript with it; otherwise JavaScript is
+# reported unchecked and the tests that need a parser skip themselves.
+os.environ["BUILD_CHECK_PROVISION"] = "false"
+_frontend = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+if os.path.isfile(os.path.join(_frontend, "node_modules", "typescript", "package.json")):
+    os.environ["BUILD_TOOLCHAIN_DIR"] = os.path.abspath(_frontend)
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

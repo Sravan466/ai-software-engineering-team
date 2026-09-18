@@ -75,10 +75,53 @@ order, so a failing backend never stalls a run:
 The **local Ollama model is always appended last** as the safety net. Every call's tokens,
 cost, latency, and whether a fallback was used are recorded as a `UsageEvent`.
 
+## The mockup: a build, not a document (`preview/`)
+
+The Frontend phase's picture of the product is built in six passes, each sized from the
+probed window of the model that answers it — no model name, window or token budget is
+written down anywhere in `preview/`:
+
+| pass | module | does |
+|---|---|---|
+| design | `design.py` | one call picks palette, type pairing, radius, shadow, density, voice → CSS tokens and a Tailwind config that also remaps `gray`/`blue` to the brand |
+| plan | `plan.py` | routes, their sections and typed collections, from the PM features, FE pages and System Design data model; normalised so there is always >1 page, a list that filters/sorts and a form that stores |
+| seed | `seed.py` | realistic records per collection, coerced to each field's type |
+| sections | `sections.py` | one call per section, checked against its kind's `data-*` contract, repaired once, replaced by `templates.py` if still broken |
+| runtime | `runtime.js` | the platform's router, store, forms, filters, sort, modals and toasts — inlined, never model-written |
+| verify | `verify.py` | structural checks on the assembled site, plus a headless render when Playwright is installed |
+
+A build runs on its own thread (`jobs.py`) and reports its pass and section count to
+`GET /preview`; `POST /preview/generate` returns at once. Edits to a site are checked
+against the same contract and refused (422) if they would break a section's bindings.
+
+## The build: scaffold + compile gate (`build/`)
+
+- `layout.py` places each agent's file: backend code under `backend/`, frontend under
+  `frontend/`, tests by the side they test, infrastructure at the root.
+- `scaffold.py` writes the boilerplate from the stack charter and the imports agents
+  actually wrote — `package.json` (npm workspaces at the root), `tsconfig`/`jsconfig`,
+  `next.config`, `tailwind.config`, `postcss.config`, `.env.example`, `requirements.txt`,
+  a SQL migration runner and an initial migration from the data model — and fixes the
+  mechanical Next.js failures (`"use client"`, `<Link><a>`, missing stylesheets).
+- `check.py` compiles each code phase in the context of the build so far: Python's
+  parser, TypeScript's for JS/TS/JSX (`check_js.cjs`, parser fetched by `toolchain.py`),
+  and import resolution against the tree and the platform's package list. Problems join
+  the agent's repair round; what survives is `PhaseResult.build_status/build_note`, and a
+  build that still does not compile stops at a `build` gate instead of `ship`.
+
+## Evaluation harness
+
+`python -m scripts.eval_harness` runs fixed ideas unattended and scores each build with
+`evals/scorecard.py`: schema conformance, charter violations, file and byte counts,
+whether it compiles, the mockup's pages/sections/checks, and console errors. Results
+land in `data/evals/<timestamp>.json`, so a prompt change is measured against the last run.
+
 ## Data model (SQLAlchemy)
 
 - `Project` — the build and its pipeline status.
-- `PhaseResult` — one agent's output + approval state (multiple rows per phase if re-run).
+- `PhaseResult` — one agent's output + approval state (multiple rows per phase if re-run),
+  and whether it matched its shape, the stack charter, and compiled.
+- `PreviewRevision` — one version of the mockup; a built one carries its build `report`.
 - `DebateRecord` — a recorded agent debate and verdict.
 - `UsageEvent` — one LLM call's usage/cost (powers analytics).
 - `KnowledgeDoc` — metadata for an uploaded RAG document (chunks live in ChromaDB).

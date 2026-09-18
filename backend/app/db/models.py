@@ -195,6 +195,14 @@ class PhaseResult(Base):
     stack_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     stack_note: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Whether this phase's generated code parses and resolves — see `BuildStatus` —
+    # and, when it does not, the problems as `[{path, line, message}]`. A third fact
+    # beside the two above: a deliverable can match its shape and agree with the
+    # stack and still not compile. Nullable for rows written before the check, and
+    # for phases that write no code at all.
+    build_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    build_note: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="phases")
@@ -224,6 +232,12 @@ class PreviewRevision(Base):
     # Which model produced this revision (after routing/fallback).
     model_used: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     provider_used: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
+    # What building this revision found: pages, sections and how each was produced
+    # (generated, repaired, or the platform's template), the checks run on the
+    # assembled site and their results. Null for single-document mockups drawn
+    # before the site builder, and for edits — an edit carries its parent's report.
+    report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

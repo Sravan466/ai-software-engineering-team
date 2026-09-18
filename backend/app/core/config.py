@@ -125,6 +125,37 @@ class Settings(BaseSettings):
     #: straight to the gate instead.
     security_remediation_rounds: BlankTolerantInt(1) = 1
 
+    # ── Mockup (the clickable site drawn from the design) ──
+    # Counts, not budgets: how *big* each call may be is always derived from the
+    # probed window of the model answering it. These say how much site to build.
+    #: Pages in a generated mockup. Each page costs one model call per section.
+    preview_max_routes: BlankTolerantInt(4) = 4
+    #: Sections per page, not counting the shared header and footer.
+    preview_max_sections_per_route: BlankTolerantInt(4) = 4
+    #: Sample records per collection — lowered automatically when the chosen model's
+    #: output budget cannot hold that many in one reply.
+    preview_seed_rows: BlankTolerantInt(8) = 8
+    #: Section calls run side by side on a cloud provider. A local runtime always
+    #: runs one at a time: it serves one request at once and the rest just queue.
+    preview_concurrency: BlankTolerantInt(3) = 3
+    #: Load the finished mockup in a headless browser and count console errors.
+    #: Only takes effect when Playwright is installed in the backend environment.
+    preview_render_check: bool = True
+
+    # ── Scaffold + compile gate (the generated code has to build) ──
+    #: Whether a code phase whose files do not parse, or import things that do not
+    #: exist, is sent back with the errors — and whether a build that still does not
+    #: compile is stopped at the Ship gate instead of being labelled finished.
+    enforce_build_check: bool = True
+    #: Where the compile gate keeps its own toolchain (the TypeScript parser it uses
+    #: to read JavaScript and TypeScript). cwd-relative, like the database.
+    build_toolchain_dir: str = "./data/toolchain"
+    #: Install that toolchain with npm on first use when it is missing. Off means
+    #: JavaScript files are reported as unchecked rather than checked.
+    build_check_provision: bool = True
+    #: Seconds one compile check may take before it is reported as unchecked.
+    build_check_timeout_seconds: BlankTolerantInt(90) = 90
+
     # ── Cloud providers ──
     anthropic_api_key: Optional[str] = None
     anthropic_default_model: str = "claude-opus-4-8"

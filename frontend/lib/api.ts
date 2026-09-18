@@ -40,6 +40,26 @@ export type PhaseResult = {
   stack_status: "ok" | "violated" | null;
   /** Each contradiction, in the words the agent was sent back with. */
   stack_note: string[] | null;
+
+  /**
+   * Does this phase's code compile? A third answer beside shape and stack: code can
+   * match its shape and agree with the stack and still not parse. `null` for phases
+   * that write no code, and for rows from before the check existed.
+   */
+  build_status: "ok" | "failed" | "unchecked" | null;
+  /** What still does not compile, after the one repair round. */
+  build_note: BuildProblem[] | null;
+};
+
+/** One reason a generated file does not compile. */
+export type BuildProblem = {
+  path: string;
+  line: number | null;
+  /** syntax | reference | import | package */
+  kind: string;
+  message: string;
+  /** Set when gathered across phases: the agent that wrote the file. */
+  phase?: string;
 };
 
 /** One security finding, and what has actually been done about it. */
@@ -73,7 +93,8 @@ export type GateKind =
   | "cost"
   | "phase"
   | "unchecked"
-  | "stack";
+  | "stack"
+  | "build";
 
 /**
  * One technology decision the whole crew is held to.
@@ -282,12 +303,9 @@ export const api = {
 
   // ── Visual preview (render + select-to-edit) ──
   getPreview: (id: string) => req<PreviewState>(`/api/projects/${id}/preview`),
+  // Starts the build and returns at once; `getPreview` reports how far it has got.
   generatePreview: (id: string) =>
-    req<PreviewState>(
-      `/api/projects/${id}/preview/generate`,
-      { method: "POST" },
-      LLM_TIMEOUT_MS
-    ),
+    req<PreviewState>(`/api/projects/${id}/preview/generate`, { method: "POST" }),
   editPreviewSection: (id: string, section_id: string, instruction: string) =>
     req<PreviewState>(
       `/api/projects/${id}/preview/edit`,
@@ -504,7 +522,60 @@ export type PullProgress = {
   error?: string;
 };
 
-export type PreviewSection = { id: string; label: string };
+export type PreviewSection = {
+  id: string;
+  label: string;
+  /** The page it is on; null for the shared header/footer and for older mockups. */
+  route?: string | null;
+  kind?: string | null;
+};
+export type PreviewRoute = { path: string; title: string };
+
+/** A mockup build in flight — or the last one, if it failed. */
+export type PreviewJob = {
+  stage: "queued" | "design" | "plan" | "seed" | "sections" | "verify" | "done" | "failed";
+  label: string;
+  done: number;
+  total: number;
+  detail: string;
+  error: string | null;
+  running: boolean;
+  /** "pipeline" when the Frontend phase started it, "request" when a person did. */
+  origin: string;
+  elapsed_s: number;
+};
+
+export type MockupCheck = { name: string; ok: boolean; detail: string };
+export type MockupSectionReport = {
+  id: string;
+  kind: string;
+  label: string;
+  route: string | null;
+  collection: string | null;
+  /** generated | repaired | fallback — how the section came to be. */
+  status: "generated" | "repaired" | "fallback";
+  problems: string[];
+  fixes: string[];
+  bytes: number;
+};
+/** What building the current mockup found. */
+export type MockupReport = {
+  version: number;
+  product: string;
+  model: string;
+  provider: string;
+  passes: { design: string; plan: string; seed: string };
+  routes: { path: string; title: string; sections: number }[];
+  collections: { name: string; label: string; rows: number; source: string }[];
+  sections: MockupSectionReport[];
+  counts: { generated: number; repaired: number; fallback: number };
+  checks: MockupCheck[];
+  render: { ran: boolean; reason?: string; console_errors?: number; errors?: string[] };
+  bytes: number;
+  calls: number;
+  tokens: number;
+  elapsed_ms: number;
+};
 export type PreviewRevision = {
   id: string;
   source: string;
@@ -518,11 +589,25 @@ export type PreviewState = {
   project_id: string;
   html: string | null;
   sections: PreviewSection[];
+  /** The mockup's pages, in order. Empty for a single-page mockup. */
+  routes: PreviewRoute[];
   revisions: PreviewRevision[];
   has_frontend: boolean;
+  report: MockupReport | null;
+  job: PreviewJob | null;
 };
 
-export type GenFile = { path: string; content: string; language: string; phase: string };
+export type GenFile = {
+  path: string;
+  content: string;
+  language: string;
+  /** The agent that wrote it, or "platform" for the scaffold's own files. */
+  phase: string;
+  /** What the platform wrote it for, or changed in it and why. */
+  notes?: string[];
+  /** What still does not compile in it. */
+  problems?: BuildProblem[];
+};
 export type GenDoc = { path: string; title: string; content: string };
 export type Artifacts = {
   idea: string;
@@ -532,4 +617,18 @@ export type Artifacts = {
   files: GenFile[];
   setup_instructions: string[];
   docs: GenDoc[];
+  scaffold?: {
+    frontend: string | null;
+    backend: string | null;
+    commands: string[];
+    notes: string[];
+    files: string[];
+    replaced: string[];
+  };
+  build?: {
+    /** null when nothing was checked (a build from before the gate). */
+    status: "ok" | "failed" | "unchecked" | null;
+    phases: Record<string, string | null>;
+    problems: BuildProblem[];
+  };
 };

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
+from app.core import artifacts
 from app.core.config import settings
 from app.core.constants import (
     PHASE_ORDER,
@@ -49,7 +50,8 @@ from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import binding_on
 from app.orchestration.graph import graph
 from app.orchestration.state import PipelineState
-from app.preview.generator import build_context, generate_preview
+from app.preview import service as mockup
+from app.preview.jobs import jobs as mockup_jobs
 from app.router.base import ProviderError
 from app.schemas.llm import LLMResponse, Usage
 
@@ -146,6 +148,7 @@ class PipelineRunner:
                         row.output,
                         row.schema_status,
                         row.stack_note,
+                        artifacts.build_problems(project),
                     )
                     if gate is not None:
                         self._park(db, project, gate)
@@ -438,6 +441,7 @@ class PipelineRunner:
                 gate_row.output if gate_row else None,
                 gate_row.schema_status if gate_row else None,
                 gate_row.stack_note if gate_row else None,
+                artifacts.build_problems(project),
             )
             self._park(db, project, gate or fallback)
             return project
@@ -661,6 +665,8 @@ class PipelineRunner:
             StackStatus.VIOLATED.value if violations else StackStatus.OK.value
         )
         row.stack_note = violations or None
+        row.build_status = lr.get("build_status")
+        row.build_note = lr.get("build_problems") or None
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
         db.commit()
@@ -761,54 +767,55 @@ class PipelineRunner:
         Strictly best effort, and never on top of existing work — a mockup that
         fails to draw must not fail a build that produced real code, and a
         regenerate would throw away sections the reviewer has already edited.
+
+        Registered with the same job registry the Preview tab reads once it starts: a
+        site is many calls, and "building section 7 of 18" or "failed, here is why"
+        are things the reviewer can see instead of an empty tab. Claimed only after
+        the pipeline goes idle, not when queued — a redo schedules a fresh draw while
+        the old one may still be waiting, and the old one holding the claim would
+        lock out the only draw that is still of anything.
         """
         if not self._wait_for_idle(project_id):
             return
 
-        db = SessionLocal()
+        reporter = mockup_jobs.claim(project_id, "pipeline")
+        if reporter is None:
+            # Someone is already drawing — a person pressed Generate, or an earlier
+            # draw got here first. Let it land, then see whether one is still needed.
+            mockup_jobs.wait(project_id, timeout=3600)
+            reporter = mockup_jobs.claim(project_id, "pipeline")
+            if reporter is None:
+                return
+        error: Optional[str] = None
         try:
-            project = db.get(Project, project_id)
-            if project is None or self._cancel_requested(db, project):
-                return
-            if self._has_mockup(db, project_id):
-                return
+            db = SessionLocal()
+            try:
+                project = db.get(Project, project_id)
+                if project is None or self._cancel_requested(db, project):
+                    return
 
-            html, resp = generate_preview(
-                project.idea,
-                project.name,
-                build_context(project),
-                mode=RoutingMode(project.routing_mode),
-                preferred_model=project.preferred_model,
-            )
-            if "<" not in html:
-                log.warning("Mockup generation returned no HTML for %s.", project_id)
-                return
+                def still_wanted(db: Session, project: Project) -> bool:
+                    # The front end may have been rewritten while this was queued or
+                    # drawing. A picture of the version that was replaced is worse than
+                    # no picture, and the Ship review captions it as current.
+                    current = self.latest_row(db, project, Phase.FRONTEND_ENGINEER.value)
+                    if current is None or current.id != source_row_id:
+                        log.info("Dropped a mockup of a replaced front end (%s).", project_id)
+                        return False
+                    return not self._has_mockup(db, project_id)
 
-            # The front end may have been rewritten while this was drawing. A picture
-            # of the version that was replaced is worse than no picture, and the Ship
-            # review captions it as current.
-            current = self.latest_row(db, project, Phase.FRONTEND_ENGINEER.value)
-            if current is None or current.id != source_row_id:
-                log.info("Dropped a mockup of a replaced front end (%s).", project_id)
-                return
-            if self._has_mockup(db, project_id):
-                return
-
-            db.add(
-                PreviewRevision(
-                    project_id=project_id,
-                    html=html,
-                    source="generated",
-                    model_used=resp.model,
-                    provider_used=resp.provider,
-                )
-            )
-            db.commit()
-            tracker.record(db, response=resp, project_id=project_id, phase="preview")
+                # Asked before spending the calls as well as after: a site is minutes
+                # of model time, and a stale draw would spend them on nothing.
+                if not still_wanted(db, project):
+                    return
+                mockup.build_and_save(db, project, reporter, still_wanted=still_wanted)
+            finally:
+                db.close()
         except Exception as e:  # noqa: BLE001 - the build is the deliverable, not the picture
             log.warning("Mockup generation failed for %s: %s", project_id, e)
+            error = f"Drawing the mockup failed: {e}"
         finally:
-            db.close()
+            mockup_jobs.finish(project_id, error)
 
     def _abandon_row(self, db: Session, row: PhaseResult, reason: str) -> None:
         row.status = PhaseStatus.FAILED.value

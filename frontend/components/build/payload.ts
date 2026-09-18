@@ -1,3 +1,5 @@
+import type { BuildProblem, GenFile } from "@/lib/api";
+
 /**
  * Turning an agent's raw JSON output into something a reviewer can actually read.
  *
@@ -33,6 +35,12 @@ export type PayloadFile = {
    */
   phase?: string;
   lines: number;
+  /** Written by the platform's scaffold rather than an agent — nobody to send it back to. */
+  platform?: boolean;
+  /** What the platform wrote it for, or changed in it and why. */
+  notes?: string[];
+  /** What still does not compile in it. */
+  problems?: BuildProblem[];
 };
 
 export type Cell = string | string[];
@@ -343,17 +351,23 @@ export function latestRow<T extends { phase: string; created_at: string; id: str
  * `sourceKey` carries the phase that wrote each file, which is what makes per-file
  * redo able to reach the agent responsible rather than whoever finished last.
  */
-export function artifactFiles(
-  files: { path: string; content: string; language: string; phase: string }[],
-): PayloadFile[] {
-  return files.map((f) => ({
-    path: f.path,
-    content: f.content,
-    language: f.language,
-    sourceKey: f.phase,
-    phase: f.phase,
-    lines: f.content.split("\n").length,
-  }));
+export function artifactFiles(files: GenFile[]): PayloadFile[] {
+  return files.map((f) => {
+    const platform = f.phase === "platform";
+    return {
+      path: f.path,
+      content: f.content,
+      language: f.language,
+      sourceKey: f.phase,
+      // The platform is not an agent: leaving `phase` unset is what tells the file
+      // browser there is no one to send this file back to.
+      phase: platform ? undefined : f.phase,
+      lines: f.content.split("\n").length,
+      platform,
+      notes: f.notes?.length ? f.notes : undefined,
+      problems: f.problems?.length ? f.problems : undefined,
+    };
+  });
 }
 
 /** "1,240 lines across 7 files" — the one-line answer to "what am I approving?". */

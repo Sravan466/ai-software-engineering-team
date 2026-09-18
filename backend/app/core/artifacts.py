@@ -4,16 +4,26 @@ Different agents emit files under different keys — backend/frontend use
 `files: [{path, code}]`, QA uses `test_files`, DevOps uses `dockerfiles` /
 `compose_or_manifests` / `ci_cd` with `content`. Rather than special-casing each,
 we generically treat *any* list of `{path, code|content}` objects as files.
+
+What comes out is a *build*, not a pile of files: each agent's file is placed under
+the side it belongs to (`backend/`, `frontend/`), the platform's scaffold is added —
+manifests, configs, the migration runner — and the mechanical fixes the scaffold makes
+are recorded against the files they were made in. Every file says who wrote it, so
+the file browser can offer a redo to its author and label the platform's own.
 """
 from __future__ import annotations
 
 import io
 import re
 import zipfile
-from typing import Iterator, Tuple
+from typing import Iterator, Optional, Tuple
 
-from app.core.constants import PHASE_LABELS, PhaseStatus
+from app.core.constants import CODE_PHASES, PHASE_LABELS, PHASE_ORDER, BuildStatus, PhaseStatus
 from app.db.models import Project
+
+#: The phase name the platform's own files are attributed to.
+PLATFORM = "platform"
+
 
 
 def iter_files(output: dict) -> Iterator[Tuple[str, str, str]]:
@@ -47,28 +57,103 @@ def current_phases(project: Project) -> list:
     .zip containing both the layout the reviewer rejected and the one that replaced
     it — `files` is keyed on path, so a renamed file does not overwrite its ghost.
     """
+    return _current(project.phases)
+
+
+def _current(rows) -> list:
     best: dict[str, object] = {}
-    for ph in project.phases:
+    for ph in rows:
         if ph.status in _SUPERSEDED:
             continue
         current = best.get(ph.phase)
         if current is None or (ph.created_at, ph.id) >= (current.created_at, current.id):
             best[ph.phase] = ph
     kept = set(id(v) for v in best.values())
-    # Keep the order the phases ran in, which is the order `project.phases` is loaded.
-    return [ph for ph in project.phases if id(ph) in kept]
+    # Keep the order the phases ran in, which is the order the rows are loaded.
+    return [ph for ph in rows if id(ph) in kept]
+
+
+def build_problems(project: Project) -> list[dict]:
+    """Every compile problem still outstanding in the current build, phase by phase.
+
+    Read from the database, not from `project.phases`. The runner's session loads that
+    collection once and, with `expire_on_commit=False`, never sees a row added after —
+    so asking it at the last phase answered for a build without its backend, and a
+    build that did not compile was waved through as finished.
+    """
+    from sqlalchemy.orm import object_session
+
+    from app.db.models import PhaseResult
+
+    try:
+        session = object_session(project)
+    except Exception:  # noqa: BLE001 - not an ORM instance (a scoring stand-in)
+        session = None
+    rows = (
+        session.query(PhaseResult)
+        .filter(PhaseResult.project_id == project.id)
+        .order_by(PhaseResult.created_at, PhaseResult.id)
+        .all()
+        if session is not None
+        else list(project.phases)
+    )
+    out: list[dict] = []
+    for ph in _current(rows):
+        if ph.phase not in CODE_PHASES or ph.build_status != BuildStatus.FAILED.value:
+            continue
+        for problem in ph.build_note or []:
+            if isinstance(problem, dict):
+                out.append({**problem, "phase": ph.phase})
+    return out
+
+
+def _language(path: str, given: str) -> str:
+    if given:
+        return given
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return {
+        "py": "python", "js": "javascript", "jsx": "javascript", "mjs": "javascript",
+        "cjs": "javascript", "ts": "typescript", "tsx": "typescript", "json": "json",
+        "css": "css", "sql": "sql", "md": "markdown", "yml": "yaml", "yaml": "yaml",
+    }.get(ext, "")
 
 
 def assemble(project: Project) -> dict:
-    """Collapse the current attempt at each phase into deduped files + docs + setup."""
-    files: dict[str, dict] = {}  # path -> record (later phases win)
+    """Collapse the current attempt at each phase into a placed, scaffolded build."""
+    from app.build import layout
+    from app.build.scaffold import build as scaffold_build, platform_owned, superseded
+    from app.orchestration.charter import Charter
+
+    charter = Charter.from_dict(project.charter)
+    backend_language = charter.get("language").token if charter and charter.get("language") else None
+
+    files: dict[str, dict] = {}  # placed path -> record (later phases win)
     setup: list[str] = []
     docs: list[dict] = []
+    design: Optional[dict] = None
+    replaced: list[str] = []
 
-    for ph in current_phases(project):
+    # Placed in pipeline order, not the order the rows were written: QA's tests follow
+    # the folders the Frontend phase was placed in, and a Frontend re-run is newer
+    # than the QA it came before. The compile check places them the same way.
+    order = {p.value: i for i, p in enumerate(PHASE_ORDER)}
+    phases = sorted(current_phases(project), key=lambda ph: order.get(ph.phase, len(order)))
+    placer = layout.Placer(backend_language)
+    for ph in phases:
         out = ph.output if isinstance(ph.output, dict) else {}
-        for path, content, lang in iter_files(out):
-            files[path] = {"path": path, "content": content, "language": lang, "phase": ph.phase}
+        if ph.phase == "system_design":
+            design = out
+        for placed, path, content, lang in placer.place_all(ph.phase, iter_files(out)):
+            if not placed:
+                continue
+            files[placed] = {
+                "path": placed,
+                "content": content,
+                "language": _language(placed, lang),
+                "phase": ph.phase,
+                "source_path": path,
+                "notes": [],
+            }
 
         instructions = out.get("setup_instructions")
         if isinstance(instructions, list):
@@ -85,7 +170,68 @@ def assemble(project: Project) -> dict:
                 }
             )
 
-    return {"files": sorted(files.values(), key=lambda f: f["path"]), "setup_instructions": setup, "docs": docs}
+    pm = next((ph.output for ph in phases if ph.phase == "product_manager" and isinstance(ph.output, dict)), {})
+    product = str(pm.get("product_name") or project.name or project.idea or "app")
+    scaffold = scaffold_build(
+        {p: f["content"] for p, f in files.items()}, charter, design, product
+    )
+
+    for path, (content, notes) in scaffold.rewrites.items():
+        if path in files:
+            files[path]["content"] = content
+            files[path]["notes"] = [f"Platform {n}" for n in notes]
+
+    for f in scaffold.files:
+        existing = files.get(f.path)
+        if existing is not None and existing["phase"] != PLATFORM:
+            replaced.append(f.path)
+        files[f.path] = {
+            "path": f.path,
+            "content": f.content,
+            "language": _language(f.path, ""),
+            "phase": PLATFORM,
+            "source_path": None,
+            "notes": [f.purpose]
+            + (["Replaces the copy an agent wrote — the platform owns this file."] if existing else []),
+        }
+    # An agent's lockfile beside a manifest the platform rewrote, or its tsconfig
+    # beside the platform's jsconfig, is a second copy that contradicts the first, so
+    # it goes. Nothing else the platform merely *claims* is dropped: a file the
+    # scaffold did not write — a Vite project's jest.config, a backend's own
+    # migrate.py — is the only copy there is, and deleting it would lose it from the
+    # archive while reporting it as replaced.
+    written = scaffold.paths()
+    for path in [p for p, f in files.items() if f["phase"] != PLATFORM and platform_owned(p)]:
+        if superseded(path, written):
+            replaced.append(path)
+            del files[path]
+
+    problems = build_problems(project)
+    statuses = {ph.phase: ph.build_status for ph in phases if ph.phase in CODE_PHASES}
+    for problem in problems:
+        record = files.get(problem.get("path") or "")
+        if record is not None:
+            record.setdefault("problems", []).append(problem)
+    if problems:
+        state = BuildStatus.FAILED.value
+    elif any(s == BuildStatus.UNCHECKED.value for s in statuses.values()):
+        state = BuildStatus.UNCHECKED.value
+    elif any(s == BuildStatus.OK.value for s in statuses.values()):
+        state = BuildStatus.OK.value
+    else:
+        state = None  # nothing was checked: a build from before the gate, or no code yet
+
+    return {
+        "files": sorted(files.values(), key=lambda f: f["path"]),
+        "setup_instructions": setup,
+        "docs": docs,
+        "scaffold": {**scaffold.as_dict(), "replaced": sorted(set(replaced))},
+        "build": {
+            "status": state,
+            "phases": statuses,
+            "problems": problems,
+        },
+    }
 
 
 def readme_md(project: Project, assembled: dict) -> str:
@@ -97,14 +243,36 @@ def readme_md(project: Project, assembled: dict) -> str:
         "Generated by the **AI Software Engineering Team** — a multi-agent build pipeline.",
         "",
     ]
+    scaffold = assembled.get("scaffold") or {}
+    if scaffold.get("commands"):
+        lines += ["## Run it", "", "```sh"]
+        lines += scaffold["commands"]
+        lines += ["```", ""]
+    if scaffold.get("notes"):
+        lines += [f"> {note}" for note in scaffold["notes"]]
+        lines.append("")
+    build = assembled.get("build") or {}
+    if build.get("status") == BuildStatus.FAILED.value:
+        lines += [
+            "## Known build problems",
+            "",
+            "The compile check still reports these after each was sent back once:",
+            "",
+        ]
+        lines += [
+            f"- `{p.get('path')}`" + (f" line {p.get('line')}" if p.get("line") else "") + f" — {p.get('message')}"
+            for p in build.get("problems", [])
+        ]
+        lines.append("")
     if assembled["setup_instructions"]:
-        lines += ["## Setup", ""]
+        lines += ["## Setup notes from the team", ""]
         lines += [f"{i}. {s}" for i, s in enumerate(assembled["setup_instructions"], 1)]
         lines.append("")
     if assembled["files"]:
-        lines += ["## Generated files", ""]
+        lines += ["## Files", ""]
         lines += [
             f"- `{f['path']}`" + (f" — {f['language']}" if f["language"] else "")
+            + (" (platform)" if f.get("phase") == PLATFORM else "")
             for f in assembled["files"]
         ]
         lines.append("")
@@ -126,7 +294,10 @@ def build_zip(project: Project, assembled: dict) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("README.md", readme_md(project, assembled))
         for f in assembled["files"]:
-            z.writestr(f["path"], f["content"])
+            # An agent's own top-level README would be a second entry of the same
+            # name, and which one an unzip keeps depends on the tool.
+            path = "docs/README.from-agents.md" if f["path"] == "README.md" else f["path"]
+            z.writestr(path, f["content"])
         for d in assembled["docs"]:
             z.writestr(d["path"], d["content"])
     return buf.getvalue()

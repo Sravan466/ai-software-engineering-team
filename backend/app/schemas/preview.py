@@ -33,11 +33,41 @@ class RevisionOut(BaseModel):
 class SectionOut(BaseModel):
     id: str
     label: str
+    #: The page this section is on; None for the shared header/footer, and for every
+    #: section of a single-page mockup drawn before sites existed.
+    route: Optional[str] = None
+    kind: Optional[str] = None
+
+
+class RouteOut(BaseModel):
+    path: str
+    title: str
+
+
+class JobOut(BaseModel):
+    """A mockup build in flight — or one that failed, and why."""
+
+    stage: str
+    label: str
+    done: int = 0
+    total: int = 0
+    detail: str = ""
+    error: Optional[str] = None
+    running: bool = True
+    origin: str = "request"
+    elapsed_s: int = 0
 
 
 class PreviewOut(BaseModel):
     project_id: str
     html: Optional[str] = None  # newest revision's document, or None if never generated
     sections: List[SectionOut] = []
+    #: The mockup's pages, in order. Empty for a single-page mockup.
+    routes: List[RouteOut] = []
     revisions: List[RevisionOut] = []
     has_frontend: bool = False  # whether the Frontend phase has run (richer preview if so)
+    #: What building the current mockup found — pages, sections, checks — taken from
+    #: the newest revision that has one (an edit inherits the build it edited).
+    report: Optional[dict] = None
+    #: A build that is running now, or the last one that failed.
+    job: Optional[JobOut] = None

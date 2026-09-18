@@ -44,7 +44,9 @@ export type IconName =
   | "file"
   | "folder"
   | "diagram"
-  | "list";
+  | "list"
+  | "pointer"
+  | "pen";
 
 export const Icon: Record<IconName, ReactNode> = {
   menu: svg(<path d="M4 6h16M4 12h16M4 18h16" />),
@@ -97,4 +99,7 @@ export const Icon: Record<IconName, ReactNode> = {
   folder: svg(<path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h3.8l1.7 2.2H19a1.5 1.5 0 0 1 1.5 1.5v9.8A1.5 1.5 0 0 1 19 20H5a1.5 1.5 0 0 1-1.5-1.5z" />),
   diagram: svg(<path d="M9 4.5h6v4H9zM3.5 15.5h5v4h-5zM15.5 15.5h5v4h-5zM12 8.5v3M6 15.5v-2a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v2" />),
   list: svg(<path d="M9 6.5h11M9 12h11M9 17.5h11M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" />),
+  // The mockup's two modes: using the prototype, and editing one of its sections.
+  pointer: svg(<path d="M5.5 4.5 18 10.2l-5.3 1.8-2 5.5z M12.7 12l5.3 5.3" />),
+  pen: svg(<path d="M14.5 5.5l4 4M4.5 19.5l1-4.2L16 4.8a1.4 1.4 0 0 1 2 0l1.2 1.2a1.4 1.4 0 0 1 0 2L8.7 18.5z" />),
 };

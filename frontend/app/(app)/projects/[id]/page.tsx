@@ -13,6 +13,7 @@ import GithubPublish from "@/components/github/GithubPublish";
 import SchemaBadge from "@/components/build/SchemaBadge";
 import PhaseArtifact from "@/components/build/PhaseArtifact";
 import FileBrowser from "@/components/build/FileBrowser";
+import BuildLine from "@/components/build/BuildLine";
 import Decision from "@/components/build/Decision";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
@@ -1131,7 +1132,12 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
               {art.files.length} files
             </span>
           </div>
-          <div className="artifact-view artifact-files" style={{ maxHeight: 560 }}>
+          <div className="artifact-view artifact-files" style={{ height: 560 }}>
+            <BuildLine
+              state={art.build?.status ?? null}
+              problems={art.build?.problems.length ?? 0}
+              commands={art.scaffold?.commands ?? []}
+            />
             <FileBrowser files={artifactFiles(art.files)} />
           </div>
         </div>
@@ -1142,16 +1148,36 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
           <h2 className="label">Run it on your machine</h2>
           <span className="rule" />
         </div>
-        {art.setup_instructions.length > 0 ? (
-          <div className="setup-list">
-            {art.setup_instructions.map((s, i) => (
-              <div key={i} className="setup-step">
-                <span className="n">{String(i + 1).padStart(2, "0")}</span>
-                <span>{s}</span>
-              </div>
+        {/* The platform's commands first: they are written against the manifests
+            the platform itself put in the archive, so they are the ones that work.
+            The team's own notes follow, as notes. */}
+        {art.scaffold?.commands.length ? (
+          <>
+            <pre className="run-cmds mono">{art.scaffold.commands.join("\n")}</pre>
+            {art.scaffold.notes.map((n, i) => (
+              <p key={i} className="field-hint" style={{ margin: "8px 0 0" }}>
+                {n}
+              </p>
             ))}
-          </div>
-        ) : (
+          </>
+        ) : null}
+        {art.setup_instructions.length > 0 ? (
+          <>
+            {art.scaffold?.commands.length ? (
+              <p className="label" style={{ margin: "18px 0 8px" }}>
+                Notes from the team
+              </p>
+            ) : null}
+            <div className="setup-list">
+              {art.setup_instructions.map((s, i) => (
+                <div key={i} className="setup-step">
+                  <span className="n">{String(i + 1).padStart(2, "0")}</span>
+                  <span>{s}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : art.scaffold?.commands.length ? null : (
           <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6 }}>
             Setup steps appear once the Backend and DevOps phases have run. The .zip always includes
             a generated <code>README.md</code>.
