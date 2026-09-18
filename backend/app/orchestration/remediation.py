@@ -90,7 +90,7 @@ def _text(value: object) -> str:
     return str(value).strip() if has_content(value) else ""
 
 
-def finding_key(category: str, title: str, location: str = "") -> str:
+def finding_key(category: str, title: str, owner_phase: Optional[str] = None) -> str:
     """A stable identity for one finding, across the re-audits that follow a fix.
 
     Derived from what the finding *says* rather than where it sat in a list, because
@@ -98,13 +98,22 @@ def finding_key(category: str, title: str, location: str = "") -> str:
     last exactly until the next audit, and the reviewer would be asked the same
     question again — which is the same as not having waived it.
 
-    The location is **not** part of it, though it is still displayed. It is the most
-    volatile field a model writes: the same issue comes back as `authController.js`,
-    then `src/controllers/authController.js`, then `authController.js:42`, and every
-    rewording would mint a new key and silently resurrect a waived finding. What the
-    finding *is* — its category and its title — is what identifies it.
+    The **location is not** part of it, though it is still displayed: it is the most
+    volatile field a model writes, coming back as `authController.js`, then
+    `src/controllers/authController.js`, then `authController.js:42`, and each
+    rewording would mint a new key and resurrect a waived finding.
+
+    The **owning phase is**, and that is not a detail. "Missing Input Validation" in
+    a React form and in a Flask view are two problems with two owners; keyed on words
+    alone they merged into one finding assigned to whichever phase ran first, and the
+    other file's instance could never be fixed — the agent handed it did not write
+    that file, the rerun of the agent who did got no feedback about it, and a bounded
+    remediation budget went on a fix that structurally could not land. The owner is
+    derived from the file, so it survives the location being reworded; it changes
+    only when the finding is genuinely about someone else's work.
     """
-    basis = "|".join(re.sub(r"\s+", " ", part.strip().lower()) for part in (category, title))
+    parts = (category, title, owner_phase or "")
+    basis = "|".join(re.sub(r"\s+", " ", part.strip().lower()) for part in parts)
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
 
 
@@ -182,11 +191,11 @@ def read_findings(output: object, project=None) -> list[Finding]:
         severity = _text(read_key(row, "severity", "risk", "level", "impact")).lower()
         if not (title or category):
             continue
-        key = finding_key(category, title)
         recommendation = _text(
             read_key(row, "recommendation", "remediation", "fix", "mitigation")
         )
         owner = _owner_for(location, owned) or _owner_by_category(category, title)
+        key = finding_key(category, title, owner)
         seen = out.get(key)
         if seen is not None:
             out[key] = Finding(
@@ -198,8 +207,9 @@ def read_findings(output: object, project=None) -> list[Finding]:
                 category=seen.category or category,
                 location=_join_locations(seen.location, location),
                 recommendation=seen.recommendation or recommendation,
-                # The earliest owner, for the same reason remediation picks one.
-                owner_phase=_earliest(seen.owner_phase, owner),
+                # Same by construction — the owner is part of the key — but stated
+                # rather than assumed, so this cannot drift if the key ever changes.
+                owner_phase=seen.owner_phase or owner,
             )
             continue
         out[key] = Finding(
@@ -298,12 +308,17 @@ def sync_dispositions(db, project, output: object, readable: bool = True) -> lis
     from app.db.models import SecurityDisposition
 
     findings = read_findings(output, project)
-    existing = {
-        row.finding_key: row
-        for row in db.query(SecurityDisposition)
+    # Ordered, so "which row wins when two share a key" has an answer that does not
+    # depend on how SQLite felt like returning them. The routes settle every row with
+    # the key, so this only decides which one carries the merged detail forward.
+    existing: dict[str, "SecurityDisposition"] = {}
+    for row in (
+        db.query(SecurityDisposition)
         .filter(SecurityDisposition.project_id == project.id)
+        .order_by(SecurityDisposition.created_at)
         .all()
-    }
+    ):
+        existing.setdefault(row.finding_key, row)
     seen: set[str] = set()
 
     for f in findings:
