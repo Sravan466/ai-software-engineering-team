@@ -125,13 +125,22 @@ export default function Decision({
   // showing a live Ship button that returned a 409 on click.
   const [unresolved, setUnresolved] = useState(0);
   const [findingsTick, setFindingsTick] = useState(0);
-  const showsFindings = kind === "security" || kind === "ship" || kind === "cost";
   useEffect(() => {
     api
       .getSecurity(id)
       .then((s) => setUnresolved(s.unresolved))
       .catch(() => setUnresolved(0));
   }, [id, findingsTick, project.updated_at]);
+
+  // An unattended run is never asked about findings — the server exempts it, so the
+  // button must too, or the one mode that promises not to stop would stop hardest.
+  const blocked = unresolved > 0 && project.approval_mode !== "unattended";
+  // Whichever gate the run is parked on, if findings are what is holding it there
+  // then this is the screen that has to offer the way out. Rendering the panel only
+  // for the gate kinds that happen to be *about* security left every-phase mode a
+  // dead end: the security gate never fires in that mode, so the reviewer met a
+  // disabled button, a 409, and a hint pointing at a screen they could not reach.
+  const showsFindings = kind === "security" || kind === "ship" || kind === "cost" || blocked;
 
   // The build under review, fetched only for the pass that needs all of it.
   const wantsBuild = kind === "ship" || kind === "cost";
@@ -187,11 +196,6 @@ export default function Decision({
   // Sending an earlier phase back invalidates everything built on top of it, so the
   // run rebuilds from there. That is a much bigger action than correcting the phase
   // on screen, and the reviewer should know before they press it, not after.
-  // Approving over an unanswered critical finding is the thing this whole path
-  // exists to stop, so the button is shut rather than the server refusing after the
-  // click. The backend refuses it too — this is the half that explains why.
-  const blocked = unresolved > 0;
-
   const order = PHASES.map((p) => p.key);
   const rebuilds =
     order.indexOf(redoPhase) >= 0 &&
@@ -274,6 +278,18 @@ export default function Decision({
             <CharterPanel charter={project.charter} />
           </div>
         )}
+        {/* The gate is being held by findings but is not one of the surfaces that
+            shows them, so it shows them here. Approving is what would advance the
+            run to a screen that has these controls, and approving is what is
+            blocked — there is no other way through. */}
+        {blocked && kind !== "security" && kind !== "ship" && kind !== "cost" && (
+          <SecurityFindings
+            id={id}
+            busy={busy}
+            act={act}
+            onChange={() => setFindingsTick((n) => n + 1)}
+          />
+        )}
         {(kind === "phase" || kind === "unchecked") && (
           <SinglePhase project={project} phase={gatePhase} onRedo={aim} />
         )}
@@ -310,10 +326,7 @@ export default function Decision({
             {blocked
               ? `${unresolved} finding${unresolved === 1 ? "" : "s"} at high severity or above ` +
                 (unresolved === 1 ? "still needs" : "still need") +
-                " a decision" +
-                (showsFindings
-                  ? ". Send it back to be fixed, or waive it with a reason."
-                  : " — open the Security panel on the Ship review to settle them.")
+                " a decision. Send each one back to be fixed, or waive it with a reason."
               : copy.after}
           </span>
         </div>

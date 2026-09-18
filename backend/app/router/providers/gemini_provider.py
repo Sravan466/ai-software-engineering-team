@@ -6,7 +6,7 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError
+from app.router.base import LLMProvider, ProviderError, status_is_retryable
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
 log = get_logger(__name__)
@@ -82,7 +82,9 @@ class GeminiProvider(LLMProvider):
             )
             resp = gmodel.generate_content(contents)
         except Exception as e:  # noqa: BLE001
-            raise ProviderError(f"Gemini call failed: {e}") from e
+            raise ProviderError(
+                f"Gemini call failed: {e}", retryable=status_is_retryable(e)
+            ) from e
 
         latency = int((time.perf_counter() - started) * 1000)
         text = getattr(resp, "text", "") or ""

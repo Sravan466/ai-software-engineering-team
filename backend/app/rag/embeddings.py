@@ -26,16 +26,22 @@ def _chosen_model() -> str:
     selection naming another provider is declined rather than forwarded. Sending
     `anthropic:claude-…` on to `/api/embed` as a model name would fail every RAG and
     memory write from that moment on, with an error about a model Ollama has never
-    heard of. A bare tag is what the Settings dropdown writes; an `ollama:` prefix is
-    reduced to its model half.
+    heard of.
+
+    The spec is split by the router's own parser rather than by a second copy of the
+    rule. Splitting on the first colon here looked right and was not: every tag the
+    Settings dropdown writes carries one (`nomic-embed-text:latest`), so a hand-rolled
+    partition read the tag as the provider, decided it was not local, and quietly
+    ignored every selection the user could actually make.
     """
     from app.core import model_roles
+    from app.router.router import ModelRouter
 
     spec = model_roles.get(ROLE)
     if not spec:
         return settings.embedding_model
-    provider, _, model = spec.partition(":")
-    if model and provider.strip() != "ollama":
+    provider, model = ModelRouter._parse_pair(spec)
+    if provider != "ollama":
         log.warning(
             "Embeddings are set to '%s', which is not a local model — they run "
             "against Ollama only. Using '%s' instead.",
@@ -43,7 +49,7 @@ def _chosen_model() -> str:
             settings.embedding_model,
         )
         return settings.embedding_model
-    return model.strip() if model else spec
+    return model
 
 
 class OllamaEmbeddingFunction:

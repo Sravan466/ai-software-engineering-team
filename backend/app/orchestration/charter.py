@@ -35,6 +35,11 @@ from app.orchestration import stack
 
 log = get_logger(__name__)
 
+#: A verdict longer than this is not a verdict. `debate._parse` falls back to
+#: putting the model's entire raw reply in `decision` when the JSON will not parse,
+#: and scanning a page of prose for technology names finds several of them.
+_MAX_VERDICT_CHARS = 400
+
 #: Where a charter entry came from, in the order of authority. The debate is the
 #: settled decision; the architecture is what the designer wrote; an implication is
 #: this application joining two dots nobody disputed.
@@ -227,13 +232,24 @@ def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Cha
             return
         chosen[category] = Choice(token=choice.token, label=choice.label, source=source)
 
-    # 1. the debate's verdict, read from the decision only — the rationale weighs
-    #    alternatives out loud, and a mention there is not a choice.
+    # 1. the debate's verdict — and only for the question the debate was asked.
+    #
+    #    Two things make this the most dangerous input in the function, and both are
+    #    handled here rather than in the matcher. The decision is *prose*, and the
+    #    alias lists contain ordinary English words: "We should go with PostgreSQL"
+    #    froze the language as Go, "gives us guard rails" froze the backend as Rails,
+    #    "lets the team express relationships" froze it as Express. And because the
+    #    debate outranks the architecture, each of those then convicted correct code
+    #    and stopped the run.
+    #
+    #    So the verdict is read for the database alone, which is what the debate is
+    #    convened to settle, and whose names ("postgresql", "mongodb", "mariadb") are
+    #    not words anyone writes by accident. Anything else it may have opined on is
+    #    the architecture's to decide.
     if isinstance(debate, dict):
         decision = debate.get("decision")
-        if isinstance(decision, str) and decision.strip():
-            for category, _ in stack.CATEGORIES:
-                record(category, stack.name_to_choice(category, decision), SOURCE_DEBATE)
+        if isinstance(decision, str) and 0 < len(decision.strip()) <= _MAX_VERDICT_CHARS:
+            record("database", stack.name_to_choice("database", decision), SOURCE_DEBATE)
 
     # 2. the architecture. Each category is read from the areas that can name it, so
     #    "Node.js" under `backend` settles the language and "React" under `frontend`

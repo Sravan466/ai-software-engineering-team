@@ -481,13 +481,21 @@ def list_findings(
 
 
 def _finding(db: Session, project: Project, key: str) -> SecurityDisposition:
+    """The tracked finding with this key.
+
+    `first`, not `one_or_none`: a database written before findings were deduplicated
+    on read may hold two rows sharing a key, and raising there turns a waivable
+    finding into a 500 on a build that then cannot be approved, fixed or waived at
+    all. Acting on the oldest is right — it is the one the reconciliation loop sees.
+    """
     row = (
         db.query(SecurityDisposition)
         .filter(
             SecurityDisposition.project_id == project.id,
             SecurityDisposition.finding_key == key,
         )
-        .one_or_none()
+        .order_by(SecurityDisposition.created_at)
+        .first()
     )
     if row is None:
         raise HTTPException(404, "That finding isn't one this build is tracking.")

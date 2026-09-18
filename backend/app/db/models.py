@@ -292,7 +292,9 @@ class SecurityDisposition(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
 
-    #: Stable across re-audits: a hash of category + title + location.
+    #: Stable across re-audits: a hash of category + title. Deliberately not the
+    #: location — that is the most volatile field a model writes, and including it
+    #: meant a reworded path minted a new key and resurrected a waived finding.
     finding_key: Mapped[str] = mapped_column(String(64), index=True)
     title: Mapped[str] = mapped_column(Text, default="")
     severity: Mapped[str] = mapped_column(String(16), default="")

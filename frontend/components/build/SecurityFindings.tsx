@@ -126,6 +126,30 @@ export default function SecurityFindings({
     );
   }
 
+  if (error && state === null) {
+    // Before the empty state, not after. A failed fetch leaves `findings` empty,
+    // and reporting that as "nothing to answer for" over a build nobody could read
+    // the findings of is the most reassuring possible way to be wrong.
+    return (
+      <div className="artifact-pad">
+        <div className="notice notice-bad" role="alert">
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-title">Couldn&apos;t load this build&apos;s findings</span>
+            <span className="notice-text">
+              {error} Don&apos;t read this as nothing to answer for — it isn&apos;t.
+            </span>
+            <div className="notice-actions">
+              <button className="btn btn-sm btn-primary" onClick={refresh}>
+                {Icon.refresh} Try again
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (ordered.length === 0) {
     return (
       <div className="artifact-pad">

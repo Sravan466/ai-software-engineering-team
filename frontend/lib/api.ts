@@ -487,6 +487,12 @@ export type RoleSettings = {
   /** What a role with no choice of its own runs on. */
   default_model: string;
   local_models: string[];
+  /**
+   * Pulled models whose name suggests they were trained on code. Derived by the
+   * backend so there is one rule rather than two that disagree — a second copy here
+   * was missing `codellama`, which the other card was already badging as code.
+   */
+  code_models: string[];
   /** `provider:model` for each cloud provider with a key configured. */
   cloud_models: string[];
 };

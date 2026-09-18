@@ -166,7 +166,13 @@ def read_findings(output: object, project=None) -> list[Finding]:
         return []
 
     owned = _owned_paths(project) if project is not None else []
-    out: list[Finding] = []
+    # Keyed, not appended, because the identity no longer includes the location and
+    # one report routinely says "SQL Injection" about three files. Two rows sharing
+    # a key is a dead end — the second becomes invisible to the reconciliation loop
+    # and stays open forever, while `fix` and `waive` raise on the ambiguous lookup,
+    # leaving a build that cannot be approved, waived or fixed. One finding, every
+    # place it was seen.
+    out: dict[str, Finding] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -176,20 +182,56 @@ def read_findings(output: object, project=None) -> list[Finding]:
         severity = _text(read_key(row, "severity", "risk", "level", "impact")).lower()
         if not (title or category):
             continue
-        out.append(
-            Finding(
-                key=finding_key(category, title),
-                title=title or category,
-                severity=severity,
-                category=category,
-                location=location,
-                recommendation=_text(
-                    read_key(row, "recommendation", "remediation", "fix", "mitigation")
-                ),
-                owner_phase=_owner_for(location, owned) or _owner_by_category(category, title),
-            )
+        key = finding_key(category, title)
+        recommendation = _text(
+            read_key(row, "recommendation", "remediation", "fix", "mitigation")
         )
-    return out
+        owner = _owner_for(location, owned) or _owner_by_category(category, title)
+        seen = out.get(key)
+        if seen is not None:
+            out[key] = Finding(
+                key=key,
+                title=seen.title,
+                # The worst severity anyone gave it wins: the same issue reported as
+                # high in one file and medium in another is a high finding.
+                severity=_worst(seen.severity, severity),
+                category=seen.category or category,
+                location=_join_locations(seen.location, location),
+                recommendation=seen.recommendation or recommendation,
+                # The earliest owner, for the same reason remediation picks one.
+                owner_phase=_earliest(seen.owner_phase, owner),
+            )
+            continue
+        out[key] = Finding(
+            key=key,
+            title=title or category,
+            severity=severity,
+            category=category,
+            location=location,
+            recommendation=recommendation,
+            owner_phase=owner,
+        )
+    return list(out.values())
+
+
+def _worst(*severities: str) -> str:
+    """The most severe of several spellings of one finding's severity."""
+    order = ["critical", "high", "medium", "low"]
+    ranked = [s for s in severities if s in order]
+    return min(ranked, key=order.index) if ranked else next((s for s in severities if s), "")
+
+
+def _join_locations(*locations: str) -> str:
+    """Every place one finding was seen, deduplicated, in the order reported."""
+    kept = list(dict.fromkeys(loc for loc in locations if loc))
+    return ", ".join(kept)
+
+
+def _earliest(*phases: Optional[str]) -> Optional[str]:
+    """The owner that runs first, so a fix rebuilds the others rather than repeating."""
+    order = [p.value for p in PHASE_ORDER]
+    known = [p for p in phases if p in order]
+    return min(known, key=order.index) if known else next((p for p in phases if p), None)
 
 
 def severe(findings: Iterable[Finding]) -> list[Finding]:

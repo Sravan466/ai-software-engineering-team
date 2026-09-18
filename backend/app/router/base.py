@@ -24,6 +24,30 @@ class ProviderError(RuntimeError):
         self.retryable = retryable
 
 
+#: Status codes worth asking again for. Everything else in the 4xx range is a
+#: statement about the request — a bad key, a malformed body, a model that does not
+#: exist — and says the same thing on the third attempt as on the first.
+RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+def status_is_retryable(error: Exception) -> bool:
+    """Whether a provider SDK's exception carries a status worth retrying.
+
+    Cloud SDKs each wrap their own transport, so the status is read off whichever
+    attribute the exception happens to expose rather than by catching a type this
+    module would have to import. An exception with no status at all is transient by
+    default: that is the dropped-socket case, which is the one retrying exists for.
+    """
+    status = getattr(error, "status_code", None) or getattr(error, "code", None)
+    if status is None:
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None) if response is not None else None
+    try:
+        return int(status) in RETRYABLE_STATUS
+    except (TypeError, ValueError):
+        return True
+
+
 class LLMProvider(abc.ABC):
     """Common interface for cloud and local model backends."""
 

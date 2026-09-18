@@ -302,7 +302,11 @@ class PipelineRunner:
         #: which stack this build is being held to.
         charter_update: Optional[dict] = None
 
-        # The attempt being sent back keeps its place in the history.
+        # The attempt being sent back keeps its place in the history. What it was
+        # before is remembered, because rejecting it is only correct once something
+        # has replaced it — see the failure path below.
+        superseded = self.latest_row(db, project, phase_key)
+        was = superseded.status if superseded is not None else None
         self._mark_phase(db, project, phase_key, PhaseStatus.REJECTED.value, feedback=feedback)
         row = self._begin_phase(db, project, phase_key)
 
@@ -368,6 +372,22 @@ class PipelineRunner:
                     )
         except ProviderError as e:
             self._abandon_row(db, row, "The model provider failed while regenerating.")
+            # Put the previous attempt back. Both `rejected` and `failed` count as
+            # superseded when the archive is assembled, so leaving them that way
+            # leaves this phase with *no* current attempt: its files vanish from the
+            # `.zip`, and because the graph is still positioned past it the run can
+            # be resumed to `completed` with the backend simply missing. The old
+            # work is the best thing anyone has until new work replaces it.
+            if superseded is not None and was is not None:
+                superseded.status = was
+                superseded.feedback = None
+                db.commit()
+                log.info(
+                    "Restored the previous %s attempt on %s — its replacement never "
+                    "generated, and dropping both would leave the build without it.",
+                    phase_key,
+                    project.id,
+                )
             self._fail(db, project, str(e))
             return project
 

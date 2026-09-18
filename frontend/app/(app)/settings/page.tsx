@@ -470,10 +470,11 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
     }
   }
 
-  /** A downloaded model whose name says "code", if there is one nothing uses yet. */
+  /** A downloaded model whose name says "code", if there is one nothing uses yet.
+   *  The list comes from the backend rather than a regex here, so the badge in the
+   *  card above and the suggestion in this one cannot disagree about a model. */
   const coder = useMemo(() => {
-    if (!state) return null;
-    const found = state.local_models.find((m) => /coder|codestral|starcoder|devstral/i.test(m));
+    const found = state?.code_models?.[0];
     if (!found) return null;
     const used = state.roles.some((r) => CODE_ROLES.includes(r.role) && r.assigned === found);
     return used ? null : found;
@@ -488,6 +489,9 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
       if (latest) setState(latest);
     } catch (e: any) {
       setError(e.message);
+      // Four sequential writes: a failure partway through leaves some roles changed
+      // on the server, and leaving the old values on screen would misreport which.
+      await refresh();
     } finally {
       setSaving(null);
     }
