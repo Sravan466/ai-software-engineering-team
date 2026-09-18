@@ -388,3 +388,14 @@ def test_an_installed_package_beats_a_same_named_local_file():
         "backend/app/core/__init__.py": "",
     }
     assert check_tree(files, ["backend/app/core/redis.py"]).problems == []
+
+
+def test_tooling_config_and_the_other_sides_folders_do_not_block_a_rename():
+    placed = [p for p, *_ in layout.Placer("javascript").place_all("frontend_engineer", [
+        ("client/src/main.jsx", ""), ("client/src/App.jsx", ""), ("client/index.html", ""),
+        ("tailwind.config.js", ""), ("server/index.js", ""),
+    ])]
+    assert placed == [
+        "frontend/src/main.jsx", "frontend/src/App.jsx", "frontend/index.html",
+        "frontend/tailwind.config.js", "backend/index.js",
+    ]

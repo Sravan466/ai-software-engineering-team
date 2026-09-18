@@ -353,3 +353,8 @@ def test_the_header_keeps_its_navigation_landmark():
     inner, classes = unwrap('<nav data-section="site-nav" class="flex gap-4"><a href="#/">Home</a></nav>', section)
     html = wrap(section, inner, classes)
     assert '<nav class="flex gap-4">' in html and html.count('data-section="site-nav"') == 1
+
+
+def test_copy_that_mentions_url_is_left_alone():
+    clean = clean_fragment('<p style="background:url(https://x/y.png)">Paste the url(s) of your feeds.</p>')
+    assert "Paste the url(s) of your feeds." in clean and "https://x" not in clean

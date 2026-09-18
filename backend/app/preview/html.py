@@ -262,7 +262,13 @@ def clean_fragment(text: str) -> str:
     t = _JS_URL.sub(r'\1="#"', t)
     t = _MEDIA.sub("", t)
     t = _SRCSET.sub("", t)
-    t = _CSS_URL.sub("none", t)
+    # Only inside a style attribute: "Paste the url(s) of your feeds" is copy.
+    t = re.sub(
+        r"""(\sstyle\s*=\s*)(["'])(.*?)\2""",
+        lambda m: m.group(1) + m.group(2) + _CSS_URL.sub("none", m.group(3)) + m.group(2),
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     while True:
         stripped = _FORM_ACTION.sub(r"\1", t)
         if stripped == t:

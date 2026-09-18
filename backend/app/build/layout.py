@@ -30,6 +30,11 @@ _BACKEND_ROOTS = frozenset({"backend", "server", "back-end", "back_end", "api-se
 
 _JS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 _CODE = _JS + (".py", ".vue", ".svelte")
+#: Build-tool configuration: code by extension, but it imports nothing of the app's.
+_TOOL_CONFIG = re.compile(
+    r"^(next|tailwind|postcss|vite|jest|vitest|babel|webpack|rollup|svelte|nuxt|astro|eslint|prettier)"
+    r"\.config\.[cm]?[jt]s$|^\.(eslintrc|prettierrc|babelrc)(\.[cm]?js)?$"
+)
 #: What makes a JavaScript test a *front-end* test: it renders something.
 _FRONTEND_TEST = re.compile(
     r"""@testing-library/(react|dom|user-event)|from\s+['"]react['"]|next/|\.\./components|"""
@@ -74,9 +79,17 @@ def renamed_roots(phase: str, paths: Iterable[str]) -> frozenset[str]:
     }.get(phase)
     if not aliases:
         return frozenset()
+    others = (_FRONTEND_ROOTS if phase == Phase.BACKEND_ENGINEER.value else _BACKEND_ROOTS)
     code = []
     for path in paths:
         p = clean(path)
+        name = p.rsplit("/", 1)[-1].lower()
+        head = p.partition("/")[0].lower() if "/" in p else ""
+        # Tooling config (`tailwind.config.js`) imports nothing of the app's, and the
+        # platform replaces it anyway; a file under the other side's name is moved
+        # across to that side. Neither says anything about this side's own folder.
+        if _TOOL_CONFIG.search(name) or head in others:
+            continue
         if p.lower().endswith(_CODE):
             code.append(p)
     python = sum(1 for p in code if p.lower().endswith(".py"))
@@ -101,13 +114,16 @@ def renamed_roots(phase: str, paths: Iterable[str]) -> frozenset[str]:
 
 def _rooted(path: str, root: str, other_root: str, renamed: frozenset) -> str:
     head, _, rest = path.partition("/")
-    if rest and head.lower() == root:
+    lowered = head.lower()
+    if rest and lowered == root:
         return f"{root}/{rest}"  # `Frontend/` is still the frontend
-    if rest and head.lower() == other_root:
+    other_names = _FRONTEND_ROOTS if other_root == FRONTEND else _BACKEND_ROOTS
+    if rest and lowered in other_names:
         # An agent writing into the other side's tree on purpose — a backend that
-        # ships a static page, say. Kept there.
+        # ships a static page under `client/`, a frontend with a `server/` beside
+        # it. That is the other side, under its canonical name.
         return f"{other_root}/{rest}"
-    if rest and head.lower() in renamed:
+    if rest and lowered in renamed:
         return f"{root}/{rest}"
     return f"{root}/{path}"
 
