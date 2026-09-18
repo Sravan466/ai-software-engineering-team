@@ -480,26 +480,31 @@ def list_findings(
     }
 
 
-def _finding(db: Session, project: Project, key: str) -> SecurityDisposition:
-    """The tracked finding with this key.
+def _findings(db: Session, project: Project, key: str) -> list[SecurityDisposition]:
+    """Every tracked row with this key — normally one, occasionally more.
 
-    `first`, not `one_or_none`: a database written before findings were deduplicated
-    on read may hold two rows sharing a key, and raising there turns a waivable
-    finding into a 500 on a build that then cannot be approved, fixed or waived at
-    all. Acting on the oldest is right — it is the one the reconciliation loop sees.
+    All of them, not the first: a database written before findings were deduplicated
+    on read can hold two rows sharing a key, and acting on one of them settles that
+    one while `unresolved` goes on counting the other. The reviewer sees the finding
+    marked waived and the Ship button stays shut with nothing left to click. Raising
+    instead (the original `one_or_none`) was at least loud, but it was a 500 on a
+    build that then could not be approved, fixed *or* waived.
+
+    Deciding a finding decides every row that says the same thing about the same
+    phase, which is what the reviewer believes they are doing.
     """
-    row = (
+    rows = (
         db.query(SecurityDisposition)
         .filter(
             SecurityDisposition.project_id == project.id,
             SecurityDisposition.finding_key == key,
         )
         .order_by(SecurityDisposition.created_at)
-        .first()
+        .all()
     )
-    if row is None:
+    if not rows:
         raise HTTPException(404, "That finding isn't one this build is tracking.")
-    return row
+    return rows
 
 
 @router.post("/{project_id}/security/{key}/fix", response_model=RunResponse)
@@ -516,7 +521,8 @@ def fix_finding(
     review itself. The re-audit is what decides whether the fix took; nothing here
     marks a finding fixed on the strength of having asked.
     """
-    row = _finding(db, project, key)
+    rows = _findings(db, project, key)
+    row = rows[0]
     if not row.owner_phase:
         raise HTTPException(
             400,
@@ -532,7 +538,8 @@ def fix_finding(
     if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
         raise _conflict(project, "fix")
 
-    row.status = FindingStatus.FIX_REQUESTED.value
+    for tracked in rows:
+        tracked.status = FindingStatus.FIX_REQUESTED.value
     db.commit()
     finding = remediation.Finding(
         key=row.finding_key,
@@ -567,9 +574,11 @@ def waive_finding(
     the silence this whole path exists to replace — and it is the one record anyone
     reading this build later has of why a known issue was shipped.
     """
-    row = _finding(db, project, key)
-    row.status = FindingStatus.WAIVED.value
-    row.note = payload.reason.strip()
+    rows = _findings(db, project, key)
+    row = rows[0]
+    for tracked in rows:
+        tracked.status = FindingStatus.WAIVED.value
+        tracked.note = payload.reason.strip()
     db.commit()
     log.info("Security finding waived on %s: %s — %s", project.id, row.title, row.note)
     return {

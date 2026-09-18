@@ -376,7 +376,6 @@ class PipelineRunner:
                         as_node=phase_key,
                     )
         except ProviderError as e:
-            self._abandon_row(db, row, "The model provider failed while regenerating.")
             # Put the previous attempt back. Both `rejected` and `failed` count as
             # superseded when the archive is assembled, so leaving them that way
             # leaves this phase with *no* current attempt: its files vanish from the
@@ -386,12 +385,24 @@ class PipelineRunner:
             if superseded is not None and was is not None:
                 superseded.status = was
                 superseded.feedback = was_feedback
+                # And drop the attempt that never generated, rather than leaving it
+                # `failed` beside the restored one. `_reconcile_current_phase`
+                # salvages a checkpointed `last_result` into a failed row whose phase
+                # matches — which at a per-phase gate it does — so keeping both left
+                # the phase with two live `pending_approval` rows for one piece of
+                # work, doubling its history and the progress count drawn from it.
+                # It produced nothing; `project.last_error` carries why.
+                self._delete_rows(db, project, [row])
                 db.commit()
                 log.info(
                     "Restored the previous %s attempt on %s — its replacement never "
                     "generated, and dropping both would leave the build without it.",
                     phase_key,
                     project.id,
+                )
+            else:
+                self._abandon_row(
+                    db, row, "The model provider failed while regenerating."
                 )
             self._fail(db, project, str(e))
             return project

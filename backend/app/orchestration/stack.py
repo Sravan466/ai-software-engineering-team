@@ -282,7 +282,10 @@ CHOICES: dict[str, tuple[Choice, ...]] = {
         Choice(
             token="postgres",
             label="PostgreSQL",
-            aliases=("postgresql", "postgres", "pgsql", "rds postgres", "supabase", "neon"),
+            # No "neon": it is a Postgres host, but it is also an ordinary English
+            # word, and this list now decides the highest-authority charter entry
+            # from a sentence of prose. Anything hosted on Neon says Postgres too.
+            aliases=("postgresql", "postgres", "pgsql", "rds postgres", "supabase"),
             signals=(
                 r"\bpsycopg2?\b",
                 r"\basyncpg\b",
@@ -506,6 +509,33 @@ def name_to_choice(category: str, text: object) -> Optional[Choice]:
         if f" {alias} " in haystack:
             return choice
     return None
+
+
+def choice_stated_in(category: str, text: object) -> Optional[Choice]:
+    """The choice a *sentence* endorses, read as the one it names first.
+
+    `name_to_choice` resolves ties by alias length, which is right for a `tech_stack`
+    entry — a short list of names where "postgresql" must beat a shorter alias of
+    something else. It is wrong for prose, where length has nothing to do with which
+    option won: "MongoDB over PostgreSQL" and "MongoDB, not PostgreSQL" both resolved
+    to PostgreSQL, because `postgresql` is the longer alias.
+
+    A verdict leads with its verdict. Position is the signal here, not length.
+    """
+    if category not in CHOICES:
+        return None
+    haystack = f" {_normalise(text)} "
+    best: Optional[tuple[int, int, Choice]] = None
+    for alias, choice in _alias_index(category):
+        at = haystack.find(f" {alias} ")
+        if at < 0:
+            continue
+        # Earliest wins; a longer alias starting at the same place wins the tie, so
+        # "postgresql" still beats a shorter alias sharing its opening word.
+        rank = (at, -len(alias))
+        if best is None or rank < (best[0], best[1]):
+            best = (at, -len(alias), choice)
+    return best[2] if best else None
 
 
 def names_to_choice(category: str, values: Iterable[object]) -> Optional[Choice]:

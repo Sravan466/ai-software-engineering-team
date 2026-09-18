@@ -135,12 +135,10 @@ export default function Decision({
   // An unattended run is never asked about findings — the server exempts it, so the
   // button must too, or the one mode that promises not to stop would stop hardest.
   const blocked = unresolved > 0 && project.approval_mode !== "unattended";
-  // Whichever gate the run is parked on, if findings are what is holding it there
-  // then this is the screen that has to offer the way out. Rendering the panel only
-  // for the gate kinds that happen to be *about* security left every-phase mode a
-  // dead end: the security gate never fires in that mode, so the reviewer met a
-  // disabled button, a 409, and a hint pointing at a screen they could not reach.
-  const showsFindings = kind === "security" || kind === "ship" || kind === "cost" || blocked;
+  // On a whole-build review the findings live behind the Security tab rather than
+  // inline, and that tab is not the one open by default — so the reviewer needs
+  // telling where to go. Everywhere else the panel is on screen already.
+  const findingsBehindTab = kind === "ship" || kind === "cost";
 
   // The build under review, fetched only for the pass that needs all of it.
   const wantsBuild = kind === "ship" || kind === "cost";
@@ -326,7 +324,10 @@ export default function Decision({
             {blocked
               ? `${unresolved} finding${unresolved === 1 ? "" : "s"} at high severity or above ` +
                 (unresolved === 1 ? "still needs" : "still need") +
-                " a decision. Send each one back to be fixed, or waive it with a reason."
+                " a decision" +
+                (findingsBehindTab
+                  ? " — they're under Security above. Send each one back to be fixed, or waive it with a reason."
+                  : ". Send each one back to be fixed, or waive it with a reason.")
               : copy.after}
           </span>
         </div>

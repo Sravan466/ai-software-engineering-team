@@ -38,7 +38,11 @@ log = get_logger(__name__)
 #: A verdict longer than this is not a verdict. `debate._parse` falls back to
 #: putting the model's entire raw reply in `decision` when the JSON will not parse,
 #: and scanning a page of prose for technology names finds several of them.
-_MAX_VERDICT_CHARS = 400
+#: Raised from 400: a local model asked to justify a verdict writes a paragraph, and
+#: a well-formed 544-character answer was being discarded as if it were a transcript.
+#: What this is really guarding against is `debate._parse`'s raw-reply fallback,
+#: which is thousands of characters, not hundreds.
+_MAX_VERDICT_CHARS = 1200
 
 #: Where a charter entry came from, in the order of authority. The debate is the
 #: settled decision; the architecture is what the designer wrote; an implication is
@@ -248,8 +252,19 @@ def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Cha
     #    the architecture's to decide.
     if isinstance(debate, dict):
         decision = debate.get("decision")
-        if isinstance(decision, str) and 0 < len(decision.strip()) <= _MAX_VERDICT_CHARS:
-            record("database", stack.name_to_choice("database", decision), SOURCE_DEBATE)
+        spoken = decision.strip() if isinstance(decision, str) else ""
+        if len(spoken) > _MAX_VERDICT_CHARS:
+            log.warning(
+                "The debate's verdict is %s characters, past the %s this reads as a "
+                "verdict rather than a transcript, so the charter takes its database "
+                "from the architecture instead. Raise it if your moderator is simply "
+                "verbose: %s…",
+                len(spoken),
+                _MAX_VERDICT_CHARS,
+                spoken[:120],
+            )
+        if 0 < len(spoken) <= _MAX_VERDICT_CHARS:
+            record("database", stack.choice_stated_in("database", decision), SOURCE_DEBATE)
 
     # 2. the architecture. Each category is read from the areas that can name it, so
     #    "Node.js" under `backend` settles the language and "React" under `frontend`

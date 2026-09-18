@@ -260,6 +260,10 @@ class ModelRouter:
         """
         assigned = model_roles.get_all()
         local = self._providers["ollama"]
+        # Asked once. `local_status` 40 lines up documents why: every extra call is
+        # another 2-second timeout the Settings page waits through when Ollama is
+        # down, which is exactly when somebody is looking at this page.
+        models = local.list_models() if hasattr(local, "list_models") else []
         rows = []
         for entry in model_roles.catalogue():
             role = entry["role"]
@@ -276,10 +280,10 @@ class ModelRouter:
         return {
             "roles": rows,
             "default_model": self._default_model["ollama"],
-            "local_models": local.list_models() if hasattr(local, "list_models") else [],
+            "local_models": models,
             #: Derived once, here, so the Settings page does not carry a second copy
             #: of the rule that disagreed with this one about `codellama`.
-            "code_models": [m for m in (local.list_models() if hasattr(local, "list_models") else []) if _looks_like_a_coder(m)],
+            "code_models": [m for m in models if _looks_like_a_coder(m)],
             "cloud_models": [
                 f"{name}:{self._default_model[name]}"
                 for name in self.CLOUD_PROVIDERS
