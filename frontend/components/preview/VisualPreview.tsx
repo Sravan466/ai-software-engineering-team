@@ -34,9 +34,20 @@ export default function VisualPreview({ id }: { id: string }) {
   const [mode, setMode] = useState<Mode>("use");
   const frameRef = useRef<MockupFrameHandle>(null);
 
+  // Responses are applied in the order they were asked for. The backend is busy while
+  // it builds, so a slow poll can come back after a faster, newer one — and applying
+  // it would put the old mockup back and turn "building" on again.
+  const asked = useRef(0);
+  const applied = useRef(0);
+  const inFlight = useRef(false);
+
   const refresh = useCallback(async () => {
+    const ticket = ++asked.current;
     try {
-      setState(await api.getPreview(id));
+      const next = await api.getPreview(id);
+      if (ticket < applied.current) return;
+      applied.current = ticket;
+      setState(next);
       // A blip that the next poll recovered from is not an error worth keeping on screen.
       setError("");
     } catch (e: any) {
@@ -58,7 +69,15 @@ export default function VisualPreview({ id }: { id: string }) {
   const building = Boolean(state?.job?.running);
   useEffect(() => {
     if (!building) return;
-    const timer = setInterval(refresh, POLL_MS);
+    const timer = setInterval(async () => {
+      if (inFlight.current) return; // a tick while the last poll is out is a tick skipped
+      inFlight.current = true;
+      try {
+        await refresh();
+      } finally {
+        inFlight.current = false;
+      }
+    }, POLL_MS);
     return () => clearInterval(timer);
   }, [building, refresh]);
 

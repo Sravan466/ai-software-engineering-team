@@ -88,6 +88,18 @@ def test_clean_fragment_removes_what_could_run_or_escape():
         assert gone not in clean
 
 
+def test_clean_fragment_drops_network_pictures_but_keeps_what_draws_locally():
+    clean = clean_fragment(
+        '<div style="background:url(https://x/y.jpg)"><picture><source srcset="a.webp">'
+        '<img src="a.jpg" srcset="a.jpg 2x" alt="Hero"></picture><video src="v.mp4"></video>'
+        '<svg><defs><linearGradient id="g"/></defs><rect fill="url(#g)"/></svg></div>'
+    )
+    assert "https://x" not in clean and "<video" not in clean and "<source" not in clean
+    assert "srcset" not in clean and "<picture" not in clean
+    assert '<img src="a.jpg" alt="Hero">' in clean  # the platform redraws this one
+    assert 'fill="url(#g)"' in clean  # an in-document reference, not a request
+
+
 # ── the plan's guarantees ────────────────────────────────────────────────────
 def test_any_plan_is_normalised_into_a_site_with_logic():
     """One page, no list, no form, a dynamic route: still a site that works."""

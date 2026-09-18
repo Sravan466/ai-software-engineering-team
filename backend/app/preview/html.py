@@ -195,8 +195,13 @@ _FORM_ACTION = re.compile(r"""(<form\b[^>]*?)\s+(action|method|target)\s*=\s*("[
 #: URL, and a guess that 404s is a console error on load — <img src> is redrawn by
 #: the platform; these have no platform version, so they go.
 _SRCSET = re.compile(r"""\s+(srcset|sizes|poster)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
-_MEDIA = re.compile(r"<(video|audio|picture)\b[\s\S]*?</\1\s*>|<source\b[^>]*/?>", re.IGNORECASE)
-_CSS_URL = re.compile(r"""url\(\s*(['"]?)(?!data:)[^)'"]*\1\s*\)""", re.IGNORECASE)
+#: Video and audio go whole — there is no platform version of either. A <picture>
+#: loses only its wrapper and its <source>s: the <img> inside is its fallback, and the
+#: platform redraws that like any other.
+_MEDIA = re.compile(r"<(video|audio)\b[\s\S]*?</\1\s*>|<source\b[^>]*/?>|</?picture\b[^>]*>", re.IGNORECASE)
+#: `url(#gradient)` is a reference inside the same SVG, not a request; only a real
+#: address can fail to load.
+_CSS_URL = re.compile(r"""url\(\s*(['"]?)(?!data:|#)[^)'"]*\1\s*\)""", re.IGNORECASE)
 
 
 def clean_fragment(text: str) -> str:
