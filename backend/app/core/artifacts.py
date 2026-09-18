@@ -24,6 +24,8 @@ from app.db.models import Project
 #: The phase name the platform's own files are attributed to.
 PLATFORM = "platform"
 
+_LOCKFILE = re.compile(r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$")
+
 
 def iter_files(output: dict) -> Iterator[Tuple[str, str, str]]:
     """Yield (path, content, language) for every file-like item in an agent output."""
@@ -84,7 +86,10 @@ def build_problems(project: Project) -> list[dict]:
 
     from app.db.models import PhaseResult
 
-    session = object_session(project)
+    try:
+        session = object_session(project)
+    except Exception:  # noqa: BLE001 - not an ORM instance (a scoring stand-in)
+        session = None
     rows = (
         session.query(PhaseResult)
         .filter(PhaseResult.project_id == project.id)
@@ -186,11 +191,17 @@ def assemble(project: Project) -> dict:
             "notes": [f.purpose]
             + (["Replaces the copy an agent wrote — the platform owns this file."] if existing else []),
         }
-    # A platform-owned file the scaffold did not write (a `yarn.lock` next to the
-    # platform's npm manifest) contradicts the manifest it sits beside.
+    # An agent's lockfile beside a manifest the platform rewrote pins what the manifest
+    # no longer says, so it goes with it. Nothing else the platform merely *claims* is
+    # dropped: a file the scaffold did not write — a Vite project's tsconfig, a
+    # backend's own migrate.py — is the only copy there is, and deleting it would
+    # lose it from the archive while reporting it as replaced.
+    written = scaffold.paths()
     for path in [p for p, f in files.items() if f["phase"] != PLATFORM and platform_owned(p)]:
-        replaced.append(path)
-        del files[path]
+        folder = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+        if _LOCKFILE.search(path) and f"{folder}package.json" in written:
+            replaced.append(path)
+            del files[path]
 
     problems = build_problems(project)
     statuses = {ph.phase: ph.build_status for ph in phases if ph.phase in CODE_PHASES}

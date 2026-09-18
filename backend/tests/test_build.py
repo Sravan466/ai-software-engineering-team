@@ -205,3 +205,42 @@ def test_a_phase_that_writes_broken_code_is_sent_back_and_recorded(client, monke
     record = next(f for f in art["files"] if f["path"] == "backend/main.py")
     assert record["problems"] and record["phase"] == "backend_engineer"
     assert any(f["phase"] == "platform" and f["path"] == "backend/requirements.txt" for f in art["files"])
+
+
+def test_files_the_platform_claims_but_does_not_write_are_kept():
+    """Only a file the scaffold actually wrote replaces the agent's copy."""
+    from datetime import datetime, timezone
+
+    from app.core.artifacts import assemble
+
+    def phase(key, files):
+        return SimpleNamespace(
+            phase=key, status="approved", created_at=datetime.now(timezone.utc), id=key,
+            output={"files": [{"path": p, "code": c} for p, c in files.items()]},
+            content_md="", build_status=None, build_note=None,
+        )
+
+    project = SimpleNamespace(
+        charter=None, name="Vite app", idea="x", phases=[
+            phase("backend_engineer", {
+                "migrate.py": "print('own runner')\n",
+                "alembic.ini": "[alembic]\n",
+                "main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+            }),
+            phase("frontend_engineer", {
+                "src/main.tsx": "import React from 'react';\n",
+                "tsconfig.json": '{"compilerOptions": {"strict": true}}',
+                "package-lock.json": "{}",
+            }),
+        ],
+    )
+    art = assemble(project)
+    by_path = {f["path"]: f for f in art["files"]}
+    # Kept: the scaffold writes no tsconfig for Vite and no runner for a backend
+    # that brings its own migrations.
+    assert by_path["frontend/tsconfig.json"]["phase"] == "frontend_engineer"
+    assert by_path["backend/migrate.py"]["phase"] == "backend_engineer"
+    # Replaced: the manifest is the platform's, so the lockfile beside it goes.
+    assert by_path["frontend/package.json"]["phase"] == "platform"
+    assert "frontend/package-lock.json" not in by_path
+    assert art["scaffold"]["replaced"] == ["frontend/package-lock.json"]

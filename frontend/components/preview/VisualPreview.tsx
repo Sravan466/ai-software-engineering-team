@@ -37,6 +37,8 @@ export default function VisualPreview({ id }: { id: string }) {
   const refresh = useCallback(async () => {
     try {
       setState(await api.getPreview(id));
+      // A blip that the next poll recovered from is not an error worth keeping on screen.
+      setError("");
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -49,13 +51,16 @@ export default function VisualPreview({ id }: { id: string }) {
   }, [refresh]);
 
   // While a build runs, follow it. Silent refreshes: no skeleton over a mockup that
-  // is still perfectly readable while its replacement is drawn.
+  // is still perfectly readable while its replacement is drawn. An interval rather
+  // than a timeout re-armed by each new state: a failed request leaves the state as
+  // it was, and a poll that only re-arms on change would stop there for good —
+  // leaving the tab on "building" with Rebuild disabled until someone reloads.
   const building = Boolean(state?.job?.running);
   useEffect(() => {
     if (!building) return;
-    const timer = setTimeout(refresh, POLL_MS);
-    return () => clearTimeout(timer);
-  }, [building, state, refresh]);
+    const timer = setInterval(refresh, POLL_MS);
+    return () => clearInterval(timer);
+  }, [building, refresh]);
 
   // Selection clicks coming up from the sandboxed iframe (edit mode only).
   useEffect(() => {
