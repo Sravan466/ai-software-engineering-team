@@ -22,8 +22,12 @@ ROLE = "embeddings"
 def _chosen_model() -> str:
     """The embedding model the user selected, or the configured default.
 
-    A bare tag is what the Settings dropdown writes and what Ollama expects here, so
-    a `provider:model` pair is reduced to its model half rather than being sent as-is.
+    This endpoint is Ollama's and nothing else's — there is no cloud path here — so a
+    selection naming another provider is declined rather than forwarded. Sending
+    `anthropic:claude-…` on to `/api/embed` as a model name would fail every RAG and
+    memory write from that moment on, with an error about a model Ollama has never
+    heard of. A bare tag is what the Settings dropdown writes; an `ollama:` prefix is
+    reduced to its model half.
     """
     from app.core import model_roles
 
@@ -31,7 +35,15 @@ def _chosen_model() -> str:
     if not spec:
         return settings.embedding_model
     provider, _, model = spec.partition(":")
-    return model.strip() if model and provider.strip() == "ollama" else spec
+    if model and provider.strip() != "ollama":
+        log.warning(
+            "Embeddings are set to '%s', which is not a local model — they run "
+            "against Ollama only. Using '%s' instead.",
+            spec,
+            settings.embedding_model,
+        )
+        return settings.embedding_model
+    return model.strip() if model else spec
 
 
 class OllamaEmbeddingFunction:

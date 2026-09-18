@@ -37,6 +37,7 @@ from app.core.constants import (
     PhaseStatus,
     PipelineStatus,
     RoutingMode,
+    SchemaStatus,
     StackStatus,
 )
 from app.core.logging import get_logger
@@ -633,7 +634,16 @@ class PipelineRunner:
             # decides whether the fix took. Here rather than in `_run_phase` because a
             # redo of this phase lands here too, and a waiver that only survived one
             # of the two paths would be a waiver the reviewer is asked about again.
-            remediation.sync_dispositions(db, project, row.output)
+            remediation.sync_dispositions(
+                db,
+                project,
+                row.output,
+                # A report that missed its declared shape yields no findings at all.
+                # Reconciling against it would read as "they all went away" and
+                # clear a critical finding because nobody could parse the report
+                # that raised it. The UNCHECKED gate already stops that run.
+                readable=row.schema_status != SchemaStatus.INVALID.value,
+            )
         return row
 
     def _park(self, db: Session, project: Project, gate: Gate) -> None:

@@ -116,19 +116,22 @@ export default function Decision({
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
 
-  // Whether anything severe is still waiting on a decision. Read here rather than
-  // inferred from the gate kind: the reviewer can settle the last finding without
-  // the run moving, and the Ship button has to notice that and open.
+  // Whether anything severe is still waiting on a decision.
+  //
+  // Asked at *every* gate, not only the ones that show the findings panel. The
+  // server refuses an approve over an unsettled critical finding whatever gate the
+  // run is parked on, and a run can easily be parked on a later one — a stack gate
+  // at DevOps, a per-phase handoff. Gating the question on the panel left those
+  // showing a live Ship button that returned a 409 on click.
   const [unresolved, setUnresolved] = useState(0);
   const [findingsTick, setFindingsTick] = useState(0);
   const showsFindings = kind === "security" || kind === "ship" || kind === "cost";
   useEffect(() => {
-    if (!showsFindings) return;
     api
       .getSecurity(id)
       .then((s) => setUnresolved(s.unresolved))
       .catch(() => setUnresolved(0));
-  }, [showsFindings, id, findingsTick, project.updated_at]);
+  }, [id, findingsTick, project.updated_at]);
 
   // The build under review, fetched only for the pass that needs all of it.
   const wantsBuild = kind === "ship" || kind === "cost";
@@ -187,7 +190,7 @@ export default function Decision({
   // Approving over an unanswered critical finding is the thing this whole path
   // exists to stop, so the button is shut rather than the server refusing after the
   // click. The backend refuses it too — this is the half that explains why.
-  const blocked = showsFindings && unresolved > 0;
+  const blocked = unresolved > 0;
 
   const order = PHASES.map((p) => p.key);
   const rebuilds =
@@ -306,7 +309,11 @@ export default function Decision({
           <span className="field-hint">
             {blocked
               ? `${unresolved} finding${unresolved === 1 ? "" : "s"} at high severity or above ` +
-                "still need a decision. Send each one back to be fixed, or waive it with a reason."
+                (unresolved === 1 ? "still needs" : "still need") +
+                " a decision" +
+                (showsFindings
+                  ? ". Send it back to be fixed, or waive it with a reason."
+                  : " — open the Security panel on the Ship review to settle them.")
               : copy.after}
           </span>
         </div>

@@ -31,15 +31,25 @@ from app.orchestration.approval import STOPPING_SEVERITIES, read_key, severe_fin
 
 log = get_logger(__name__)
 
-#: Phases that write files a finding can be about, in pipeline order. A finding is
-#: routed to the earliest owner, because fixing an earlier phase rebuilds the later
-#: ones anyway — sending the same problem to Frontend and then to DevOps would run
-#: the back half of the pipeline twice for one fix.
-CODE_PHASES: tuple[str, ...] = (
-    Phase.BACKEND_ENGINEER.value,
-    Phase.FRONTEND_ENGINEER.value,
-    Phase.QA_ENGINEER.value,
-    Phase.DEVOPS_ENGINEER.value,
+#: Phases that can own a finding: the ones that write files **and run before the
+#: security review**, in pipeline order.
+#:
+#: That second condition is not a detail. Sending a finding back to a phase that
+#: runs *after* Warden rewinds nothing Warden depends on, so the audit never re-runs
+#: — the finding sits at `fix_requested` forever and the build can never be
+#: approved. DevOps is the phase this excludes, and excluding it costs nothing:
+#: DevOps has not written a line when the audit happens, so Warden has never seen a
+#: Dockerfile it could raise a finding about. What it *has* seen is whatever config
+#: the backend wrote, which is where those findings belong.
+CODE_PHASES: tuple[str, ...] = tuple(
+    p.value
+    for p in PHASE_ORDER[: [q.value for q in PHASE_ORDER].index(Phase.SECURITY_ENGINEER.value)]
+    if p.value
+    in {
+        Phase.BACKEND_ENGINEER.value,
+        Phase.FRONTEND_ENGINEER.value,
+        Phase.QA_ENGINEER.value,
+    }
 )
 
 #: When a finding names no file this build recognises, its category is the next best
@@ -49,12 +59,13 @@ CODE_PHASES: tuple[str, ...] = (
 _CATEGORY_OWNER: tuple[tuple[str, str], ...] = (
     (r"\bcsrf\b|\bxss\b|\bcors\b|clickjack|content security policy|\bcsp\b",
      Phase.FRONTEND_ENGINEER.value),
+    # Secrets and transport land on the backend rather than on DevOps: at the moment
+    # the audit runs, the only configuration that exists is the backend's, and DevOps
+    # cannot be sent back without stranding the finding (see `CODE_PHASES`).
     (r"sql injection|\bauthz\b|authoriz|authentic|session|password|jwt|token|"
-     r"rate.?limit|mass assignment|idor|injection",
+     r"rate.?limit|mass assignment|idor|injection|secret|credential|\benv\b|"
+     r"environment variable|tls|https|certificate",
      Phase.BACKEND_ENGINEER.value),
-    (r"secret|credential|\benv\b|environment variable|docker|container|image|"
-     r"tls|https|certificate|pipeline|workflow",
-     Phase.DEVOPS_ENGINEER.value),
 )
 
 
@@ -79,15 +90,21 @@ def _text(value: object) -> str:
     return str(value).strip() if has_content(value) else ""
 
 
-def finding_key(category: str, title: str, location: str) -> str:
+def finding_key(category: str, title: str, location: str = "") -> str:
     """A stable identity for one finding, across the re-audits that follow a fix.
 
     Derived from what the finding *says* rather than where it sat in a list, because
     the list is regenerated every time the phase re-runs. Without this a waiver would
     last exactly until the next audit, and the reviewer would be asked the same
     question again — which is the same as not having waived it.
+
+    The location is **not** part of it, though it is still displayed. It is the most
+    volatile field a model writes: the same issue comes back as `authController.js`,
+    then `src/controllers/authController.js`, then `authController.js:42`, and every
+    rewording would mint a new key and silently resurrect a waived finding. What the
+    finding *is* — its category and its title — is what identifies it.
     """
-    basis = "|".join(re.sub(r"\s+", " ", part.strip().lower()) for part in (category, title, location))
+    basis = "|".join(re.sub(r"\s+", " ", part.strip().lower()) for part in (category, title))
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
 
 
@@ -161,7 +178,7 @@ def read_findings(output: object, project=None) -> list[Finding]:
             continue
         out.append(
             Finding(
-                key=finding_key(category, title, location),
+                key=finding_key(category, title),
                 title=title or category,
                 severity=severity,
                 category=category,
@@ -215,17 +232,26 @@ def group_by_owner(findings: Iterable[Finding]) -> dict[str, list[Finding]]:
 
 
 # ── persistence ──────────────────────────────────────────────────────────────
-def sync_dispositions(db, project, output: object) -> list:
+def sync_dispositions(db, project, output: object, readable: bool = True) -> list:
     """Record this audit's findings against the ones already being tracked.
 
     Called after every security phase, including the re-audit that follows a fix, so
-    it has to answer three questions at once and get all three right:
+    it has to answer four questions at once and get all four right:
 
       * a finding the audit no longer reports, and which was sent back to be fixed,
         is **fixed** — that is what a re-audit not finding it means;
+      * a finding that vanished without having been sent back is **gone**, not fixed.
+        It stops blocking, because refusing to ship over something the current report
+        does not mention is asking the reviewer to waive a finding that is not there
+        — but it is not called a remediation, because nobody performed one;
       * a finding the reviewer **waived** stays waived when it reappears, or waiving
         would last until the next audit and mean nothing;
       * anything else is open, and the gate will ask about it.
+
+    `readable` is what stops the second rule becoming a hole. An audit that failed
+    its own schema yields no findings at all, and treating that as "everything went
+    away" would clear a critical finding because nobody could parse the report that
+    raised it. When the report is unreadable, this only adds — it never resolves.
     """
     from app.db.models import SecurityDisposition
 
@@ -266,15 +292,18 @@ def sync_dispositions(db, project, output: object) -> list:
         row.owner_phase = f.owner_phase or row.owner_phase
 
     for key, row in existing.items():
-        if key in seen or row.status == FindingStatus.WAIVED.value:
+        if key in seen or row.status in FindingStatus.settled() or not readable:
             continue
         # Gone from the report. Only a finding that was actually sent back can be
-        # called fixed — one that simply stopped being mentioned is a model being
-        # inconsistent, and recording that as a remediation would be a lie the
-        # reviewer has no way to catch.
+        # called *fixed* — one that simply stopped being mentioned is a rebuild that
+        # may have removed it or a model being inconsistent, and this cannot tell
+        # which. Both stop blocking; only one claims a remediation happened.
         if row.status == FindingStatus.FIX_REQUESTED.value:
             row.status = FindingStatus.FIXED.value
             log.info("Security finding fixed and re-audited: %s (%s)", row.title, project.id)
+        else:
+            row.status = FindingStatus.GONE.value
+            log.info("Security finding no longer reported: %s (%s)", row.title, project.id)
 
     db.commit()
     return list(

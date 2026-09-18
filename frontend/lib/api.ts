@@ -52,7 +52,7 @@ export type SecurityFinding = {
   recommendation: string;
   /** The phase that wrote the offending file. Null when nothing owns it. */
   owner_phase: string | null;
-  status: "open" | "fix_requested" | "fixed" | "waived";
+  status: "open" | "fix_requested" | "fixed" | "gone" | "waived";
   /** The reviewer's reason for a waiver. */
   note: string | null;
 };

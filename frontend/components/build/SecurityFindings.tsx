@@ -36,8 +36,17 @@ const STATUS_COPY: Record<SecurityFinding["status"], { label: string; cls: strin
   open: { label: "Open", cls: "badge-bad" },
   fix_requested: { label: "Being fixed", cls: "badge-run" },
   fixed: { label: "Fixed and re-audited", cls: "badge-ok" },
+  gone: { label: "No longer reported", cls: "badge-ok" },
   waived: { label: "Waived", cls: "badge-warn" },
 };
+
+/**
+ * The states that let a build ship. Anything else still needs a decision — and
+ * still needs its buttons, which is the half that was missing: a finding whose fix
+ * request died mid-flight sat at "Being fixed" with no controls and no way out,
+ * while the server went on refusing every approve because of it.
+ */
+const SETTLED = new Set(["fixed", "gone", "waived"]);
 
 export default function SecurityFindings({
   id,
@@ -75,7 +84,7 @@ export default function SecurityFindings({
   const ordered = useMemo(() => {
     const rows = state?.findings ?? [];
     return [...rows].sort((a, b) => {
-      const settled = (f: SecurityFinding) => (f.status === "open" ? 0 : 1);
+      const settled = (f: SecurityFinding) => (SETTLED.has(f.status) ? 1 : 0);
       return (
         settled(a) - settled(b) ||
         (RANK[a.severity] ?? 9) - (RANK[b.severity] ?? 9) ||
@@ -147,7 +156,7 @@ export default function SecurityFindings({
           ) : (
             <>
               <span className="dot dot-ok" aria-hidden="true" />
-              Every serious finding is fixed or waived
+              Every serious finding has been settled
             </>
           )}
         </span>
@@ -167,7 +176,7 @@ export default function SecurityFindings({
         {ordered.map((f) => {
           const agent = f.owner_phase ? AGENT_BY_KEY[f.owner_phase] : undefined;
           const status = STATUS_COPY[f.status];
-          const open = f.status === "open";
+          const needsDecision = !SETTLED.has(f.status);
           const mine = working === f.key;
           return (
             <li key={f.key} className="finding" data-severity={f.severity} data-status={f.status}>
@@ -202,7 +211,7 @@ export default function SecurityFindings({
                 </p>
               )}
 
-              {open && waiving !== f.key && (
+              {needsDecision && waiving !== f.key && (
                 <div className="finding-acts">
                   <button
                     className="btn btn-sm btn-primary"
@@ -215,7 +224,8 @@ export default function SecurityFindings({
                     }
                   >
                     {mine && <span className="btn-spinner" aria-hidden="true" />}
-                    {Icon.undo} Send back to fix
+                    {Icon.undo}
+                    {f.status === "fix_requested" ? "Send back again" : "Send back to fix"}
                   </button>
                   <button className="btn btn-sm" disabled={busy || mine} onClick={() => setWaiving(f.key)}>
                     Waive it

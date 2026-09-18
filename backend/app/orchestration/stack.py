@@ -48,6 +48,11 @@ class Choice:
     #: Choices in other categories that follow from this one when nothing says
     #: otherwise — FastAPI means Python, Express means a JavaScript test runner.
     implies: tuple[tuple[str, str], ...] = ()
+    #: True for a choice that legitimately appears beside any other: SQLite is what
+    #: a Postgres project runs locally and tests against, so finding it in a build
+    #: whose charter says Postgres is normal practice, not a contradiction. It can
+    #: still be *chosen* as the charter's database; it just never convicts.
+    dev_fallback: bool = False
     _matchers: tuple[re.Pattern, ...] = field(default=(), init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -323,6 +328,7 @@ CHOICES: dict[str, tuple[Choice, ...]] = {
             label="SQLite",
             aliases=("sqlite3", "sqlite"),
             signals=(r"\bsqlite3?\b", r"sqlite://", r"\bbetter-sqlite3\b"),
+            dev_fallback=True,
         ),
         Choice(
             token="dynamodb",
@@ -389,7 +395,10 @@ CHOICES: dict[str, tuple[Choice, ...]] = {
         Choice(
             token="gotest",
             label="go test",
-            aliases=("go test", "gotest", "testing"),
+            # Not "testing": aliases are matched across the whole tech stack, and an
+            # architecture listing "Automated testing" under infra would have frozen
+            # a Node build's test runner as `go test`.
+            aliases=("go test", "gotest"),
             signals=(r"^\s*func\s+Test[A-Z]\w*\s*\(", r"_test\.go$"),
             implies=(("language", "go"),),
         ),
@@ -532,6 +541,12 @@ def satisfies(charter_token: str, found_token: str) -> bool:
     """Whether code that looks like `found_token` is allowed under `charter_token`."""
     if charter_token == found_token:
         return True
+    found = BY_TOKEN.get(found_token)
+    if found is not None and found.dev_fallback:
+        # A `sqlite:///./dev.db` default in a Postgres project is how almost every
+        # Postgres project starts. Convicting on it would fail correct work, which
+        # costs more than the contradiction it would catch.
+        return True
     charter = BY_TOKEN.get(charter_token)
     return bool(charter and found_token in charter.subsumes)
 
@@ -539,6 +554,17 @@ def satisfies(charter_token: str, found_token: str) -> bool:
 def implications(choice: Choice) -> dict[str, str]:
     """The categories this choice settles on its own: FastAPI means Python, and pip."""
     return {category: token for category, token in choice.implies}
+
+
+def language_family(token: str) -> frozenset[str]:
+    """The language tokens a file may be written in under one language choice.
+
+    TypeScript and JavaScript are one family, because a repo that uses either uses
+    both. Everything else stands alone.
+    """
+    if token in ("javascript", "typescript"):
+        return frozenset({"javascript", "typescript"})
+    return frozenset({token})
 
 
 def label_for(token: str) -> str:

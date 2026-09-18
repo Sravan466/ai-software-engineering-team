@@ -81,15 +81,21 @@ class FindingStatus(str, Enum):
     OPEN = "open"
     #: Sent back to the agent that owns the file. The re-audit says whether it took.
     FIX_REQUESTED = "fix_requested"
-    #: A later audit no longer reports it.
+    #: Sent back, and the audit that ran over the rebuilt code no longer reports it.
     FIXED = "fixed"
+    #: Gone from a later audit without having been sent back. Not called "fixed",
+    #: because nobody asked for it and nothing here can say why it went — a rebuild
+    #: may have removed it, or the model may simply be inconsistent. It stops
+    #: blocking either way: refusing to ship over a finding the current report does
+    #: not make would be asking the reviewer to waive something that is not there.
+    GONE = "gone"
     #: Accepted deliberately, with a reason attached.
     WAIVED = "waived"
 
     @classmethod
     def settled(cls) -> frozenset[str]:
         """The states that let a build past the security gate."""
-        return frozenset({cls.FIXED.value, cls.WAIVED.value})
+        return frozenset({cls.FIXED.value, cls.GONE.value, cls.WAIVED.value})
 
 
 class SchemaStatus(str, Enum):

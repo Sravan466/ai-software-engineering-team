@@ -15,7 +15,6 @@ from app.analytics import tracker
 from app.api.deps import get_project
 from app.core.constants import RoutingMode
 from app.db.base import get_db
-from app.core.config import settings
 from app.db.models import PreviewRevision, Project
 from app.preview.generator import build_context, edit_section, generate_preview
 from app.preview.html import extract_section, replace_section, scan_sections

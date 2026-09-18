@@ -324,7 +324,10 @@ def _require_models(project: Project) -> None:
     ready = model_router.readiness(
         RoutingMode(project.routing_mode),
         project.preferred_model,
-        roles=[r["role"] for r in model_roles.catalogue()],
+        # Embeddings are left out: they never go through the chat router, so
+        # resolving that role here would check the wrong model entirely. RAG and
+        # memory degrade to no-ops when their model is missing; a build does not.
+        roles=[r["role"] for r in model_roles.catalogue() if r["role"] != "embeddings"],
     )
     if not ready.ok:
         raise HTTPException(status_code=409, detail=ready.reason)

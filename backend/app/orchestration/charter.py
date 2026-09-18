@@ -63,15 +63,32 @@ def binding_on(phase_key: str, stored: object) -> Optional["Charter"]:
     return Charter.from_dict(stored)
 
 
-#: Which categories are checked against which phase's output. Scoped, because the
-#: evidence only means something in context: a `.py` file is a contradiction in a
-#: JavaScript project's *test suite* and completely normal in a Python backend, and
-#: a check that cannot tell those apart fails correct work.
+#: Which categories are checked against which phase's output, and it is a short
+#: list on purpose.
+#:
+#: The charter is *printed* to all six categories — every agent is told the whole
+#: stack. Only these are allowed to **fail a phase**, because only these convict on
+#: evidence that is unambiguous in a real repository. The ones deliberately absent:
+#:
+#:   `language` and `package_manager` — almost every build here is polyglot. A
+#:   FastAPI backend beside a React frontend legitimately contains `.tsx` files and
+#:   an `npm ci` line, and a check that reads those as contradicting a Python
+#:   charter tells a correct agent to "rewrite it against pip", which is not an
+#:   instruction anyone can follow.
+#:
+#:   `test_runner` as a token comparison — same reason. What a test suite must not
+#:   do is far narrower, and `_foreign_language_tests` below says exactly what.
+#:
+#:   `database` on QA — a `sqlite:///:memory:` fixture under a Postgres charter is
+#:   ordinary practice, and a QA suite importing the wrong driver only happens when
+#:   the backend already did, which the backend's own check catches first.
+#:
+#: A false positive costs more than a missed contradiction: it fails work that was
+#: correct, and it does it in a gate that stops the run.
 ENFORCED: dict[str, tuple[str, ...]] = {
-    Phase.BACKEND_ENGINEER.value: ("database", "backend_framework", "language"),
+    Phase.BACKEND_ENGINEER.value: ("database", "backend_framework"),
     Phase.FRONTEND_ENGINEER.value: ("frontend_framework",),
-    Phase.QA_ENGINEER.value: ("test_runner", "database"),
-    Phase.DEVOPS_ENGINEER.value: ("database", "package_manager"),
+    Phase.DEVOPS_ENGINEER.value: ("database",),
 }
 
 
@@ -267,7 +284,13 @@ def violations(charter: Optional[Charter], phase_key: str, output: object) -> li
     says PostgreSQL" is. The wording matches the shape-validation errors these are
     merged with, so the repair round reads as one list of problems rather than two.
     """
-    if not charter or phase_key not in ENFORCED:
+    if not charter:
+        return []
+    if phase_key == Phase.QA_ENGINEER.value:
+        # The test suite gets its own check, not a category comparison. See
+        # `_foreign_language_tests` for why the obvious version fails correct work.
+        return _foreign_language_tests(charter, output)
+    if phase_key not in ENFORCED:
         return []
     from app.core.artifacts import iter_files  # local: artifacts imports db models
 
@@ -296,6 +319,66 @@ def violations(charter: Optional[Charter], phase_key: str, output: object) -> li
                 f" ({_SOURCE_PHRASE.get(expected.source, 'agreed for this build')}). "
                 f"Rewrite it, and every other file like it, against {expected.label}."
             )
+    return found
+
+
+#: Always allowed in a web build's test suite. Every frontend framework this
+#: pipeline knows is JavaScript or TypeScript, and a build whose architecture named
+#: no frontend at all still had a Frontend Engineer write one — so treating JS as
+#: foreign because the charter did not mention it would fail a correct test suite.
+#: The check is for a test in a language the build does not contain *at all*, and
+#: erring towards a miss is the right direction: a missed contradiction costs a
+#: reader's attention, a false one fails work that was right.
+_ALWAYS_PRESENT = frozenset({"javascript", "typescript"})
+
+
+def _build_languages(charter: Charter) -> frozenset[str]:
+    """The languages this build legitimately contains.
+
+    The charter's backend language, plus the web languages every build here has a
+    front end in. A Python backend with a React front end is a Python *and* a
+    TypeScript repository, and treating it as one language is how a correct
+    `.tsx` test gets reported as a contradiction.
+    """
+    backend = charter.get("language")
+    if not backend:
+        return frozenset()
+    return stack.language_family(backend.token) | _ALWAYS_PRESENT
+
+
+def _foreign_language_tests(charter: Charter, output: object) -> list[str]:
+    """Test files written in a language this build does not contain.
+
+    This is the narrow, high-precision version of "the tests match the stack", and
+    it is the one the reported failure actually needs: a run whose backend was
+    Express and whose QA phase produced `tests/test_auth_controller.py` aimed at
+    `authController.js`. Those tests cannot run, cannot pass, and cannot be fixed by
+    anyone reading the archive.
+
+    Comparing test-runner *names* instead would fail every polyglot build, where a
+    Python backend and a React front end each correctly bring their own runner.
+    """
+    languages = _build_languages(charter)
+    if not languages:
+        return []
+    from app.core.artifacts import iter_files
+
+    found: list[str] = []
+    reported: set[str] = set()
+    for path, content, _lang in iter_files(output if isinstance(output, dict) else {}):
+        detected = stack.detect("language", path, content)
+        if detected is None or detected.token in languages:
+            continue
+        if detected.token in reported:
+            continue
+        reported.add(detected.token)
+        written_in = charter.get("language")
+        spoken = written_in.label if written_in else "the language this build uses"
+        found.append(
+            f"`{path}` — is a {detected.label} test, and nothing in this build is "
+            f"written in {detected.label}. It is aimed at {spoken} code it cannot "
+            f"import or run. Rewrite the suite in {spoken}."
+        )
     return found
 
 

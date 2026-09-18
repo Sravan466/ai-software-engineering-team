@@ -621,9 +621,14 @@ function RoleLine({
   // Kept as an option so the control shows what this role is actually set to,
   // rather than snapping back to a default it is not using.
   const options = useMemo(() => {
-    const all = [...state.local_models, ...state.cloud_models];
+    // Embeddings run against Ollama's own endpoint and nothing else, so offering a
+    // cloud model here would be offering a choice that cannot be honoured.
+    const all =
+      row.role === "embeddings"
+        ? [...state.local_models]
+        : [...state.local_models, ...state.cloud_models];
     return row.assigned && !all.includes(row.assigned) ? [...all, row.assigned] : all;
-  }, [state.local_models, state.cloud_models, row.assigned]);
+  }, [state.local_models, state.cloud_models, row.assigned, row.role]);
   const missing =
     Boolean(row.assigned) && row.provider === "ollama" && !state.local_models.includes(row.model ?? "");
 
