@@ -191,6 +191,12 @@ _DOC_TAGS = re.compile(r"</?(html|head|body)\b[^>]*>|<!doctype[^>]*>", re.IGNORE
 _ON_ATTR = re.compile(r"""\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
 _JS_URL = re.compile(r"""(href|src|action|formaction)\s*=\s*(["'])\s*javascript:[^"']*\2""", re.IGNORECASE)
 _FORM_ACTION = re.compile(r"""(<form\b[^>]*?)\s+(action|method|target)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
+#: Every other way a fragment can ask the network for a picture. Each is a guess at a
+#: URL, and a guess that 404s is a console error on load — <img src> is redrawn by
+#: the platform; these have no platform version, so they go.
+_SRCSET = re.compile(r"""\s+(srcset|sizes|poster)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
+_MEDIA = re.compile(r"<(video|audio|picture)\b[\s\S]*?</\1\s*>|<source\b[^>]*/?>", re.IGNORECASE)
+_CSS_URL = re.compile(r"""url\(\s*(['"]?)(?!data:)[^)'"]*\1\s*\)""", re.IGNORECASE)
 
 
 def clean_fragment(text: str) -> str:
@@ -212,6 +218,9 @@ def clean_fragment(text: str) -> str:
     t = _DOC_TAGS.sub("", t)
     t = _ON_ATTR.sub("", t)
     t = _JS_URL.sub(r'\1="#"', t)
+    t = _MEDIA.sub("", t)
+    t = _SRCSET.sub("", t)
+    t = _CSS_URL.sub("none", t)
     while True:
         stripped = _FORM_ACTION.sub(r"\1", t)
         if stripped == t:
