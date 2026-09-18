@@ -317,9 +317,11 @@ export default function VisualPreview({ id }: { id: string }) {
         </div>
       ) : (
         <p className="field-hint">
-          {mode === "use"
-            ? "Click through it like a user: the pages, forms and filters work. Switch to Edit to change a section."
-            : "Click any section in the mockup — or pick one below — then describe the change you want."}
+          {mode === "edit"
+            ? "Click any section in the mockup — or pick one below — then describe the change you want."
+            : state!.routes.length
+              ? "Click through it like a user: the pages, forms and filters work. Switch to Edit to change a section."
+              : "This mockup is a single static page, drawn before mockups were built as sites. Rebuild it for pages, sample data and forms that work."}
         </p>
       )}
 

@@ -889,3 +889,17 @@
   border-top: 1px solid var(--line-2);
 }
 .finding-waive .field { flex: 1; min-width: 240px; }
+
+/* The platform's run commands on the Deliver tab — literally commands, so mono. */
+.run-cmds {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  color: var(--ink);
+  font-size: var(--t-xs);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
