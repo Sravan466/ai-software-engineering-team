@@ -204,9 +204,13 @@ def preview(payload: PreviewRequest) -> dict:
     overrides = Overrides(
         pinned=frozenset(payload.pinned), excluded=frozenset(payload.excluded)
     )
+    # Read once and scored eight times. Letting each phase reach for the library
+    # itself re-parses every file on disk eight times for one answer — and, worse,
+    # would let a file changed mid-request give two phases different libraries.
+    candidates = registry.library()
     phases = []
     for phase in PHASE_ORDER:
-        chosen = select(phase.value, payload.idea, {}, overrides)
+        chosen = select(phase.value, payload.idea, {}, overrides, candidates=candidates)
         phases.append(
             {
                 "phase": phase.value,

@@ -563,7 +563,7 @@ class BaseAgent:
 _TRUNCATED = "… [cut here to fit this model's context window]\n"
 
 
-def _pack_skills(skills, limit: int) -> tuple[str, list[str]]:
+def _pack_skills(skills: tuple[Selected, ...], limit: int) -> tuple[str, list[str]]:
     """As many whole skills as fit, in the order they were selected.
 
     Whole ones only. A procedure cut off mid-step is a procedure with its last

@@ -200,5 +200,7 @@ def select(
     # same idea select the same skills in the same order, which is what makes
     # "which skills did this phase get?" a question with one answer.
     chosen.sort(key=lambda s: (not s.pinned, -s.score, s.skill.name))
+    # Zero means none. Reading it as "uncapped" would turn the most obvious way
+    # to ask for no skills into the one that delivers every one of them.
     cap = settings.skills_max_per_phase if limit is None else limit
-    return chosen[: max(cap, 0)] if cap else chosen
+    return chosen[: max(cap, 0)]

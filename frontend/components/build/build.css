@@ -734,7 +734,7 @@
   font-family: var(--pixel);
   font-size: 10px;
   letter-spacing: 0.02em;
-  color: var(--ink-4);
+  color: var(--ink-3);
 }
 .pick-row .seg { flex: none; }
 .pick-row .seg-btn { padding: 0 9px; }

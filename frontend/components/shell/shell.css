@@ -844,7 +844,7 @@
   color: var(--ink-3);
 }
 .skills-group:first-of-type { margin-top: 6px; }
-.skills-group .mono { font-weight: 400; font-size: var(--t-xs); color: var(--ink-4); }
+.skills-group .mono { font-weight: 400; font-size: var(--t-xs); color: var(--ink-3); }
 
 .skills-empty { margin: 8px 0 0; font-size: var(--t-sm); color: var(--ink-3); line-height: 1.6; }
 .skills-error { margin: 8px 0 0; font-size: var(--t-sm); color: var(--bad); line-height: 1.5; }
@@ -881,7 +881,7 @@
   white-space: nowrap;
 }
 .dryrun-picks { display: flex; flex-wrap: wrap; gap: 6px; }
-.dryrun-none { font-size: var(--t-xs); color: var(--ink-4); font-style: italic; }
+.dryrun-none { font-size: var(--t-xs); color: var(--ink-3); font-style: italic; }
 
 /* One chip for a skill that would arrive. Amber only when it was pinned — the
    accent means "you decided this", the same thing it means everywhere else. */
@@ -951,7 +951,7 @@
   color: var(--ink-3);
 }
 .skill-serves { color: var(--ink-3); }
-.skill-meta .mono { color: var(--ink-4); }
+.skill-meta .mono { color: var(--ink-3); }
 
 .skill-acts { display: flex; align-items: center; gap: 6px; }
 /* The controls resolve on hover or focus. Twelve rows each shouting two buttons

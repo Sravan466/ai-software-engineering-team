@@ -287,8 +287,7 @@ function DryRun() {
           {empty.length > 0 && (
             <p className="field-hint" style={{ marginTop: 12 }}>
               {empty.length === 1
-                ? `${AGENT_BY_KEY[empty[0].phase]?.codename ?? empty[0].label} would get no
-                   skills for this idea.`
+                ? `${AGENT_BY_KEY[empty[0].phase]?.codename ?? empty[0].label} would get no skills for this idea.`
                 : `${empty.length} phases would get no skills for this idea.`}{" "}
               That is a keyword miss, not a verdict — add a keyword below, or pin the
               skill on the build itself from the composer.
