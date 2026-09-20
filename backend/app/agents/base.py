@@ -33,6 +33,8 @@ from app.router.model_profile import ModelProfile
 from app.router.router import router
 from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
+from app.skills.loader import render as render_skill
+from app.skills.selection import Selected
 
 log = get_logger(__name__)
 
@@ -46,10 +48,16 @@ _PERSON_SHARE = {
     "extra": 0.10,
 }
 #: How whatever remains is divided between the sections the pipeline assembles.
+#: `skills` is a claimant here rather than a constant of its own, and that is the
+#: whole point. A separate budget added on top of this allocator is how a phase ends
+#: up over the window on a small local model — precisely the truncation
+#: `model_profile.py` exists to prevent. On a 7B window a skill arriving means RAG
+#: or memory gets less, and that is the correct trade, made visibly.
 _CONTEXT_SHARE = {
-    "depends_on": 0.62,
-    "rag": 0.26,
-    "memory": 0.12,
+    "depends_on": 0.55,
+    "rag": 0.19,
+    "skills": 0.18,
+    "memory": 0.08,
 }
 #: The text wrapping each optional section. Written once and used twice — to build
 #: the section, and to charge its cost against the budget — because a frame that is
@@ -58,6 +66,14 @@ _CONTEXT_SHARE = {
 _DEP_FRAME = "# Context — {dep} output\n```json\n{body}\n```\n"
 _RAG_FRAME = "# Reference material (from the uploaded knowledge base)\n{body}\n"
 _MEMORY_FRAME = "# Lessons from past projects (long-term memory)\n{body}\n"
+_SKILLS_FRAME = "# How this team does this work — follow these procedures\n{body}\n"
+#: What the heading and the join around it cost, charged *inside* the skills budget
+#: rather than on top of it. That is what lets the block be dropped entirely when
+#: nothing fits: the skeleton that measures the overhead and the prompt that is sent
+#: both omit it, so the two still cost the same — and a phase on a 4k window is not
+#: handed "follow these procedures" with the knowledge base sitting underneath it as
+#: the only thing that looks like an answer.
+_SKILLS_FRAME_COST = len(_SKILLS_FRAME.format(body="")) + 1  # + the "\n" join
 
 
 @dataclass
@@ -70,6 +86,11 @@ class AgentContext:
     prior_outputs: dict[str, dict] = field(default_factory=dict)  # phase -> structured output
     rag_context: str = ""
     memory_context: str = ""
+    #: The skills chosen for this phase, best first. Candidates rather than a
+    #: finished block: *which* of them fit is decided against the window of the
+    #: model this agent is about to call, which is knowledge the selector does not
+    #: have and the graph node that assembled this list does not either.
+    skills: tuple[Selected, ...] = ()
     feedback: Optional[str] = None  # human guidance when a phase is re-run after rejection
     extra_context: str = ""  # e.g. an agent-debate decision injected before a phase
     #: The technology decisions frozen after the architecture was settled. Printed
@@ -101,6 +122,19 @@ class AgentResult:
     #: round. None for a phase that writes no code.
     build_status: Optional[str] = None
     build_problems: list[dict] = field(default_factory=list)
+    #: The skills this deliverable was actually written with, in the order they were
+    #: injected. What was *selected* is not the same fact: a skill that did not fit
+    #: the window never reached the model, and recording it would make a skill you
+    #: cannot confirm was used indistinguishable from one that did nothing.
+    skills_used: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Prompt:
+    """A built ask, and which skills survived the budget to be part of it."""
+
+    messages: list[ChatMessage]
+    skills_used: list[str] = field(default_factory=list)
 
 
 class BaseAgent:
@@ -137,10 +171,15 @@ class BaseAgent:
         ask = self._build_messages(ctx, profile)
         options = GenerationOptions(json_mode=True, json_schema=self.response_schema())
 
-        resp = self._complete(ask, ctx, options)
+        resp = self._complete(ask.messages, ctx, options)
         responses = [resp]
         output, errors = self._check(self._parse(resp.text), ctx)
         best = (output, errors)
+        # Which skills the *kept* attempt was written with. A repair round is sized
+        # down to make room for the echoed attempt, so it can carry fewer of them —
+        # and the provenance has to describe the answer that survived, not the ask
+        # that was abandoned.
+        best_skills = list(ask.skills_used)
 
         rounds = 0
         while errors and rounds < max(settings.schema_repair_rounds, 0):
@@ -157,9 +196,8 @@ class BaseAgent:
             # already sized to fill the window is how the repair call — the one whose
             # whole job is to restate the shape — gets truncated from the head and
             # loses the system prompt that carries it.
-            resp = self._complete(
-                self._repair_messages(ctx, profile, resp.text, errors), ctx, options
-            )
+            retry = self._repair_messages(ctx, profile, resp.text, errors)
+            resp = self._complete(retry.messages, ctx, options)
             responses.append(resp)
             output, errors = self._check(self._parse(resp.text), ctx)
             # Fewer things wrong wins. Without this the *last* attempt is kept
@@ -167,6 +205,7 @@ class BaseAgent:
             # response it was repairing is what reaches the database and the gates.
             if len(errors) < len(best[1]):
                 best = (output, errors)
+                best_skills = list(retry.skills_used)
 
         output, errors = best
         # Two different failures, kept apart all the way to the reviewer. "This did
@@ -216,6 +255,7 @@ class BaseAgent:
             stack_violations=stack_errors,
             build_status=build.status if build else None,
             build_problems=build.as_list() if build else [],
+            skills_used=best_skills,
         )
 
     def _check(self, raw: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
@@ -296,7 +336,7 @@ class BaseAgent:
         ctx: AgentContext,
         profile: Optional[ModelProfile] = None,
         reserve: int = 0,
-    ) -> list[ChatMessage]:
+    ) -> Prompt:
         if profile is None:
             profile = router.profile_for(
                 ctx.routing_mode, ctx.preferred_model, complexity=self.complexity, role=self.key
@@ -309,22 +349,32 @@ class BaseAgent:
             if dep in ctx.prior_outputs
         }
         budget = self._section_budgets(ctx, profile, reserve, bodies)
-        return [
-            ChatMessage(role="system", content=self.system_prompt(ctx.charter)),
-            ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies)),
-        ]
+        used: list[str] = []
+        return Prompt(
+            messages=[
+                ChatMessage(role="system", content=self.system_prompt(ctx.charter)),
+                ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies, used)),
+            ],
+            skills_used=used,
+        )
 
     def _user_turn(
         self,
         ctx: AgentContext,
         budget: dict[str, int],
         bodies: Optional[dict[str, str]] = None,
+        skills_used: Optional[list[str]] = None,
     ) -> str:
         """Everything the agent is given, with every section held to its budget.
 
         `bodies` is the serialised prior-phase context, passed in so that measuring
         this prompt does not mean `json.dumps`-ing several hundred kilobytes of
         generated source a second time purely to count its characters.
+
+        `skills_used` is filled in with the skills that fit. It is an out-parameter
+        because this method runs twice per prompt — once at zero to measure the
+        overhead, once for real — and only the second run is the truth about what
+        the model was given.
         """
         if bodies is None:
             bodies = {}
@@ -341,6 +391,23 @@ class BaseAgent:
             clipped = body[:per_dep] if len(body) > per_dep else body
             note = "" if len(clipped) == len(body) else _TRUNCATED
             parts.append(_DEP_FRAME.format(dep=dep, body=clipped) + note)
+
+        # Before the reference material, because a procedure is how to do the work
+        # and reference material is what the work is about — and because a small
+        # model weights what it reads first most heavily.
+        if ctx.skills:
+            body, used = _pack_skills(
+                ctx.skills, budget.get("skills", 0) - _SKILLS_FRAME_COST
+            )
+            # Nothing fitted, so nothing is printed. A heading with no procedure
+            # under it is worse than silence on a small model: the next section
+            # starts immediately, and "follow these procedures" ends up pointing at
+            # the knowledge base. (`_section_budgets` says so in the log; it is the
+            # one that knows how much room there was.)
+            if body:
+                parts.append(_SKILLS_FRAME.format(body=body))
+            if skills_used is not None:
+                skills_used[:] = used
 
         if ctx.rag_context:
             parts.append(_RAG_FRAME.format(body=_clip(ctx.rag_context, budget["rag"])))
@@ -425,10 +492,46 @@ class BaseAgent:
         present = {
             "depends_on": any(d in ctx.prior_outputs for d in self.depends_on),
             "rag": bool(ctx.rag_context),
+            "skills": bool(ctx.skills),
             "memory": bool(ctx.memory_context),
         }
         share_total = sum(_CONTEXT_SHARE[n] for n, has in present.items() if has)
+
+        # Skills are sized first, and charged at what they *actually* cost.
+        #
+        # Every other section here spends whatever it is given: a budget of 4,000
+        # characters of reference material means 4,000 characters of reference
+        # material. Skills cannot — a procedure is injected whole or not at all, so
+        # a share that cannot hold the smallest candidate buys nothing. Reserving it
+        # anyway is how a build with skills switched on ends up *strictly worse* than
+        # the same build with them off: no procedures, and a fifth less room for the
+        # knowledge base than the run that never asked for any.
+        #
+        # So: offer them their share, see what fits, keep only that, and hand the
+        # rest back to the sections that can spend it.
+        budget["skills"] = 0
+        if present["skills"] and share_total:
+            offered = int(free * (_CONTEXT_SHARE["skills"] / share_total))
+            body, _ = _pack_skills(ctx.skills, offered - _SKILLS_FRAME_COST)
+            if body:
+                budget["skills"] = _SKILLS_FRAME_COST + len(body)
+            else:
+                smallest = min(len(render_skill(c.skill)) for c in ctx.skills)
+                log.info(
+                    "%s: %d skill(s) matched, but the smallest needs %s characters "
+                    "and this model's share is %s. This phase gets none, and the room "
+                    "goes to the context that can use it.",
+                    self.title,
+                    len(ctx.skills),
+                    f"{smallest:,}",
+                    f"{max(offered - _SKILLS_FRAME_COST, 0):,}",
+                )
+            free -= budget["skills"]
+            share_total -= _CONTEXT_SHARE["skills"]
+
         for name, share in _CONTEXT_SHARE.items():
+            if name == "skills":
+                continue
             budget[name] = int(free * (share / share_total)) if present[name] and share_total else 0
         return budget
 
@@ -442,7 +545,7 @@ class BaseAgent:
         profile: ModelProfile,
         attempt: str,
         errors: list[str],
-    ) -> list[ChatMessage]:
+    ) -> Prompt:
         """The same ask, plus what was wrong with the answer — inside the same window.
 
         The rejected attempt is echoed back so the model corrects rather than starts
@@ -460,11 +563,15 @@ class BaseAgent:
         )
         echo_budget = max(profile.prompt_char_budget // 4, 1000)
         echo = _clip(attempt, echo_budget)
-        return [
-            *self._build_messages(ctx, profile, reserve=len(echo) + len(instruction)),
-            ChatMessage(role="assistant", content=echo),
-            ChatMessage(role="user", content=instruction),
-        ]
+        ask = self._build_messages(ctx, profile, reserve=len(echo) + len(instruction))
+        return Prompt(
+            messages=[
+                *ask.messages,
+                ChatMessage(role="assistant", content=echo),
+                ChatMessage(role="user", content=instruction),
+            ],
+            skills_used=ask.skills_used,
+        )
 
     # ── output handling ───────────────────────────────────────────────────────
     def _validate(self, raw: dict) -> tuple[dict, list[str]]:
@@ -502,6 +609,33 @@ class BaseAgent:
 #: cost exactly what the finished prompt costs, and "55,344" is six characters longer
 #: than "0" — which is the whole overshoot, five sections over.
 _TRUNCATED = "… [cut here to fit this model's context window]\n"
+
+
+def _pack_skills(skills: tuple[Selected, ...], limit: int) -> tuple[str, list[str]]:
+    """As many whole skills as fit, in the order they were selected.
+
+    Whole ones only. A procedure cut off mid-step is a procedure with its last
+    instruction missing, and nothing downstream — not the agent, not the reviewer —
+    can tell that from a procedure that simply ends there. Everything else in this
+    prompt is truncatable prose or data; a skill is not.
+
+    A skill that does not fit is skipped rather than ending the pack, so a short
+    lower-ranked procedure still reaches the model when a long higher-ranked one
+    could not. The order of what *is* taken never changes, so the same build on the
+    same model gets the same block twice running.
+    """
+    blocks: list[str] = []
+    used: list[str] = []
+    spent = 0
+    for chosen in skills:
+        block = render_skill(chosen.skill)
+        cost = len(block) + (2 if blocks else 0)  # the "\n\n" this join will add
+        if spent + cost > limit:
+            continue
+        blocks.append(block)
+        used.append(chosen.skill.name)
+        spent += cost
+    return "\n\n".join(blocks), used
 
 
 def _clip(text: str, limit: int) -> str:

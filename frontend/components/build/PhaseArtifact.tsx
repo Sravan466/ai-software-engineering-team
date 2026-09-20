@@ -123,6 +123,55 @@ export default function PhaseArtifact({
           </div>
         )}
       </div>
+
+      <SkillsUsed row={row} />
     </div>
+  );
+}
+
+/**
+ * The procedures this agent was actually working from.
+ *
+ * Provenance rather than content, so it sits under the work rather than over it.
+ * Three states, and the third is the point: `null` is a phase from before the
+ * library existed and says nothing, `[]` is a phase that got none — which is a real
+ * thing to know, because selection happens before the model call and leaves no other
+ * trace anywhere in the build.
+ *
+ * What `[]` deliberately does *not* claim is why. There are two causes — nothing in
+ * the library matched this work, or what matched did not fit this model's share of
+ * the window — and this row cannot tell them apart. Naming the first would send
+ * someone off to add keywords that are already matching.
+ */
+function SkillsUsed({ row }: { row: PhaseResult }) {
+  const used = row.skills_used;
+  if (used === null || used === undefined) return null;
+  return (
+    <p className="artifact-skills">
+      {used.length === 0 ? (
+        <>
+          <span className="artifact-skills-label">Worked from</span>
+          <span
+            className="dryrun-none"
+            title={
+              "Either nothing in the library matched this work, or what matched did " +
+              "not fit this model's share of the context window. Try the idea on the " +
+              "Skills page to see which."
+            }
+          >
+            no skills
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="artifact-skills-label">Worked from</span>
+          {used.map((name) => (
+            <span key={name} className="pick">
+              {name}
+            </span>
+          ))}
+        </>
+      )}
+    </p>
   );
 }

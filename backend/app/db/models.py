@@ -90,6 +90,14 @@ class Project(Base):
     #: fix it on the fourth attempt. Past the bound the decision goes to a person.
     remediation_rounds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    #: What this build was told about skills, over what scoring would have chosen:
+    #: `{"pinned": [...], "excluded": [...]}`. Selection is a keyword score, and a
+    #: keyword miss is silent — a skill that does not match simply never arrives and
+    #: nothing in the output says so. This is the correction for that, per build,
+    #: without editing the library every other build reads. Null means the automatic
+    #: choice stands, which is the state every run starts in.
+    skill_overrides: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -202,6 +210,14 @@ class PhaseResult(Base):
     # for phases that write no code at all.
     build_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     build_note: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    #: The skills this phase was actually given, by name, in the order they were
+    #: injected. What was *selected* is a different fact: a skill that did not fit
+    #: the model's window never reached the agent. A skill you cannot confirm was
+    #: used is indistinguishable from one that did nothing, which is the whole
+    #: reason this column exists rather than the reviewer being asked to trust it.
+    #: Null on rows written before skills existed, and on a phase that got none.
+    skills_used: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

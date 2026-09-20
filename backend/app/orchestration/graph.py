@@ -34,6 +34,7 @@ from app.orchestration.charter import binding_on, freeze
 from app.orchestration.debate import conduct_debate, decision_summary
 from app.orchestration.state import PipelineState
 from app.rag.knowledge_base import knowledge_base
+from app.skills import selection as skills
 
 log = get_logger(__name__)
 
@@ -65,6 +66,11 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # not. A third fact beside the two above, with its own fix: the files named.
         "build_status": result.build_status,
         "build_problems": list(result.build_problems),
+        # Which procedures this deliverable was actually written with. Recorded
+        # because a skill you cannot confirm reached the model is indistinguishable
+        # from one that did nothing — and because selection is a keyword score, so
+        # "this phase got none" is a result the reviewer has to be able to see.
+        "skills_used": list(result.skills_used),
         # One entry per model call. A repaired phase made two, and analytics counts
         # calls and averages latency across them — folding both into a single event
         # would report one call that took as long as two.
@@ -100,6 +106,32 @@ def _gather_context(state: PipelineState, phase_key: str) -> tuple[str, str]:
     rag = knowledge_base.query(query, k=4)
     mem = memory_store.recall(idea, k=2, exclude_project_id=state.get("project_id"))
     return rag, mem
+
+
+def gather_skills(state: PipelineState, phase_key: str) -> tuple:
+    """The procedures this phase should be working from, best first.
+
+    Assembled here beside RAG and memory, and for the same reason: it is context the
+    pipeline gathers, not something the agent goes looking for. What it is *not* is
+    a finished block — how much of it fits belongs to the agent, which is the only
+    part of this that knows which model is about to answer.
+
+    Best effort, exactly like the two above it. A library that cannot be read leaves
+    a phase with no skills and a build that runs as it did before skills existed;
+    it never stops a run.
+    """
+    try:
+        return tuple(
+            skills.select(
+                phase_key,
+                state["idea"],
+                state.get("prior_outputs", {}),
+                skills.Overrides.from_dict(state.get("skill_overrides")),
+            )
+        )
+    except Exception as e:  # noqa: BLE001 - skills must never fail a phase
+        log.warning("Skill selection failed for %s (continuing without): %s", phase_key, e)
+        return ()
 
 
 def run_debate(state: PipelineState) -> tuple[Optional[dict], str]:
@@ -139,6 +171,7 @@ def _make_node(phase: Phase):
 
     def node(state: PipelineState) -> dict:
         rag_ctx, mem_ctx = _gather_context(state, phase.value)
+        skill_ctx = gather_skills(state, phase.value)
         extra = ""
         updates: dict = {}
         verdict: Optional[dict] = None
@@ -156,6 +189,7 @@ def _make_node(phase: Phase):
             prior_outputs=state.get("prior_outputs", {}),
             rag_context=rag_ctx,
             memory_context=mem_ctx,
+            skills=skill_ctx,
             feedback=(state.get("feedback") or {}).get(phase.value),
             extra_context=extra,
             # Everything from the Backend Engineer onwards builds against the same

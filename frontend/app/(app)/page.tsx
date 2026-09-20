@@ -76,6 +76,12 @@ export default function NewBuildPage() {
         preferred_model: config.model || undefined,
         approval_mode: config.approval,
         cost_cap_usd: config.costCap ?? undefined,
+        // Sent only when something was actually decided, so an untouched composer
+        // does not write an empty choice over the automatic one.
+        skill_overrides:
+          config.skills.pinned.length || config.skills.excluded.length
+            ? config.skills
+            : undefined,
       });
       setCreatedId(project.id);
       // Awaited, not fire-and-forget: a rejected run is the whole reason a build
@@ -162,6 +168,7 @@ export default function NewBuildPage() {
               onChange={setConfig}
               options={options}
               disabled={busy}
+              idea={idea}
             />
           </div>
         )}

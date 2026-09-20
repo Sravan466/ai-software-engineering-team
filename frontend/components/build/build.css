@@ -663,6 +663,89 @@
 .prefixed-mark { font-family: var(--mono); font-size: var(--t-base); color: var(--ink-3); }
 .prefixed-suffix { font-size: var(--t-sm); color: var(--ink-3); }
 
+/* ── provenance: what the agent was working from ────────────────────────────
+   Under the artifact, not over it: you read the work, then you can see what it
+   was written with. A skill nobody can confirm reached the model is
+   indistinguishable from one that did nothing, which is why this is here at
+   all rather than being taken on trust. */
+.artifact-skills {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+.artifact-skills-label { font-size: var(--t-xs); color: var(--ink-3); margin-right: 2px; }
+.artifact-skills .pick { font-family: var(--mono); font-size: 11px; }
+
+/* ── which procedures this build works from ─────────────────────────────────
+   Full width under the two columns above: twelve rows of a three-way control
+   do not belong in a 260px track, and the check below them is a paragraph of
+   result, not a field. */
+.skill-picker {
+  grid-column: 1 / -1;
+  gap: 0;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.skill-picker-toggle { margin-left: -6px; }
+.skill-picker-toggle .label { flex: none; color: var(--ink-2); }
+.skill-picker-toggle .phase-chev { transition: transform var(--tr); }
+.skill-picker-toggle .phase-chev.open { transform: rotate(90deg); color: var(--accent); }
+
+.skill-picker-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+  animation: rise var(--tr) ease both;
+}
+
+.pick-rows {
+  display: flex;
+  flex-direction: column;
+  max-height: 268px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 2px;
+  border-top: 1px solid var(--line);
+}
+.pick-row:first-child { border-top: 0; }
+.pick-id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pick-name {
+  font-size: var(--t-sm);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pick-serves {
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+/* Said, not implied: Auto on a skill that is off everywhere means it never
+   arrives, and only Always overrides that. */
+.pick-off { color: var(--warn); }
+.pick-off::before { content: " · "; color: var(--ink-3); }
+
+.pick-row .seg { flex: none; }
+.pick-row .seg-btn { padding: 0 9px; }
+
+.skill-picker-check { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
 /* ===========================================================================
    REVIEW POLICY — changeable while the run is in flight
    =========================================================================== */
@@ -717,6 +800,8 @@
   .decision-alarm { padding-left: 14px; padding-right: 14px; }
   .run-settings { padding: 14px; }
   .settings-grid { gap: 20px; }
+  /* The three-way control keeps its full labels; the name wraps above it. */
+  .pick-row { flex-direction: column; align-items: stretch; gap: 6px; }
 }
 
 /* ===========================================================================

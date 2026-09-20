@@ -91,6 +91,15 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         preferred_model=payload.preferred_model,
         approval_mode=approval,
         cost_cap_usd=payload.cost_cap_usd,
+        # Stored only when something was actually said. An empty override set and
+        # "nothing was said" both mean the automatic choice stands, and writing the
+        # first into every row would make the column unable to tell them apart.
+        skill_overrides=(
+            payload.skill_overrides.model_dump()
+            if payload.skill_overrides
+            and (payload.skill_overrides.pinned or payload.skill_overrides.excluded)
+            else None
+        ),
         # Kept in step with the mode so anything still reading the old flag — a saved
         # query, an older client — never disagrees with the policy actually in force.
         require_approval=approval != ApprovalMode.UNATTENDED.value,

@@ -28,6 +28,24 @@ def _as_utc(value: object) -> object:
 UtcDatetime = Annotated[datetime, BeforeValidator(_as_utc)]
 
 
+class SkillOverrides(BaseModel):
+    """What one build was told about skills, over what scoring would have chosen.
+
+    Selection is a keyword score with no model call behind it, which makes a miss
+    silent: a skill that does not match simply never arrives, and nothing in the
+    output says so. A pin is how that is corrected for one build without editing a
+    library every other build reads; an exclusion is the same thing the other way.
+    """
+
+    #: Skills this build gets whether or not they scored — and whether or not they
+    #: are switched off in the library, since naming one here is a more specific
+    #: instruction than the standing default.
+    pinned: list[str] = Field(default_factory=list)
+    #: Skills this build never gets, whatever they scored. Excluding beats pinning:
+    #: the two together are a contradiction, and refusing to inject is the safe half.
+    excluded: list[str] = Field(default_factory=list)
+
+
 class ProjectCreate(BaseModel):
     idea: str = Field(..., min_length=3, description="The product idea to build.")
     name: Optional[str] = None
@@ -46,6 +64,13 @@ class ProjectCreate(BaseModel):
             "Omit for no cap — zero would be indistinguishable from one. Only "
             "`checkpoints` acts on it; the other modes are explicit choices about "
             "being interrupted, and keep the value for when you switch back."
+        ),
+    )
+    skill_overrides: Optional[SkillOverrides] = Field(
+        None,
+        description=(
+            "Skills to force on or off for this build, over what keyword scoring "
+            "would choose. Omit to let the automatic choice stand."
         ),
     )
     #: Legacy switch, still honoured when `approval_mode` is absent.
@@ -122,6 +147,12 @@ class PhaseResultOut(BaseModel):
     #: `[{path, line, kind, message}]` for what still does not compile.
     build_note: Optional[list[dict]] = None
 
+    #: The procedural skills this phase was actually given, by name and in the order
+    #: they were injected. `None` on rows written before the library existed — which
+    #: is not the same as `[]`, and the UI says nothing at all for those rather than
+    #: reporting that an agent was offered skills and took none.
+    skills_used: Optional[list[str]] = None
+
     # Timing, so a phase in flight can show elapsed time and a finished one can show
     # what it actually cost in wall-clock and tokens.
     started_at: Optional[UtcDatetime] = None
@@ -164,6 +195,9 @@ class ProjectOut(BaseModel):
     #: How many times this build has already been sent back to fix its own severe
     #: security findings.
     remediation_rounds: Optional[int] = None
+    #: The skills this build forces on or off, over the automatic choice. `None` on
+    #: a build that never said anything about them.
+    skill_overrides: Optional[SkillOverrides] = None
     created_at: UtcDatetime
     updated_at: UtcDatetime
     phases: list[PhaseResultOut] = []

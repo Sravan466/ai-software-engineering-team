@@ -823,6 +823,227 @@
 .role-warn > svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
 
 /* ===========================================================================
+   SKILLS — the procedural library the crew is given
+
+   Wider than Settings because a skill row carries four facts (what it is, who
+   gets it, what triggers it, how big it is) and Settings rows carry two. Still
+   a single column of rows, not a grid of cards: the question is "what is each
+   of these, and is it on?", which is a scan down one column.
+   =========================================================================== */
+.skills-wrap { max-width: 940px; margin: 0 auto; padding: 24px 24px 72px; }
+.skills-stack { display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
+
+.skills-group {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 18px 0 2px;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+.skills-group:first-of-type { margin-top: 6px; }
+.skills-group .mono { font-weight: 400; font-size: var(--t-xs); color: var(--ink-3); }
+
+.skills-empty { margin: 8px 0 0; font-size: var(--t-sm); color: var(--ink-3); line-height: 1.6; }
+.skills-error { margin: 8px 0 0; font-size: var(--t-sm); color: var(--bad); line-height: 1.5; }
+
+/* ── the dry run: would this idea actually reach these procedures? ──────────
+   The page leads with this because a keyword miss is silent — a skill that does
+   not match never arrives, and nothing in a finished build says so. */
+.dryrun-ask { display: flex; gap: 8px; align-items: stretch; }
+.dryrun-ask .input { flex: 1; min-width: 0; }
+
+.dryrun-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: none;
+}
+.dryrun-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 12rem) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+.dryrun-row:first-child { border-top: 0; }
+.dryrun-who { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.dryrun-what {
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dryrun-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.dryrun-none { font-size: var(--t-xs); color: var(--ink-3); font-style: italic; }
+
+/* One chip for a skill that would arrive. Amber only when it was pinned — the
+   accent means "you decided this", the same thing it means everywhere else. */
+.pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  background: var(--bg-raised);
+  color: var(--ink-2);
+  font-size: var(--t-xs);
+  line-height: 1.4;
+}
+.pick-pinned { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
+.pick-pinned::before { content: "pinned"; font-size: 10px; opacity: 0.75; }
+
+/* ── one skill in the library ──────────────────────────────────────────────── */
+.skill-rows { display: flex; flex-direction: column; margin: 6px 0 0; padding: 0; list-style: none; }
+.skill-row { padding: 12px 0; border-top: 1px solid var(--line); }
+.skill-row:first-child { border-top: 0; }
+/* Switched off, or unusable: dimmed, never hidden. A skill you cannot see is a
+   skill you cannot work out the absence of. */
+.skill-row.off .skill-name,
+.skill-row.off .skill-what { color: var(--ink-3); }
+.skill-row.off .skill-keys .key { opacity: 0.6; }
+
+.skill-main {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+.skill-main > .switch { justify-self: start; padding-top: 3px; }
+
+.skill-id {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.skill-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--t-base);
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+}
+.skill-what { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.5; max-width: 62ch; }
+.skill-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.skill-serves { color: var(--ink-3); }
+.skill-meta .mono { color: var(--ink-3); }
+
+.skill-acts { display: flex; align-items: center; gap: 6px; }
+/* The controls resolve on hover or focus. Twelve rows each shouting two buttons
+   is how a library turns into a wall of chrome. */
+.skill-acts .btn { opacity: 0.55; transition: opacity var(--tr); }
+.skill-row:hover .skill-acts .btn,
+.skill-row:focus-within .skill-acts .btn { opacity: 1; }
+
+.skill-keys { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 0 54px; }
+.key {
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.skill-problem {
+  margin: 10px 0 0 54px;
+  padding: 9px 12px;
+  border-radius: var(--r);
+  border: 1px solid rgba(240, 82, 82, 0.35);
+  background: var(--bad-soft);
+  color: var(--ink-2);
+  font-size: var(--t-xs);
+  line-height: 1.55;
+}
+
+.skill-body {
+  margin: 10px 0 0 54px;
+  padding: 14px 16px;
+  max-height: 340px;
+  overflow: auto;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+  font-family: var(--sans);
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+/* ── writing one ───────────────────────────────────────────────────────────── */
+.skill-editor {
+  margin: 12px 0 4px 0;
+  padding: 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line-2);
+  background: var(--bg-raised);
+}
+.skill-form {
+  display: grid;
+  grid-template-columns: minmax(0, 14rem) minmax(0, 1fr);
+  gap: 14px;
+  margin-top: 4px;
+}
+.skill-f-wide { grid-column: 1 / -1; }
+.skill-editor-acts { display: flex; gap: 8px; margin-top: 16px; }
+.skill-editor .field-hint.over { color: var(--bad); }
+
+.agent-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  color: var(--ink-3);
+  font-family: var(--pixel);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background var(--tr), border-color var(--tr), color var(--tr);
+}
+.agent-pick .dot { background: var(--agent, var(--ink-4)); opacity: 0.35; transition: opacity var(--tr); }
+.agent-pick:hover:not(:disabled) { border-color: var(--line-3); color: var(--ink-2); }
+.agent-pick[aria-pressed="true"] {
+  border-color: var(--agent, var(--line-3));
+  background: var(--bg);
+  color: var(--ink);
+}
+.agent-pick[aria-pressed="true"] .dot { opacity: 1; }
+.agent-pick:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ===========================================================================
    RESPONSIVE — structural, not fluid type
    =========================================================================== */
 @media (max-width: 900px) {
@@ -838,7 +1059,16 @@
   }
 }
 @media (max-width: 640px) {
-  .build-wrap, .settings-wrap { padding: 18px 16px 64px; }
+  .build-wrap, .settings-wrap, .skills-wrap { padding: 18px 16px 64px; }
+  /* A skill row keeps its switch and its name side by side; everything that was
+     in a third column drops under them rather than being truncated. */
+  .skill-main { grid-template-columns: 34px minmax(0, 1fr); }
+  .skill-acts { grid-column: 2 / -1; justify-content: flex-start; }
+  .skill-acts .btn { opacity: 1; }
+  .skill-keys, .skill-problem, .skill-body { margin-left: 0; }
+  .skill-form { grid-template-columns: minmax(0, 1fr); }
+  .dryrun-row { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
+  .dryrun-ask { flex-direction: column; }
   /* The select needs the full width to show a model tag; stacking beats truncating. */
   .role-row { grid-template-columns: 30px minmax(0, 1fr); row-gap: 8px; }
   .role-pick { grid-column: 2 / -1; }

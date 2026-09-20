@@ -13,6 +13,7 @@
                                       │  agents/     8 specialist agents               │
                                       │  router/     hybrid LLM router + fallback      │
                                       │  memory/ rag/  ChromaDB (local embeddings)     │
+                                      │  skills/     procedural library, injected      │
                                       │  analytics/  usage & cost tracking             │
                                       │  db/         SQLAlchemy (SQLite/Postgres)      │
                                       └───────────┬───────────────────┬───────────────┘
@@ -126,6 +127,11 @@ land in `data/evals/<timestamp>.json`, so a prompt change is measured against th
 - `UsageEvent` — one LLM call's usage/cost (powers analytics).
 - `KnowledgeDoc` — metadata for an uploaded RAG document (chunks live in ChromaDB).
 
+`Project.skill_overrides` and `PhaseResult.skills_used` are the two columns the skill
+library adds: what a build was told to force on or off, and what each phase was actually
+given. The second is nullable rather than defaulted, because a row written before the
+library existed cannot say it was offered skills and took none.
+
 ## Memory & RAG
 
 Both use ChromaDB with **local embeddings via Ollama** (`nomic-embed-text`). They degrade to
@@ -136,3 +142,24 @@ on them.
   future agents' context.
 - **RAG** (`rag/`) — uploaded docs are chunked, embedded, and queried for phase-relevant
   context.
+
+## Skills (`skills/`)
+
+The third thing an agent is given, beside those two, and the one that is not about this
+project: procedure that holds across projects, kept as `SKILL.md` files in `backend/skills/`
+(shipped) and `data/skills/` (yours, shadowing a shipped one of the same name).
+
+- `loader.py` — one file: frontmatter, body, and the two rules checked as it loads (a length
+  ceiling, and no instructions about output format, both measured on the block that is
+  actually injected).
+- `registry.py` — the library on disk, which skills are switched off, and how to change them.
+- `selection.py` — which skills a phase gets: keyword score against the idea, the phase and
+  what earlier phases wrote, decided **before** the model call so a phase costs no extra
+  latency. Pinned skills sort first.
+
+Delivery is prompt injection rather than provider tool-calling, because every provider takes
+the same `list[ChatMessage]` and a 7B local model has no reliable tool loop. The packing is
+in `agents/base.py`, not here: `skills` is a claimant in `_CONTEXT_SHARE` beside `rag` and
+`memory`, so a skill's room comes out of the same allocator everything else is sized by — and
+whatever it cannot spend (a procedure is injected whole or not at all) goes back to the
+sections that can. Like memory and RAG, an empty or unreadable library is a no-op.
