@@ -379,9 +379,12 @@ def test_the_budget_and_the_prompt_agree_about_what_was_injected(library):
     contains another, which is how a prompt sized to fill the window ends up past
     it; and past it is where the head, and the shape it carries, is cut.
 
-    Swept rather than sampled. The failure only shows where the leftover after
-    packing is smaller than the smallest skill but larger than nothing — a gap a
-    handful of hand-picked windows walks straight over.
+    Swept rather than sampled, and the sweep is the point. Dropping the frame
+    charge is a silent 59-character overrun, but it only shows where a skill is
+    small enough to slip into the room the heading should have reserved *and* the
+    leftover is otherwise too small to matter. Measured over random libraries, that
+    band is about one in thirty — so a handful of hand-picked windows genuinely
+    sails past it, which is what the first version of this test did.
     """
     agent = get_agent(Phase.QA_ENGINEER.value)
     shared = dict(
