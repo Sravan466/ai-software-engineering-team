@@ -551,7 +551,12 @@ function Editor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const over = form.body.length > maxChars;
+  // What this skill will actually cost a prompt. The title and the description are
+  // injected beside the procedure, so counting the textarea alone under-reports the
+  // bill by the length of two fields the author can see but not feel.
+  const cost = `## ${form.title}${form.description ? `\n${form.description}` : ""}\n${form.body}`
+    .trim().length;
+  const over = cost > maxChars;
   const slug = (locked ?? form.name ?? "").trim();
 
   async function save() {
@@ -696,12 +701,13 @@ function Editor({
           />
           <p className={"field-hint" + (over ? " over" : "")}>
             <span className="mono">
-              {form.body.length.toLocaleString()} / {maxChars.toLocaleString()}
+              {cost.toLocaleString()} / {maxChars.toLocaleString()}
             </span>{" "}
-            — every phase that gets this pays for all of it, so what you spend here the
-            knowledge base and the earlier phases do not get. Say what to do, never how
-            to lay the answer out: each agent already answers in a fixed shape, and a
-            procedure that argues with it costs the build a repair round.
+            — the title and the description count too, because they are injected beside
+            the procedure. Every phase that gets this pays for all of it, so what you
+            spend here the knowledge base and the earlier phases do not get. Say what to
+            do, never how to lay the answer out: each agent already answers in a fixed
+            shape, and a procedure that argues with it costs the build a repair round.
           </p>
         </div>
       </div>

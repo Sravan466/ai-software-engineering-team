@@ -92,7 +92,12 @@ class Skill:
 
     @property
     def chars(self) -> int:
-        return len(self.body)
+        """What this skill costs a prompt: the whole injected block, not just the body.
+
+        The title and the description are injected too, so counting the body alone
+        under-reports what every phase that selects this skill actually pays.
+        """
+        return len(render(self))
 
     def serves(self, phase: str) -> bool:
         """Whether this skill is bound to `phase`. An empty list serves all of them."""
@@ -163,8 +168,16 @@ def _as_list(value: object) -> tuple[str, ...]:
 
 
 def check(name: str, title: str, description: str, body: str, max_chars: int) -> list[str]:
-    """Everything that would stop this skill being injected, in a person's words."""
+    """Everything that would stop this skill being injected, in a person's words.
+
+    Checked against the *rendered* block — the title and the description go into the
+    prompt beside the procedure, so a ceiling applied to the body alone is a ceiling
+    a nine-thousand-character description walks straight past, and a format rule
+    applied to the body alone leaves "reply in markdown" in the one field that is
+    injected verbatim and never read.
+    """
     problems: list[str] = []
+    injected = rendered(title, description, body)
     if not NAME_RE.match(name or ""):
         problems.append(
             "The name has to be a slug — lowercase letters, digits and hyphens, "
@@ -178,17 +191,25 @@ def check(name: str, title: str, description: str, body: str, max_chars: int) ->
             "It has no description. That sentence is what tells a reader when this "
             "skill applies, and it is the only thing a preview can show."
         )
+    for field, value in (("title", title), ("description", description)):
+        if "\n" in value or "\r" in value:
+            problems.append(
+                f"The {field} runs over more than one line. It is stored as a single "
+                "line of frontmatter, so everything after the first would be lost the "
+                "next time this skill is read — along with, if the break happened to "
+                "be a `---`, the list of agents it serves."
+            )
     if not body.strip():
         problems.append("It has no body, so there is no procedure to give an agent.")
-    elif len(body) > max_chars:
+    elif len(injected) > max_chars:
         problems.append(
-            f"The procedure is {len(body):,} characters and the ceiling is "
+            f"The procedure is {len(injected):,} characters and the ceiling is "
             f"{max_chars:,}. Everything selected is paid for on every phase it "
             "reaches, so a long skill is paid for by the knowledge base and the "
             "prior phases that then get less room."
         )
     for pattern, why in _FORMAT_RULES:
-        found = pattern.search(body)
+        found = pattern.search(injected)
         if found:
             problems.append(
                 f"“{found.group(0)}” {why}. Every agent already answers in a declared "
@@ -245,6 +266,18 @@ def load_file(
     )
 
 
+def rendered(title: str, description: str, body: str) -> str:
+    """The block an agent is given, from the three fields that make it up.
+
+    One function so the rules, the ceiling, the character count on screen and the
+    prompt itself all measure the same string. Written apart from `render` because
+    the checks run before there is a `Skill` to render.
+    """
+    head = f"## {title}"
+    intro = f"\n{description}" if description else ""
+    return f"{head}{intro}\n{body}".strip()
+
+
 def render(skill: Skill) -> str:
     """One skill as it appears in an agent's prompt.
 
@@ -252,9 +285,7 @@ def render(skill: Skill) -> str:
     *when* the procedure applies — an agent handed a procedure with no trigger
     applies it to everything.
     """
-    head = f"## {skill.title}"
-    intro = f"\n{skill.description}" if skill.description else ""
-    return f"{head}{intro}\n{skill.body}".strip()
+    return rendered(skill.title, skill.description, skill.body)
 
 
 def to_markdown(skill: Skill) -> str:

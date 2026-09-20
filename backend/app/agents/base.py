@@ -66,9 +66,14 @@ _CONTEXT_SHARE = {
 _DEP_FRAME = "# Context — {dep} output\n```json\n{body}\n```\n"
 _RAG_FRAME = "# Reference material (from the uploaded knowledge base)\n{body}\n"
 _MEMORY_FRAME = "# Lessons from past projects (long-term memory)\n{body}\n"
-_SKILLS_FRAME = (
-    "# How this team does this work — follow these procedures\n{body}\n"
-)
+_SKILLS_FRAME = "# How this team does this work — follow these procedures\n{body}\n"
+#: What the heading and the join around it cost, charged *inside* the skills budget
+#: rather than on top of it. That is what lets the block be dropped entirely when
+#: nothing fits: the skeleton that measures the overhead and the prompt that is sent
+#: both omit it, so the two still cost the same — and a phase on a 4k window is not
+#: handed "follow these procedures" with the knowledge base sitting underneath it as
+#: the only thing that looks like an answer.
+_SKILLS_FRAME_COST = len(_SKILLS_FRAME.format(body="")) + 1  # + the "\n" join
 
 
 @dataclass
@@ -391,8 +396,23 @@ class BaseAgent:
         # and reference material is what the work is about — and because a small
         # model weights what it reads first most heavily.
         if ctx.skills:
-            body, used = _pack_skills(ctx.skills, budget.get("skills", 0))
-            parts.append(_SKILLS_FRAME.format(body=body))
+            body, used = _pack_skills(
+                ctx.skills, budget.get("skills", 0) - _SKILLS_FRAME_COST
+            )
+            # Nothing fitted, so nothing is printed. A heading with no procedure
+            # under it is worse than silence on a small model: the next section
+            # starts immediately, and "follow these procedures" ends up pointing at
+            # the knowledge base.
+            if body:
+                parts.append(_SKILLS_FRAME.format(body=body))
+            elif skills_used is not None:
+                log.info(
+                    "%s: %d skill(s) matched but none fit the %s-character share of "
+                    "this model's window, so this phase has none.",
+                    self.title,
+                    len(ctx.skills),
+                    f"{budget.get('skills', 0):,}",
+                )
             if skills_used is not None:
                 skills_used[:] = used
 

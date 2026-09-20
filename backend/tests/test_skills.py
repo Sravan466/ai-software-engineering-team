@@ -16,7 +16,7 @@ import pytest
 
 from app.agents import get_agent
 from app.agents.base import AgentContext
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.constants import Phase, PhaseStatus
 from app.db.base import SessionLocal
 from app.db.models import PhaseResult
@@ -24,6 +24,17 @@ from app.router.model_profile import ModelProfile
 from app.skills import registry
 from app.skills.loader import Skill, parse
 from app.skills.selection import Overrides, select
+
+def _shipped_default(name: str):
+    """What this setting is in the repository, whatever this machine's `.env` says.
+
+    These tests assert properties of the library *as shipped* — that every bundled
+    skill clears the ceiling, that a phase gets more than one skill. A developer who
+    has tuned a knob in their own `.env` would otherwise see those fail, pointing at
+    the library rather than at their configuration.
+    """
+    return Settings.model_fields[name].default
+
 
 def _write(directory, name: str, *, body: str = "Do the thing.", **meta) -> None:
     """A `SKILL.md` on disk, with sane defaults for everything not named."""
@@ -46,15 +57,42 @@ def _write(directory, name: str, *, body: str = "Do the thing.", **meta) -> None
 
 @pytest.fixture
 def library(tmp_path, monkeypatch):
-    """An empty library on disk, in place of whatever this machine happens to have."""
+    """An empty library on disk, in place of whatever this machine happens to have.
+
+    `skills_enabled` is pinned on with the rest. It is a documented setting, and a
+    developer who has it off in their own `.env` would otherwise watch most of this
+    file fail with an empty library and no hint that a setting, not the code, was
+    the reason.
+    """
     bundled = tmp_path / "bundled"
     user = tmp_path / "user"
     bundled.mkdir()
     user.mkdir()
+    monkeypatch.setattr(settings, "skills_enabled", True)
+    monkeypatch.setattr(settings, "skills_max_per_phase", _shipped_default("skills_max_per_phase"))
     monkeypatch.setattr(settings, "skills_bundled_dir", str(bundled))
     monkeypatch.setattr(settings, "skills_user_dir", str(user))
     monkeypatch.setattr(registry, "_STATE_PATH", tmp_path / "skills.local.json")
     return bundled, user
+
+
+@pytest.fixture
+def shipped(tmp_path, monkeypatch):
+    """The library that ships, and nothing this machine happens to have added to it.
+
+    Without the empty user directory these tests read the developer's own
+    `data/skills/`, so one local skill bound to a phase that does not exist would
+    fail a test about the *bundled* library — a failure pointing at the wrong file.
+    """
+    user = tmp_path / "no-user-skills"
+    user.mkdir()
+    monkeypatch.setattr(settings, "skills_enabled", True)
+    monkeypatch.setattr(settings, "skills_max_per_phase", _shipped_default("skills_max_per_phase"))
+    monkeypatch.setattr(
+        settings, "skill_body_max_chars", _shipped_default("skill_body_max_chars")
+    )
+    monkeypatch.setattr(settings, "skills_user_dir", str(user))
+    monkeypatch.setattr(registry, "_STATE_PATH", tmp_path / "skills.local.json")
 
 
 def _profile(window: int) -> ModelProfile:
@@ -68,7 +106,7 @@ def _profile(window: int) -> ModelProfile:
 
 
 # ── the library that ships ───────────────────────────────────────────────────
-def test_every_bundled_skill_passes_its_own_rules():
+def test_every_bundled_skill_passes_its_own_rules(shipped):
     """The ceiling and the no-format rule are enforced on the library that ships.
 
     Not a style check. A bundled skill over the ceiling takes its excess out of the
@@ -82,7 +120,7 @@ def test_every_bundled_skill_passes_its_own_rules():
     assert not broken, f"bundled skills that would never be injected: {broken}"
 
 
-def test_every_bundled_skill_reaches_at_least_one_agent():
+def test_every_bundled_skill_reaches_at_least_one_agent(shipped):
     """A skill bound to a phase that does not exist is a file nobody ever gets."""
     phases = registry.known_phases()
     for skill in registry.library():
@@ -136,14 +174,14 @@ def test_a_missing_user_directory_is_simply_no_user_skills(library, monkeypatch)
     assert [s.name for s in registry.library()] == ["shipped"]
 
 
-def test_a_configured_directory_that_is_not_there_falls_back_to_what_ships(monkeypatch):
+def test_a_configured_directory_that_is_not_there_falls_back_to_what_ships(shipped, monkeypatch):
     """A backend started from another directory still has its own skills."""
     monkeypatch.setattr(settings, "skills_bundled_dir", "/nowhere/at/all")
     assert registry.bundled_dir().is_dir()
     assert any(s.source == "bundled" for s in registry.library())
 
 
-def test_a_library_that_cannot_be_read_leaves_the_phase_with_no_skills(monkeypatch):
+def test_a_library_that_cannot_be_read_leaves_the_phase_with_no_skills(shipped, monkeypatch):
     """The same contract RAG and memory hold to: degrade, never fail the pipeline."""
     from app.orchestration import graph
 
@@ -285,7 +323,7 @@ def test_an_agent_with_no_skills_gets_no_heading():
 
 
 # ── end to end: the reviewer can see which skills a phase had ────────────────
-def test_a_finished_phase_records_the_skills_it_was_given(client):
+def test_a_finished_phase_records_the_skills_it_was_given(shipped, client):
     """Provenance. A skill you cannot confirm was used did nothing, as far as anyone
     reading this build can tell."""
     project = client.post(
@@ -311,7 +349,7 @@ def test_a_finished_phase_records_the_skills_it_was_given(client):
         db.close()
 
 
-def test_what_a_build_excludes_never_reaches_its_agents(client):
+def test_what_a_build_excludes_never_reaches_its_agents(shipped, client):
     """The override set is carried into the run, not just stored on the row."""
     project = client.post(
         "/api/projects",
@@ -331,14 +369,14 @@ def test_what_a_build_excludes_never_reaches_its_agents(client):
 
 
 # ── the API ──────────────────────────────────────────────────────────────────
-def test_the_preview_answers_which_skills_an_idea_would_get(client):
+def test_the_preview_answers_which_skills_an_idea_would_get(shipped, client):
     body = client.post("/api/skills/preview", json={"idea": "an online shop"}).json()
     by_phase = {p["phase"]: [s["name"] for s in p["skills"]] for p in body["phases"]}
     assert by_phase[Phase.PRODUCT_MANAGER.value]
     assert set(by_phase) == registry.known_phases()
 
 
-def test_a_skill_that_breaks_a_rule_is_refused_at_the_door(client):
+def test_a_skill_that_breaks_a_rule_is_refused_at_the_door(shipped, client):
     res = client.post(
         "/api/skills",
         json={
@@ -352,8 +390,7 @@ def test_a_skill_that_breaks_a_rule_is_refused_at_the_door(client):
     assert "format" in res.json()["detail"]
 
 
-def test_a_bundled_skill_is_edited_by_shadowing_it_not_by_writing_to_it(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "skills_user_dir", str(tmp_path / "user"))
+def test_a_bundled_skill_is_edited_by_shadowing_it_not_by_writing_to_it(shipped, client):
     original = client.get("/api/skills").json()
     shipped = next(s for s in original["skills"] if s["source"] == "bundled")
 

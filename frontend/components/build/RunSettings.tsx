@@ -486,6 +486,11 @@ function SkillPicker({
                         : skill.agents
                             .map((a) => AGENT_BY_KEY[a]?.codename ?? a)
                             .join(" · ")}
+                      {/* Auto on a skill switched off in the library means never, and
+                          a row that does not say so is a control that looks live and
+                          is not. Always still reaches it — a pin is the more specific
+                          instruction. */}
+                      {!skill.enabled && <span className="pick-off">off in the library</span>}
                     </span>
                   </span>
                   <span className="seg" role="group" aria-label={skill.title}>

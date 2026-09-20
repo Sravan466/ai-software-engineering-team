@@ -874,15 +874,19 @@ def test_the_example_env_agrees_with_the_code_it_configures():
     from app.core.config import Settings
 
     example = Path(__file__).resolve().parents[2] / ".env.example"
-    defaults = Settings(_env_file=None)
+    # The declared defaults, not an instance of them. `Settings(_env_file=None)` skips
+    # the .env file but still reads the *environment*, so a developer who exported one
+    # of these knobs saw this test report that `.env.example` disagreed with the code —
+    # naming the two files that were in fact identical.
+    defaults = {name: field.default for name, field in Settings.model_fields.items()}
     for line in example.read_text().splitlines():
         match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line.strip())
         if not match:
             continue
         name, raw = match.group(1).lower(), match.group(2).strip()
-        if not raw or not hasattr(defaults, name):
+        if not raw or name not in defaults:
             continue
-        expected = getattr(defaults, name)
+        expected = defaults[name]
         if isinstance(expected, bool) or not isinstance(expected, (int, float)):
             continue
         assert float(raw) == float(expected), (

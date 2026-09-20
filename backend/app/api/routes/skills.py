@@ -14,6 +14,7 @@ turning a bundled skill off and later pulling a new version of it is not a confl
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -29,6 +30,9 @@ from app.skills.selection import Overrides, select
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
+
+#: What a keyword may not contain, because the frontmatter spells a list with them.
+_KEYWORD_JUNK = re.compile(r"[,\[\]\r\n]+")
 
 
 class SkillBody(BaseModel):
@@ -135,7 +139,14 @@ def _save(name: str, payload: SkillBody, created: bool) -> dict:
         title=payload.title.strip(),
         description=payload.description.strip(),
         agents=tuple(payload.agents),
-        keywords=tuple(k.strip().lower() for k in payload.keywords if k.strip()),
+        # The frontmatter writes keywords as `[a, b, c]` on one line, so a keyword
+        # carrying a comma, a bracket or a newline would come back as two keywords
+        # or as none. Cleaned rather than refused: the value is still what was meant.
+        keywords=tuple(
+            cleaned
+            for cleaned in (_KEYWORD_JUNK.sub(" ", k).strip().lower() for k in payload.keywords)
+            if cleaned
+        ),
         body=payload.body.strip(),
         source="user",
     )
