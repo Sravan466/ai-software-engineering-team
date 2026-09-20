@@ -4,9 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   api,
+  canRunABuild,
   type ApprovalMode,
   type LocalStatus,
-  type ModelCapabilities,
   type RouterStatus,
   type Skill,
   type SkillOverrides,
@@ -62,11 +62,11 @@ export type ModelOption = {
 };
 
 // ── what can this machine actually run? ──────────────────────────────────────
-/** The capability an agent needs: something that writes prose, code and JSON. */
-const COMPLETION = "completion";
+/** A downloaded model the picker is leaving out, and what the runtime said it does. */
+export type OmittedModel = { name: string; does: string[] };
 
 /**
- * Whether a downloaded model could run a build — asked of the runtime, not the name.
+ * Downloaded models this picker is leaving out, in the order they'd have appeared.
  *
  * Sorting the default to the front was the whole defence before this, and it only
  * ever moved the problem down one row: the embedding model this app pulls for its
@@ -75,28 +75,17 @@ const COMPLETION = "completion";
  * it either — `nomic-embed-text` announces itself and `mxbai-embed-large` does not,
  * and the next one will be called something nobody here has heard of.
  *
- * Only a *definite* negative hides a model, which is the rule `runtimeBlocker`
- * below already works from: a runtime that said nothing, or that is too old to
- * report capabilities at all, leaves the model listed. Being wrong that way costs
- * one failed run; being wrong the other way empties the picker on the setups least
- * able to explain themselves.
+ * They are returned rather than silently dropped, because "why isn't it here?" is
+ * the worse question — the same reason a cloud provider with no key stays listed
+ * and disabled a few lines down. A `select` is the wrong place to answer it, so the
+ * panel puts the answer under the control. What the runtime *did* report travels
+ * with each name so that answer can quote it instead of guessing at it.
  */
-export function canRunABuild(model: string, capabilities?: ModelCapabilities): boolean {
-  const reported = capabilities?.[model];
-  if (!reported || reported.length === 0) return true;
-  return reported.includes(COMPLETION);
-}
-
-/**
- * Downloaded models this picker is leaving out, in the order they'd have appeared.
- *
- * Returned rather than silently dropped because "why isn't it here?" is the worse
- * question — the same reason a cloud provider with no key stays listed and disabled
- * a few lines down. A select is the wrong place to answer it, so the panel puts the
- * answer under the control instead.
- */
-export function modelsThatCannotBuild(local: LocalStatus | null): string[] {
-  return (local?.models ?? []).filter((m) => !canRunABuild(m, local?.model_capabilities));
+export function modelsThatCannotBuild(local: LocalStatus | null): OmittedModel[] {
+  const capabilities = local?.model_capabilities;
+  return (local?.models ?? [])
+    .filter((m) => !canRunABuild(m, capabilities))
+    .map((name) => ({ name, does: capabilities?.[name] ?? [] }));
 }
 
 /** Every model the run could be pinned to, local first. */
@@ -135,6 +124,12 @@ export function modelOptions(
   }
 
   return options;
+}
+
+/** "a", "a and b", "a, b and c" — an English list, not a comma-joined array. */
+function listOf(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
 function providerOf(spec: string): string {
@@ -186,15 +181,16 @@ export function runtimeBlocker(
   };
   // Downloaded, running, and still unable to write a line. Left to the run, this
   // fails on the first agent's first call — for a reason that is knowable here,
-  // before a project has been created.
+  // before a project has been created. The reason quotes what the runtime actually
+  // reported rather than assuming which kind of model this is.
   const cannotWrite: RuntimeBlocker | null =
     local?.default_model && !canRunABuild(local.default_model, local.model_capabilities)
       ? {
           title: `${local.default_model} can't run a build`,
           text:
-            `It makes embeddings — the numbers behind document search — and cannot ` +
-            "write. Every agent here has to produce prose, code and JSON, so pick a " +
-            "model that completes text and this build can go.",
+            `The runtime lists it as ${listOf(local.model_capabilities?.[local.default_model] ?? [])}` +
+            ", not completion. Every agent here has to produce prose, code and JSON, " +
+            "so pick a model that writes and this build can go.",
           action: "Choose another model",
           href: "/settings",
         }
@@ -277,7 +273,7 @@ export default function RunSettings({
    * model you can see in Settings and not here is a discrepancy someone will go
    * looking for.
    */
-  omitted?: string[];
+  omitted?: OmittedModel[];
   disabled?: boolean;
   /** What has been typed so far, so the skill picker can show what it would get. */
   idea?: string;
@@ -361,7 +357,7 @@ export default function RunSettings({
                 .
               </p>
             )}
-            <OmittedModels names={omitted} />
+            <OmittedModels models={omitted} />
           </div>
         )}
       </div>
@@ -439,19 +435,26 @@ export default function RunSettings({
  * Nothing here is actionable, so it is a hint rather than a notice: the answer to
  * "where did `nomic-embed-text` go?" costs a sentence, and asking someone to
  * dismiss a banner for it would cost more than the question is worth.
+ *
+ * The sentence quotes the runtime rather than naming a kind of model. "It makes
+ * embeddings" is true of every case anyone has today and is still a guess — the
+ * rule upstream is `completion` is absent, and the copy says exactly that much.
  */
-function OmittedModels({ names }: { names: string[] }) {
-  if (names.length === 0) return null;
+function OmittedModels({ models }: { models: OmittedModel[] }) {
+  if (models.length === 0) return null;
+  const one = models.length === 1;
+  // The union of what they do, so two embedding models read as one reason.
+  const does = listOf(Array.from(new Set(models.flatMap((m) => m.does))));
   return (
     <p className="field-hint omitted-models">
-      {names.map((name, i) => (
-        <span key={name}>
-          {i > 0 && (i === names.length - 1 ? " and " : ", ")}
-          <span className="mono">{name}</span>
+      {models.map((m, i) => (
+        <span key={m.name}>
+          {i > 0 && (i === models.length - 1 ? " and " : ", ")}
+          <span className="mono">{m.name}</span>
         </span>
       ))}
-      {names.length === 1 ? " isn't here: it makes" : " aren't here: they make"} embeddings,
-      not sentences, so no agent could run on {names.length === 1 ? "it" : "them"}.
+      {one ? " isn't here" : " aren't here"} — the runtime lists {one ? "it" : "them"} as{" "}
+      {does}. Every agent has to write, so {one ? "it can't" : "they can't"} run a build.
     </p>
   );
 }

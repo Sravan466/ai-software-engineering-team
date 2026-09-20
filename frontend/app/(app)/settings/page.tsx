@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   api,
+  canRunABuild,
   LocalStatus,
   ModelProfile,
   ProviderSetting,
   RoleRow,
   RoleSettings,
 } from "@/lib/api";
-import { canRunABuild } from "@/components/build/RunSettings";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
