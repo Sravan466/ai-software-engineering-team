@@ -48,7 +48,7 @@ from app.memory.store import memory_store
 from app.orchestration import remediation
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import binding_on
-from app.orchestration.graph import graph
+from app.orchestration.graph import graph, gather_skills
 from app.orchestration.state import PipelineState
 from app.preview import service as mockup
 from app.preview.jobs import jobs as mockup_jobs
@@ -69,6 +69,16 @@ def _config(project_id: str) -> dict:
     return {"configurable": {"thread_id": project_id}}
 
 
+def _skills_for(values: dict, phase_key: str, prior_outputs: dict) -> tuple:
+    """The skills a redone phase gets — chosen the same way a first run chooses them.
+
+    The same function the graph node uses, handed the outputs this redo is keeping,
+    so a rewind is not the one path through the pipeline where an agent works from a
+    different library than the run it is repairing.
+    """
+    return gather_skills({**values, "prior_outputs": prior_outputs}, phase_key)
+
+
 def _initial_state(project: Project) -> PipelineState:
     return PipelineState(
         project_id=project.id,
@@ -79,6 +89,10 @@ def _initial_state(project: Project) -> PipelineState:
         feedback={},
         debates=[],
         charter={},
+        # Mirrored in from the project row so every node reads one answer, including
+        # a run resumed in a new process. Set when the build is created, because a
+        # pin is a statement about the work this build is about to do.
+        skill_overrides=project.skill_overrides or {},
     )
 
 
@@ -326,15 +340,21 @@ class PipelineRunner:
                     values: PipelineState = dict(snapshot.values)  # type: ignore[assignment]
 
                     agent = get_agent(phase_key)
+                    # The phases this redo drops are dropped from the scoring too:
+                    # a procedure chosen because of something a phase that no longer
+                    # exists wrote is a procedure chosen from a build that no longer
+                    # exists.
+                    kept_outputs = {
+                        k: v
+                        for k, v in values.get("prior_outputs", {}).items()
+                        if k != phase_key and k not in stale
+                    }
                     ctx = AgentContext(
                         idea=values["idea"],
                         routing_mode=RoutingMode(values.get("routing_mode", "local_only")),
                         preferred_model=values.get("preferred_model"),
-                        prior_outputs={
-                            k: v
-                            for k, v in values.get("prior_outputs", {}).items()
-                            if k != phase_key and k not in stale
-                        },
+                        prior_outputs=kept_outputs,
+                        skills=_skills_for(values, phase_key, kept_outputs),
                         feedback=feedback,
                         # Held to the same stack the rest of the build uses. Without
                         # this a redo is the one path through the pipeline where an
@@ -667,6 +687,11 @@ class PipelineRunner:
         row.stack_note = violations or None
         row.build_status = lr.get("build_status")
         row.build_note = lr.get("build_problems") or None
+        # Provenance, not a verdict: which procedures this deliverable was written
+        # with. Empty stays empty rather than becoming null — "this phase was
+        # offered skills and none fitted" is a different fact from "this row was
+        # written before skills existed", and the review panel says which.
+        row.skills_used = lr.get("skills_used") if "skills_used" in lr else None
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
         db.commit()

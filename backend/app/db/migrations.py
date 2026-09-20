@@ -46,6 +46,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "gate_note",
         "charter",
         "remediation_rounds",
+        # Nullable: a run started before skills existed was told nothing about them,
+        # and writing an empty override set into it would claim a choice nobody made.
+        "skill_overrides",
     ),
     "phase_results": (
         "started_at",
@@ -60,6 +63,10 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # its code built, and writing "ok" into it would claim a check nobody ran.
         "build_status",
         "build_note",
+        # Nullable for the same reason as `build_status`: a phase that ran before the
+        # skill library existed cannot say which skills it had, and an empty list
+        # would read as "it was offered skills and took none".
+        "skills_used",
     ),
     # Nullable for the same reason: a mockup drawn by the single-shot generator has
     # no pages, sections or checks to report.

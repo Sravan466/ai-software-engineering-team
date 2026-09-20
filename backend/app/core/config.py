@@ -125,6 +125,29 @@ class Settings(BaseSettings):
     #: straight to the gate instead.
     security_remediation_rounds: BlankTolerantInt(1) = 1
 
+    # ── Skills (the procedural library injected into agent prompts) ──
+    #: Whether agents are given skills at all. Off means an empty library and a
+    #: pipeline that runs exactly as it did before skills existed — the same
+    #: contract RAG and memory hold to when their store is unavailable.
+    skills_enabled: bool = True
+    #: The library shipped with this platform, cwd-relative like the database. When
+    #: it does not resolve, the copy that ships beside `app/` is used instead, so a
+    #: backend started from another directory still has its own skills.
+    skills_bundled_dir: str = "./skills"
+    #: Skills added on this machine. Gitignored, beside `providers.local.json`. A
+    #: skill here shadows a bundled one of the same name, which is how the bundled
+    #: library is editable without anything in the repository being written to.
+    skills_user_dir: str = "./data/skills"
+    #: How many skills one phase may be given, before the character budget has its
+    #: say. A count, not a budget: how much room they get is always derived from the
+    #: probed window of the model about to answer.
+    skills_max_per_phase: BlankTolerantInt(4) = 4
+    #: Ceiling on one skill's procedure. Everything selected is paid for on every
+    #: phase it reaches — there is no second level that loads on demand — so a long
+    #: skill is paid for by the knowledge base and the prior phases, which then get
+    #: less room. A skill over this is listed with the reason and never injected.
+    skill_body_max_chars: BlankTolerantInt(2400) = 2400
+
     # ── Mockup (the clickable site drawn from the design) ──
     # Counts, not budgets: how *big* each call may be is always derived from the
     # probed window of the model answering it. These say how much site to build.

@@ -123,6 +123,41 @@ export default function PhaseArtifact({
           </div>
         )}
       </div>
+
+      <SkillsUsed row={row} />
     </div>
+  );
+}
+
+/**
+ * The procedures this agent was actually working from.
+ *
+ * Provenance rather than content, so it sits under the work rather than over it.
+ * Three states, and the third is the point: `null` is a phase from before the
+ * library existed and says nothing, `[]` is a phase that was offered skills and
+ * matched none — which is a real thing to know, because selection is a keyword
+ * score and a miss leaves no other trace anywhere in the build.
+ */
+function SkillsUsed({ row }: { row: PhaseResult }) {
+  const used = row.skills_used;
+  if (used === null || used === undefined) return null;
+  return (
+    <p className="artifact-skills">
+      {used.length === 0 ? (
+        <>
+          <span className="artifact-skills-label">Worked from</span>
+          <span className="dryrun-none">no skills — nothing in the library matched</span>
+        </>
+      ) : (
+        <>
+          <span className="artifact-skills-label">Worked from</span>
+          {used.map((name) => (
+            <span key={name} className="pick">
+              {name}
+            </span>
+          ))}
+        </>
+      )}
+    </p>
   );
 }

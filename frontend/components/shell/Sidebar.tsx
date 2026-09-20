@@ -241,6 +241,13 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
         </Link>
         <Link
           className="sb-link"
+          href="/skills"
+          aria-current={pathname === "/skills" ? "page" : undefined}
+        >
+          {Icon.book} Skills
+        </Link>
+        <Link
+          className="sb-link"
           href="/settings"
           aria-current={pathname === "/settings" ? "page" : undefined}
         >

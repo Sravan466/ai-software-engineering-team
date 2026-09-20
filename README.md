@@ -17,7 +17,7 @@ gates**. It runs on **local models via Ollama** (default, zero cost) or **cloud 
 ```mermaid
 flowchart LR
     subgraph Client["🖥️  Frontend · Next.js 14"]
-        UI["Dashboard /<br/>Landing /landing<br/>Settings /settings"]
+        UI["Dashboard /<br/>Landing /landing<br/>Skills /skills<br/>Settings /settings"]
     end
 
     subgraph API["⚙️  Backend · FastAPI"]
@@ -53,6 +53,8 @@ backend/    FastAPI service
     orchestration/  LangGraph StateGraph + human-in-the-loop approvals
     memory/         Long-term project memory (ChromaDB)
     rag/            Knowledge base & retrieval (ChromaDB)
+    skills/         The procedural library: loading, selection, injection
+  skills/           The skills that ship with the platform (one folder each)
     analytics/      Token usage & cost tracking
     api/            REST endpoints
     db/             SQLAlchemy models (SQLite default, Postgres optional)
@@ -170,6 +172,65 @@ Every ceiling involved is yours to move: `OLLAMA_CONTEXT_CEILING`, `OLLAMA_RAM_F
 
 ---
 
+## What the agents know before they start
+
+Every agent used to begin a phase holding three things: the idea, the phases before it,
+and whatever the knowledge base happened to retrieve. The *craft* — how to write an
+acceptance criterion someone else can check, what a paginated endpoint sends back, which
+OWASP categories matter for a form that takes card details — lived nowhere, and got
+re-derived differently on every run by whichever model the router picked.
+
+**Skills** are that missing layer. A skill is a `SKILL.md` with frontmatter, bound to the
+agents it serves and the keywords that make it relevant:
+
+```markdown
+---
+name: api-contract-design
+title: API contract design
+description: Use when defining HTTP endpoints, request/response shapes, status codes…
+agents: [system_design, backend_engineer]
+keywords: [api, rest, endpoint, http, pagination]
+---
+
+Name resources as plural nouns and act on them with methods…
+```
+
+Twelve ship in `backend/skills/`. Your own go in `backend/data/skills/` (gitignored,
+beside `providers.local.json`), and one there shadows a bundled skill of the same name —
+which is how the shipped library is editable without the repository being written to.
+The `/skills` page does all of this without a text editor.
+
+**Delivery is prompt injection, not tool-calling.** All four providers take the same
+`list[ChatMessage]`, so a skill block is byte-identical on `qwen2.5:7b`, Claude, GPT and
+Gemini. A 7B local model has no reliable tool loop, and building one per provider would
+mean the local-only path — this project's default — got a worse team than the cloud path.
+
+**Selection is a keyword score, decided before the call**, so a phase costs no more
+latency than it did: drop what is switched off or excluded on this build, drop what is
+not bound to the running phase, score the rest against the idea, the phase and what the
+earlier phases wrote, pinned first. Two consequences are real and deliberate:
+
+- **A keyword miss is silent.** The skill simply never arrives. That is what the
+  per-build pin is for, and why `POST /api/skills/preview` — "which skills would this
+  idea get?" — is on the `/skills` page and in the composer rather than being optional.
+- **Everything selected is paid for, every phase.** There is no second level that loads
+  on demand, so skills claim a share of the *same* prompt budget as RAG, memory and the
+  prior phases (`_CONTEXT_SHARE` in `app/agents/base.py`) rather than a budget of their
+  own. On a small window a skill arriving means RAG or memory gets less, which is the
+  correct trade and a visible one.
+
+Two rules are enforced when a skill loads, not by review: a length ceiling, and no
+instructions about output format — every agent already answers in a declared JSON shape,
+and on a small model a prose "present this as a table" beats the schema and costs the
+build a repair round. A skill that breaks either stays listed, with the reason, and is
+never injected.
+
+Which skills each phase actually received is recorded on its result and shown in the
+review, because a skill you cannot confirm was used is indistinguishable from one that
+did nothing.
+
+---
+
 ## Workflow
 
 A product idea flows through **8 specialist agents** in order. After each phase the graph
@@ -222,6 +283,14 @@ Security vs. Backend), and decisions are persisted to long-term memory for reuse
 | 3 | `GET /api/projects/{id}` | Read the latest phase output |
 | 4 | `POST /api/projects/{id}/approve` | Advance the graph to the next phase |
 | 5 | `POST /api/projects/{id}/reject` | Send feedback → regenerate the current phase |
+
+| Skills | Call | What happens |
+|--------|------|--------------|
+| List | `GET /api/skills` | The whole library, what each serves, and what is switched off |
+| Add / edit | `POST` · `PUT /api/skills/{name}` | Save one to `data/skills/`; a bundled name is shadowed, never overwritten |
+| Switch | `PUT /api/skills/{name}/enabled` | On or off for every build that does not name it |
+| Remove | `DELETE /api/skills/{name}` | Deletes yours; on an edited bundled skill, restores the original |
+| Preview | `POST /api/skills/preview` | Which skills each phase would get for an idea — before a run |
 
 > Completion is **explicit**: the final phase must be approved (not merely reached) for the
 > project to move to `completed`.

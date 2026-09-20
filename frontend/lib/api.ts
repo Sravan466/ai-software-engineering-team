@@ -49,6 +49,14 @@ export type PhaseResult = {
   build_status: "ok" | "failed" | "unchecked" | null;
   /** What still does not compile, after the one repair round. */
   build_note: BuildProblem[] | null;
+
+  /**
+   * The procedural skills this phase was actually given, by name and in the order
+   * they were injected. `null` on rows written before the library existed — which
+   * is not the same as `[]`, so the UI says nothing for those rather than reporting
+   * that an agent was offered skills and took none.
+   */
+  skills_used: string[] | null;
 };
 
 /** One reason a generated file does not compile. */
@@ -147,6 +155,8 @@ export type Project = {
   charter: Charter | null;
   /** How many times this build has been sent back to fix its own security findings. */
   remediation_rounds: number | null;
+  /** Skills this build forces on or off, over what keyword scoring would choose. */
+  skill_overrides: SkillOverrides | null;
 
   created_at: string;
   updated_at: string;
@@ -258,6 +268,7 @@ export const api = {
     preferred_model?: string;
     approval_mode?: ApprovalMode;
     cost_cap_usd?: number;
+    skill_overrides?: SkillOverrides;
   }) => req<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   // Review policy is editable while the run is in flight — the runner re-reads it
   // before every handoff.
@@ -345,6 +356,33 @@ export const api = {
       body: JSON.stringify({ model }),
     }),
 
+  // ── Skills: the procedural library the agents are given ──
+  listSkills: () => req<SkillLibrary>("/api/skills"),
+  createSkill: (body: SkillDraft) =>
+    req<Skill>("/api/skills", { method: "POST", body: JSON.stringify(body) }),
+  updateSkill: (name: string, body: SkillDraft) =>
+    req<Skill>(`/api/skills/${name}`, { method: "PUT", body: JSON.stringify(body) }),
+  /** Switch one off for every build that does not name it explicitly. */
+  setSkillEnabled: (name: string, enabled: boolean) =>
+    req<Skill>(`/api/skills/${name}/enabled`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  /** Removes a skill added here; on an edited bundled one, restores the original. */
+  deleteSkill: (name: string) =>
+    req<{ deleted: string; restored: Skill | null }>(`/api/skills/${name}`, {
+      method: "DELETE",
+    }),
+  /**
+   * Which skills each phase would get for an idea. Selection is a keyword score, so
+   * a miss is silent — this is the only way to see one without spending a build.
+   */
+  previewSkills: (body: { idea: string; pinned?: string[]; excluded?: string[] }) =>
+    req<SkillPreview>("/api/skills/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   // ── Security findings: fix them, or waive them on the record ──
   getSecurity: (id: string) => req<SecurityState>(`/api/projects/${id}/security`),
   fixFinding: (id: string, key: string) =>
@@ -403,6 +441,71 @@ export const api = {
       }
     }
   },
+};
+
+/** Skills a single build forces on or off, over what keyword scoring would choose. */
+export type SkillOverrides = { pinned: string[]; excluded: string[] };
+
+/** One piece of procedural knowledge in the library. */
+export type Skill = {
+  name: string;
+  title: string;
+  description: string;
+  /** Phases that may receive it. Empty means every phase. */
+  agents: string[];
+  /** What makes it relevant to a particular build. */
+  keywords: string[];
+  body: string;
+  /** `bundled` ships with the platform; `user` was added on this machine. */
+  source: "bundled" | "user";
+  chars: number;
+  enabled: boolean;
+  /**
+   * Whether it may be injected at all. A skill over the length ceiling, or one
+   * carrying an instruction about output format, stays listed with its reasons
+   * showing — a file that exists, does nothing and never says why is worse.
+   */
+  usable: boolean;
+  problems: string[];
+  /** A local edit currently shadowing a bundled skill of the same name. */
+  overridden: boolean;
+};
+
+export type SkillDraft = {
+  name?: string;
+  title: string;
+  description: string;
+  agents: string[];
+  keywords: string[];
+  body: string;
+};
+
+export type SkillLibrary = {
+  skills: Skill[];
+  phases: { key: string; label: string }[];
+  /** False when skills are switched off for this backend entirely. */
+  enabled: boolean;
+  max_per_phase: number;
+  max_chars: number;
+  user_dir: string;
+  bundled_dir: string;
+};
+
+/** One skill a phase would receive, and why it was chosen. */
+export type SkillPick = {
+  name: string;
+  title: string;
+  score: number;
+  pinned: boolean;
+  /** The keywords that actually hit. Empty on a pin that matched nothing. */
+  matched: string[];
+  reason: string;
+  chars: number;
+};
+
+export type SkillPreview = {
+  idea: string;
+  phases: { phase: string; label: string; skills: SkillPick[] }[];
 };
 
 export type RunResponse = {

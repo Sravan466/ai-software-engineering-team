@@ -46,7 +46,8 @@ export type IconName =
   | "diagram"
   | "list"
   | "pointer"
-  | "pen";
+  | "pen"
+  | "book";
 
 export const Icon: Record<IconName, ReactNode> = {
   menu: svg(<path d="M4 6h16M4 12h16M4 18h16" />),
@@ -102,4 +103,10 @@ export const Icon: Record<IconName, ReactNode> = {
   // The mockup's two modes: using the prototype, and editing one of its sections.
   pointer: svg(<path d="M5.5 4.5 18 10.2l-5.3 1.8-2 5.5z M12.7 12l5.3 5.3" />),
   pen: svg(<path d="M14.5 5.5l4 4M4.5 19.5l1-4.2L16 4.8a1.4 1.4 0 0 1 2 0l1.2 1.2a1.4 1.4 0 0 1 0 2L8.7 18.5z" />),
+  // The skill library: a bound manual, open at a page. Drawn rather than a
+  // graduation cap or a lightbulb — this is procedure written down, not a badge
+  // for cleverness.
+  book: svg(
+    <path d="M12 7.2v12M12 7.2C10.6 6 8.7 5.4 6 5.4H3.5v12H6c2.7 0 4.6.6 6 1.8 1.4-1.2 3.3-1.8 6-1.8h2.5v-12H18c-2.7 0-4.6.6-6 1.8zM6.5 9.4h2.8M6.5 12.4h2.8" />,
+  ),
 };

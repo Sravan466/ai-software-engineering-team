@@ -1,13 +1,23 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import type { ApprovalMode, LocalStatus, RouterStatus } from "@/lib/api";
+import {
+  api,
+  type ApprovalMode,
+  type LocalStatus,
+  type RouterStatus,
+  type Skill,
+  type SkillOverrides,
+  type SkillPreview,
+} from "@/lib/api";
 import {
   APPROVAL_MODES,
   ROUTING_MODES,
   type RoutingModeMeta,
 } from "@/components/shell/phases";
+import { AGENT_BY_KEY } from "@/components/agents/personas";
+import { Icon } from "@/components/shell/icons";
 
 /**
  * How a run is routed and how often it stops — and whether it can run at all.
@@ -27,6 +37,12 @@ export type RunConfig = {
   approval: ApprovalMode;
   /** Projected monthly run cost above which the build interrupts itself. */
   costCap: number | null;
+  /**
+   * Skills this build forces on or off, over what keyword scoring would choose.
+   * Scoring happens before the model call, so a miss is silent — this is how a
+   * procedure reaches one build without being turned on for every other.
+   */
+  skills: SkillOverrides;
 };
 
 export const DEFAULT_RUN_CONFIG: RunConfig = {
@@ -34,6 +50,7 @@ export const DEFAULT_RUN_CONFIG: RunConfig = {
   model: "",
   approval: "checkpoints",
   costCap: null,
+  skills: { pinned: [], excluded: [] },
 };
 
 export type ModelOption = {
@@ -183,6 +200,9 @@ export function settingsSummary(config: RunConfig): string {
   if (config.routing.needsModel && config.model) parts.push(config.model);
   parts.push(APPROVAL_MODES.find((m) => m.id === config.approval)?.label ?? config.approval);
   if (config.costCap) parts.push(`cap $${config.costCap.toLocaleString()}/mo`);
+  const { pinned, excluded } = config.skills;
+  if (pinned.length) parts.push(`${pinned.length} skill${pinned.length > 1 ? "s" : ""} pinned`);
+  if (excluded.length) parts.push(`${excluded.length} off`);
   return parts.join(" · ");
 }
 
@@ -192,11 +212,14 @@ export default function RunSettings({
   onChange,
   options,
   disabled,
+  idea = "",
 }: {
   config: RunConfig;
   onChange: (next: RunConfig) => void;
   options: ModelOption[];
   disabled?: boolean;
+  /** What has been typed so far, so the skill picker can show what it would get. */
+  idea?: string;
 }) {
   const { routing, model, approval, costCap } = config;
 
@@ -335,6 +358,205 @@ export default function RunSettings({
           </div>
         )}
       </div>
+
+      <SkillPicker
+        overrides={config.skills}
+        onChange={(skills) => onChange({ ...config, skills })}
+        idea={idea}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
+// ── which procedures this build works from ───────────────────────────────────
+/**
+ * Skills are matched on keywords *before* the model is called, so a skill that
+ * does not match simply never arrives and nothing in the finished build says so.
+ * Two controls answer that here: a per-skill Auto / Always / Never, and a check
+ * against the idea already typed — the only way to see a miss without paying for
+ * a whole run to find it.
+ */
+function SkillPicker({
+  overrides,
+  onChange,
+  idea,
+  disabled,
+}: {
+  overrides: SkillOverrides;
+  onChange: (next: SkillOverrides) => void;
+  idea: string;
+  disabled?: boolean;
+}) {
+  const [skills, setSkills] = useState<Skill[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState<SkillPreview | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  // Loaded when this panel is, not when the page is: the composer's whole shape
+  // is "ask nothing until it is asked for", and a library fetch behind a closed
+  // disclosure is a request nobody wanted.
+  useEffect(() => {
+    let live = true;
+    api
+      .listSkills()
+      .then((lib) => live && setSkills(lib.skills.filter((s) => s.usable)))
+      .catch(() => live && setSkills([]));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const set = useCallback(
+    (name: string, state: "auto" | "pin" | "off") => {
+      onChange({
+        pinned: state === "pin"
+          ? [...overrides.pinned.filter((n) => n !== name), name]
+          : overrides.pinned.filter((n) => n !== name),
+        excluded: state === "off"
+          ? [...overrides.excluded.filter((n) => n !== name), name]
+          : overrides.excluded.filter((n) => n !== name),
+      });
+      setPreview(null);
+    },
+    [onChange, overrides],
+  );
+
+  async function check() {
+    if (checking) return;
+    setChecking(true);
+    try {
+      setPreview(
+        await api.previewSkills({
+          idea: idea.trim(),
+          pinned: overrides.pinned,
+          excluded: overrides.excluded,
+        }),
+      );
+    } catch {
+      setPreview(null);
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  if (skills !== null && skills.length === 0) return null;
+
+  const touched = overrides.pinned.length + overrides.excluded.length;
+
+  return (
+    <div className="setting skill-picker">
+      <button
+        type="button"
+        className="run-settings-toggle skill-picker-toggle"
+        aria-expanded={open}
+        aria-controls="skill-picker"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className={"phase-chev" + (open ? " open" : "")} aria-hidden="true">
+          {Icon.chevron}
+        </span>
+        <span className="label">What the crew works from</span>
+        <span className="run-settings-summary">
+          {skills === null
+            ? "reading the library…"
+            : touched === 0
+              ? `${skills.length} skills, matched to this idea automatically`
+              : `${skills.length} skills · ${touched} decided by you`}
+        </span>
+      </button>
+
+      {open && skills && (
+        <div id="skill-picker" className="skill-picker-body">
+          <ul className="pick-rows">
+            {skills.map((skill) => {
+              const state = overrides.pinned.includes(skill.name)
+                ? "pin"
+                : overrides.excluded.includes(skill.name)
+                  ? "off"
+                  : "auto";
+              return (
+                <li key={skill.name} className="pick-row">
+                  <span className="pick-id">
+                    <span className="pick-name">{skill.title}</span>
+                    <span className="pick-serves">
+                      {skill.agents.length === 0
+                        ? "every agent"
+                        : skill.agents
+                            .map((a) => AGENT_BY_KEY[a]?.codename ?? a)
+                            .join(" · ")}
+                    </span>
+                  </span>
+                  <span className="seg" role="group" aria-label={skill.title}>
+                    {(["auto", "pin", "off"] as const).map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        className="seg-btn"
+                        aria-pressed={state === option}
+                        disabled={disabled}
+                        onClick={() => set(skill.name, option)}
+                      >
+                        {option === "auto" ? "Auto" : option === "pin" ? "Always" : "Never"}
+                      </button>
+                    ))}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="skill-picker-check">
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={!idea.trim() || checking || disabled}
+              onClick={check}
+            >
+              {checking && <span className="btn-spinner" aria-hidden="true" />}
+              {checking ? "Checking…" : "What would this idea get?"}
+            </button>
+            {!idea.trim() && (
+              <span className="field-hint">Write the idea first — it is what they match against.</span>
+            )}
+          </div>
+
+          {preview && (
+            <ol className="dryrun-rows">
+              {preview.phases.map((phase) => {
+                const agent = AGENT_BY_KEY[phase.phase];
+                return (
+                  <li
+                    key={phase.phase}
+                    className="dryrun-row"
+                    style={{ ["--agent" as string]: agent?.accent }}
+                  >
+                    <span className="dryrun-who">
+                      <b className="agent-line-name">{agent?.codename ?? phase.phase}</b>
+                    </span>
+                    {phase.skills.length === 0 ? (
+                      <span className="dryrun-none">nothing matched</span>
+                    ) : (
+                      <span className="dryrun-picks">
+                        {phase.skills.map((s) => (
+                          <span
+                            key={s.name}
+                            className={"pick" + (s.pinned ? " pick-pinned" : "")}
+                            title={s.reason}
+                          >
+                            {s.title}
+                          </span>
+                        ))}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+      )}
     </div>
   );
 }

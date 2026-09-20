@@ -55,12 +55,14 @@ from app.api.routes import (  # noqa: E402
     projects,
     rag,
     settings as settings_routes,
+    skills,
 )
 
 app.include_router(projects.router)
 app.include_router(preview.router)
 app.include_router(models.router)
 app.include_router(rag.router)
+app.include_router(skills.router)
 app.include_router(analytics.router)
 app.include_router(settings_routes.router)
 app.include_router(github.router)

@@ -21,6 +21,12 @@ class PipelineState(TypedDict, total=False):
     # phase key -> reviewer feedback (set on re-run after a rejection)
     feedback: dict[str, str]
 
+    #: What this build was told about skills — `{"pinned": [...], "excluded": [...]}`
+    #: — mirrored in from the project row when the run starts. Selection is a keyword
+    #: score and a keyword miss is silent, so a build needs a way to force a skill on
+    #: or off without editing the library every other build reads.
+    skill_overrides: dict
+
     # Set by the most recently executed node; read by the runner.
     last_phase: str
     last_result: dict

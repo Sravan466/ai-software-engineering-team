@@ -316,7 +316,7 @@ def test_no_agent_can_build_a_prompt_that_overruns_its_window(window):
                 extra_context="Debate decision: use Postgres.",
                 feedback=feedback,
             )
-            built = sum(len(m.content) for m in agent._build_messages(ctx, profile))
+            built = sum(len(m.content) for m in agent._build_messages(ctx, profile).messages)
             assert built <= profile.prompt_char_budget, (
                 f"{key} built {built:,} chars against a {profile.prompt_char_budget:,} budget"
             )
@@ -332,7 +332,9 @@ def test_the_repair_round_still_fits_the_window():
     )
 
     # A rejected attempt as long as anything a model could return.
-    messages = agent._repair_messages(ctx, profile, "y" * 400_000, ["`findings` — Field required"])
+    messages = agent._repair_messages(
+        ctx, profile, "y" * 400_000, ["`findings` — Field required"]
+    ).messages
     total = sum(len(m.content) for m in messages)
     assert total <= profile.prompt_char_budget, (
         f"repair prompt is {total:,} chars against a {profile.prompt_char_budget:,} budget"
@@ -758,7 +760,7 @@ def test_a_long_idea_cannot_push_the_prompt_out_of_the_window():
     agent = get_agent(Phase.PRODUCT_MANAGER.value)
     profile = _profile(8192)
     ctx = AgentContext(idea="i" * 60_000, feedback="f" * 40_000, extra_context="e" * 20_000)
-    built = sum(len(m.content) for m in agent._build_messages(ctx, profile))
+    built = sum(len(m.content) for m in agent._build_messages(ctx, profile).messages)
     assert built <= profile.prompt_char_budget
 
 
