@@ -219,7 +219,13 @@ earlier phases wrote, pinned first. Two consequences are real and deliberate:
   own. On a small window a skill arriving means RAG or memory gets less, which is the
   correct trade and a visible one.
 
-Two rules are enforced when a skill loads, not by review: a length ceiling, and no
+That share is also the reason a skill can be selected and still not arrive: on a small
+window carrying a lot of upstream source, the share can be smaller than the smallest
+skill, and a procedure is injected whole or not at all — half of one is half of one. The
+backend log says so by name when it happens, and the phase's review says it got none.
+
+Two rules are enforced when a skill loads, not by review: a length ceiling (measured on
+what is actually injected — the title and the description go into the prompt too), and no
 instructions about output format — every agent already answers in a declared JSON shape,
 and on a small model a prose "present this as a table" beats the schema and costs the
 build a repair round. A skill that breaks either stays listed, with the reason, and is
