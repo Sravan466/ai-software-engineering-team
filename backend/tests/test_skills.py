@@ -282,7 +282,7 @@ def _selected(name: str, body: str) -> tuple:
     return tuple(select("qa_engineer", "x", {}, candidates=[skill], limit=1))
 
 
-def test_skills_take_their_room_from_the_same_budget_as_everything_else():
+def test_skills_take_their_room_from_the_same_budget_as_everything_else(library):
     """A separate budget on top of the allocator is how a phase overruns the window."""
     agent = get_agent(Phase.QA_ENGINEER.value)
     profile = _profile(8192)
@@ -316,7 +316,58 @@ def test_what_fits_is_what_is_recorded(library):
     assert "Check the edges." in ask.messages[1].content
 
 
-def test_an_agent_with_no_skills_gets_no_heading():
+def test_a_skill_that_cannot_fit_costs_the_rest_of_the_prompt_nothing(library):
+    """Turning skills on must never make a build worse than leaving them off.
+
+    Every other section spends whatever it is given; skills cannot, because a
+    procedure is injected whole or not at all. Reserving a share that nothing can
+    spend is how a phase ends up with no procedures *and* a fifth less room for the
+    knowledge base than the identical run that never asked for any — strictly worse
+    on both counts, and invisible except in a log line.
+    """
+    agent = get_agent(Phase.QA_ENGINEER.value)
+    profile = _profile(8192)
+    shared = dict(
+        idea="an app",
+        prior_outputs={d: {"code": "x" * 80_000} for d in agent.depends_on},
+        rag_context="r" * 40_000,
+        memory_context="m" * 40_000,
+    )
+    offered = agent._section_budgets(
+        AgentContext(**shared, skills=_selected("huge", "s" * 40_000)), profile
+    )
+    none = agent._section_budgets(AgentContext(**shared), profile)
+
+    assert offered["skills"] == 0, "nothing fitted, so nothing should have been charged"
+    for section in ("depends_on", "rag", "memory"):
+        # A character of integer-division rounding, not a share.
+        assert none[section] - offered[section] <= 1
+
+
+def test_what_skills_do_not_spend_goes_back_to_the_context_that_can(library):
+    agent = get_agent(Phase.QA_ENGINEER.value)
+    profile = _profile(32768)
+    shared = dict(
+        idea="an app",
+        prior_outputs={d: {"code": "x" * 80_000} for d in agent.depends_on},
+        rag_context="r" * 40_000,
+        memory_context="m" * 40_000,
+    )
+    tiny = _selected("tiny", "Check the edges.")
+    budget = agent._section_budgets(AgentContext(**shared, skills=tiny), profile)
+    none = agent._section_budgets(AgentContext(**shared), profile)
+
+    spent = budget["skills"]
+    assert 0 < spent < 400, "a two-line skill should cost about two lines"
+    given_back = sum(budget[s] for s in ("depends_on", "rag", "memory")) - sum(
+        none[s] for s in ("depends_on", "rag", "memory")
+    )
+    # Everything the skill did not use is back in the other sections, give or take
+    # the rounding of three integer divisions.
+    assert abs(given_back + spent) <= 3
+
+
+def test_an_agent_with_no_skills_gets_no_heading(library):
     agent = get_agent(Phase.QA_ENGINEER.value)
     ask = agent._build_messages(AgentContext(idea="an app"), _profile(32768))
     assert "How this team does this work" not in ask.messages[1].content

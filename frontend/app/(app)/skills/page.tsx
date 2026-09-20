@@ -554,8 +554,12 @@ function Editor({
   // What this skill will actually cost a prompt. The title and the description are
   // injected beside the procedure, so counting the textarea alone under-reports the
   // bill by the length of two fields the author can see but not feel.
-  const cost = `## ${form.title}${form.description ? `\n${form.description}` : ""}\n${form.body}`
-    .trim().length;
+  // Spread rather than `.length`: JavaScript counts UTF-16 code units and the
+  // server counts code points, so an emoji in a title made the two disagree — the
+  // counter on screen is meant to be the number the ceiling is checked against.
+  const cost = [
+    ...`## ${form.title}${form.description ? `\n${form.description}` : ""}\n${form.body}`.trim(),
+  ].length;
   const over = cost > maxChars;
   const slug = (locked ?? form.name ?? "").trim();
 

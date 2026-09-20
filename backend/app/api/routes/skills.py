@@ -115,13 +115,15 @@ def update_skill(name: str, payload: SkillBody) -> dict:
 
 def _save(name: str, payload: SkillBody, created: bool) -> dict:
     known = registry.known_phases()
-    problems = check(
-        name,
-        payload.title,
-        payload.description,
-        payload.body,
-        settings.skill_body_max_chars,
+    # Checked in the form it will be *stored* in. Validating the raw payload and
+    # saving a stripped one means the reported size and the real size differ by
+    # however much whitespace happened to arrive.
+    title, description, body = (
+        payload.title.strip(),
+        payload.description.strip(),
+        payload.body.strip(),
     )
+    problems = check(name, title, description, body, settings.skill_body_max_chars)
     unknown = [a for a in payload.agents if a not in known]
     if unknown:
         problems.append(
@@ -136,8 +138,8 @@ def _save(name: str, payload: SkillBody, created: bool) -> dict:
 
     skill = Skill(
         name=name,
-        title=payload.title.strip(),
-        description=payload.description.strip(),
+        title=title,
+        description=description,
         agents=tuple(payload.agents),
         # The frontmatter writes keywords as `[a, b, c]` on one line, so a keyword
         # carrying a comma, a bracket or a newline would come back as two keywords
@@ -147,7 +149,7 @@ def _save(name: str, payload: SkillBody, created: bool) -> dict:
             for cleaned in (_KEYWORD_JUNK.sub(" ", k).strip().lower() for k in payload.keywords)
             if cleaned
         ),
-        body=payload.body.strip(),
+        body=body,
         source="user",
     )
     try:

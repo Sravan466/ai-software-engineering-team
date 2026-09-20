@@ -402,17 +402,10 @@ class BaseAgent:
             # Nothing fitted, so nothing is printed. A heading with no procedure
             # under it is worse than silence on a small model: the next section
             # starts immediately, and "follow these procedures" ends up pointing at
-            # the knowledge base.
+            # the knowledge base. (`_section_budgets` says so in the log; it is the
+            # one that knows how much room there was.)
             if body:
                 parts.append(_SKILLS_FRAME.format(body=body))
-            elif skills_used is not None:
-                log.info(
-                    "%s: %d skill(s) matched but none fit the %s-character share of "
-                    "this model's window, so this phase has none.",
-                    self.title,
-                    len(ctx.skills),
-                    f"{budget.get('skills', 0):,}",
-                )
             if skills_used is not None:
                 skills_used[:] = used
 
@@ -503,7 +496,42 @@ class BaseAgent:
             "memory": bool(ctx.memory_context),
         }
         share_total = sum(_CONTEXT_SHARE[n] for n, has in present.items() if has)
+
+        # Skills are sized first, and charged at what they *actually* cost.
+        #
+        # Every other section here spends whatever it is given: a budget of 4,000
+        # characters of reference material means 4,000 characters of reference
+        # material. Skills cannot — a procedure is injected whole or not at all, so
+        # a share that cannot hold the smallest candidate buys nothing. Reserving it
+        # anyway is how a build with skills switched on ends up *strictly worse* than
+        # the same build with them off: no procedures, and a fifth less room for the
+        # knowledge base than the run that never asked for any.
+        #
+        # So: offer them their share, see what fits, keep only that, and hand the
+        # rest back to the sections that can spend it.
+        budget["skills"] = 0
+        if present["skills"] and share_total:
+            offered = int(free * (_CONTEXT_SHARE["skills"] / share_total))
+            body, _ = _pack_skills(ctx.skills, offered - _SKILLS_FRAME_COST)
+            if body:
+                budget["skills"] = _SKILLS_FRAME_COST + len(body)
+            else:
+                smallest = min(len(render_skill(c.skill)) for c in ctx.skills)
+                log.info(
+                    "%s: %d skill(s) matched, but the smallest needs %s characters "
+                    "and this model's share is %s. This phase gets none, and the room "
+                    "goes to the context that can use it.",
+                    self.title,
+                    len(ctx.skills),
+                    f"{smallest:,}",
+                    f"{max(offered - _SKILLS_FRAME_COST, 0):,}",
+                )
+            free -= budget["skills"]
+            share_total -= _CONTEXT_SHARE["skills"]
+
         for name, share in _CONTEXT_SHARE.items():
+            if name == "skills":
+                continue
             budget[name] = int(free * (share / share_total)) if present[name] and share_total else 0
         return budget
 
