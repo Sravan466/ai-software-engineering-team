@@ -126,9 +126,23 @@ class OllamaProvider(LLMProvider):
         try:
             r = httpx.get(f"{self.base_url}/api/tags", timeout=2.0)
             r.raise_for_status()
-            return r.json().get("models", []) or []
+            entries = r.json().get("models", []) or []
         except Exception:  # noqa: BLE001 - server not running / unexpected payload
             return []
+        # Recent servers report capabilities in the tag list itself, which answers
+        # for every pulled model in the one round trip the caller was making anyway.
+        # Taken as it goes past, so `capabilities` below falls back to a probe per
+        # model only on a server old enough not to say — and so the answers refresh
+        # whenever the list is read, rather than aging in a cache of their own.
+        #
+        # Only an entry that actually carries the key is remembered. Recording a
+        # missing key as "reported nothing" would cache the older server's silence
+        # as an answer and stop the probe that *can* get one.
+        for entry in entries:
+            name = entry.get("name")
+            if name and isinstance(entry.get("capabilities"), (list, tuple)):
+                self._remember_capabilities(name, entry)
+        return entries
 
     def server_version(self) -> Optional[tuple[int, ...]]:
         """The server's version, asked once — but only remembered once it answers.
@@ -211,10 +225,13 @@ class OllamaProvider(LLMProvider):
         picker — refusing a model because we failed to ask about it would hide every
         model on an older runtime.
 
-        The answer is remembered, because the tag list is read on every Settings
-        poll and this is one `/api/show` per model behind it. A failed probe is not
-        remembered, for the same reason `profile` does not cache one: a model pulled
-        a moment from now has to be picked up on the next call.
+        Usually free: a server that reports capabilities in `/api/tags` has already
+        filled the cache this reads, so nothing goes over the wire here at all. The
+        `/api/show` fallback is for servers that do not, and its answer is kept for
+        the same reason — the tag list is read on every Settings poll, and a probe
+        per model behind each one is a page that waits. A *failed* probe is not
+        kept, for the reason `profile` does not keep one either: a model pulled a
+        moment from now has to be picked up on the next call.
         """
         key = (self.base_url, model)
         if key in self._capabilities:

@@ -1119,3 +1119,66 @@ def test_a_model_the_runtime_will_not_describe_is_asked_again_next_time(monkeypa
     monkeypatch.setattr(prov, "_show", lambda model, **_: answers.pop(0))
     assert prov.capabilities("nomic-embed-text") is None
     assert prov.capabilities("nomic-embed-text") == ("embedding",)
+
+
+def test_the_tag_list_answers_for_every_model_in_one_round_trip(monkeypatch):
+    """A server that reports capabilities in `/api/tags` is not probed again.
+
+    `local_status` is polled by the sidebar. One `/api/show` per pulled model
+    behind every poll is a page that waits on a list it already had — so the real
+    HTTP call is stubbed here rather than the method, to prove the tag list itself
+    is what fills the answer.
+    """
+    from app.router.providers import ollama as ollama_module
+    from app.router.providers.ollama import OllamaProvider
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {
+                "models": [
+                    {"name": "qwen2.5:7b", "capabilities": ["completion", "tools"]},
+                    {"name": "nomic-embed-text:latest", "capabilities": ["embedding"]},
+                ]
+            }
+
+    calls: list[str] = []
+
+    def _get(url, **_):
+        calls.append(url)
+        return _Response()
+
+    monkeypatch.setattr(ollama_module.httpx, "get", _get)
+
+    def _refuse(*a, **k):
+        raise AssertionError("a model was probed although the tag list said what it does")
+
+    monkeypatch.setattr(ollama_module.httpx, "post", _refuse)
+
+    prov = OllamaProvider("http://localhost:11434")
+    assert prov.list_models() == ["qwen2.5:7b", "nomic-embed-text:latest"]
+    assert prov.capabilities("nomic-embed-text:latest") == ("embedding",)
+    assert prov.capabilities("qwen2.5:7b") == ("completion", "tools")
+    assert calls == ["http://localhost:11434/api/tags"], "the answer cost more than one call"
+
+
+def test_a_tag_list_that_omits_capabilities_still_gets_probed(monkeypatch):
+    """Silence in `/api/tags` must not be cached as an answer.
+
+    An older server does not report capabilities there but does on `/api/show`.
+    Remembering the missing key as "reported nothing" would hide every model it
+    serves behind a probe that never runs.
+    """
+    from app.router.providers.ollama import OllamaProvider
+
+    prov = OllamaProvider("http://localhost:11434")
+    monkeypatch.setattr(prov, "_tags", lambda: [{"name": "llama3.1:8b"}])
+    monkeypatch.setattr(prov, "_show", lambda model, **_: {"capabilities": ["completion"]})
+    assert prov.list_models() == ["llama3.1:8b"]
+    assert prov.capabilities("llama3.1:8b") == ("completion",)
