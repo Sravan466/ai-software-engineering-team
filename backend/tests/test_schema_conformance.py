@@ -1182,3 +1182,32 @@ def test_a_tag_list_that_omits_capabilities_still_gets_probed(monkeypatch):
     monkeypatch.setattr(prov, "_show", lambda model, **_: {"capabilities": ["completion"]})
     assert prov.list_models() == ["llama3.1:8b"]
     assert prov.capabilities("llama3.1:8b") == ("completion",)
+
+
+def test_the_default_model_is_a_key_even_when_the_tag_list_spells_it_differently(
+    monkeypatch,
+):
+    """`OLLAMA_MODEL=nomic-embed-text`, tag list says `nomic-embed-text:latest`.
+
+    The UI looks the default up by the string this same payload handed it. Keyed
+    only by tag, that lookup misses and reads as "unknown" — which is the answer
+    that lets the run start, quietly switching off the check that exists to stop
+    a build on a model that cannot write.
+    """
+    model_router = _stubbed_local(
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
+    )
+    # The runtime resolves the tag itself, which is what makes this fixable here.
+    monkeypatch.setattr(
+        model_router._providers["ollama"],
+        "_show",
+        lambda model, **_: EMBEDDING_SHOW
+        if model.split(":", 1)[0] == "nomic-embed-text"
+        else SHOW,
+    )
+    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
+
+    status = model_router.local_status()
+    assert status["default_model"] == "nomic-embed-text"
+    assert status["model_capabilities"]["nomic-embed-text"] == ["embedding"]

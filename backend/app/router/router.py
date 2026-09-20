@@ -249,7 +249,7 @@ class ModelRouter:
             #: embedding-only model being offered as something to run a build on —
             #: the tag list alone cannot tell the two apart, and offering one is a
             #: build that fails on its first call for a reason that was knowable here.
-            "model_capabilities": self._model_capabilities(models),
+            "model_capabilities": self._model_capabilities(models, default),
             #: Pulled models whose name suggests they were trained for code. A hint
             #: for the code phases, offered — never a default the router reaches for,
             #: because a name is not a capability.
@@ -293,7 +293,7 @@ class ModelRouter:
             "code_models": [m for m in models if _looks_like_a_coder(m)],
             #: Same map, same rule, same reason as on `local_status` — a role pinned
             #: to a model that cannot complete text fails exactly as a build does.
-            "model_capabilities": self._model_capabilities(models),
+            "model_capabilities": self._model_capabilities(models, self._default_model["ollama"]),
             "cloud_models": [
                 f"{name}:{self._default_model[name]}"
                 for name in self.CLOUD_PROVIDERS
@@ -301,19 +301,31 @@ class ModelRouter:
             ],
         }
 
-    def _model_capabilities(self, models: Iterable[str]) -> dict:
+    def _model_capabilities(self, models: Iterable[str], also: Optional[str] = None) -> dict:
         """`{model: [capability, …]}` for every model the runtime would answer about.
 
         Models the runtime will not describe are left out rather than given an empty
         list, because "reported nothing" and "was not asked" are different facts and
         only one of them is a reason to act. One probe per model, cached in the
         provider, so a Settings page that polls does not re-ask on every tick.
+
+        `also` is a name that has to be a key even when the tag list spells it
+        differently. The configured default may be `nomic-embed-text` while the tag
+        list calls it `nomic-embed-text:latest`, and a caller looking the default up
+        by the string this same payload handed it would find nothing and read that
+        as "unknown" — silently turning off the check that stops a build starting on
+        a model that cannot write. The runtime resolves the tag itself, so asking it
+        under that exact name is both the fix and the only authority on which tag it
+        means.
         """
         prov = self._providers["ollama"]
         if not hasattr(prov, "capabilities"):
             return {}
+        names = list(models)
+        if also and also not in names:
+            names.append(also)
         out: dict = {}
-        for name in models:
+        for name in names:
             caps = prov.capabilities(name)
             if caps is not None:
                 out[name] = list(caps)

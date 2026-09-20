@@ -266,17 +266,21 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                     // Asked of the runtime, never of the name. A model that only
                     // makes embeddings is a working model doing a different job:
                     // it is named and kept, and the one thing it cannot be is the
-                    // model eight agents write with.
+                    // model eight agents write with. The badge below prints what
+                    // the runtime actually said rather than a word for the kind of
+                    // model we assume it is — the rule upstream is only that
+                    // `completion` is absent.
                     const canBuild = canRunABuild(m, status.model_capabilities);
+                    const does = (status.model_capabilities?.[m] ?? []).join(" · ");
                     return (
                       <li key={m} className="model-row" data-current={current || undefined}>
                         <span className="model-row-name mono">{m}</span>
                         {!canBuild && (
                           <span
                             className="badge"
-                            title="This model turns text into vectors for document search. It cannot write, so no agent can run on it — which is why it isn't offered as a build model."
+                            title={`The runtime lists this model as ${does}, not completion. Every agent has to write, so none can run on it — which is why it isn't offered as a build model.`}
                           >
-                            embeddings only
+                            {does} only
                           </span>
                         )}
                         {canBuild && status.code_models.includes(m) && (
@@ -300,7 +304,7 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                             title={
                               canBuild
                                 ? undefined
-                                : "An embedding model cannot write, so every agent would fail on its first call."
+                                : `The runtime lists this model as ${does}. It can't write, so every agent would fail on its first call.`
                             }
                             aria-label={`Run agents on ${m} by default`}
                           >
