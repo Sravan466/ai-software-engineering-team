@@ -97,6 +97,10 @@ class OllamaProvider(LLMProvider):
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self._profiles = ProfileCache()
         self._version: Optional[tuple[int, ...]] = None
+        #: What each model says it can do, remembered per probe. A plain dict is
+        #: enough: every write is the same answer to the same question, so two
+        #: threads racing cost one duplicate HTTP call and nothing else.
+        self._capabilities: dict[tuple[str, str], Optional[tuple[str, ...]]] = {}
 
     def available(self) -> bool:
         try:
@@ -171,9 +175,12 @@ class OllamaProvider(LLMProvider):
         # The KV cache lives in the Ollama process. When that is on another host — or
         # in its own container — this machine's RAM says nothing about what fits there,
         # and a confident clamp built on it would be a number about the wrong computer.
+        # This is the only place that may read local RAM, because it is the only place
+        # that knows where the runtime is; `None` reaches `build_profile` as "unknown,
+        # so do not clamp", which is a different answer from "not passed".
         ram = total_ram_bytes() if self.is_same_machine() else None
 
-        capabilities = [str(c) for c in (show.get("capabilities") or [])]
+        capabilities = list(self._remember_capabilities(model, show) or ())
         version = self.server_version()
         supports_schema = bool(
             version
@@ -194,7 +201,44 @@ class OllamaProvider(LLMProvider):
             ),
         )
 
-    def _show(self, model: str) -> Optional[dict]:
+    def capabilities(self, model: str) -> Optional[tuple[str, ...]]:
+        """What the runtime says this model can do — or None when it will not say.
+
+        `None` and `()` are different answers and the caller has to be able to tell
+        them apart. `()` is a server that reported a capability list with nothing in
+        it; `None` is a server too old to report capabilities at all, or one that
+        could not be reached. Only the first is grounds for keeping a model out of a
+        picker — refusing a model because we failed to ask about it would hide every
+        model on an older runtime.
+
+        The answer is remembered, because the tag list is read on every Settings
+        poll and this is one `/api/show` per model behind it. A failed probe is not
+        remembered, for the same reason `profile` does not cache one: a model pulled
+        a moment from now has to be picked up on the next call.
+        """
+        key = (self.base_url, model)
+        if key in self._capabilities:
+            return self._capabilities[key]
+        show = self._show(model, note="; its capabilities are unknown until it answers.")
+        if show is None:
+            return None
+        return self._remember_capabilities(model, show)
+
+    def _remember_capabilities(self, model: str, show: dict) -> Optional[tuple[str, ...]]:
+        """Record what one `/api/show` payload said about capabilities, and return it.
+
+        Shared so that the capability probe and the profile probe cannot drift, and
+        so a profiled model does not get asked a second time for the half of the
+        payload the first call already had in its hands.
+        """
+        reported = show.get("capabilities")
+        caps = (
+            tuple(str(c) for c in reported) if isinstance(reported, (list, tuple)) else None
+        )
+        self._capabilities[(self.base_url, model)] = caps
+        return caps
+
+    def _show(self, model: str, *, note: Optional[str] = None) -> Optional[dict]:
         try:
             r = httpx.post(f"{self.base_url}/api/show", json={"model": model}, timeout=10.0)
             r.raise_for_status()
@@ -202,12 +246,15 @@ class OllamaProvider(LLMProvider):
             return payload if isinstance(payload, dict) else None
         except Exception as e:  # noqa: BLE001 - unreachable, or the model is not pulled
             log.warning(
-                "Could not probe '%s' on %s (%s); falling back to the configured window "
-                "of %s tokens.",
+                "Could not probe '%s' on %s (%s)%s",
                 model,
                 self.base_url,
                 e,
-                settings.model_context_fallback_tokens,
+                note
+                or (
+                    "; falling back to the configured window of "
+                    f"{settings.model_context_fallback_tokens} tokens."
+                ),
             )
             return None
 
@@ -217,8 +264,19 @@ class OllamaProvider(LLMProvider):
         return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
     def forget_profile(self, model: Optional[str] = None) -> None:
-        """Drop cached probes — after a pull, or when the host changes underneath us."""
+        """Drop cached probes — after a pull, or when the host changes underneath us.
+
+        Capabilities come from the same `/api/show` payload and go stale at the same
+        moments, so they are dropped together. Leaving them behind is how a model
+        re-pulled at a newer tag would keep the capability list of the old one.
+        """
         self._profiles.forget((self.base_url, model) if model else None)
+        if model:
+            self._capabilities.pop((self.base_url, model), None)
+        else:
+            self._capabilities = {
+                k: v for k, v in self._capabilities.items() if k[0] != self.base_url
+            }
 
     # ── generation ────────────────────────────────────────────────────────────
     def generate(

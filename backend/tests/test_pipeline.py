@@ -210,3 +210,82 @@ def test_delete_removes_the_build(client):
     pid = _create(client)
     assert client.delete(f"/api/projects/{pid}").status_code == 204
     assert client.get(f"/api/projects/{pid}").status_code == 404
+
+
+# ── two builds, two model calls, one process ─────────────────────────────────
+def test_two_builds_on_two_projects_generate_at_the_same_time(client, monkeypatch):
+    """The runner's lock used to wrap the model call, so builds ran one at a time.
+
+    A rendezvous is the assertion: both runs have to be *inside* a model call at the
+    same moment for it to clear. Serialised, the second never arrives, the first
+    times out, and `overlapped` stays unset — which is what this test does against
+    the code before the fix.
+
+    The checkpoints are then read back per project. Concurrency that let one build's
+    writes land in another's thread would be a far worse bug than the one being
+    fixed, so both halves are asserted, not just the fast one.
+    """
+    import threading
+
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.orchestration.graph import graph
+    from app.orchestration.runner import _config, runner
+    from app.router.router import router as model_router
+    from tests.conftest import _fake_complete
+
+    rendezvous = threading.Barrier(2, timeout=15)
+    overlapped = threading.Event()
+    guard = threading.Lock()
+    done = False
+
+    def meeting_complete(messages, **kwargs):
+        # Only the first call from each run waits: once the two have met there is
+        # nothing left to prove, and a second wait would hang on a reset barrier.
+        nonlocal done
+        with guard:
+            wait = not done
+        if wait:
+            try:
+                rendezvous.wait()
+                overlapped.set()
+            except threading.BrokenBarrierError:
+                pass  # serialised — the assertion below is what reports it
+            with guard:
+                done = True
+        return _fake_complete(messages, **kwargs)
+
+    monkeypatch.setattr(model_router, "complete", meeting_complete)
+
+    ideas = {
+        _create(client, idea="A parking app for a university campus", require_approval=False):
+            "A parking app for a university campus",
+        _create(client, idea="A reading tracker for a book club", require_approval=False):
+            "A reading tracker for a book club",
+    }
+
+    def drive(project_id: str) -> None:
+        db = SessionLocal()
+        try:
+            runner.continue_run(db, db.get(Project, project_id))
+        finally:
+            db.close()
+
+    threads = [
+        threading.Thread(target=drive, args=(pid,), name=f"build-{pid[:8]}")
+        for pid in ideas
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+        assert not t.is_alive(), "a build never finished"
+
+    assert overlapped.is_set(), "the two builds never generated at the same time"
+
+    for project_id, idea in ideas.items():
+        proj = client.get(f"/api/projects/{project_id}").json()
+        assert proj["status"] == "completed", proj.get("last_error")
+        values = graph.get_state(_config(project_id)).values
+        assert values["idea"] == idea, "one build's checkpoint holds another's idea"
+        assert set(values["prior_outputs"]) == set(PHASES)

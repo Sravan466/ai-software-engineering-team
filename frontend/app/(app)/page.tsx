@@ -13,6 +13,7 @@ import RunSettings, {
   type RunConfig,
   DEFAULT_RUN_CONFIG,
   modelOptions,
+  modelsThatCannotBuild,
   runtimeBlocker,
   settingsSummary,
 } from "@/components/build/RunSettings";
@@ -61,6 +62,9 @@ export default function NewBuildPage() {
   }, [probe]);
 
   const options = useMemo(() => modelOptions(local, models), [local, models]);
+  // What the list above left out, so the panel can say so rather than leaving a
+  // model visible in Settings and missing here with no explanation anywhere.
+  const omitted = useMemo(() => modelsThatCannotBuild(local), [local]);
   const blocker = runtimeBlocker(config, local, models);
 
   async function start() {
@@ -167,6 +171,7 @@ export default function NewBuildPage() {
               config={config}
               onChange={setConfig}
               options={options}
+              omitted={omitted}
               disabled={busy}
               idea={idea}
             />

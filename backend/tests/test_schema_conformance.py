@@ -1004,3 +1004,118 @@ def _minimal(model) -> dict:
     from app.schemas.agent_outputs import response_schema
 
     return _conforming(response_schema(model))
+
+
+# ── the RAM clamp belongs to the machine the runtime is actually on ──────────
+def test_a_runtime_on_another_machine_is_not_clamped_by_this_machines_ram(monkeypatch):
+    """`profile()`, not `is_same_machine()` — the bug lived one call past the check.
+
+    The provider already answered "unknown RAM" for a runtime it does not share a
+    machine with. `build_profile` then read `None` as "not passed" and substituted
+    this host's memory, so the window was clamped by a number about the wrong
+    computer. Only going through `profile()` catches that; the host check on its own
+    passed before the fix and after it.
+    """
+    from app.router import model_profile
+    from app.router.providers import ollama as ollama_module
+    from app.router.providers.ollama import OllamaProvider
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    # Far too little for a 32k window of this model's KV cache — so if this figure
+    # is consulted at all, the assertion below fails.
+    monkeypatch.setattr(model_profile, "total_ram_bytes", lambda: 2 * 2**30)
+    monkeypatch.setattr(ollama_module, "total_ram_bytes", lambda: 2 * 2**30)
+
+    def _probed(base_url: str):
+        prov = OllamaProvider(base_url)
+        monkeypatch.setattr(prov, "_show", lambda model, **_: SHOW)
+        monkeypatch.setattr(prov, "server_version", lambda: (0, 5, 0))
+        return prov.profile("qwen2.5:7b")
+
+    remote = _probed("http://ollama.internal:11434")
+    assert remote.context_window == 32768, "clamped by RAM belonging to another computer"
+    assert remote.clamp_reason is None
+
+    # The same model on this machine still is clamped. The fix is about *which*
+    # machine gets asked, not about dropping the clamp.
+    local = _probed("http://localhost:11434")
+    assert local.context_window < 32768
+    assert "RAM" in (local.clamp_reason or "")
+
+
+def test_unknown_ram_is_not_silently_replaced_with_this_machines(monkeypatch):
+    """The unit underneath: `None` means "do not clamp", never "go and look"."""
+    from app.router import model_profile
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    monkeypatch.setattr(model_profile, "total_ram_bytes", lambda: 2 * 2**30)
+    profile = build_profile(
+        provider="ollama",
+        model="qwen2.5:7b",
+        show=SHOW,
+        supports_schema_format=True,
+        ram_bytes=None,
+    )
+    assert profile.context_window == 32768
+    assert profile.clamp_reason is None
+
+
+# ── a model that cannot complete text is not something to run a build on ─────
+EMBEDDING_SHOW = {
+    "capabilities": ["embedding"],
+    "details": {"family": "nomic-bert", "parameter_size": "137M"},
+    "model_info": {"general.architecture": "nomic-bert", "nomic-bert.context_length": 2048},
+}
+
+
+def _stubbed_local(monkeypatch, models: dict):
+    """Point the router's local provider at a fixed set of `/api/show` answers."""
+    from app.router.model_profile import ProfileCache
+    from app.router.router import router as model_router
+
+    prov = model_router._providers["ollama"]
+    monkeypatch.setattr(prov, "available", lambda: True)
+    monkeypatch.setattr(prov, "list_models", lambda: list(models))
+    monkeypatch.setattr(prov, "_show", lambda model, **_: models.get(model))
+    monkeypatch.setattr(prov, "server_version", lambda: (0, 5, 0))
+    # Swapped rather than emptied: the provider is a process-wide singleton, and
+    # monkeypatch puts the real caches back afterwards — so these stubbed answers
+    # cannot outlive the test that asked for them.
+    monkeypatch.setattr(prov, "_capabilities", {})
+    monkeypatch.setattr(prov, "_profiles", ProfileCache())
+    return model_router
+
+
+def test_local_status_says_what_each_pulled_model_can_do(monkeypatch):
+    """The tag list cannot tell a chat model from an embedding one. This can."""
+    model_router = _stubbed_local(
+        monkeypatch, {"qwen2.5:7b": SHOW, "nomic-embed-text": EMBEDDING_SHOW}
+    )
+    caps = model_router.local_status()["model_capabilities"]
+    assert caps["nomic-embed-text"] == ["embedding"]
+    assert "completion" in caps["qwen2.5:7b"]
+    # The same map reaches the per-role picker, so the two cannot disagree.
+    assert model_router.role_settings()["model_capabilities"] == caps
+
+
+def test_a_runtime_that_will_not_say_leaves_the_model_unlisted(monkeypatch):
+    """"Did not report" is not "reported nothing", and only one hides a model.
+
+    An Ollama old enough not to return `capabilities` would otherwise have every
+    model it serves read as incapable — and a picker applying the rule would go
+    empty on the runtimes least able to explain why.
+    """
+    silent = {"details": {"family": "llama"}, "model_info": {}}
+    model_router = _stubbed_local(monkeypatch, {"llama3.1:8b": silent})
+    assert model_router.local_status()["model_capabilities"] == {}
+
+
+def test_a_model_the_runtime_will_not_describe_is_asked_again_next_time(monkeypatch):
+    """A failed probe is never cached, or a model pulled a minute later stays hidden."""
+    from app.router.providers.ollama import OllamaProvider
+
+    prov = OllamaProvider("http://localhost:11434")
+    answers = [None, EMBEDDING_SHOW]
+    monkeypatch.setattr(prov, "_show", lambda model, **_: answers.pop(0))
+    assert prov.capabilities("nomic-embed-text") is None
+    assert prov.capabilities("nomic-embed-text") == ("embedding",)

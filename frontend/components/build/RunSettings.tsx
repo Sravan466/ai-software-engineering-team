@@ -6,6 +6,7 @@ import {
   api,
   type ApprovalMode,
   type LocalStatus,
+  type ModelCapabilities,
   type RouterStatus,
   type Skill,
   type SkillOverrides,
@@ -61,6 +62,43 @@ export type ModelOption = {
 };
 
 // ── what can this machine actually run? ──────────────────────────────────────
+/** The capability an agent needs: something that writes prose, code and JSON. */
+const COMPLETION = "completion";
+
+/**
+ * Whether a downloaded model could run a build — asked of the runtime, not the name.
+ *
+ * Sorting the default to the front was the whole defence before this, and it only
+ * ever moved the problem down one row: the embedding model this app pulls for its
+ * own knowledge base sat in the same list as the models that write code, and
+ * picking it produced a build that failed on its first call. A name cannot settle
+ * it either — `nomic-embed-text` announces itself and `mxbai-embed-large` does not,
+ * and the next one will be called something nobody here has heard of.
+ *
+ * Only a *definite* negative hides a model, which is the rule `runtimeBlocker`
+ * below already works from: a runtime that said nothing, or that is too old to
+ * report capabilities at all, leaves the model listed. Being wrong that way costs
+ * one failed run; being wrong the other way empties the picker on the setups least
+ * able to explain themselves.
+ */
+export function canRunABuild(model: string, capabilities?: ModelCapabilities): boolean {
+  const reported = capabilities?.[model];
+  if (!reported || reported.length === 0) return true;
+  return reported.includes(COMPLETION);
+}
+
+/**
+ * Downloaded models this picker is leaving out, in the order they'd have appeared.
+ *
+ * Returned rather than silently dropped because "why isn't it here?" is the worse
+ * question — the same reason a cloud provider with no key stays listed and disabled
+ * a few lines down. A select is the wrong place to answer it, so the panel puts the
+ * answer under the control instead.
+ */
+export function modelsThatCannotBuild(local: LocalStatus | null): string[] {
+  return (local?.models ?? []).filter((m) => !canRunABuild(m, local?.model_capabilities));
+}
+
 /** Every model the run could be pinned to, local first. */
 export function modelOptions(
   local: LocalStatus | null,
@@ -68,14 +106,11 @@ export function modelOptions(
 ): ModelOption[] {
   const options: ModelOption[] = [];
 
-  // The configured default leads, and is what an auto-pick lands on. Ollama lists
-  // everything that has been pulled — including the embedding model this app uses
-  // for its own knowledge base — and alphabetical order would happily pin a build
-  // to something that cannot hold a conversation.
+  // The configured default leads, and is what an auto-pick lands on.
   const preferred = local?.default_model;
-  const names = [...(local?.models ?? [])].sort((a, b) =>
-    a === preferred ? -1 : b === preferred ? 1 : a.localeCompare(b),
-  );
+  const names = [...(local?.models ?? [])]
+    .filter((m) => canRunABuild(m, local?.model_capabilities))
+    .sort((a, b) => (a === preferred ? -1 : b === preferred ? 1 : a.localeCompare(b)));
   for (const name of names) {
     options.push({
       value: `ollama:${name}`,
@@ -149,11 +184,26 @@ export function runtimeBlocker(
     action: "Pull the model",
     href: "/settings",
   };
+  // Downloaded, running, and still unable to write a line. Left to the run, this
+  // fails on the first agent's first call — for a reason that is knowable here,
+  // before a project has been created.
+  const cannotWrite: RuntimeBlocker | null =
+    local?.default_model && !canRunABuild(local.default_model, local.model_capabilities)
+      ? {
+          title: `${local.default_model} can't run a build`,
+          text:
+            `It makes embeddings — the numbers behind document search — and cannot ` +
+            "write. Every agent here has to produce prose, code and JSON, so pick a " +
+            "model that completes text and this build can go.",
+          action: "Choose another model",
+          href: "/settings",
+        }
+      : null;
 
   if (config.routing.backend === "local_only") {
     if (!localReachable) return notRunning;
     if (!localReady) return notPulled;
-    return null;
+    return cannotWrite;
   }
 
   if (config.routing.backend === "manual") {
@@ -189,6 +239,9 @@ export function runtimeBlocker(
   if (!localReady && !cloudAvailable(models)) {
     return localReachable ? notPulled : notRunning;
   }
+  // Auto's safety net is the local default. A cloud key means there is still
+  // something to fall back *to*, so this only stops a run that has nothing else.
+  if (cannotWrite && !cloudAvailable(models)) return cannotWrite;
   return null;
 }
 
@@ -211,12 +264,20 @@ export default function RunSettings({
   config,
   onChange,
   options,
+  omitted = [],
   disabled,
   idea = "",
 }: {
   config: RunConfig;
   onChange: (next: RunConfig) => void;
   options: ModelOption[];
+  /**
+   * Downloaded models deliberately left out of `options` because they cannot
+   * complete text. Named under the control rather than dropped in silence — a
+   * model you can see in Settings and not here is a discrepancy someone will go
+   * looking for.
+   */
+  omitted?: string[];
   disabled?: boolean;
   /** What has been typed so far, so the skill picker can show what it would get. */
   idea?: string;
@@ -291,13 +352,16 @@ export default function RunSettings({
               </select>
             ) : (
               <p className="field-hint">
-                No models are available yet.{" "}
+                {omitted.length > 0
+                  ? "Nothing downloaded can write. "
+                  : "No models are available yet. "}
                 <Link className="link" href="/settings">
                   Pull a local model or add a key
                 </Link>
                 .
               </p>
             )}
+            <OmittedModels names={omitted} />
           </div>
         )}
       </div>
@@ -366,6 +430,29 @@ export default function RunSettings({
         disabled={disabled}
       />
     </div>
+  );
+}
+
+/**
+ * The models this list is not offering, and why — in one line, under the control.
+ *
+ * Nothing here is actionable, so it is a hint rather than a notice: the answer to
+ * "where did `nomic-embed-text` go?" costs a sentence, and asking someone to
+ * dismiss a banner for it would cost more than the question is worth.
+ */
+function OmittedModels({ names }: { names: string[] }) {
+  if (names.length === 0) return null;
+  return (
+    <p className="field-hint omitted-models">
+      {names.map((name, i) => (
+        <span key={name}>
+          {i > 0 && (i === names.length - 1 ? " and " : ", ")}
+          <span className="mono">{name}</span>
+        </span>
+      ))}
+      {names.length === 1 ? " isn't here: it makes" : " aren't here: they make"} embeddings,
+      not sentences, so no agent could run on {names.length === 1 ? "it" : "them"}.
+    </p>
   );
 }
 

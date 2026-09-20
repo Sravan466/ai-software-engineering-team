@@ -343,9 +343,19 @@ def build_profile(
     model: str,
     show: dict,
     supports_schema_format: bool,
-    ram_bytes: Optional[int] = None,
+    ram_bytes: Optional[int],
 ) -> ModelProfile:
-    """Turn one `/api/show` payload into the profile the rest of the app runs on."""
+    """Turn one `/api/show` payload into the profile the rest of the app runs on.
+
+    `ram_bytes` has no default, and `None` means **unknown — do not clamp**, never
+    "read this machine's RAM". It used to default to `None` and fall back to
+    `total_ram_bytes()`, which collapsed the two meanings: the one caller that says
+    "unknown" says it precisely because the runtime is on *another* host, and the
+    fallback then clamped that model's window by the memory of the machine the
+    backend happens to run on — a confident number about the wrong computer. Only a
+    caller that has established the runtime is local may read local RAM and pass it
+    in; that decision lives in the provider, which is the only code that knows.
+    """
     model_info = show.get("model_info") or {}
     details = show.get("details") or {}
     arch = str(model_info.get("general.architecture") or details.get("family") or "").strip()
@@ -362,7 +372,7 @@ def build_profile(
     window, clamp_reason = resolve_window(
         context_limit=context_limit,
         kv_bytes_per_token=kv_bytes_per_token(model_info, arch) if arch else None,
-        ram_bytes=ram_bytes if ram_bytes is not None else total_ram_bytes(),
+        ram_bytes=ram_bytes,
     )
 
     parameters = parameter_count_from(model_info, details)

@@ -243,6 +243,13 @@ class ModelRouter:
             "default_model": default,
             "has_default": has_default,
             "profile": profile,
+            #: What each model says it can do. A model is listed here only when the
+            #: runtime answered; one that is absent is unknown, not incapable, and a
+            #: reader has to keep it rather than hide it. This is what stops an
+            #: embedding-only model being offered as something to run a build on —
+            #: the tag list alone cannot tell the two apart, and offering one is a
+            #: build that fails on its first call for a reason that was knowable here.
+            "model_capabilities": self._model_capabilities(models),
             #: Pulled models whose name suggests they were trained for code. A hint
             #: for the code phases, offered — never a default the router reaches for,
             #: because a name is not a capability.
@@ -284,12 +291,33 @@ class ModelRouter:
             #: Derived once, here, so the Settings page does not carry a second copy
             #: of the rule that disagreed with this one about `codellama`.
             "code_models": [m for m in models if _looks_like_a_coder(m)],
+            #: Same map, same rule, same reason as on `local_status` — a role pinned
+            #: to a model that cannot complete text fails exactly as a build does.
+            "model_capabilities": self._model_capabilities(models),
             "cloud_models": [
                 f"{name}:{self._default_model[name]}"
                 for name in self.CLOUD_PROVIDERS
                 if self._providers[name].available() and self._default_model.get(name)
             ],
         }
+
+    def _model_capabilities(self, models: Iterable[str]) -> dict:
+        """`{model: [capability, …]}` for every model the runtime would answer about.
+
+        Models the runtime will not describe are left out rather than given an empty
+        list, because "reported nothing" and "was not asked" are different facts and
+        only one of them is a reason to act. One probe per model, cached in the
+        provider, so a Settings page that polls does not re-ask on every tick.
+        """
+        prov = self._providers["ollama"]
+        if not hasattr(prov, "capabilities"):
+            return {}
+        out: dict = {}
+        for name in models:
+            caps = prov.capabilities(name)
+            if caps is not None:
+                out[name] = list(caps)
+        return out
 
     def _role_pair(self, role: Optional[str]) -> Optional[tuple[str, str]]:
         spec = model_roles.get(role)

@@ -9,6 +9,7 @@ import {
   RoleRow,
   RoleSettings,
 } from "@/lib/api";
+import { canRunABuild } from "@/components/build/RunSettings";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
@@ -262,10 +263,23 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                 <ul className="model-rows">
                   {status.models.map((m) => {
                     const current = m === model;
+                    // Asked of the runtime, never of the name. A model that only
+                    // makes embeddings is a working model doing a different job:
+                    // it is named and kept, and the one thing it cannot be is the
+                    // model eight agents write with.
+                    const canBuild = canRunABuild(m, status.model_capabilities);
                     return (
                       <li key={m} className="model-row" data-current={current || undefined}>
                         <span className="model-row-name mono">{m}</span>
-                        {status.code_models.includes(m) && (
+                        {!canBuild && (
+                          <span
+                            className="badge"
+                            title="This model turns text into vectors for document search. It cannot write, so no agent can run on it — which is why it isn't offered as a build model."
+                          >
+                            embeddings only
+                          </span>
+                        )}
+                        {canBuild && status.code_models.includes(m) && (
                           <span
                             className="badge"
                             title="Its name suggests it was trained on code — a guess from the name, not a measurement."
@@ -282,7 +296,12 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                           <button
                             className="btn btn-sm"
                             onClick={() => select(m)}
-                            disabled={busy}
+                            disabled={busy || !canBuild}
+                            title={
+                              canBuild
+                                ? undefined
+                                : "An embedding model cannot write, so every agent would fail on its first call."
+                            }
                             aria-label={`Run agents on ${m} by default`}
                           >
                             {selecting === m && <span className="btn-spinner" aria-hidden="true" />}
@@ -626,13 +645,21 @@ function RoleLine({
   // rather than snapping back to a default it is not using.
   const options = useMemo(() => {
     // Embeddings run against Ollama's own endpoint and nothing else, so offering a
-    // cloud model here would be offering a choice that cannot be honoured.
-    const all =
-      row.role === "embeddings"
-        ? [...state.local_models]
-        : [...state.local_models, ...state.cloud_models];
+    // cloud model here would be offering a choice that cannot be honoured — and it
+    // is the one role an embedding-only model is the *right* answer for, so the
+    // capability filter below deliberately does not apply to it.
+    if (row.role === "embeddings") {
+      const all = [...state.local_models];
+      return row.assigned && !all.includes(row.assigned) ? [...all, row.assigned] : all;
+    }
+    // Every other role is an agent that has to write. Same rule and same map as the
+    // build picker, so a model missing from one is missing from both.
+    const all = [
+      ...state.local_models.filter((m) => canRunABuild(m, state.model_capabilities)),
+      ...state.cloud_models,
+    ];
     return row.assigned && !all.includes(row.assigned) ? [...all, row.assigned] : all;
-  }, [state.local_models, state.cloud_models, row.assigned, row.role]);
+  }, [state.local_models, state.cloud_models, state.model_capabilities, row.assigned, row.role]);
   const missing =
     Boolean(row.assigned) && row.provider === "ollama" && !state.local_models.includes(row.model ?? "");
 

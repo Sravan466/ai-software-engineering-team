@@ -583,12 +583,25 @@ export type LocalStatus = {
   /** Null while Ollama is unreachable or the default model isn't pulled yet. */
   profile: ModelProfile | null;
   /**
+   * What each pulled model says it can do — `completion`, `embedding`, `tools`,
+   * `vision`, and whatever a runtime reports next. Keyed by model name.
+   *
+   * A model is a key here only when the runtime answered about it. One that is
+   * **absent is unknown, not incapable**, and readers have to keep it: an older
+   * runtime reports no capabilities at all, and a rule that hid everything it
+   * serves would empty the picker on exactly the setups least able to say why.
+   */
+  model_capabilities: ModelCapabilities;
+  /**
    * Pulled models whose name suggests they were trained for code. A suggestion for
    * the code phases, derived from what you actually have — never a default the
    * router reaches for, because a name is not a capability.
    */
   code_models: string[];
 };
+
+/** `{ "nomic-embed-text": ["embedding"] }` — see `LocalStatus.model_capabilities`. */
+export type ModelCapabilities = Record<string, string[]>;
 
 /** One role a model can be chosen for: the eight agents, plus the support tasks. */
 export type RoleRow = {
@@ -614,6 +627,8 @@ export type RoleSettings = {
    * was missing `codellama`, which the other card was already badging as code.
    */
   code_models: string[];
+  /** The same map `LocalStatus` carries, and read by the same rule. */
+  model_capabilities: ModelCapabilities;
   /** `provider:model` for each cloud provider with a key configured. */
   cloud_models: string[];
 };

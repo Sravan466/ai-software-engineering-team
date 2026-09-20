@@ -657,6 +657,15 @@
 .setting .field-hint { max-width: 52ch; }
 .setting .seg { align-self: flex-start; max-width: 100%; flex-wrap: wrap; }
 
+/* ── what this picker is not offering ───────────────────────────────────────
+   Prose under the control, not a notice beside it. There is nothing to act on:
+   an embedding model is a working model doing a different job, and the only
+   thing anyone needs is the sentence that says so. The names carry the mono
+   face the rest of the app gives model names, one step brighter than the
+   sentence around them so the eye finds them without a badge. */
+.omitted-models { margin: 2px 0 0; }
+.omitted-models .mono { color: var(--ink-2); font-size: 0.95em; }
+
 /* A currency field that says what its number means without a second label. */
 .prefixed { display: flex; align-items: center; gap: 8px; }
 .prefixed .input { flex: 1; min-width: 90px; max-width: 150px; }
