@@ -12,6 +12,8 @@ could look like it works and not:
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.agents import get_agent
@@ -365,6 +367,75 @@ def test_what_skills_do_not_spend_goes_back_to_the_context_that_can(library):
     # Everything the skill did not use is back in the other sections, give or take
     # the rounding of three integer divisions.
     assert abs(given_back + spent) <= 3
+
+
+def test_the_budget_and_the_prompt_agree_about_what_was_injected(library):
+    """What `_section_budgets` charges for skills is what the prompt actually carries.
+
+    The two are computed by separate `_pack_skills` calls with different limits —
+    the offered share when sizing, the resulting length when printing — and the
+    heading is charged against that same budget rather than added on top of it.
+    Each is a place the allocator can come to believe one number while the prompt
+    contains another, which is how a prompt sized to fill the window ends up past
+    it; and past it is where the head, and the shape it carries, is cut.
+
+    Swept rather than sampled. The failure only shows where the leftover after
+    packing is smaller than the smallest skill but larger than nothing — a gap a
+    handful of hand-picked windows walks straight over.
+    """
+    agent = get_agent(Phase.QA_ENGINEER.value)
+    shared = dict(
+        idea="an app",
+        prior_outputs={d: {"code": "x" * 50_000} for d in agent.depends_on},
+        rag_context="r" * 20_000,
+        memory_context="m" * 20_000,
+    )
+    # Lumpy on purpose, with one skill small enough to slip through a gap the width
+    # of the heading: an even-sized library cannot tell a correct frame charge from
+    # a missing one.
+    sizes = (4_000, 300, 2_000, 120, 900, 1)
+    skills = tuple(
+        select(
+            "qa_engineer",
+            "x",
+            {},
+            candidates=[
+                Skill(name=f"s{i}", title=f"s{i}", description="d", body="b" * n)
+                for i, n in enumerate(sizes)
+            ],
+            limit=len(sizes),
+        )
+    )
+    for window in range(3_000, 40_001, 250):
+        profile = _profile(window)
+        ctx = AgentContext(**shared, skills=skills)
+        budget = agent._section_budgets(ctx, profile, 0, _bodies(agent, ctx))
+        printed = _skills_block(agent._build_messages(ctx, profile).messages[1].content)
+        assert len(printed) == budget["skills"], (
+            f"at a {window}-token window the budget charged {budget['skills']} "
+            f"characters for skills and the prompt carries {len(printed)}"
+        )
+
+
+def _bodies(agent, ctx) -> dict:
+    """The serialised prior-phase context, the way `_build_messages` computes it."""
+    return {
+        dep: json.dumps(ctx.prior_outputs[dep], indent=2)
+        for dep in agent.depends_on
+        if dep in ctx.prior_outputs
+    }
+
+
+def _skills_block(user_turn: str) -> str:
+    """The skills section of a built prompt, joins and all, or "" when there is none."""
+    heading = "# How this team does this work"
+    if heading not in user_turn:
+        return ""
+    start = user_turn.index(heading)
+    rest = user_turn[start:]
+    end = rest.index("\n# ", 1) if "\n# " in rest[1:] else len(rest)
+    # The block plus the "\n" the join puts in front of it.
+    return user_turn[start - 1 : start + end]
 
 
 def test_an_agent_with_no_skills_gets_no_heading(library):
