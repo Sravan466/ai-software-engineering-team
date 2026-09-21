@@ -1068,15 +1068,53 @@ EMBEDDING_SHOW = {
 }
 
 
-def _stubbed_local(monkeypatch, models: dict):
-    """Point the router's local provider at a fixed set of `/api/show` answers."""
+def _stubbed_local(monkeypatch, models: dict, *, tags_report: bool = False):
+    """Point the router's local provider at a fixed runtime.
+
+    Only the HTTP edge is stubbed. `available()`, `list_models()` and `_tags()` run
+    for real, so a test exercises the caching the tag list does in production rather
+    than a copy of it; and `/api/show` resolves a name the way the runtime does, so
+    `nomic-embed-text` finds `nomic-embed-text:latest`. `tags_report` is whether the
+    tag list carries capabilities (a recent runtime) or leaves them to `/api/show`.
+    """
     from app.router.model_profile import ProfileCache
+    from app.router.providers import ollama as ollama_module
+    from app.router.providers.ollama import _spellings
     from app.router.router import router as model_router
 
     prov = model_router._providers["ollama"]
-    monkeypatch.setattr(prov, "available", lambda: True)
-    monkeypatch.setattr(prov, "list_models", lambda: list(models))
-    monkeypatch.setattr(prov, "_show", lambda model, **_: models.get(model))
+
+    class _Tags:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {
+                "models": [
+                    {
+                        "name": name,
+                        **(
+                            {"capabilities": show["capabilities"]}
+                            if tags_report and "capabilities" in show
+                            else {}
+                        ),
+                    }
+                    for name, show in models.items()
+                ]
+            }
+
+    def _show(model, **_):
+        for name in _spellings(model):
+            if name in models:
+                return models[name]
+        return None
+
+    monkeypatch.setattr(ollama_module.httpx, "get", lambda url, **_: _Tags())
+    monkeypatch.setattr(prov, "_show", _show)
     monkeypatch.setattr(prov, "server_version", lambda: (0, 5, 0))
     # Swapped rather than emptied: the provider is a process-wide singleton, and
     # monkeypatch puts the real caches back afterwards — so these stubbed answers
@@ -1091,11 +1129,16 @@ def test_local_status_says_what_each_pulled_model_can_do(monkeypatch):
     model_router = _stubbed_local(
         monkeypatch, {"qwen2.5:7b": SHOW, "nomic-embed-text": EMBEDDING_SHOW}
     )
-    caps = model_router.local_status()["model_capabilities"]
+    status = model_router.local_status()
+    caps = status["model_capabilities"]
     assert caps["nomic-embed-text"] == ["embedding"]
     assert "completion" in caps["qwen2.5:7b"]
-    # The same map reaches the per-role picker, so the two cannot disagree.
-    assert model_router.role_settings()["model_capabilities"] == caps
+    # The verdict is decided here, once — the pages read it rather than re-derive it.
+    assert status["cannot_build"] == ["nomic-embed-text"]
+    # The same view reaches the per-role picker, so the two cannot disagree.
+    roles = model_router.role_settings()
+    assert roles["model_capabilities"] == caps
+    assert roles["cannot_build"] == status["cannot_build"]
 
 
 def test_a_runtime_that_will_not_say_leaves_the_model_unlisted(monkeypatch):
@@ -1197,17 +1240,147 @@ def test_the_default_model_is_a_key_even_when_the_tag_list_spells_it_differently
     model_router = _stubbed_local(
         monkeypatch,
         {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
-    )
-    # The runtime resolves the tag itself, which is what makes this fixable here.
-    monkeypatch.setattr(
-        model_router._providers["ollama"],
-        "_show",
-        lambda model, **_: EMBEDDING_SHOW
-        if model.split(":", 1)[0] == "nomic-embed-text"
-        else SHOW,
+        tags_report=True,
     )
     monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
 
     status = model_router.local_status()
     assert status["default_model"] == "nomic-embed-text"
     assert status["model_capabilities"]["nomic-embed-text"] == ["embedding"]
+    assert "nomic-embed-text" in status["cannot_build"]
+
+
+# ── what the pre-merge review of #40 found ───────────────────────────────────
+def test_a_runtime_that_is_down_costs_the_settings_page_no_probe(monkeypatch):
+    """Nothing is pulled and nothing is answering, so nothing may be asked.
+
+    Asking about the configured default here spent a probe timeout on every
+    Settings poll whenever the runtime was down — the case `local_status` was
+    already written to keep to a single wait.
+    """
+    from app.router.model_profile import ProfileCache
+    from app.router.router import router as model_router
+
+    prov = model_router._providers["ollama"]
+
+    def _refuse(model, **_):
+        raise AssertionError(f"probed '{model}' although the runtime is down")
+
+    monkeypatch.setattr(prov, "available", lambda: False)
+    monkeypatch.setattr(prov, "list_models", lambda: [])
+    monkeypatch.setattr(prov, "_show", _refuse)
+    monkeypatch.setattr(prov, "_capabilities", {})
+    monkeypatch.setattr(prov, "_profiles", ProfileCache())
+
+    status = model_router.local_status()
+    assert status["reachable"] is False
+    assert status["model_capabilities"] == {} and status["cannot_build"] == []
+    assert model_router.role_settings()["cannot_build"] == []
+
+
+def test_models_the_tag_list_did_not_describe_are_probed_side_by_side(monkeypatch):
+    """Ten models on an older runtime cost one probe's wait, not ten in a row."""
+    import threading
+
+    shows = {f"model-{i}:latest": SHOW for i in range(3)}
+    model_router = _stubbed_local(monkeypatch, shows)  # tags do not report
+    prov = model_router._providers["ollama"]
+
+    together = threading.Barrier(len(shows), timeout=5)
+    serial: list[str] = []
+
+    def _show(model, **_):
+        try:
+            together.wait()
+        except threading.BrokenBarrierError:
+            serial.append(model)
+        return shows.get(model)
+
+    monkeypatch.setattr(prov, "_show", _show)
+    found = prov.capabilities_for(list(shows))
+    assert not serial, "capability probes ran one after another"
+    assert set(found) == set(shows)
+
+
+def test_readiness_refuses_a_model_that_cannot_write(monkeypatch):
+    """The guard that holds for every path to `/run`, not only the one page.
+
+    A default set in `.env`, a role pinned through the API, a resume — none of them
+    pass through the picker, and each started a build that died on its first call.
+    """
+    from app.core.constants import RoutingMode
+
+    model_router = _stubbed_local(
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
+        tags_report=True,
+    )
+    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
+
+    ready = model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=["product_manager"])
+    assert not ready.ok
+    assert ready.incapable and ready.incapable[0]["model"] == "nomic-embed-text"
+    assert "cannot write" in (ready.reason or "") and "embedding" in (ready.reason or "")
+    assert "ollama" not in (ready.reason or "").lower(), "#26: no runtime name in copy"
+
+    # And a model that writes is let through by the same check.
+    monkeypatch.setitem(model_router._default_model, "ollama", "qwen2.5:7b")
+    assert model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=["product_manager"]).ok
+
+
+def test_an_explicitly_empty_capability_list_is_a_no_not_an_unknown(monkeypatch):
+    """`[]` is the runtime answering; only a missing list is "unknown".
+
+    The backend documented the difference and the frontend collapsed it, so the two
+    disagreed about the same model. The verdict is now made once, here.
+    """
+    empty = {**SHOW, "capabilities": []}
+    model_router = _stubbed_local(
+        monkeypatch, {"qwen2.5:7b": SHOW, "odd:latest": empty}, tags_report=True
+    )
+    status = model_router.local_status()
+    assert status["model_capabilities"]["odd:latest"] == []
+    assert status["cannot_build"] == ["odd:latest"]
+
+
+def test_choosing_a_default_does_not_forget_what_every_model_can_do(monkeypatch):
+    """A new default changes which model runs, not what any model can do."""
+    model_router = _stubbed_local(
+        monkeypatch, {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW}
+    )
+    prov = model_router._providers["ollama"]
+    prov.capabilities_for(prov.list_models())
+    remembered = dict(prov._capabilities)
+    assert remembered
+
+    prov.forget_profile()  # what `_apply` does when the default changes
+    assert prov._capabilities == remembered
+
+
+def test_forgetting_a_re_pulled_model_forgets_every_spelling_of_it(monkeypatch):
+    """The pull route passes `llama3.1`; the tag list cached `llama3.1:latest`."""
+    from app.router.providers.ollama import OllamaProvider
+
+    prov = OllamaProvider("http://localhost:11434")
+    prov._capabilities[(prov.base_url, "llama3.1:latest")] = ("completion",)
+    prov._capabilities[(prov.base_url, "qwen2.5:7b")] = ("completion",)
+
+    prov.forget_profile("llama3.1")
+    assert (prov.base_url, "llama3.1:latest") not in prov._capabilities
+    assert (prov.base_url, "qwen2.5:7b") in prov._capabilities, "forgot an unrelated model"
+
+
+@pytest.mark.parametrize(
+    "name,spellings",
+    [
+        ("llama3.1", ("llama3.1", "llama3.1:latest")),
+        ("llama3.1:latest", ("llama3.1:latest", "llama3.1")),
+        ("qwen2.5:7b", ("qwen2.5:7b",)),
+        # A colon inside a registry host:port is not a tag.
+        ("registry:5000/team/model", ("registry:5000/team/model", "registry:5000/team/model:latest")),
+    ],
+)
+def test_a_model_name_is_known_by_each_way_the_runtime_spells_it(name, spellings):
+    from app.router.providers.ollama import _spellings
+
+    assert _spellings(name) == spellings

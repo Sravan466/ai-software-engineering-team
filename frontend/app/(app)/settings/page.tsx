@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   api,
-  canRunABuild,
   LocalStatus,
   ModelProfile,
   ProviderSetting,
   RoleRow,
   RoleSettings,
 } from "@/lib/api";
+import { canRunABuild, runtimeSays } from "@/lib/capabilities";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
@@ -270,17 +270,17 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                     // the runtime actually said rather than a word for the kind of
                     // model we assume it is — the rule upstream is only that
                     // `completion` is absent.
-                    const canBuild = canRunABuild(m, status.model_capabilities);
-                    const does = (status.model_capabilities?.[m] ?? []).join(" · ");
+                    const canBuild = canRunABuild(m, status.cannot_build);
+                    const reported = status.model_capabilities?.[m] ?? [];
                     return (
                       <li key={m} className="model-row" data-current={current || undefined}>
                         <span className="model-row-name mono">{m}</span>
                         {!canBuild && (
                           <span
                             className="badge"
-                            title={`The runtime lists this model as ${does}, not completion. Every agent has to write, so none can run on it — which is why it isn't offered as a build model.`}
+                            title={`The runtime ${runtimeSays(reported)}. It can't write, so no agent can run on it — which is why it isn't offered as a build model.`}
                           >
-                            {does} only
+                            {reported.length > 0 ? `${reported.join(" · ")} only` : "can't write"}
                           </span>
                         )}
                         {canBuild && status.code_models.includes(m) && (
@@ -304,7 +304,7 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                             title={
                               canBuild
                                 ? undefined
-                                : `The runtime lists this model as ${does}. It can't write, so every agent would fail on its first call.`
+                                : `The runtime ${runtimeSays(reported)}. It can't write, so every agent would fail on its first call.`
                             }
                             aria-label={`Run agents on ${m} by default`}
                           >
@@ -548,6 +548,24 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
         </div>
       ) : (
         <>
+          {!canRunABuild(state.default_model, state.cannot_build) &&
+            state.roles.some((r) => r.role !== "embeddings" && !r.assigned) && (
+              <div className="notice notice-warn" role="status" style={{ marginTop: 14 }}>
+                {Icon.alert}
+                <div className="notice-body">
+                  <span className="notice-title">
+                    Agents left on the default can&apos;t write
+                  </span>
+                  <span className="notice-text">
+                    <span className="mono">{state.default_model}</span> is the default, and the
+                    runtime {runtimeSays(state.model_capabilities?.[state.default_model] ?? [])} —
+                    it can&apos;t write, so a build refuses to start on it. Choose a default that
+                    writes in the card above, or give each agent below a model of its own.
+                  </span>
+                </div>
+              </div>
+            )}
+
           {coder && !dismissed && (
             <div className="notice" style={{ marginTop: 14 }}>
               {Icon.sparkle}
@@ -659,13 +677,19 @@ function RoleLine({
     // Every other role is an agent that has to write. Same rule and same map as the
     // build picker, so a model missing from one is missing from both.
     const all = [
-      ...state.local_models.filter((m) => canRunABuild(m, state.model_capabilities)),
+      ...state.local_models.filter((m) => canRunABuild(m, state.cannot_build)),
       ...state.cloud_models,
     ];
     return row.assigned && !all.includes(row.assigned) ? [...all, row.assigned] : all;
-  }, [state.local_models, state.cloud_models, state.model_capabilities, row.assigned, row.role]);
+  }, [state.local_models, state.cloud_models, state.cannot_build, row.assigned, row.role]);
   const missing =
     Boolean(row.assigned) && row.provider === "ollama" && !state.local_models.includes(row.model ?? "");
+  // The explicit list above is filtered, but "Default" is the value every unpinned
+  // row holds — so a default that cannot write would otherwise sit in each select
+  // reading as a perfectly good choice. Embeddings is exempt for the same reason it
+  // is exempt from the filter.
+  const defaultCannotWrite =
+    row.role !== "embeddings" && !canRunABuild(state.default_model, state.cannot_build);
 
   return (
     <li className="role-row" style={{ ["--agent" as string]: agent?.accent }}>
@@ -686,7 +710,10 @@ function RoleLine({
           disabled={disabled}
           onChange={(e) => onChoose(row.role, e.target.value)}
         >
-          <option value="">Default — {state.default_model}</option>
+          <option value="">
+            Default — {state.default_model}
+            {defaultCannotWrite ? " · can't write" : ""}
+          </option>
           {options.map((m) => (
             <option key={m} value={m}>
               {m}

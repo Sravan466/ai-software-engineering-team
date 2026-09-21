@@ -19,8 +19,17 @@ if settings.database_url.startswith("sqlite"):
     if parent:
         os.makedirs(parent, exist_ok=True)
 
+# How long a SQLite write waits for another writer before giving up. The driver's
+# default is five seconds, which was enough while one model call ran at a time. Builds
+# on different projects now run side by side, each committing phase rows and a
+# heartbeat, so two writers meeting is ordinary rather than rare — and losing a
+# phase's result to `database is locked` over a wait of a second or two is not.
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30
+
 _connect_args = (
-    {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+    {"check_same_thread": False, "timeout": _SQLITE_BUSY_TIMEOUT_SECONDS}
+    if settings.database_url.startswith("sqlite")
+    else {}
 )
 
 engine = create_engine(

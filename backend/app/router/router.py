@@ -71,6 +71,8 @@ class Readiness:
     missing: tuple[dict, ...] = field(default_factory=tuple)
     #: True when the local runtime itself is not answering.
     unreachable: bool = False
+    #: [{role, model, capabilities}] — pulled, but the runtime says they cannot write.
+    incapable: tuple[dict, ...] = field(default_factory=tuple)
 
 
 class ModelRouter:
@@ -243,13 +245,13 @@ class ModelRouter:
             "default_model": default,
             "has_default": has_default,
             "profile": profile,
-            #: What each model says it can do. A model is listed here only when the
-            #: runtime answered; one that is absent is unknown, not incapable, and a
-            #: reader has to keep it rather than hide it. This is what stops an
-            #: embedding-only model being offered as something to run a build on —
-            #: the tag list alone cannot tell the two apart, and offering one is a
-            #: build that fails on its first call for a reason that was knowable here.
-            "model_capabilities": self._model_capabilities(models, default),
+            #: `model_capabilities` — what each model says it can do, in the runtime's
+            #: words; a model is a key only when the runtime answered. `cannot_build`
+            #: — the models that definitely cannot write, decided once, here. This is
+            #: what stops an embedding-only model being offered as something to run a
+            #: build on: the tag list alone cannot tell the two apart, and offering
+            #: one is a build that fails on its first call for a knowable reason.
+            **self._capability_view(models, default),
             #: Pulled models whose name suggests they were trained for code. A hint
             #: for the code phases, offered — never a default the router reaches for,
             #: because a name is not a capability.
@@ -291,9 +293,9 @@ class ModelRouter:
             #: Derived once, here, so the Settings page does not carry a second copy
             #: of the rule that disagreed with this one about `codellama`.
             "code_models": [m for m in models if _looks_like_a_coder(m)],
-            #: Same map, same rule, same reason as on `local_status` — a role pinned
+            #: Same view, same rule, same reason as on `local_status` — a role pinned
             #: to a model that cannot complete text fails exactly as a build does.
-            "model_capabilities": self._model_capabilities(models, self._default_model["ollama"]),
+            **self._capability_view(models, self._default_model["ollama"]),
             "cloud_models": [
                 f"{name}:{self._default_model[name]}"
                 for name in self.CLOUD_PROVIDERS
@@ -301,35 +303,32 @@ class ModelRouter:
             ],
         }
 
-    def _model_capabilities(self, models: Iterable[str], also: Optional[str] = None) -> dict:
-        """`{model: [capability, …]}` for every model the runtime would answer about.
+    def _capability_view(self, models: Iterable[str], also: Optional[str]) -> dict:
+        """What each model can do, and which of them cannot run a build.
 
-        Models the runtime will not describe are left out rather than given an empty
-        list, because "reported nothing" and "was not asked" are different facts and
-        only one of them is a reason to act. One probe per model, cached in the
-        provider, so a Settings page that polls does not re-ask on every tick.
+        `model_capabilities` is the runtime's own words, for quoting. `cannot_build`
+        is the verdict, decided here and nowhere else — the pages read the list
+        rather than re-deriving it, because two copies of this rule already
+        disagreed once about what an empty capability list means.
 
-        `also` is a name that has to be a key even when the tag list spells it
-        differently. The configured default may be `nomic-embed-text` while the tag
-        list calls it `nomic-embed-text:latest`, and a caller looking the default up
-        by the string this same payload handed it would find nothing and read that
-        as "unknown" — silently turning off the check that stops a build starting on
-        a model that cannot write. The runtime resolves the tag itself, so asking it
-        under that exact name is both the fix and the only authority on which tag it
-        means.
+        `also` is the configured default, which need not be spelled the way the tag
+        list spells it (`nomic-embed-text` against `nomic-embed-text:latest`). It is
+        answered from what is already known and never probed: this runs on every
+        Settings poll, and a probe for a model that is not pulled — or on a runtime
+        that is not up — is a timeout paid on every one of them.
         """
         prov = self._providers["ollama"]
-        if not hasattr(prov, "capabilities"):
-            return {}
-        names = list(models)
-        if also and also not in names:
-            names.append(also)
-        out: dict = {}
-        for name in names:
-            caps = prov.capabilities(name)
-            if caps is not None:
-                out[name] = list(caps)
-        return out
+        if not hasattr(prov, "capabilities_for"):
+            return {"model_capabilities": {}, "cannot_build": []}
+        found: dict[str, tuple[str, ...]] = dict(prov.capabilities_for(models))
+        if also and also not in found:
+            known = prov.known_capabilities(also)
+            if known is not None:
+                found[also] = known
+        return {
+            "model_capabilities": {name: list(caps) for name, caps in found.items()},
+            "cannot_build": [name for name, caps in found.items() if prov.writes(caps) is False],
+        }
 
     def _role_pair(self, role: Optional[str]) -> Optional[tuple[str, str]]:
         spec = model_roles.get(role)
@@ -377,7 +376,7 @@ class ModelRouter:
             if not prov.has_model(model)
         ]
         if not missing:
-            return Readiness(ok=True)
+            return self._able_to_write(prov, wanted)
 
         names = sorted({str(m["model"]) for m in missing})
         listed = ", ".join(f"'{n}'" for n in names)
@@ -389,6 +388,42 @@ class ModelRouter:
                 f"{'has' if len(names) == 1 else 'have'} not been downloaded. "
                 "Download it on the Settings page and start the build again — "
                 "without it the run fails inside the first agent."
+            ),
+        )
+
+    @staticmethod
+    def _able_to_write(prov: LLMProvider, wanted: dict[str, str]) -> Readiness:
+        """Downloaded is not the same as able to write.
+
+        Every model here is pulled; this asks whether each one completes text. The
+        pickers already keep such a model out of reach, but they are one client of
+        this API — a default set in `.env`, a role pinned through the API, or a
+        resume all reach `/run` without passing through them. This is the check that
+        holds for every path, so it lives beside the one that refuses a model that
+        was never downloaded. An unknown answer never refuses anything.
+        """
+        if not hasattr(prov, "capabilities") or not hasattr(prov, "writes"):
+            return Readiness(ok=True)
+        incapable = []
+        for model, role in wanted.items():
+            caps = prov.capabilities(model)
+            if prov.writes(caps) is False:
+                incapable.append({"role": role, "model": model, "capabilities": list(caps or ())})
+        if not incapable:
+            return Readiness(ok=True)
+
+        first = incapable[0]
+        does = ", ".join(first["capabilities"]) or "nothing it can do"
+        names = sorted({str(m["model"]) for m in incapable})
+        listed = ", ".join(f"'{n}'" for n in names)
+        return Readiness(
+            ok=False,
+            incapable=tuple(incapable),
+            reason=(
+                f"This build is set to run on {listed}, which cannot write — the runtime "
+                f"lists {'it' if len(names) == 1 else first['model']} as {does}, not "
+                "completion. Every agent has to produce prose, code and JSON, so choose "
+                "a model that writes on the Settings page and start the build again."
             ),
         )
 

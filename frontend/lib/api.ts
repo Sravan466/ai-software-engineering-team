@@ -593,6 +593,12 @@ export type LocalStatus = {
    */
   model_capabilities: ModelCapabilities;
   /**
+   * Models the runtime says cannot complete text, so cannot run a build. Decided by
+   * the backend and read as-is — see `lib/capabilities.ts` for why the page no longer
+   * re-derives it. May include the default under the name it is configured by.
+   */
+  cannot_build: string[];
+  /**
    * Pulled models whose name suggests they were trained for code. A suggestion for
    * the code phases, derived from what you actually have — never a default the
    * router reaches for, because a name is not a capability.
@@ -602,27 +608,6 @@ export type LocalStatus = {
 
 /** `{ "nomic-embed-text": ["embedding"] }` — see `LocalStatus.model_capabilities`. */
 export type ModelCapabilities = Record<string, string[]>;
-
-/** The capability an agent needs: something that writes prose, code and JSON. */
-export const COMPLETION = "completion";
-
-/**
- * Whether a model could run a build — asked of the runtime, never of the name.
- *
- * It lives beside the map it reads because the rule *is* how to read that map, and
- * two copies of it are two things that drift. The build picker, the per-role picker
- * and the Settings list all answer the question here.
- *
- * Only a **definite negative** hides a model: a runtime that said nothing, or that
- * is too old to report capabilities at all, leaves it listed. Being wrong that way
- * costs one failed run; being wrong the other way empties every picker on exactly
- * the setups least able to explain themselves.
- */
-export function canRunABuild(model: string, capabilities?: ModelCapabilities): boolean {
-  const reported = capabilities?.[model];
-  if (!reported || reported.length === 0) return true;
-  return reported.includes(COMPLETION);
-}
 
 /** One role a model can be chosen for: the eight agents, plus the support tasks. */
 export type RoleRow = {
@@ -648,8 +633,9 @@ export type RoleSettings = {
    * was missing `codellama`, which the other card was already badging as code.
    */
   code_models: string[];
-  /** The same map `LocalStatus` carries, and read by the same rule. */
+  /** The same view `LocalStatus` carries, decided by the same rule. */
   model_capabilities: ModelCapabilities;
+  cannot_build: string[];
   /** `provider:model` for each cloud provider with a key configured. */
   cloud_models: string[];
 };

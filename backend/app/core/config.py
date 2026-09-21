@@ -62,6 +62,10 @@ class Settings(BaseSettings):
 
     # ── Database ──
     database_url: str = "sqlite:///./data/aiteam.db"
+    #: Where the pipeline graph checkpoints each build's position. Its own file, not a
+    #: table in `database_url`: LangGraph owns the schema. Configurable so the test
+    #: suite can keep its throwaway builds out of the real one.
+    checkpoint_db_path: str = "./data/checkpoints.sqlite"
 
     # ── Routing ──
     default_routing_mode: str = "local_only"  # auto | manual | local_only

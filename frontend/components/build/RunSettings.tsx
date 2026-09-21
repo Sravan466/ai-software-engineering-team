@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   api,
-  canRunABuild,
   type ApprovalMode,
   type LocalStatus,
   type RouterStatus,
@@ -17,6 +16,7 @@ import {
   ROUTING_MODES,
   type RoutingModeMeta,
 } from "@/components/shell/phases";
+import { canRunABuild, runtimeSays } from "@/lib/capabilities";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
 
@@ -77,15 +77,17 @@ export type OmittedModel = { name: string; does: string[] };
  *
  * They are returned rather than silently dropped, because "why isn't it here?" is
  * the worse question — the same reason a cloud provider with no key stays listed
- * and disabled a few lines down. A `select` is the wrong place to answer it, so the
- * panel puts the answer under the control. What the runtime *did* report travels
- * with each name so that answer can quote it instead of guessing at it.
+ * and disabled a few lines down. The question only exists where a list of models is
+ * on screen, which is Manual routing; Local and Auto show no list and run on the
+ * default, and a default that cannot write is `runtimeBlocker`'s to stop, not a
+ * hint's. A `select` is the wrong place for the answer, so the panel puts it under
+ * the control. What the runtime *did* report travels with each name so that answer
+ * can quote it instead of guessing at it.
  */
 export function modelsThatCannotBuild(local: LocalStatus | null): OmittedModel[] {
-  const capabilities = local?.model_capabilities;
   return (local?.models ?? [])
-    .filter((m) => !canRunABuild(m, capabilities))
-    .map((name) => ({ name, does: capabilities?.[name] ?? [] }));
+    .filter((m) => !canRunABuild(m, local?.cannot_build))
+    .map((name) => ({ name, does: local?.model_capabilities?.[name] ?? [] }));
 }
 
 /** Every model the run could be pinned to, local first. */
@@ -98,7 +100,7 @@ export function modelOptions(
   // The configured default leads, and is what an auto-pick lands on.
   const preferred = local?.default_model;
   const names = [...(local?.models ?? [])]
-    .filter((m) => canRunABuild(m, local?.model_capabilities))
+    .filter((m) => canRunABuild(m, local?.cannot_build))
     .sort((a, b) => (a === preferred ? -1 : b === preferred ? 1 : a.localeCompare(b)));
   for (const name of names) {
     options.push({
@@ -124,12 +126,6 @@ export function modelOptions(
   }
 
   return options;
-}
-
-/** "a", "a and b", "a, b and c" — an English list, not a comma-joined array. */
-function listOf(items: string[]): string {
-  if (items.length <= 1) return items[0] ?? "";
-  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
 function providerOf(spec: string): string {
@@ -184,13 +180,13 @@ export function runtimeBlocker(
   // before a project has been created. The reason quotes what the runtime actually
   // reported rather than assuming which kind of model this is.
   const cannotWrite: RuntimeBlocker | null =
-    local?.default_model && !canRunABuild(local.default_model, local.model_capabilities)
+    local?.default_model && !canRunABuild(local.default_model, local.cannot_build)
       ? {
           title: `${local.default_model} can't run a build`,
           text:
-            `The runtime lists it as ${listOf(local.model_capabilities?.[local.default_model] ?? [])}` +
-            ", not completion. Every agent here has to produce prose, code and JSON, " +
-            "so pick a model that writes and this build can go.",
+            `The runtime ${runtimeSays(local.model_capabilities?.[local.default_model] ?? [])}` +
+            ". Every agent here has to produce prose, code and JSON, so pick a model " +
+            "that writes and this build can go.",
           action: "Choose another model",
           href: "/settings",
         }
@@ -444,7 +440,7 @@ function OmittedModels({ models }: { models: OmittedModel[] }) {
   if (models.length === 0) return null;
   const one = models.length === 1;
   // The union of what they do, so two embedding models read as one reason.
-  const does = listOf(Array.from(new Set(models.flatMap((m) => m.does))));
+  const does = Array.from(new Set(models.flatMap((m) => m.does)));
   return (
     <p className="field-hint omitted-models">
       {models.map((m, i) => (
@@ -453,8 +449,8 @@ function OmittedModels({ models }: { models: OmittedModel[] }) {
           <span className="mono">{m.name}</span>
         </span>
       ))}
-      {one ? " isn't here" : " aren't here"} — the runtime lists {one ? "it" : "them"} as{" "}
-      {does}. Every agent has to write, so {one ? "it can't" : "they can't"} run a build.
+      {one ? " isn't here" : " aren't here"} — the runtime {runtimeSays(does, !one)}. Every
+      agent has to write, so {one ? "it can't" : "they can't"} run a build.
     </p>
   );
 }

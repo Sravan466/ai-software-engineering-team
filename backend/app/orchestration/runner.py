@@ -62,20 +62,27 @@ log = get_logger(__name__)
 #
 # This used to be a single `threading.Lock()` held around `graph.invoke` — which is
 # the model call. One slow generation therefore stalled every other build in the
-# process: eight agents, one at a time, globally. That was invisible with a single
-# local user and is a hard blocker the moment builds run for more than one person.
+# process: eight agents, one at a time, globally.
 #
-# The checkpointer does not need a lock out here to stay intact. `SqliteSaver` holds
-# its own lock around every cursor it opens, so its single SQLite connection is
-# already serialised and concurrent checkpoint writes cannot interleave. What *does*
-# need a lock is the read-modify-write pair this module performs on one build's
-# checkpoint — `get_state` … `update_state` in `redo`, and the salvage in
-# `_reconcile_current_phase` — where another writer landing in between would patch
-# state that had already moved.
+# The lock is now per project, and it still covers the model call. It has to: a
+# phase is a read-modify-write on that build's checkpoint (`invoke` reads the state,
+# generates, writes the next one; `redo` reads a snapshot, generates, patches it), and
+# a build *can* have a second driver while the first is mid-generation — Stop marks
+# it cancelled immediately without interrupting the call, Resume can claim it
+# straight back, and a stalled `running` build can be taken over. Without the lock
+# the second driver's writes would be overwritten by a patch built from a snapshot
+# that no longer exists. What changed is who waits: another writer of the *same*
+# build, rather than every build in the process.
 #
-# That pair is only ever about one project, so the lock is per project. Two builds
-# on two different projects now generate at the same time, and a build still has
-# exactly one writer of its own checkpoint.
+# The SQLite connection itself does not need this. `SqliteSaver` holds its own lock
+# around every cursor it opens, so writes from two builds cannot interleave on it.
+#
+# What this does not cover: the database rows around a phase (`_complete_row`,
+# `_delete_rows`) are written outside it, exactly as they were under the old lock,
+# and it is a lock in *this process*. Several workers would each have their own and
+# would share `checkpoints.sqlite` unguarded — the status claim in the routes is the
+# only thing that spans processes, and a multi-worker deployment needs a
+# checkpointer that is built for one.
 #
 # Weak values, so a lock is collected once nothing holds it: a `with` block keeps its
 # own reference alive for as long as it is held, so two threads asking at the same
@@ -369,68 +376,68 @@ class PipelineRunner:
         try:
             with _heartbeat(project.id):
                 cfg = _config(project.id)
-                lock = _checkpoint_lock(project.id)
-                with lock:
+                with _checkpoint_lock(project.id):
                     snapshot = graph.get_state(cfg)
-                values: PipelineState = dict(snapshot.values)  # type: ignore[assignment]
+                    values: PipelineState = dict(snapshot.values)  # type: ignore[assignment]
 
-                agent = get_agent(phase_key)
-                # The phases this redo drops are dropped from the scoring too:
-                # a procedure chosen because of something a phase that no longer
-                # exists wrote is a procedure chosen from a build that no longer
-                # exists.
-                kept_outputs = {
-                    k: v
-                    for k, v in values.get("prior_outputs", {}).items()
-                    if k != phase_key and k not in stale
-                }
-                ctx = AgentContext(
-                    idea=values["idea"],
-                    routing_mode=RoutingMode(values.get("routing_mode", "local_only")),
-                    preferred_model=values.get("preferred_model"),
-                    prior_outputs=kept_outputs,
-                    skills=_skills_for(values, phase_key, kept_outputs),
-                    feedback=feedback,
-                    # Held to the same stack the rest of the build uses. Without
-                    # this a redo is the one path through the pipeline where an
-                    # agent is free to change database, which is precisely the
-                    # divergence the charter exists to prevent — and the phases
-                    # rebuilt behind it would inherit the disagreement. System
-                    # Design is the exception, and `binding_on` is where that
-                    # exception lives rather than here.
-                    charter=binding_on(phase_key, values.get("charter")),
-                )
-                # Outside the lock, and the reason this whole block was dedented: a
-                # redo is a full model call, and holding a lock across it is how one
-                # build came to stall every other one. The snapshot above is safe to
-                # work from because a project has exactly one driver at a time — the
-                # status claim in the route guarantees it — so nothing else can have
-                # written this checkpoint while the model was generating.
-                result = agent.run(ctx)
+                    agent = get_agent(phase_key)
+                    # The phases this redo drops are dropped from the scoring too:
+                    # a procedure chosen because of something a phase that no longer
+                    # exists wrote is a procedure chosen from a build that no longer
+                    # exists.
+                    kept_outputs = {
+                        k: v
+                        for k, v in values.get("prior_outputs", {}).items()
+                        if k != phase_key and k not in stale
+                    }
+                    ctx = AgentContext(
+                        idea=values["idea"],
+                        routing_mode=RoutingMode(values.get("routing_mode", "local_only")),
+                        preferred_model=values.get("preferred_model"),
+                        prior_outputs=kept_outputs,
+                        skills=_skills_for(values, phase_key, kept_outputs),
+                        feedback=feedback,
+                        # Held to the same stack the rest of the build uses. Without
+                        # this a redo is the one path through the pipeline where an
+                        # agent is free to change database, which is precisely the
+                        # divergence the charter exists to prevent — and the phases
+                        # rebuilt behind it would inherit the disagreement. System
+                        # Design is the exception, and `binding_on` is where that
+                        # exception lives rather than here.
+                        charter=binding_on(phase_key, values.get("charter")),
+                    )
+                    # Inside the lock, model call and all. This is a read-modify-write:
+                    # the patch below is built from the snapshot above, so anything that
+                    # wrote this checkpoint in between would be silently overwritten. And
+                    # something can — Stop marks the project cancelled while this call is
+                    # still generating, Resume can claim it straight back, and a second
+                    # driver then runs `graph.invoke` on the same thread. The lock is
+                    # what makes that second driver wait. It is per project, so the only
+                    # thing it holds up is another writer of *this* build.
+                    result = agent.run(ctx)
 
-                from app.orchestration.graph import _last_debate, _serialize_result
-                from app.orchestration.charter import freeze
+                    from app.orchestration.graph import _last_debate, _serialize_result
+                    from app.orchestration.charter import freeze
 
-                last_result = _serialize_result(phase_key, agent.title, result)
-                kept = {
-                    key: value
-                    for key, value in values.get("prior_outputs", {}).items()
-                    if key not in stale
-                }
-                patch = {
-                    "prior_outputs": {**kept, phase_key: result.output},
-                    "last_phase": phase_key,
-                    "last_result": last_result,
-                    "feedback": {**values.get("feedback", {}), phase_key: feedback},
-                }
-                if phase_key == Phase.SYSTEM_DESIGN.value:
-                    # The architecture was rewritten, so the charter frozen from
-                    # the old one describes a build that no longer exists. Every
-                    # phase after this is about to re-run against the new one.
-                    rewritten = freeze(result.output, _last_debate(values))
-                    patch["charter"] = rewritten.as_dict() if rewritten else {}
-                    charter_update = patch["charter"]
-                with lock:
+                    last_result = _serialize_result(phase_key, agent.title, result)
+                    kept = {
+                        key: value
+                        for key, value in values.get("prior_outputs", {}).items()
+                        if key not in stale
+                    }
+                    patch = {
+                        "prior_outputs": {**kept, phase_key: result.output},
+                        "last_phase": phase_key,
+                        "last_result": last_result,
+                        "feedback": {**values.get("feedback", {}), phase_key: feedback},
+                    }
+                    if phase_key == Phase.SYSTEM_DESIGN.value:
+                        # The architecture was rewritten, so the charter frozen from
+                        # the old one describes a build that no longer exists. Every
+                        # phase after this is about to re-run against the new one.
+                        rewritten = freeze(result.output, _last_debate(values))
+                        patch["charter"] = rewritten.as_dict() if rewritten else {}
+                        charter_update = patch["charter"]
                     graph.update_state(
                         cfg,
                         patch,
@@ -629,10 +636,8 @@ class PipelineRunner:
 
         try:
             with _heartbeat(project.id):
-                # `invoke` runs the node *and* checkpoints it, so the two cannot be
-                # separated from out here — the lock is per project precisely so that
-                # does not matter. This build's own checkpoint gets one writer; every
-                # other build in the process generates at the same time as this one.
+                # This build's checkpoint gets one writer at a time; every other build
+                # in the process generates alongside it. See `_checkpoint_lock`.
                 with _checkpoint_lock(project.id):
                     state = graph.invoke(
                         None if started else _initial_state(project), _config(project.id)

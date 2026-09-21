@@ -289,3 +289,71 @@ def test_two_builds_on_two_projects_generate_at_the_same_time(client, monkeypatc
         values = graph.get_state(_config(project_id)).values
         assert values["idea"] == idea, "one build's checkpoint holds another's idea"
         assert set(values["prior_outputs"]) == set(PHASES)
+
+
+def test_a_redo_holds_its_own_build_while_it_generates_and_no_other(client, monkeypatch):
+    """The read-modify-write in `redo` stays one critical section, per project.
+
+    A redo builds its checkpoint patch from a snapshot read before the model call.
+    Stop marks a build cancelled without interrupting that call and Resume can claim
+    it straight back, so a second driver on the *same* build is possible mid-call —
+    and releasing the lock across generation let that driver's writes be overwritten
+    by a patch built from a snapshot that no longer existed. The same lock must not
+    hold up any *other* build, or this is the process-wide lock over again.
+    """
+    import threading
+
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.orchestration.runner import _checkpoint_lock, runner
+    from app.router.router import router as model_router
+    from tests.conftest import _fake_complete
+
+    busy = _create(client, require_approval=True)
+    other = _create(client, require_approval=True)
+    client.post(f"/api/projects/{busy}/run")
+    assert client.get(f"/api/projects/{busy}").json()["status"] == "awaiting_approval"
+
+    generating = threading.Event()
+    release = threading.Event()
+
+    def held_complete(messages, **kwargs):
+        generating.set()
+        release.wait(timeout=15)
+        return _fake_complete(messages, **kwargs)
+
+    monkeypatch.setattr(model_router, "complete", held_complete)
+
+    def drive_redo() -> None:
+        db = SessionLocal()
+        try:
+            runner.redo(db, db.get(Project, busy), "product_manager", "Tighten the scope")
+        finally:
+            db.close()
+
+    redo = threading.Thread(target=drive_redo, name="redo")
+    redo.start()
+    try:
+        assert generating.wait(timeout=15), "the redo never reached its model call"
+
+        def try_lock(project_id: str, out: list) -> None:
+            # From another thread: the lock is re-entrant, so asking from the redo's
+            # own thread would always succeed and prove nothing.
+            lock = _checkpoint_lock(project_id)
+            got = lock.acquire(timeout=0.3)
+            if got:
+                lock.release()
+            out.append(got)
+
+        same: list = []
+        elsewhere: list = []
+        for project_id, out in ((busy, same), (other, elsewhere)):
+            t = threading.Thread(target=try_lock, args=(project_id, out))
+            t.start()
+            t.join()
+        assert same == [False], "another driver could write this build's checkpoint mid-redo"
+        assert elsewhere == [True], "a redo on one build held up a different build"
+    finally:
+        release.set()
+        redo.join(timeout=30)
+    assert not redo.is_alive(), "the redo never finished"

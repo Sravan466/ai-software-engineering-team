@@ -235,8 +235,9 @@ def build_graph() -> StateGraph:
 def _build_checkpointer():
     from langgraph.checkpoint.sqlite import SqliteSaver
 
-    os.makedirs("./data", exist_ok=True)
-    conn = sqlite3.connect("./data/checkpoints.sqlite", check_same_thread=False)
+    path = settings.checkpoint_db_path
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    conn = sqlite3.connect(path, check_same_thread=False)
     saver = SqliteSaver(conn)
     saver.setup()
     return saver
