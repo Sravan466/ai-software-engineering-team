@@ -58,10 +58,17 @@ def redact(url: object) -> str:
     try:
         parsed = urlparse(str(url))
         host = parsed.hostname or "?"
+        if ":" in host:
+            host = f"[{host}]"
         port = f":{parsed.port}" if parsed.port else ""
         return f"{parsed.scheme or 'http'}://{host}{port}"
     except ValueError:
         return "(unreadable address)"
+
+
+def _shown(raw: object) -> str:
+    """What someone typed, safe to repeat back: any `user:password@` taken out."""
+    return re.sub(r"//[^/@\s]*@", "//", str(raw or ""))
 
 
 def clean_key(key: Optional[str]) -> Optional[str]:
@@ -88,9 +95,9 @@ def normalise_url(raw: str) -> str:
         parsed = urlparse(url)
         parsed.port  # raises on a port that is not a number in range
     except ValueError:
-        raise SourceError(f"'{raw}' isn't an address this can read — check the host and port.")
+        raise SourceError(f"'{_shown(raw)}' isn't an address this can read — check the host and port.")
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise SourceError(f"'{raw}' isn't an http(s) address with a host.")
+        raise SourceError(f"'{_shown(raw)}' isn't an http(s) address with a host.")
     if parsed.username or parsed.password:
         raise SourceError("Leave credentials out of the address — use the API key field.")
     if parsed.path.rstrip("/") not in ("", "/v1"):
@@ -123,6 +130,10 @@ class SourceRegistry:
         #: monotonic clock can start near zero, and "probed at 0" would read as fresh.
         self._detected_at: Optional[float] = None
         self._loaded = False
+        #: Saved sources that could not be loaded, exactly as they were saved. Written
+        #: back on every save, so a source this version cannot read is not erased —
+        #: key and all — the first time something else changes.
+        self._unloaded: list[dict] = []
         #: Guards the providers and the lists. Never held while waiting on the
         #: detection lock — the order is always detection first, then this.
         self._lock = threading.RLock()
@@ -131,6 +142,15 @@ class SourceRegistry:
         self._background: Optional[threading.Thread] = None
 
     # ── what is known ────────────────────────────────────────────────────────
+    def ensure_loaded(self) -> None:
+        """The configured and saved sources, without probing anything."""
+        with self._lock:
+            if not self._loaded:
+                try:
+                    self._load()
+                finally:
+                    self._loaded = True
+
     def ensure(self, *, max_age: float = DETECT_TTL_SECONDS, wait: bool = False) -> None:
         """Load the configured and added sources once, and keep detection fresh.
 
@@ -140,20 +160,14 @@ class SourceRegistry:
         connection and then says nothing costs a background thread its time, not
         the build. `wait` is for the explicit "look again" a person asked for.
         """
-        with self._lock:
-            if not self._loaded:
-                try:
-                    self._load()
-                finally:
-                    # Whatever one entry did, the rest are loaded and this is not
-                    # retried on every call — which is how one bad port in `.env`
-                    # used to take routing down for good.
-                    self._loaded = True
+        # Whatever one entry does, the rest are loaded and loading is not retried on
+        # every call — which is how one bad port in `.env` used to take routing down.
+        self.ensure_loaded()
         now = time.monotonic()
         if self._detected_at is not None and now - self._detected_at < max_age:
             return
         if self._detected_at is None or wait:
-            self.rescan()
+            self.rescan(fresh=wait)
             return
         with self._lock:
             if self._background is not None and self._background.is_alive():
@@ -200,10 +214,13 @@ class SourceRegistry:
         renamed = False
         for entry in secrets_store.get_sources():
             try:
+                if not isinstance(entry["base_url"], str):
+                    raise SourceError("its address isn't text")
                 url = normalise_url(entry["base_url"])
-                key = clean_key(entry.get("api_key"))
-            except SourceError as e:
-                log.warning("Ignoring the saved source at %s: %s", redact(entry.get("base_url")), e)
+                key = clean_key(entry.get("api_key") if isinstance(entry.get("api_key"), str) else None)
+            except Exception as e:  # noqa: BLE001 - kept as saved, never dropped
+                log.warning("The saved source at %s can't be used: %s", redact(entry.get("base_url")), e)
+                self._unloaded.append(entry)
                 continue
             source_id = entry["id"]
             if source_id in self._providers or source_id in CLOUD_PROVIDERS:
@@ -253,11 +270,14 @@ class SourceRegistry:
             )
         )
 
-    def _register(self, source: Source) -> SourceProvider:
-        # Two sources that read the same in a picker are one source to the person
-        # choosing — so a repeated label says where each one is.
+    def _unique_label(self, source: Source) -> None:
+        """Two sources that read the same in a picker are one source to the person
+        choosing — so a repeated label says where each one is."""
         if any(p.source.label == source.label for p in self._providers.values() if p.source.id != source.id):
             source.label = f"{source.label} · {redact(source.base_url).split('://', 1)[1]}"
+
+    def _register(self, source: Source) -> SourceProvider:
+        self._unique_label(source)
         adapter = table.adapter_for(source.runtime)(source.base_url, source.api_key)
         provider = SourceProvider(source, adapter)
         self._providers[source.id] = provider
@@ -285,33 +305,47 @@ class SourceRegistry:
         return f"{base}-{n}"
 
     # ── detection ────────────────────────────────────────────────────────────
-    def rescan(self) -> None:
-        """Probe loopback again, adopting runtimes that identify themselves."""
+    def rescan(self, *, fresh: bool = False) -> None:
+        """Probe loopback again, adopting runtimes that identify themselves.
+
+        A probe already running is joined rather than repeated — unless `fresh`: a
+        person who pressed "look again" wants a probe that began after they did.
+        """
         if not self._detect_lock.acquire(blocking=False):
-            # Someone else is probing right now; their answer is as fresh as ours.
-            with self._detect_lock:
-                return
+            if not fresh:
+                with self._detect_lock:
+                    return
+            self._detect_lock.acquire()
         try:
             found = detect.detect()
             # A source someone named that nobody has identified yet — its runtime
             # was still starting, say — is asked again, wherever it is.
             with self._lock:
-                pending = [p for p in self._providers.values() if p.source.runtime is None]
+                # Unidentified, or identified only as "speaks OpenAI" — which is what
+                # an answer looks like while a runtime is still starting its own API.
+                pending = [
+                    p for p in self._providers.values() if p.source.runtime is None or p.source.provisional
+                ]
             for provider in pending:
                 if not detect.answers_http(provider.source.base_url):
                     continue
                 hello = detect.identify(provider.source.base_url, provider.source.api_key)
-                if hello is None and provider.source.origin == ORIGIN_CONFIGURED:
+                provisional = False
+                if hello is None and provider.source.origin == ORIGIN_CONFIGURED and provider.source.runtime is None:
                     # Someone configured this address, so an OpenAI-compatible
-                    # answer is enough: they have already said it is a source.
+                    # answer is enough to use it — for now. It stays provisional and
+                    # is asked again, so a runtime that was only half up does not
+                    # stay on the generic dialect for good.
                     from app.router.runtimes.openai_compat import OpenAICompatAdapter
 
                     hello = OpenAICompatAdapter.fingerprint(
                         provider.source.base_url, provider.source.api_key
                     )
-                if hello is not None:
+                    provisional = hello is not None
+                if hello is not None and (hello.runtime != provider.source.runtime or provider.source.provisional):
                     with self._lock:
                         self._identified(provider, hello)
+                        provider.source.provisional = provisional
             with self._lock:
                 for hello in found.found:
                     self._adopt(hello)
@@ -333,11 +367,12 @@ class SourceRegistry:
             if source.runtime == hello.runtime:
                 source.version = hello.version or source.version
                 return
-            if source.origin != ORIGIN_DETECTED and source.runtime is not None:
+            if source.origin != ORIGIN_DETECTED and source.runtime is not None and not source.provisional:
                 return  # someone said what this is; an answer does not overrule them
             if source.origin != ORIGIN_DETECTED:
                 # A configured source nobody could identify at start now answers.
                 self._identified(provider, hello)
+                source.provisional = False
                 return
             # A different runtime now answers on a port a detected one used to.
             self._providers.pop(source.id, None)
@@ -354,13 +389,13 @@ class SourceRegistry:
         self._register(source)
         log.info("Found %s at %s (source '%s').", spec.label, hello.base_url, source.id)
 
-    @staticmethod
-    def _identified(provider: SourceProvider, hello) -> None:
+    def _identified(self, provider: SourceProvider, hello) -> None:
         source = provider.source
         source.runtime = hello.runtime
         source.version = hello.version
         if source.label == redact(source.base_url):
             source.label = table.spec_for(hello.runtime).label
+            self._unique_label(source)
         provider.adapter = table.adapter_for(hello.runtime)(source.base_url, source.api_key)
         # Everything learned through the old adapter was learned in the wrong
         # dialect — a fallback window, no per-request `num_ctx` — so it goes too.
@@ -480,4 +515,5 @@ class SourceRegistry:
                 for p in self._providers.values()
                 if p.source.origin == ORIGIN_ADDED
             ]
+            + list(self._unloaded)
         )

@@ -84,10 +84,13 @@ function isLoopback(address: string): boolean {
     return true; // not an address yet; the server says what is wrong with it
   }
   host = host.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
-  if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+  // `0.0.0.0` is where a runtime says it listens, and connecting to it is this machine.
+  if (host === "localhost" || host === "::1" || host === "::" || host === "0.0.0.0") return true;
+  // The URL parser writes an IPv4-mapped loopback as hex: `::ffff:7f00:1`.
+  if (/^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(host)) return true;
   if (host.startsWith("::ffff:")) host = host.slice("::ffff:".length);
   const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  return Boolean(v4 && v4.slice(1).every((n) => Number(n) <= 255) && v4[1] === "127");
+  return Boolean(v4 && v4.slice(1).every((n) => Number(n) <= 255) && (v4[1] === "127" || host === "0.0.0.0"));
 }
 
 const ORIGIN_LABEL: Record<LocalSource["origin"], string> = {

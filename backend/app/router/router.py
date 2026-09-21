@@ -145,11 +145,13 @@ class ModelRouter:
 
     # ── model references ─────────────────────────────────────────────────────
     def _is_provider_id(self, name: str) -> bool:
-        return (
-            name in CLOUD_PROVIDERS
-            or name in self.sources.ids()
-            or table.looks_like_source_id(name)
-        )
+        if name in CLOUD_PROVIDERS or table.looks_like_source_id(name):
+            return True
+        # Loading the configured and saved sources is free (no network), and without
+        # it an id derived from an address (`local-8081`) reads as a bare model name
+        # in the moment before anything else has asked.
+        self.sources.ensure_loaded()
+        return name in self.sources.ids()
 
     def parse(self, spec: str) -> tuple[str, str]:
         """'source:model' -> ('source', 'model'). A bare name is refused, not guessed.
@@ -896,14 +898,37 @@ class ModelRouter:
                     spec,
                 )
         pinned = self._embedding_pin
-        if pinned is not None and self.sources.get(pinned[0][0]) is not None:
+        if pinned is not None and self._pin_still_holds(pinned):
             return pinned
         found = self._resolve_embedding()
         if found[0] is not None:
             self._embedding_pin = (found[0], found[1] or DEFAULT_DETECTED)
         return found
 
-    def _resolve_embedding(self) -> tuple[Optional[tuple[str, str]], Optional[str]]:
+    def _pin_still_holds(self, pinned: tuple[tuple[str, str], str]) -> bool:
+        """Whether the kept embedding model is still the right one to keep.
+
+        Kept while its source is known — even down, so a source that restarts does
+        not hand the collections to another model — but not once its runtime no
+        longer serves it, and not over the model `EMBEDDING_MODEL` names once that
+        appears: that is the stated choice, and what the next restart would pick.
+        """
+        (source_id, model), origin = pinned
+        prov = self.sources.get(source_id)
+        if prov is None:
+            return False
+        state = prov.state()
+        if state.reachable and not prov.resolves(model, [e.name for e in state.models]):
+            return False
+        if origin == DEFAULT_DETECTED and (settings.embedding_model or "").strip():
+            configured = self._resolve_embedding(configured_only=True)[0]
+            if configured is not None and configured != (source_id, model):
+                return False
+        return True
+
+    def _resolve_embedding(
+        self, *, configured_only: bool = False
+    ) -> tuple[Optional[tuple[str, str]], Optional[str]]:
         self.sources.ensure()
         hint = (settings.embedding_model or "").strip()
         if hint:
@@ -915,6 +940,8 @@ class ModelRouter:
                 found = self._find(hint)
                 if found:
                     return found, DEFAULT_CONFIGURED
+        if configured_only:
+            return None, None
         first = self._first_local(lambda entry: entry.kind == KIND_EMBEDDING)
         return (first, DEFAULT_DETECTED) if first else (None, None)
 

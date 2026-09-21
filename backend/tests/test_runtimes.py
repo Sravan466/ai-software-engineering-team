@@ -760,7 +760,7 @@ def test_a_saved_source_whose_id_was_taken_is_kept(monkeypatch):
         ("http://localhost.:1234", True),
         ("http://[::1]:1234", True),
         ("http://[::ffff:127.0.0.1]:1234", True),
-        ("http://0.0.0.0:1234", False),
+        ("http://0.0.0.0:1234", True),
         ("http://10.0.0.5:1234", False),
     ],
 )
@@ -885,9 +885,21 @@ def test_identifying_a_source_late_forgets_what_the_old_adapter_learned(monkeypa
         OpenAICompatAdapter("http://127.0.0.1:8080"),
     )
     provider._profiles.put(("local-8080", "m"), _fallback("m"))
-    SourceRegistry._identified(provider, Hello(runtime="llamacpp", base_url="http://127.0.0.1:8080"))
+    registry = SourceRegistry()
+    registry._providers = {provider.name: provider}
+    registry._identified(provider, Hello(runtime="llamacpp", base_url="http://127.0.0.1:8080"))
     assert provider._profiles.get(("local-8080", "m")) is None
     assert isinstance(provider.adapter, LlamaCppAdapter) and provider.source.label == "llama.cpp"
+
+    # Named late, a source still may not share a label with one already listed.
+    twin = SourceProvider(
+        Source(id="local-8082", label="http://127.0.0.1:8082", base_url="http://127.0.0.1:8082",
+               runtime=None, origin="configured"),
+        OpenAICompatAdapter("http://127.0.0.1:8082"),
+    )
+    registry._providers[twin.name] = twin
+    registry._identified(twin, Hello(runtime="llamacpp", base_url="http://127.0.0.1:8082"))
+    assert twin.source.label == "llama.cpp · 127.0.0.1:8082"
 
 
 def _fallback(model: str):
@@ -931,3 +943,112 @@ def test_tried_addresses_are_listed_once_and_only_where_nothing_answered(router_
     monkeypatch.setattr(model_router.sources, "_tried", ["http://127.0.0.1:11434", "http://127.0.0.1:5000", "http://127.0.0.1:1234"])
     monkeypatch.setattr(model_router.sources, "_unknown", [{"base_url": "http://127.0.0.1:5000", "openai": False, "note": ""}])
     assert model_router._tried() == ["http://localhost:11434", "http://127.0.0.1:1234"]
+
+
+# ── what the second review of #43 found ──────────────────────────────────────
+def test_the_unspecified_address_is_this_machine():
+    """`0.0.0.0` is how runtimes print where they listen; it reaches this machine."""
+    assert detect.is_loopback("http://0.0.0.0:11434")
+    assert detect.same_address("http://0.0.0.0:11434", "http://127.0.0.1:11434")
+
+
+def test_a_saved_source_that_cannot_load_is_written_back_unchanged(monkeypatch):
+    """It was skipped at load and then erased — key and all — by the next save."""
+    from app.router.runtimes import sources as sources_module
+    from app.router.runtimes.sources import SourceRegistry
+
+    saved: list = []
+    broken = {"id": "odd", "label": "Odd", "base_url": "http://10.0.0.9:1234", "api_key": "sk abc"}
+    typed_wrong = {"id": "typed", "label": "T", "base_url": 1234}
+    good = {"id": "good", "label": "Good", "base_url": "http://127.0.0.1:1234", "runtime": "lmstudio"}
+    monkeypatch.setattr(sources_module.settings, "local_sources", "")
+    monkeypatch.setattr(sources_module.settings, "ollama_base_url", None)
+    monkeypatch.setattr(sources_module.secrets_store, "get_sources", lambda: [broken, typed_wrong, good])
+    monkeypatch.setattr(sources_module.secrets_store, "save_sources", saved.append)
+    registry = SourceRegistry()
+    registry._load()
+    assert registry.ids() == {"good"}, "one bad entry stopped the ones after it"
+    registry._save()
+    assert broken in saved[-1] and typed_wrong in saved[-1]
+
+
+def test_an_address_derived_id_is_a_source_before_anything_has_probed(monkeypatch):
+    """`local-8081:…` read as a bare model name in the moment before the first probe."""
+    from app.router.router import ModelRouter
+    from app.router.runtimes import sources as sources_module
+
+    monkeypatch.setattr(sources_module.settings, "local_sources", "http://127.0.0.1:8081")
+    monkeypatch.setattr(sources_module.settings, "ollama_base_url", None)
+    monkeypatch.setattr(sources_module.settings, "local_detect", False)
+    monkeypatch.setattr(sources_module.secrets_store, "get_sources", lambda: [])
+    fresh = ModelRouter()
+    assert fresh.parse("local-8081:nomic-embed-text") == ("local-8081", "nomic-embed-text")
+
+
+def test_a_configured_source_identified_only_as_openai_is_asked_again(monkeypatch):
+    """A runtime half up answered as "speaks OpenAI" once, and stayed generic for good."""
+    from app.router.runtimes import sources as sources_module
+    from app.router.runtimes.sources import SourceRegistry
+
+    provider = SourceProvider(
+        Source(id="local-11434", label="http://127.0.0.1:11434", base_url="http://127.0.0.1:11434",
+               runtime=None, origin="configured"),
+        OpenAICompatAdapter("http://127.0.0.1:11434"),
+    )
+    registry = SourceRegistry()
+    registry._providers = {provider.name: provider}
+    registry._loaded = True
+    monkeypatch.setattr(sources_module.detect, "detect", lambda: detect.Detection())
+    monkeypatch.setattr(sources_module.detect, "answers_http", lambda url: True)
+    answers = iter([None, Hello(runtime="ollama", base_url="http://127.0.0.1:11434")])
+    monkeypatch.setattr(sources_module.detect, "identify", lambda url, key=None, **_: next(answers))
+    monkeypatch.setattr(
+        "app.router.runtimes.openai_compat.OpenAICompatAdapter.fingerprint",
+        classmethod(lambda cls, url, key=None, **_: Hello(runtime="openai-compatible", base_url=url)),
+    )
+    registry.rescan()
+    assert provider.source.runtime == "openai-compatible" and provider.source.provisional
+    registry.rescan()
+    assert provider.source.runtime == "ollama" and not provider.source.provisional
+
+
+def test_a_kept_embedding_model_gives_way_to_the_configured_one(router_with, monkeypatch):
+    """Found automatically while the configured model's runtime was down — and then kept
+    after it came back, though the next restart would pick the configured one."""
+    from app.router import router as router_module
+
+    monkeypatch.setattr(router_module.settings, "embedding_model", "nomic-embed-text")
+    configured = _source("ollama", [ModelEntry(name="nomic-embed-text", kind="embedding")], up=False)
+    other = _source("llamacpp-8081", [EMBED])
+    model_router = router_with(configured, other)
+    monkeypatch.setattr(model_router, "_embedding_pin", None)
+    assert model_router.embedding_target() == ("llamacpp-8081", "vectors")
+    configured.adapter.up = True
+    configured.invalidate()
+    assert model_router.embedding_target() == ("ollama", "nomic-embed-text")
+    # And a kept model its runtime no longer serves is not kept.
+    configured.adapter.models = []
+    configured.invalidate()
+    assert model_router.embedding_target() == ("llamacpp-8081", "vectors")
+
+
+@pytest.mark.parametrize(
+    "host,trusted",
+    [("localhost:8000", True), ("127.0.0.1:8000", True), ("[::1]:8000", True), ("[::1]", True),
+     ("localhost.", True), ("127.0.0.2:8000", True), ("evil.example:8000", False), ("", False)],
+)
+def test_the_trusted_host_check_reads_every_loopback_spelling(host, trusted):
+    from starlette.requests import Request
+
+    from app.api.routes.settings import _trusted_host
+
+    scope = {"type": "http", "headers": [(b"host", host.encode())] if host else []}
+    assert _trusted_host(Request(scope)) is trusted
+
+
+def test_an_address_with_a_password_is_never_repeated_back():
+    from app.router.runtimes.sources import SourceError, normalise_url
+
+    with pytest.raises(SourceError) as caught:
+        normalise_url("http://user:hunter2@gpu:abc")
+    assert "hunter2" not in str(caught.value)

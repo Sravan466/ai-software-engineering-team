@@ -42,7 +42,8 @@ def is_loopback(base_url: str) -> bool:
     Only those. A name is never read by its spelling — `127.x.10.0.0.5.nip.io`
     starts like loopback and resolves to another computer — and resolving names
     here would make "is this machine" depend on whatever DNS says at the moment.
-    `0.0.0.0` is not an address anyone connects to, so it is not this machine either.
+    The unspecified address (`0.0.0.0`, `::`) counts: connecting to it reaches this
+    machine, and runtimes print it as their listen address, so people paste it.
     """
     try:
         host = (urlparse(base_url).hostname or "").strip("[]").rstrip(".").lower()
@@ -55,7 +56,11 @@ def is_loopback(base_url: str) -> bool:
     except ValueError:
         return False
     mapped = getattr(address, "ipv4_mapped", None)
-    return bool(address.is_loopback or (mapped is not None and mapped.is_loopback))
+    return bool(
+        address.is_loopback
+        or address.is_unspecified
+        or (mapped is not None and (mapped.is_loopback or mapped.is_unspecified))
+    )
 
 
 def url_for(host: str, port: int) -> str:

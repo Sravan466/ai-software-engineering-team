@@ -63,6 +63,9 @@ class Source:
     #: machine's memory — a sibling container, say.
     same_machine_override: Optional[bool] = None
     version: Optional[str] = None
+    #: Identified only as "speaks the OpenAI API" — used, but asked again, because
+    #: that is also how a runtime answers while it is still starting.
+    provisional: bool = False
 
     @property
     def remote(self) -> bool:

@@ -133,9 +133,17 @@ def _trusted_host(request: Request) -> bool:
     still names that site. Loopback, and the configured public URL, are the names
     this backend is served at.
     """
-    host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower()
-    public = (urlparse(settings.backend_public_url).hostname or "").lower()
-    return host in ("localhost", "127.0.0.1", "::1") or (bool(public) and host == public)
+    raw = (request.headers.get("host") or "").strip()
+    if not raw:
+        return False
+    if is_loopback(f"http://{raw}"):
+        return True
+    try:
+        host = (urlparse(f"http://{raw}").hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    public = (urlparse(settings.backend_public_url).hostname or "").rstrip(".").lower()
+    return bool(public) and host == public
 
 
 @router.post("/sources", status_code=201)

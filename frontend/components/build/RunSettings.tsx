@@ -64,6 +64,8 @@ export type ModelOption = {
   isDefault?: boolean;
   /** Served from another computer; never pinned without the user choosing it. */
   remote?: boolean;
+  /** Sent by its runtime to a hosted service to run; never pinned silently either. */
+  hosted?: boolean;
 };
 
 // ── what can this machine actually run? ──────────────────────────────────────
@@ -122,6 +124,7 @@ export function modelOptions(
         available: true,
         isDefault: m.spec === preferred,
         remote: source.remote,
+        hosted: !m.is_local,
       });
     }
   }
@@ -222,6 +225,19 @@ export function runtimeBlocker(
       // "found nothing" and "could not ask" look identical from here, and only one of
       // them is a reason to refuse to start.
       if (!local && !models) return null;
+      // Something is there, but only models that send prompts off this machine, which
+      // are never pinned for anyone. The picker says "Choose a model…"; so does this.
+      if (modelOptions(local, models).some((o) => o.available)) {
+        return {
+          title: "Choose the model to pin",
+          text:
+            "Manual routing runs every phase on the one model you choose. The models " +
+            "available run on another computer or a hosted service, so none is picked " +
+            "for you — choose one under “Model for every phase”.",
+          action: "Review models in Settings",
+          href: "/settings",
+        };
+      }
       const all = (local?.sources ?? []).flatMap((s) => (s.reachable ? s.models : []));
       // Every model found was left out as unable to write — not merely some of them.
       const onlyNonWriting =
@@ -324,7 +340,7 @@ export default function RunSettings({
     if (!routing.needsModel || model) return;
     const first =
       options.find((o) => o.available && o.isDefault) ??
-      options.find((o) => o.available && !o.remote);
+      options.find((o) => o.available && !o.remote && !o.hosted);
     if (first) onChange({ ...config, model: first.value });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routing.needsModel, model, options]);
@@ -364,6 +380,13 @@ export default function RunSettings({
                 disabled={disabled}
                 onChange={(e) => onChange({ ...config, model: e.target.value })}
               >
+                {/* Without this, a select with nothing pinned shows its first option as
+                    if it were chosen — and choosing that option changes nothing. */}
+                {!model && (
+                  <option value="" disabled>
+                    Choose a model…
+                  </option>
+                )}
                 {groups.map((group) => (
                   <optgroup key={group} label={group}>
                     {options
