@@ -9,7 +9,7 @@ round when it misses, and turning the result into display markdown.
 The sizing matters as much as the schema. Every truncation length here used to be a
 literal — 6000 characters of prior-phase context, 4000 of reference material — chosen
 against no particular model. Combined with a provider that never set a context window,
-that put the later phases over the limit, and Ollama truncates from the head: the system
+that put the later phases over the limit, and a runtime truncates from the head: the system
 prompt, and with it the required shape, went first. Both halves are now derived from the
 window the model reports.
 """
@@ -439,7 +439,7 @@ class BaseAgent:
         every section at zero, which yields the exact cost of the headings, the code
         fences, the truncation markers and the joins around them. Estimating that is
         how a prompt sized to fill the window ends up thirty characters past it, and
-        past it is where Ollama truncates from the head — taking the system prompt,
+        past it is where a runtime truncates from the head — taking the system prompt,
         and the shape it carries, first.
 
         What a person wrote is served first and in full, capped at a share each: the

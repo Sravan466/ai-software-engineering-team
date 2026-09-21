@@ -29,6 +29,7 @@ def record(
         response.usage.prompt_tokens,
         response.usage.completion_tokens,
         provider=response.provider,
+        is_local=response.is_local,
     )
     event = UsageEvent(
         project_id=project_id,
@@ -40,6 +41,7 @@ def record(
         total_tokens=response.usage.total_tokens,
         cost_usd=cost if cost is not None else 0.0,
         cost_known=cost is not None,
+        is_local=response.is_local,
         latency_ms=response.latency_ms,
         fallback_used=response.fallback_used,
     )
@@ -67,6 +69,8 @@ def summary(db: Session, project_id: Optional[str] = None) -> dict:
     # a floor, and saying which models it is missing is what stops "$0.00" reading as
     # "this cost nothing" when it means "nobody priced it".
     unpriced = [e for e in events if e.cost_known is False]
+    #: Calls that ran on the user's own hardware, as each call recorded it.
+    local_calls = sum(1 for e in events if e.is_local)
 
     by_provider: dict[str, dict] = {}
     by_model: dict[str, dict] = {}
@@ -95,6 +99,7 @@ def summary(db: Session, project_id: Optional[str] = None) -> dict:
         "total_cost_usd": round(total_cost, 6),
         "avg_latency_ms": avg_latency,
         "fallback_rate": round(fallback_calls / calls, 3) if calls else 0.0,
+        "local_calls": local_calls,
         "by_provider": by_provider,
         "by_model": by_model,
         #: How many calls the total above could not price, and on which models. When

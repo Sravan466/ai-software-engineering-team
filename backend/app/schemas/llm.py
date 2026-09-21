@@ -26,6 +26,10 @@ class LLMResponse(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     latency_ms: int = 0
     fallback_used: bool = False
+    #: Whether the model ran on hardware the user controls — decided by the provider
+    #: that served it, per model, so analytics and pricing never guess from a name.
+    #: None only where nothing could say (the test suite's stub).
+    is_local: Optional[bool] = None
     # Each entry: {"provider": ..., "model": ..., "error": ...}
     attempts: list[dict] = Field(default_factory=list)
 

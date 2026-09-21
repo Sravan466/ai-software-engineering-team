@@ -17,11 +17,21 @@ class ProviderError(RuntimeError):
     asked, and retrying those only delays the one message that says what to do about
     it. Anything that does not say otherwise is treated as transient, because that is
     the failure worth surviving.
+
+    `unreachable` says nothing answered at all — a refused or timed-out connection —
+    which is what lets a source be marked down at once, so the next link in the chain
+    does not wait on it too.
     """
 
-    def __init__(self, message: str, *, retryable: bool = True) -> None:
+    def __init__(self, message: str, *, retryable: bool = True, unreachable: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.unreachable = unreachable
+
+
+#: The providers that are services rather than model sources. Their names are never
+#: a source id, so `anthropic:…` cannot be read two ways.
+CLOUD_PROVIDERS = ("anthropic", "openai", "gemini")
 
 
 #: Status codes worth asking again for. Everything else in the 4xx range is a
@@ -58,9 +68,10 @@ def status_is_retryable(error: Exception) -> bool:
 class LLMProvider(abc.ABC):
     """Common interface for cloud and local model backends."""
 
-    #: short stable identifier, e.g. "ollama", "anthropic"
+    #: short stable identifier: a cloud provider's name, or a model source's id
     name: str = "base"
-    #: True for local backends (Ollama) — used by Local-Only / Auto routing.
+    #: True for model sources that run models on hardware the user controls — used
+    #: by Local-Only / Auto routing. Per model, `is_local_model` has the last word.
     is_local: bool = False
     #: Context window this provider publishes for its models, when it publishes one.
     #: Local backends override `profile()` and probe the model instead.
@@ -78,6 +89,14 @@ class LLMProvider(abc.ABC):
         options: GenerationOptions,
     ) -> LLMResponse:
         """Run one completion and return a normalised response. Raise ProviderError on failure."""
+
+    def is_local_model(self, model: str) -> bool:
+        """Whether `model` runs on the user's own hardware when this provider serves it.
+
+        A local runtime can list a model it sends elsewhere to run; its source says
+        so per model. Everything else answers for all its models at once.
+        """
+        return self.is_local
 
     def profile(self, model: str) -> ModelProfile:
         """How much room `model` has, and what it can be asked to do.

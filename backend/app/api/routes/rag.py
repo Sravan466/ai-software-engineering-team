@@ -35,8 +35,8 @@ async def upload_document(
     if stored == 0:
         raise HTTPException(
             503,
-            "Document saved but indexing failed — is Ollama running with the embedding "
-            "model pulled? (`ollama pull nomic-embed-text`)",
+            "Document saved but indexing failed — no local runtime is serving an embedding "
+            "model, or the one chosen isn't answering. Settings shows which one is in use.",
         )
     return {"id": doc.id, "filename": doc.filename, "chunks": stored}
 

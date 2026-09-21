@@ -1,30 +1,33 @@
-"""Runtime settings: provider keys, the local model, and which model each role runs on.
+"""Runtime settings: cloud keys, local model sources, and which model each role runs on.
 
-Keys are stored on this backend only (gitignored `data/providers.local.json`), never
-returned to the client in full, and used immediately by the router.
+Keys — a cloud provider's, or a local runtime's — are stored on this backend only
+(gitignored `data/providers.local.json`), never returned to the client in full, and
+used immediately by the router.
 
-Two things here used to contradict each other. `POST /local/pull` would download any
-model the user named, progress bar and all — and the only way to *select* one went
-through `PUT /providers/{provider}`, which rejected the local provider outright. So a
-user could pull `llama3.1:8b`, watch it finish, and every agent would carry on running
-on whatever `OLLAMA_DEFAULT_MODEL` said in `.env`. Selecting a model is now valid for
-every provider, and `/roles` goes further: one model per agent, chosen from what has
-actually been pulled.
+Local models come from **sources**: runtimes found running on this machine, sources
+configured in `.env`, and sources added here. Every model is named `source:model`,
+the local default is one of them, and `/roles` goes further: one model per agent,
+chosen from what the sources actually serve.
 """
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.router.runtimes.sources import SourceError
 from app.router.router import router as model_router
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+#: What a model name sent to a runtime's download API may look like: a name, tags,
+#: a namespace and a registry host — nothing that could walk a path.
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$")
 
 
 class ProviderKeyUpdate(BaseModel):
@@ -34,15 +37,34 @@ class ProviderKeyUpdate(BaseModel):
 
 
 class PullRequest(BaseModel):
-    model: Optional[str] = None
+    model: str
+
+
+class LocalDefaultUpdate(BaseModel):
+    """`source:model` — the model every role falls back to."""
+
+    model: str
+
+
+class SourceCreate(BaseModel):
+    base_url: str
+    label: Optional[str] = None
+    api_key: Optional[str] = None
+    #: Required for an address that is not on this machine: prompts sent there
+    #: leave it, and that has to be a decision rather than a default.
+    confirm_remote: bool = False
+
+
+class SourceUpdate(BaseModel):
+    # None = leave unchanged, "" = clear, "..." = set
+    api_key: Optional[str] = None
 
 
 class RoleModelUpdate(BaseModel):
     """Point one role at a model. Blank or null puts it back on the default.
 
-    The value is a `provider:model` pair, or a bare tag meaning the local runtime —
-    the same spelling `FALLBACK_CHAIN` uses, parsed by the same function, so a tag
-    with a colon in it survives intact.
+    The value is `source:model` (or `provider:model` for the cloud), the spelling
+    every picker writes. A name with no source in front of it is refused.
     """
 
     model: Optional[str] = None
@@ -59,19 +81,13 @@ def get_providers() -> dict:
 
 @router.put("/providers/{provider}")
 def set_provider(provider: str, body: ProviderKeyUpdate) -> dict:
-    """Set a provider's API key, its default model, or both.
-
-    `ollama` is a valid provider here for the model half. It was not, which is why a
-    model downloaded through this very page could never be the one the agents ran on.
-    """
+    """Set a cloud provider's API key, its default model, or both."""
     try:
         model_router.set_provider_key(
             provider, api_key=body.api_key, default_model=body.default_model
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    if provider == "ollama":
-        return model_router.local_status()
     return model_router.provider_settings()[provider]
 
 
@@ -91,56 +107,80 @@ def set_role(role: str, body: RoleModelUpdate) -> dict:
     return model_router.role_settings()
 
 
-# ── Local model (Ollama) ─────────────────────────────────────────────────────
+# ── Local model sources ──────────────────────────────────────────────────────
 @router.get("/local")
-def get_local() -> dict:
+def get_local(refresh: bool = False) -> dict:
+    """Every source, what it serves, and the local default. `refresh` re-probes."""
+    return model_router.local_status(refresh=refresh)
+
+
+@router.put("/local/default")
+def set_local_default(body: LocalDefaultUpdate) -> dict:
+    try:
+        model_router.set_local_default(body.model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return model_router.local_status()
 
 
-@router.post("/local/pull")
-def pull_local(body: PullRequest):
-    """Proxy Ollama's streaming model pull so the UI can show live progress.
+@router.post("/sources", status_code=201)
+def add_source(body: SourceCreate) -> dict:
+    """Add a source by address. It has to answer, so its runtime can be identified."""
+    try:
+        model_router.add_source(
+            body.base_url,
+            label=body.label,
+            api_key=body.api_key,
+            confirm_remote=body.confirm_remote,
+        )
+    except SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return model_router.local_status()
 
-    Streams NDJSON lines straight from Ollama, e.g.
-    {"status":"pulling ...","total":...,"completed":...} ... {"status":"success"}.
+
+@router.put("/sources/{source_id}")
+def update_source(source_id: str, body: SourceUpdate) -> dict:
+    try:
+        model_router.set_source_key(source_id, body.api_key)
+    except SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return model_router.local_status()
+
+
+@router.delete("/sources/{source_id}")
+def remove_source(source_id: str) -> dict:
+    try:
+        model_router.remove_source(source_id)
+    except SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return model_router.local_status()
+
+
+@router.post("/sources/{source_id}/pull")
+def pull_model(source_id: str, body: PullRequest):
+    """Download a model through a source's own API, streaming its progress.
+
+    Only offered where the runtime's adapter says it has a download API; anywhere
+    else this refuses, with how to add a model in that runtime instead. Streams
+    NDJSON, e.g. {"status":"pulling ...","total":...,"completed":...} ... {"status":"success"}.
     """
-    # The router's current default, not the one `.env` was started with: the two
-    # differ the moment anyone selects a model on this page, and pulling the older of
-    # them would download something nothing is going to run.
-    model = body.model or model_router.default_model("ollama")
-    base = settings.ollama_base_url.rstrip("/")
+    name = (body.model or "").strip()
+    if not _MODEL_NAME.match(name) or ".." in name:
+        raise HTTPException(status_code=400, detail=f"'{name}' isn't a model name this can download.")
+    source = model_router.source(source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail=f"No model source is called '{source_id}'.")
+    if not source.adapter.can_download:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{source.source.label} doesn't download models through its API.",
+        )
 
     def stream():
-        # The model on disk is about to change, so whatever was probed about it is
-        # already stale. Dropping the cache in a `finally` rather than after the loop
-        # covers the case that actually happens: the user closes the tab mid-pull,
-        # Starlette throws GeneratorExit — a BaseException, so no `except Exception`
-        # sees it — and every later call would size prompts for the previous model.
         try:
-            with httpx.stream(
-                "POST", f"{base}/api/pull", json={"name": model}, timeout=None
-            ) as r:
-                if r.status_code != 200:
-                    r.read()
-                    yield json.dumps(
-                        {"error": f"Ollama returned {r.status_code}: {r.text[:200]}"}
-                    ) + "\n"
-                    return
-                for line in r.iter_lines():
-                    if line:
-                        yield line if line.endswith("\n") else line + "\n"
-        except Exception as e:  # noqa: BLE001 - surface a clean error line to the client
-            yield json.dumps(
-                {
-                    "error": (
-                        f"Could not reach Ollama at {base}: {e}. "
-                        "Is Ollama installed and running?"
-                    )
-                }
-            ) + "\n"
-        finally:
-            prov = model_router.provider("ollama")
-            if prov is not None and hasattr(prov, "forget_profile"):
-                prov.forget_profile(model)
+            for line in model_router.pull(source_id, name):
+                yield json.dumps(line) + "\n"
+        except SourceError as e:
+            yield json.dumps({"error": str(e)}) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")

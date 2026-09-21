@@ -23,6 +23,14 @@ async def lifespan(app: FastAPI):
     from app.build import toolchain
 
     toolchain.warm_up()
+    # Find the model runtimes on this machine now rather than inside the first
+    # request that needs one. Loopback only; in the background, so a runtime that is
+    # slow to answer never holds up startup.
+    import threading
+
+    from app.router.router import router as model_router
+
+    threading.Thread(target=model_router.sources.ensure, name="detect-sources", daemon=True).start()
     yield
     log.info("Shutting down.")
 
@@ -32,7 +40,7 @@ app = FastAPI(
     description=(
         "A multi-agent platform that turns a product idea into production-ready software. "
         "Specialist agents collaborate through a LangGraph pipeline with human approval gates, "
-        "running on local (Ollama) or cloud (Claude/GPT/Gemini) models."
+        "running on any local model runtime or on cloud (Claude/GPT/Gemini) models."
     ),
     version="0.1.0",
     lifespan=lifespan,

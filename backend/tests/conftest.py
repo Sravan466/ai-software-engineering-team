@@ -2,7 +2,7 @@
 
 Points the app at a throwaway SQLite DB and stubs the LLM router with a fake provider so
 the whole pipeline (orchestration, approvals, debate, persistence) can be exercised without
-Ollama or any cloud key.
+any local runtime or any cloud key.
 """
 from __future__ import annotations
 
@@ -23,12 +23,29 @@ os.environ["ENABLE_DEBATE"] = "true"
 # has TypeScript installed, the gate reads JavaScript with it; otherwise JavaScript is
 # reported unchecked and the tests that need a parser skip themselves.
 os.environ["BUILD_CHECK_PROVISION"] = "false"
+# Model sources: none. Left alone, the suite would find whatever runtimes the machine
+# running it has on loopback — and the developer's `.env` would add its own — so a
+# test's answer would depend on what happened to be running.
+os.environ["LOCAL_DETECT"] = "false"
+os.environ["LOCAL_SOURCES"] = ""
+os.environ["OLLAMA_BASE_URL"] = ""
 _frontend = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
 if os.path.isfile(os.path.join(_frontend, "node_modules", "typescript", "package.json")):
     os.environ["BUILD_TOOLCHAIN_DIR"] = os.path.abspath(_frontend)
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
+# The two settings files — cloud keys and sources, and each role's model — are
+# cwd-relative, which under pytest is the developer's real `backend/data`. Pointed
+# at the throwaway directory before the router reads them at import, so no test can
+# read a real choice or write over one.
+from pathlib import Path  # noqa: E402
+
+from app.core import model_roles as _model_roles, secrets_store as _secrets_store  # noqa: E402
+
+_secrets_store._PATH = Path(_tmp) / "providers.local.json"
+_model_roles._PATH = Path(_tmp) / "model_roles.local.json"
 
 from app.main import app  # noqa: E402
 from app.router.model_profile import ModelProfile  # noqa: E402
@@ -103,16 +120,16 @@ def _fake_readiness(*_args, **_kwargs) -> Readiness:
 
 @pytest.fixture
 def stub_router(monkeypatch):
-    """Replace the LLM router with the deterministic fake (no Ollama / cloud keys).
+    """Replace the LLM router with the deterministic fake (no local runtime / cloud keys).
 
     All three halves are stubbed, and none of them is a detail.
 
-    `profile_for` is called before every prompt, and left live it reaches out to
-    Ollama over HTTP — so the suite would depend on whether the machine running it
+    `profile_for` is called before every prompt, and left live it reaches out to a
+    local runtime over HTTP — so the suite would depend on whether the machine running it
     has a model pulled, and would block on a timeout per phase when nothing answers.
 
     `readiness` is the pre-flight check that refuses to start a run whose model was
-    never downloaded. Left live it asks that same unreachable Ollama and declines to
+    never downloaded. Left live it asks that same unreachable runtime and declines to
     start anything — correct on a machine with no local runtime, and exactly wrong
     for a suite whose whole point is not to need one.
     """

@@ -81,15 +81,26 @@ def _resolve_approval_mode(payload: ProjectCreate) -> str:
     )
 
 
+def _checked_model(spec: Optional[str]) -> Optional[str]:
+    """A pinned model, refused unless it names its source — never a guessed runtime."""
+    if not spec or not spec.strip():
+        return None
+    try:
+        return ":".join(model_router.parse(spec))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("", response_model=ProjectOut, status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Project:
     mode = (payload.routing_mode or RoutingMode(settings.default_routing_mode)).value
+    preferred = _checked_model(payload.preferred_model)
     approval = _resolve_approval_mode(payload)
     project = Project(
         idea=payload.idea,
         name=payload.name,
         routing_mode=mode,
-        preferred_model=payload.preferred_model,
+        preferred_model=preferred,
         approval_mode=approval,
         cost_cap_usd=payload.cost_cap_usd,
         # Stored only when something was actually said. An empty override set and
@@ -333,7 +344,7 @@ def _require_models(project: Project) -> None:
     Checked before the project is claimed, so a refusal leaves the build exactly as
     it was — ready to start again once the download finishes. Without this the run
     went `running`, and then died eight seconds later inside the first agent with a
-    404 from Ollama for a message, having already moved the project into a state the
+    404 from the runtime for a message, having already moved the project into a state the
     user had to work out how to get back out of.
     """
     ready = _readiness(RoutingMode(project.routing_mode), project.preferred_model)
@@ -367,6 +378,12 @@ def preflight(payload: PreflightRequest) -> dict:
         mode = RoutingMode(payload.routing_mode)
     except ValueError:
         raise HTTPException(400, f"'{payload.routing_mode}' is not a routing mode.")
+    if payload.preferred_model and payload.preferred_model.strip():
+        try:
+            model_router.parse(payload.preferred_model)
+        except ValueError as e:
+            # The same refusal creating the project would give, said before it exists.
+            return {"ok": False, "reason": str(e), "unreachable": False}
     ready = _readiness(mode, payload.preferred_model)
     return {"ok": ready.ok, "reason": ready.reason, "unreachable": ready.unreachable}
 

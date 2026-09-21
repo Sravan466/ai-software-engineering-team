@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import AliasChoices, BaseModel, BeforeValidator, Field
+from pydantic import AliasChoices, BaseModel, BeforeValidator, Field, model_validator
 from typing_extensions import Annotated
 
 from app.core.constants import ApprovalMode, RoutingMode
@@ -51,7 +51,11 @@ class ProjectCreate(BaseModel):
     name: Optional[str] = None
     routing_mode: Optional[RoutingMode] = None
     preferred_model: Optional[str] = Field(
-        None, description="provider:model for Manual mode, e.g. 'anthropic:claude-opus-4-8'."
+        None,
+        description=(
+            "source:model for Manual mode, as the pickers write it — a local source's "
+            "id or a cloud provider, e.g. 'anthropic:claude-opus-4-8'."
+        ),
     )
     approval_mode: Optional[ApprovalMode] = Field(
         None, description="How often the run stops for review. Defaults to two checkpoints."
@@ -123,6 +127,10 @@ class PhaseResultOut(BaseModel):
     content_md: str
     model_used: Optional[str] = None
     provider_used: Optional[str] = None
+    #: Whether the model ran on the user's own hardware — the backend's answer, so
+    #: the page never guesses it from a provider's name. Rows written before calls
+    #: recorded it are answered from the provider: only the cloud ones were not.
+    is_local: Optional[bool] = None
     feedback: Optional[str] = None
     created_at: UtcDatetime
 
@@ -162,6 +170,14 @@ class PhaseResultOut(BaseModel):
 
     # from_attributes for ORM; disable the 'model_' protected namespace (we use model_used).
     model_config = {"from_attributes": True, "protected_namespaces": ()}
+
+    @model_validator(mode="after")
+    def _is_local_for_older_rows(self) -> "PhaseResultOut":
+        if self.is_local is None and self.provider_used:
+            from app.router.base import CLOUD_PROVIDERS
+
+            self.is_local = self.provider_used not in CLOUD_PROVIDERS
+        return self
 
 
 class ProjectOut(BaseModel):
@@ -221,7 +237,7 @@ class PreflightRequest(BaseModel):
 
     routing_mode: str = Field(..., description="auto | manual | local_only")
     preferred_model: Optional[str] = Field(
-        None, description="`provider:model` pinned to the run, for Manual routing."
+        None, description="`source:model` pinned to the run, for Manual routing."
     )
 
 

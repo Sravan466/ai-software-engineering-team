@@ -184,6 +184,11 @@ class PhaseResult(Base):
     # Which model actually produced it (after routing/fallback).
     model_used: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     provider_used: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: Whether that model ran on hardware the user controls, as the provider that
+    #: served it said at the time. A source's id says nothing about that — a local
+    #: runtime can serve a model it sends elsewhere to run. Null on rows written
+    #: before calls recorded it.
+    is_local: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
     # Human feedback when rejected.
     feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -293,6 +298,9 @@ class UsageEvent(Base):
     #: produced a dashboard reading $0.00 and a cost cap that could never trip.
     #: Nullable: rows written before this existed cannot say which of the two they are.
     cost_known: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    #: Whether the call ran on the user's own hardware — what makes it free. Null on
+    #: rows written before calls recorded it.
+    is_local: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     fallback_used: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

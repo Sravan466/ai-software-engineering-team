@@ -1,7 +1,6 @@
 """Which model each role runs on, chosen by the user and persisted locally.
 
-The platform used to have exactly one local model: whatever `OLLAMA_DEFAULT_MODEL`
-said. A user could download a second one through Settings, watch the progress bar
+The platform used to have exactly one local model: whatever `.env` said. A user could download a second one through Settings, watch the progress bar
 finish, and every agent would carry on running on the first — because the only way
 to *select* a model was an endpoint that rejected the local provider outright.
 
@@ -11,9 +10,10 @@ the provider's default model", which is the state every role starts in — so th
 file is empty until somebody makes a choice, and a fresh install behaves exactly as
 it did before.
 
-Values are `provider:model` pairs, or a bare model name meaning the local runtime
-(the same spelling `FALLBACK_CHAIN` uses, parsed by the same function). No model
-name is ever written here by the application itself.
+Values are `source:model` pairs (or `provider:model` for the cloud), parsed by the
+router. A bare model name in a file written before model sources existed is read
+with the meaning it had then. No model name is ever written here by the
+application itself.
 """
 from __future__ import annotations
 
@@ -36,6 +36,9 @@ EXTRA_ROLES: tuple[tuple[str, str, str], ...] = (
     ("preview", "Mockup", "The visual preview of the front end"),
     ("embeddings", "Embeddings", "Long-term memory and the knowledge base"),
 )
+
+#: The support role whose model turns documents and memories into vectors.
+EMBEDDINGS_ROLE = "embeddings"
 
 #: The role a caller names when it has none of its own — spelled once so the router
 #: and the API cannot disagree about what "no role" is called.

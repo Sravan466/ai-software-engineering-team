@@ -40,10 +40,14 @@ def _provider_hint() -> str:
     router is asked rather than the settings object, because a choice made in
     Settings lands there first — `.env` is only where the default started.
     """
-    model = model_router.default_model("ollama") or "the model you selected"
+    default = model_router.local_default()
+    if default is None:
+        return " If you're running Local-Only, start a local runtime and choose a model in Settings."
+    source = model_router.source(default[0])
+    where = source.source.label if source is not None else default[0]
     return (
-        " If you're running Local-Only, make sure Ollama is running and the model is "
-        f"pulled (`ollama pull {model}`)."
+        f" If you're running Local-Only, make sure {where} is running and has "
+        f"'{default[1]}'."
     )
 
 

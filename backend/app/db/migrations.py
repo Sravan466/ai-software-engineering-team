@@ -67,6 +67,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # skill library existed cannot say which skills it had, and an empty list
         # would read as "it was offered skills and took none".
         "skills_used",
+        # Nullable: a row written before calls recorded where they ran cannot say,
+        # and the API answers for it from the provider's name instead.
+        "is_local",
     ),
     # Nullable for the same reason: a mockup drawn by the single-shot generator has
     # no pages, sections or checks to report.
@@ -74,7 +77,7 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     # `cost_known` is nullable rather than defaulted to true: an existing row cannot
     # say whether its zero was a price or a gap, and claiming it was a price would
     # write a fact nobody checked into every historical event.
-    "usage_events": ("cost_known",),
+    "usage_events": ("cost_known", "is_local"),
 }
 
 

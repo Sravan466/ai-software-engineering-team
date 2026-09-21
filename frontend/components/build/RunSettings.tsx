@@ -17,6 +17,7 @@ import {
   type RoutingModeMeta,
 } from "@/components/shell/phases";
 import { canRunABuild, runtimeSays } from "@/lib/capabilities";
+import { hostOf, modelName, sourceFor, splitSpec, triedText } from "@/lib/models";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
 
@@ -33,7 +34,7 @@ import { Icon } from "@/components/shell/icons";
 
 export type RunConfig = {
   routing: RoutingModeMeta;
-  /** `provider:model`, empty when nothing is pinned to the run. */
+  /** `source:model`, empty when nothing is pinned to the run. */
   model: string;
   approval: ApprovalMode;
   /** Projected monthly run cost above which the build interrupts itself. */
@@ -62,53 +63,61 @@ export type ModelOption = {
 };
 
 // ── what can this machine actually run? ──────────────────────────────────────
-/** A downloaded model the picker is leaving out, and what the runtime said it does. */
+/** A model the picker is leaving out, and what the runtime said it does. */
 export type OmittedModel = { name: string; does: string[] };
 
 /**
- * Downloaded models this picker is leaving out, in the order they'd have appeared.
+ * Models this picker is leaving out, in the order they'd have appeared.
  *
  * Sorting the default to the front was the whole defence before this, and it only
- * ever moved the problem down one row: the embedding model this app pulls for its
- * own knowledge base sat in the same list as the models that write code, and
- * picking it produced a build that failed on its first call. A name cannot settle
- * it either — `nomic-embed-text` announces itself and `mxbai-embed-large` does not,
- * and the next one will be called something nobody here has heard of.
+ * ever moved the problem down one row: an embedding model sat in the same list as
+ * the models that write code, and picking it produced a build that failed on its
+ * first call. A name cannot settle it either — the next one will be called
+ * something nobody here has heard of — so the backend asks the runtime, once.
  *
  * They are returned rather than silently dropped, because "why isn't it here?" is
  * the worse question — the same reason a cloud provider with no key stays listed
- * and disabled a few lines down. The question only exists where a list of models is
- * on screen, which is Manual routing; Local and Auto show no list and run on the
- * default, and a default that cannot write is `runtimeBlocker`'s to stop, not a
- * hint's. A `select` is the wrong place for the answer, so the panel puts it under
- * the control. What the runtime *did* report travels with each name so that answer
- * can quote it instead of guessing at it.
+ * and disabled a few lines down. What the runtime *did* report travels with each
+ * name so the panel can quote it instead of guessing at it.
  */
 export function modelsThatCannotBuild(local: LocalStatus | null): OmittedModel[] {
-  return (local?.models ?? [])
-    .filter((m) => !canRunABuild(m, local?.cannot_build))
-    .map((name) => ({ name, does: local?.model_capabilities?.[name] ?? [] }));
+  return (local?.sources ?? []).flatMap((source) =>
+    source.models
+      .filter((m) => !canRunABuild(m.spec, local?.cannot_build))
+      .map((m) => ({ name: m.name, does: local?.model_capabilities?.[m.spec] ?? [] })),
+  );
 }
 
-/** Every model the run could be pinned to, local first. */
+/**
+ * Every model the run could be pinned to: each local source's, grouped under the
+ * source that serves it, then the cloud.
+ */
 export function modelOptions(
   local: LocalStatus | null,
   models: RouterStatus | null,
 ): ModelOption[] {
   const options: ModelOption[] = [];
 
-  // The configured default leads, and is what an auto-pick lands on.
+  // The configured default leads its group, and is what an auto-pick lands on.
   const preferred = local?.default_model;
-  const names = [...(local?.models ?? [])]
-    .filter((m) => canRunABuild(m, local?.cannot_build))
-    .sort((a, b) => (a === preferred ? -1 : b === preferred ? 1 : a.localeCompare(b)));
-  for (const name of names) {
-    options.push({
-      value: `ollama:${name}`,
-      label: name === preferred ? `${name} · default` : name,
-      group: "On this machine",
-      available: Boolean(local?.reachable),
-    });
+  for (const source of local?.sources ?? []) {
+    if (!source.reachable) continue;
+    const group = source.remote ? `${source.label} · another computer` : source.label;
+    const names = source.models
+      .filter((m) => canRunABuild(m.spec, local?.cannot_build))
+      .sort((a, b) =>
+        a.spec === preferred ? -1 : b.spec === preferred ? 1 : a.name.localeCompare(b.name),
+      );
+    for (const m of names) {
+      options.push({
+        value: m.spec,
+        label:
+          (m.spec === preferred ? `${m.name} · default` : m.name) +
+          (m.is_local ? "" : " · runs on a hosted service"),
+        group,
+        available: true,
+      });
+    }
   }
 
   for (const [provider, info] of Object.entries(models?.providers ?? {})) {
@@ -128,10 +137,6 @@ export function modelOptions(
   return options;
 }
 
-function providerOf(spec: string): string {
-  return spec.includes(":") ? spec.split(":", 1)[0] : "ollama";
-}
-
 function cloudAvailable(models: RouterStatus | null): boolean {
   return Object.values(models?.providers ?? {}).some((p) => p.available && !p.is_local);
 }
@@ -144,12 +149,55 @@ export type RuntimeBlocker = {
 };
 
 /**
+ * Why the local half of a run cannot start, or null when it can — decided from the
+ * sources, never from one runtime's name. Null also when there is nothing definite
+ * to say: the server's preflight answers everything subtler.
+ */
+function localBlocker(local: LocalStatus | null): RuntimeBlocker | null {
+  if (!local) return null;
+  if (!local.reachable) {
+    const tried = triedText(local.tried);
+    return {
+      title: "No local runtime reachable",
+      text:
+        (tried ? `Nothing answered at ${tried}, ` : "Nothing is answering, ") +
+        "so there's no model to hand this idea to. Start a local runtime, add its address " +
+        "in Settings, or add a cloud API key — and this build can go.",
+      action: "Set up a runtime",
+      href: "/settings",
+    };
+  }
+  const home = sourceFor(local, local.default_model);
+  if (local.default_model && home && !home.reachable) {
+    return {
+      title: `${home.label} isn't answering`,
+      text:
+        `The default model is on ${home.label} at ${hostOf(home.base_url)}, which isn't ` +
+        "answering. Start it, or choose a model from a runtime that is running.",
+      action: "Choose in Settings",
+      href: "/settings",
+    };
+  }
+  if (local.default_model && !local.has_default) {
+    const where = home?.label ?? "its runtime";
+    return {
+      title: `${modelName(local.default_model)} isn't on ${where}`,
+      text: home?.can_download
+        ? `${where} is running but doesn't have the model this build would use. Downloading it is a one-time step.`
+        : `${where} is running but doesn't serve the model this build would use. ${home?.add_model ?? ""}`,
+      action: home?.can_download ? "Download the model" : "Choose in Settings",
+      href: "/settings",
+    };
+  }
+  return null;
+}
+
+/**
  * Why this run cannot start, or null when it can — for the cases this page can
- * explain best from what it already knows: the runtime is down, or the model is not
- * downloaded. Anything subtler (a default or an agent's model that cannot write, a
- * run Auto would send elsewhere) is the server's to answer, through `preflight`;
- * this used to hold a copy of those rules too, and three reviews in a row found the
- * copy disagreeing with the original.
+ * explain best from what it already knows: no runtime answers, the default's runtime
+ * is down, or it does not have the model. Anything subtler (a default or an agent's
+ * model that cannot write, a run Auto would send elsewhere) is the server's to
+ * answer, through `preflight`.
  *
  * Only ever returns a blocker on a *definite* negative: if the probe itself failed
  * we know nothing, and refusing to start on our own inability to ask is worse than
@@ -160,31 +208,7 @@ export function runtimeBlocker(
   local: LocalStatus | null,
   models: RouterStatus | null,
 ): RuntimeBlocker | null {
-  const localReachable = local?.reachable ?? true;
-  const localReady = localReachable && (local?.has_default ?? true);
-
-  const notRunning: RuntimeBlocker = {
-    title: "Ollama isn't running",
-    text:
-      `Nothing is answering at ${local?.base_url ?? "the local runtime"}, so there is no ` +
-      "model to hand this idea to. Start Ollama — or add a cloud API key — and this build " +
-      "can go.",
-    action: "Set up the runtime",
-    href: "/settings",
-  };
-  const notPulled: RuntimeBlocker = {
-    title: `The ${local?.default_model ?? "local"} model isn't downloaded`,
-    text:
-      "Ollama is running but the model this build would use hasn't been pulled yet. " +
-      "Pulling it is a one-time download.",
-    action: "Pull the model",
-    href: "/settings",
-  };
-  if (config.routing.backend === "local_only") {
-    if (!localReachable) return notRunning;
-    if (!localReady) return notPulled;
-    return null;
-  }
+  if (config.routing.backend === "local_only") return localBlocker(local);
 
   if (config.routing.backend === "manual") {
     if (!config.model) {
@@ -192,28 +216,39 @@ export function runtimeBlocker(
       // "found nothing" and "could not ask" look identical from here, and only one of
       // them is a reason to refuse to start.
       if (!local && !models) return null;
-      // Every pulled model was left out as unable to write — not merely some of them.
+      const all = (local?.sources ?? []).flatMap((s) => (s.reachable ? s.models : []));
+      // Every model found was left out as unable to write — not merely some of them.
       const onlyNonWriting =
-        modelsThatCannotBuild(local).length > 0 &&
-        !(local?.models ?? []).some((m) => canRunABuild(m, local?.cannot_build));
+        all.length > 0 && !all.some((m) => canRunABuild(m.spec, local?.cannot_build));
       return {
         title: "No model to pin",
         text: onlyNonWriting
-          ? "Manual routing runs every phase on one model you choose. The models on this " +
-            "machine can't write, and no cloud key is set."
-          : "Manual routing runs every phase on one model you choose, and this machine " +
-            "has none available — no local model pulled, no cloud key set.",
+          ? "Manual routing runs every phase on one model you choose. The local models " +
+            "found can't write, and no cloud key is set."
+          : "Manual routing runs every phase on one model you choose, and none is " +
+            "available — no local runtime serves a model, and no cloud key is set.",
         action: "Add a model",
         href: "/settings",
       };
     }
-    const provider = providerOf(config.model);
-    const available =
-      provider === "ollama" ? localReachable : models?.providers?.[provider]?.available ?? true;
+    const { source } = splitSpec(config.model);
+    const local_source = local?.sources.find((s) => s.id === source);
+    if (local_source) {
+      if (!local_source.reachable) {
+        return {
+          title: `${local_source.label} isn't answering`,
+          text: `This run is pinned to ${modelName(config.model)} on ${local_source.label} at ${hostOf(local_source.base_url)}, which isn't answering.`,
+          action: "Fix it in Settings",
+          href: "/settings",
+        };
+      }
+      return null;
+    }
+    const available = models?.providers?.[source]?.available ?? true;
     if (!available) {
       return {
-        title: `${provider} isn't available`,
-        text: `This run is pinned to ${config.model}, and ${provider} has no working credentials on this machine.`,
+        title: `${source} isn't available`,
+        text: `This run is pinned to ${config.model}, and ${source} has no working credentials on this machine.`,
         action: "Fix it in Settings",
         href: "/settings",
       };
@@ -222,9 +257,7 @@ export function runtimeBlocker(
   }
 
   // Auto falls back to local, so it needs one or the other.
-  if (!localReady && !cloudAvailable(models)) {
-    return localReachable ? notPulled : notRunning;
-  }
+  if (!cloudAvailable(models)) return localBlocker(local);
   return null;
 }
 
@@ -255,7 +288,7 @@ export default function RunSettings({
   onChange: (next: RunConfig) => void;
   options: ModelOption[];
   /**
-   * Downloaded models deliberately left out of `options` because they cannot
+   * Local models deliberately left out of `options` because they cannot
    * complete text. Named under the control rather than dropped in silence — a
    * model you can see in Settings and not here is a discrepancy someone will go
    * looking for.
@@ -336,10 +369,10 @@ export default function RunSettings({
             ) : (
               <p className="field-hint">
                 {omitted.length > 0
-                  ? "Nothing downloaded can write. "
+                  ? "No local model found can write. "
                   : "No models are available yet. "}
                 <Link className="link" href="/settings">
-                  Pull a local model or add a key
+                  Add a local runtime or a key
                 </Link>
                 .
               </p>

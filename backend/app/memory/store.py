@@ -9,7 +9,7 @@ from typing import Optional
 
 from app.core.logging import get_logger
 from app.rag import chroma
-from app.rag.embeddings import OllamaEmbeddingFunction
+from app.rag.embeddings import SourceEmbeddingFunction
 
 log = get_logger(__name__)
 
@@ -25,7 +25,7 @@ class MemoryStore:
             # The shared client lives in `app.rag.chroma`, which opens it once,
             # behind the lock both stores take — see there for why.
             self._collection = chroma.collection(
-                _COLLECTION, OllamaEmbeddingFunction(), owner="Memory store"
+                _COLLECTION, SourceEmbeddingFunction(), owner="Memory store"
             )
         return self._collection
 

@@ -48,6 +48,7 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         "content_md": result.content_md,
         "model_used": r.model,
         "provider_used": r.provider,
+        "is_local": r.is_local,
         "usage": r.usage.model_dump(),
         "latency_ms": r.latency_ms,
         "fallback_used": r.fallback_used,
@@ -81,6 +82,7 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
                 "usage": c.usage.model_dump(),
                 "latency_ms": c.latency_ms,
                 "fallback_used": c.fallback_used,
+                "is_local": c.is_local,
             }
             for c in (result.calls or [result.response])
         ],
@@ -163,6 +165,7 @@ def run_debate(state: PipelineState) -> tuple[Optional[dict], str]:
     record["_usage"] = resp.usage.model_dump()
     record["_provider"] = resp.provider
     record["_model"] = resp.model
+    record["_is_local"] = resp.is_local
     return record, decision_summary(record)
 
 
