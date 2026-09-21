@@ -188,7 +188,29 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
             </div>
           )}
 
-          {status?.reachable && status.has_default && model && (
+          {/* The same verdict the composer and the run itself act on. One warning,
+              here, beside the "Use this" buttons that are the way out of it. */}
+          {status?.reachable &&
+            status.has_default &&
+            model &&
+            !canRunABuild(model, status.cannot_build) && (
+              <div className="notice notice-warn" role="status">
+                {Icon.alert}
+                <div className="notice-body">
+                  <span className="notice-title">
+                    <span className="mono">{model}</span> can&apos;t run a build
+                  </span>
+                  <span className="notice-text">
+                    The runtime {runtimeSays(status.model_capabilities?.[model] ?? [])} — it
+                    can&apos;t write, and every agent has to. Builds refuse to start on it,
+                    however each agent below is set. Choose a model that writes from the list
+                    below.
+                  </span>
+                </div>
+              </div>
+            )}
+
+          {status?.reachable && status.has_default && model && canRunABuild(model, status.cannot_build) && (
             <div className="notice">
               <span className="dot dot-ok" style={{ marginTop: 7 }} aria-hidden="true" />
               <div className="notice-body">
@@ -215,7 +237,12 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
             </div>
           )}
 
-          {status?.profile && <ModelCapability profile={status.profile} />}
+          {/* The window, the prompt budget and the notes on them describe a model
+              writing. For one that cannot, they contradicted the warning above —
+              "it will follow the required output shape" of an embedding model. */}
+          {status?.profile && model && canRunABuild(model, status.cannot_build) && (
+            <ModelCapability profile={status.profile} />
+          )}
 
           {status?.reachable && !status.has_default && model && (
             <div className="notice notice-warn">
@@ -548,24 +575,6 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
         </div>
       ) : (
         <>
-          {!canRunABuild(state.default_model, state.cannot_build) &&
-            state.roles.some((r) => r.role !== "embeddings" && !r.assigned) && (
-              <div className="notice notice-warn" role="status" style={{ marginTop: 14 }}>
-                {Icon.alert}
-                <div className="notice-body">
-                  <span className="notice-title">
-                    Agents left on the default can&apos;t write
-                  </span>
-                  <span className="notice-text">
-                    <span className="mono">{state.default_model}</span> is the default, and the
-                    runtime {runtimeSays(state.model_capabilities?.[state.default_model] ?? [])} —
-                    it can&apos;t write, so a build refuses to start on it. Choose a default that
-                    writes in the card above, or give each agent below a model of its own.
-                  </span>
-                </div>
-              </div>
-            )}
-
           {coder && !dismissed && (
             <div className="notice" style={{ marginTop: 14 }}>
               {Icon.sparkle}

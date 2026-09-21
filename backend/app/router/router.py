@@ -233,8 +233,13 @@ class ModelRouter:
         # Ollama was down — which is exactly when someone is looking at that page.
         reachable = prov.available()
         models = prov.list_models() if reachable and hasattr(prov, "list_models") else []
-        base = default.split(":", 1)[0]
-        has_default = default in models or any(m.split(":", 1)[0] == base for m in models)
+        # The runtime's naming rule, the same one `readiness` applies — so this page
+        # cannot call a model present that the run is about to refuse as missing.
+        has_default = (
+            prov.resolves(default, models)
+            if hasattr(prov, "resolves")
+            else default in models
+        )
         # The probe is the same one the pipeline runs on, so the window shown here is
         # the window agents will actually get — not a second guess at it.
         profile = prov.profile(default).as_dict() if has_default else None
@@ -402,11 +407,14 @@ class ModelRouter:
         holds for every path, so it lives beside the one that refuses a model that
         was never downloaded. An unknown answer never refuses anything.
         """
-        if not hasattr(prov, "capabilities") or not hasattr(prov, "writes"):
+        if not hasattr(prov, "capabilities_for") or not hasattr(prov, "writes"):
             return Readiness(ok=True)
+        # Asked together: usually answered from the tag list already read, and where
+        # it is not, the probes run side by side rather than one timeout per model.
+        found = prov.capabilities_for(list(wanted))
         incapable = []
         for model, role in wanted.items():
-            caps = prov.capabilities(model)
+            caps = found.get(model)
             if prov.writes(caps) is False:
                 incapable.append({"role": role, "model": model, "capabilities": list(caps or ())})
         if not incapable:

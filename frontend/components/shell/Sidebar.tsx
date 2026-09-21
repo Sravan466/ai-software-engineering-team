@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api, type LocalStatus, type Project } from "@/lib/api";
+import { canRunABuild } from "@/lib/capabilities";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
 
@@ -107,14 +108,20 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
     [pathname, refresh, router],
   );
 
-  const ready = !localError && local?.reachable && local?.has_default;
+  // "Ready" means a build can start on it, which is what the dot is read as. A
+  // default that is pulled but cannot write used to show green here while the
+  // composer refused to start on it — two answers about one model.
+  const writes = canRunABuild(local?.default_model ?? "", local?.cannot_build);
+  const ready = !localError && local?.reachable && local?.has_default && writes;
   const runtimeLabel = localError
     ? "Backend unreachable"
     : !local?.reachable
       ? "Ollama not running"
       : !local.has_default
         ? `${local.default_model} not downloaded`
-        : `${local.default_model} ready`;
+        : !writes
+          ? `${local.default_model} can't write`
+          : `${local.default_model} ready`;
 
   return (
     <aside className="sidebar">

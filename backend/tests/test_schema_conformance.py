@@ -1153,15 +1153,33 @@ def test_a_runtime_that_will_not_say_leaves_the_model_unlisted(monkeypatch):
     assert model_router.local_status()["model_capabilities"] == {}
 
 
-def test_a_model_the_runtime_will_not_describe_is_asked_again_next_time(monkeypatch):
-    """A failed probe is never cached, or a model pulled a minute later stays hidden."""
+def test_a_failed_probe_is_left_alone_briefly_then_asked_again(monkeypatch):
+    """A broken blob must not cost every poll a timeout; a new pull must not wait long.
+
+    The failure is remembered as *unknown* — never as a verdict — for a short while,
+    then forgotten, so the model is asked again on the next call after that.
+    """
+    from app.router.providers import ollama as ollama_module
     from app.router.providers.ollama import OllamaProvider
 
     prov = OllamaProvider("http://localhost:11434")
-    answers = [None, EMBEDDING_SHOW]
-    monkeypatch.setattr(prov, "_show", lambda model, **_: answers.pop(0))
+    asked: list[str] = []
+
+    def _show(model, **_):
+        asked.append(model)
+        return None if len(asked) == 1 else EMBEDDING_SHOW
+
+    clock = [1000.0]
+    monkeypatch.setattr(ollama_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(prov, "_show", _show)
+
     assert prov.capabilities("nomic-embed-text") is None
+    assert prov.capabilities("nomic-embed-text") is None
+    assert asked == ["nomic-embed-text"], "a failed probe was repeated on the next poll"
+
+    clock[0] += ollama_module._FAILED_PROBE_TTL_SECONDS + 1
     assert prov.capabilities("nomic-embed-text") == ("embedding",)
+    assert len(asked) == 2
 
 
 def test_the_tag_list_answers_for_every_model_in_one_round_trip(monkeypatch):
@@ -1328,19 +1346,24 @@ def test_readiness_refuses_a_model_that_cannot_write(monkeypatch):
     assert model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=["product_manager"]).ok
 
 
-def test_an_explicitly_empty_capability_list_is_a_no_not_an_unknown(monkeypatch):
-    """`[]` is the runtime answering; only a missing list is "unknown".
+@pytest.mark.parametrize("reported", [[], ["tools"]])
+def test_a_list_without_completion_or_embedding_is_could_not_tell(monkeypatch, reported):
+    """Only positive evidence is a "cannot write".
 
-    The backend documented the difference and the frontend collapsed it, so the two
-    disagreed about the same model. The verdict is now made once, here.
+    The runtime decides `completion` against `embedding` by reading the model file.
+    When the read fails it reports neither, leaving `[]`, or `["tools"]` from the
+    template — a working chat model the runtime merely could not describe. Refusing
+    it would block every build on a model that writes perfectly well.
     """
-    empty = {**SHOW, "capabilities": []}
+    odd = {**SHOW, "capabilities": reported}
     model_router = _stubbed_local(
-        monkeypatch, {"qwen2.5:7b": SHOW, "odd:latest": empty}, tags_report=True
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "odd:latest": odd, "nomic-embed-text:latest": EMBEDDING_SHOW},
+        tags_report=True,
     )
     status = model_router.local_status()
-    assert status["model_capabilities"]["odd:latest"] == []
-    assert status["cannot_build"] == ["odd:latest"]
+    assert status["model_capabilities"]["odd:latest"] == reported
+    assert status["cannot_build"] == ["nomic-embed-text:latest"]
 
 
 def test_choosing_a_default_does_not_forget_what_every_model_can_do(monkeypatch):
@@ -1362,12 +1385,17 @@ def test_forgetting_a_re_pulled_model_forgets_every_spelling_of_it(monkeypatch):
     from app.router.providers.ollama import OllamaProvider
 
     prov = OllamaProvider("http://localhost:11434")
-    prov._capabilities[(prov.base_url, "llama3.1:latest")] = ("completion",)
-    prov._capabilities[(prov.base_url, "qwen2.5:7b")] = ("completion",)
+    for name in ("llama3.1:latest", "qwen2.5:7b"):
+        prov._remember_capabilities(name, {"capabilities": ["completion"]})
+        prov._profiles.put((prov.base_url, name), _profile(8192))
 
     prov.forget_profile("llama3.1")
-    assert (prov.base_url, "llama3.1:latest") not in prov._capabilities
-    assert (prov.base_url, "qwen2.5:7b") in prov._capabilities, "forgot an unrelated model"
+    assert prov.known_capabilities("llama3.1:latest") is None
+    assert prov._profiles.get((prov.base_url, "llama3.1:latest")) is None, (
+        "the profile a re-pull made stale was kept under the other spelling"
+    )
+    assert prov.known_capabilities("qwen2.5:7b") == ("completion",), "forgot an unrelated model"
+    assert prov._profiles.get((prov.base_url, "qwen2.5:7b")) is not None
 
 
 @pytest.mark.parametrize(
@@ -1384,3 +1412,101 @@ def test_a_model_name_is_known_by_each_way_the_runtime_spells_it(name, spellings
     from app.router.providers.ollama import _spellings
 
     assert _spellings(name) == spellings
+
+
+# ── what the second pre-merge review of #40 found ─────────────────────────────
+def test_a_runtime_in_a_sibling_container_is_still_clamped_by_this_hosts_ram(monkeypatch):
+    """docker compose: `http://ollama:11434` is another hostname, not another computer.
+
+    Inferring "remote" from the name left the shipped Docker setup unclamped, sending
+    a model's full trained window to a host that cannot hold its KV cache. The
+    configured answer wins over the hostname.
+    """
+    from app.router import model_profile
+    from app.router.providers import ollama as ollama_module
+    from app.router.providers.ollama import OllamaProvider
+
+    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    monkeypatch.setattr(ollama_module, "total_ram_bytes", lambda: 2 * 2**30)
+
+    def _probed():
+        prov = OllamaProvider("http://ollama:11434")
+        monkeypatch.setattr(prov, "_show", lambda model, **_: SHOW)
+        monkeypatch.setattr(prov, "server_version", lambda: (0, 5, 0))
+        return prov.profile("qwen2.5:7b")
+
+    monkeypatch.setattr(ollama_module.settings, "ollama_same_machine", True)
+    assert _probed().context_window < 32768, "a same-host container went unclamped"
+
+    monkeypatch.setattr(ollama_module.settings, "ollama_same_machine", None)
+    assert _probed().context_window == 32768, "unset must keep inferring from the address"
+
+
+def test_the_docker_compose_backend_declares_its_runtime_on_the_same_host():
+    """The shipped deployment has to actually set the knob, or the fix is not on."""
+    import pathlib
+
+    compose = (pathlib.Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
+    assert "OLLAMA_BASE_URL: http://ollama:11434" in compose
+    assert 'OLLAMA_SAME_MACHINE: "true"' in compose
+
+
+@pytest.mark.parametrize("mode", ["auto", "local_only"])
+def test_a_default_that_cannot_write_blocks_even_with_every_agent_pinned(monkeypatch, mode):
+    """The contract the composer and the Settings notice have to mirror.
+
+    Readiness always resolves "the rest of the run" to the default, and Auto's chain
+    is headed by it whatever cloud keys exist. So neither a cloud key nor pinning
+    every agent gets a run past a default that cannot write — which is why the UI no
+    longer suggests either.
+    """
+    from app.core import model_roles
+    from app.core.constants import RoutingMode
+
+    model_router = _stubbed_local(
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
+        tags_report=True,
+    )
+    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text:latest")
+    roles = ["product_manager", "system_design"]
+    monkeypatch.setattr(model_roles, "get", lambda role: "ollama:qwen2.5:7b" if role in roles else None)
+
+    ready = model_router.readiness(RoutingMode(mode), None, roles=roles)
+    assert not ready.ok
+    assert [m["role"] for m in ready.incapable] == ["the rest of the run"]
+
+
+def test_an_answer_from_api_show_is_re_read_once_it_is_stale(monkeypatch):
+    """`ollama create mymodel` from the CLI must not leave the old verdict forever."""
+    from app.router.providers import ollama as ollama_module
+    from app.router.providers.ollama import OllamaProvider
+
+    prov = OllamaProvider("http://localhost:11434")
+    answers = [EMBEDDING_SHOW, SHOW]
+    clock = [1000.0]
+    monkeypatch.setattr(ollama_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(prov, "_show", lambda model, **_: answers.pop(0))
+
+    assert prov.writes(prov.capabilities("mymodel")) is False
+    clock[0] += ollama_module._CAPABILITY_TTL_SECONDS - 1
+    assert prov.writes(prov.capabilities("mymodel")) is False, "re-probed while still fresh"
+    clock[0] += 2
+    assert prov.writes(prov.capabilities("mymodel")) is True, "a stale verdict kept blocking"
+
+
+@pytest.mark.parametrize(
+    "configured,pulled,present",
+    [
+        ("nomic-embed-text", ["nomic-embed-text:latest"], True),
+        ("nomic-embed-text:latest", ["nomic-embed-text:latest"], True),
+        # The runtime resolves an untagged name to `:latest` only — so a different
+        # tag of the same model is *not* this model, and a run on it would 404.
+        ("nomic-embed-text", ["nomic-embed-text:v1.5"], False),
+        ("qwen2.5", ["qwen2.5:7b"], False),
+    ],
+)
+def test_presence_uses_the_runtimes_naming_rule(configured, pulled, present):
+    from app.router.providers.ollama import OllamaProvider
+
+    assert OllamaProvider.resolves(configured, pulled) is present

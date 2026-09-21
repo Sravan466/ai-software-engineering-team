@@ -357,3 +357,51 @@ def test_a_redo_holds_its_own_build_while_it_generates_and_no_other(client, monk
         release.set()
         redo.join(timeout=30)
     assert not redo.is_alive(), "the redo never finished"
+
+
+def test_the_vector_stores_never_open_the_shared_directory_twice_at_once(monkeypatch, tmp_path):
+    """Two builds' first phases used to be serialised by the process-wide lock.
+
+    With builds side by side, the knowledge base and project memory could each build
+    a Chroma client on the same directory at the same moment. A stand-in client
+    records overlap, so this runs whether or not Chroma is installed.
+    """
+    import sys
+    import threading
+    import time
+    import types
+
+    from app.core.config import settings
+    from app.memory.store import MemoryStore
+    from app.rag.knowledge_base import KnowledgeBase
+
+    guard = threading.Lock()
+    seen = {"open": 0, "peak": 0, "made": 0}
+
+    class _Client:
+        def __init__(self, path):
+            with guard:
+                seen["made"] += 1
+                seen["open"] += 1
+                seen["peak"] = max(seen["peak"], seen["open"])
+            time.sleep(0.05)  # long enough that an unguarded second open overlaps
+            with guard:
+                seen["open"] -= 1
+
+        def get_or_create_collection(self, **_):
+            return object()
+
+    monkeypatch.setitem(sys.modules, "chromadb", types.SimpleNamespace(PersistentClient=_Client))
+    monkeypatch.setattr(settings, "chroma_persist_dir", str(tmp_path))
+
+    stores = [KnowledgeBase(), MemoryStore()]
+    callers = [
+        threading.Thread(target=stores[i % 2]._get_collection) for i in range(8)
+    ]
+    for t in callers:
+        t.start()
+    for t in callers:
+        t.join(timeout=10)
+
+    assert seen["peak"] == 1, "two Chroma clients were opened on one directory at once"
+    assert seen["made"] == 2, "a store opened its collection more than once"

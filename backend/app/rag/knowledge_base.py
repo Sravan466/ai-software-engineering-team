@@ -10,6 +10,7 @@ import os
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.rag import chroma
 from app.rag.embeddings import OllamaEmbeddingFunction
 
 log = get_logger(__name__)
@@ -26,6 +27,14 @@ class KnowledgeBase:
     def _get_collection(self):
         if self._collection is not None:
             return self._collection
+        # Checked again under the lock: whoever waited behind a first open finds
+        # the collection it built instead of opening a second client beside it.
+        with chroma.init_lock:
+            if self._collection is not None:
+                return self._collection
+            return self._open_collection()
+
+    def _open_collection(self):
         try:
             import chromadb
 

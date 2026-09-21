@@ -204,11 +204,14 @@ export function runtimeBlocker(
       // "found nothing" and "could not ask" look identical from here, and only one of
       // them is a reason to refuse to start.
       if (!local && !models) return null;
+      const onlyNonWriting = modelsThatCannotBuild(local).length > 0;
       return {
         title: "No model to pin",
-        text:
-          "Manual routing runs every phase on one model you choose, and this machine " +
-          "has none available — no local model pulled, no cloud key set.",
+        text: onlyNonWriting
+          ? "Manual routing runs every phase on one model you choose. The models on this " +
+            "machine can't write, and no cloud key is set."
+          : "Manual routing runs every phase on one model you choose, and this machine " +
+            "has none available — no local model pulled, no cloud key set.",
         action: "Add a model",
         href: "/settings",
       };
@@ -231,9 +234,11 @@ export function runtimeBlocker(
   if (!localReady && !cloudAvailable(models)) {
     return localReachable ? notPulled : notRunning;
   }
-  // Auto's safety net is the local default. A cloud key means there is still
-  // something to fall back *to*, so this only stops a run that has nothing else.
-  if (cannotWrite && !cloudAvailable(models)) return cannotWrite;
+  // Unconditionally, not "unless a cloud key is set": Auto's chain is headed by the
+  // local default whatever keys exist, and the run's own readiness check resolves
+  // the rest of the run to it. Exempting a cloud key here only moved the refusal to
+  // after the project had been created.
+  if (cannotWrite) return cannotWrite;
   return null;
 }
 

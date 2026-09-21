@@ -47,8 +47,23 @@ _CAPABILITY_PROBE_TIMEOUT = 3.0
 #: Probes for models the tag list did not describe run side by side, so ten pulled
 #: models on an older runtime cost one timeout rather than ten in a row.
 _MAX_PARALLEL_PROBES = 8
+#: The runtime's word for a model that turns text into vectors instead of writing.
+#: Its presence *without* `completion` is the one definite "cannot write": the two are
+#: decided by the same branch when the runtime reads the model file.
+_EMBEDDING_CAPABILITY = "embedding"
+#: How long an answer from `/api/show` is trusted. The tag list refreshes its own
+#: answers every time it is read; this bounds the ones it does not carry, so a model
+#: re-created from the CLI under the same name is re-read within minutes rather than
+#: at the next restart.
+_CAPABILITY_TTL_SECONDS = 300.0
+#: How long a *failed* probe is left alone before it is tried again. Long enough that
+#: a model whose blob is broken does not cost every Settings poll a timeout; short
+#: enough that one pulled a moment from now is picked up almost at once.
+_FAILED_PROBE_TTL_SECONDS = 30.0
 #: "Not remembered" — distinct from a remembered `None`, which is an answer.
 _MISSING = object()
+#: "Asked, and the probe failed" — unknown, but not worth asking again just yet.
+_FAILED = object()
 
 
 def _spellings(model: str) -> tuple[str, ...]:
@@ -123,10 +138,11 @@ class OllamaProvider(LLMProvider):
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self._profiles = ProfileCache()
         self._version: Optional[tuple[int, ...]] = None
-        #: What each model says it can do, remembered per probe. A plain dict is
-        #: enough: every write is the same answer to the same question, so two
-        #: threads racing cost one duplicate HTTP call and nothing else.
-        self._capabilities: dict[tuple[str, str], Optional[tuple[str, ...]]] = {}
+        #: What each model says it can do: `(answer, expires_at)` on the monotonic
+        #: clock. A plain dict is enough: every write is the same answer to the same
+        #: question, so two threads racing cost one duplicate HTTP call and nothing
+        #: else.
+        self._capabilities: dict[tuple[str, str], tuple[object, float]] = {}
 
     def available(self) -> bool:
         try:
@@ -140,12 +156,21 @@ class OllamaProvider(LLMProvider):
         return [m.get("name", "") for m in self._tags() if m.get("name")]
 
     def has_model(self, model: str) -> bool:
-        """True if `model` (exact tag, or same base when no tag given) is pulled."""
-        models = self.list_models()
-        if model in models:
-            return True
-        base = model.split(":", 1)[0]
-        return any(m.split(":", 1)[0] == base for m in models)
+        """True if `model`, as written, names something that is pulled."""
+        return self.resolves(model, self.list_models())
+
+    @staticmethod
+    def resolves(model: str, pulled: Iterable[str]) -> bool:
+        """Whether `model` names one of `pulled`, by the runtime's own rule.
+
+        An untagged name means `:latest` and nothing else. The looser rule this
+        replaced — any pulled model with the same base — called `nomic-embed-text`
+        present when only `nomic-embed-text:v1.5` was, which the runtime would then
+        refuse to load; and it disagreed with the capability lookup, so the two
+        checks before a run could reach opposite answers about one name.
+        """
+        names = set(pulled)
+        return any(name in names for name in _spellings(model))
 
     # ── capability probe ──────────────────────────────────────────────────────
     def _tags(self) -> list[dict]:
@@ -225,9 +250,10 @@ class OllamaProvider(LLMProvider):
         supports_schema = bool(
             version
             and version >= _SCHEMA_FORMAT_MIN_VERSION
-            # An empty capability list means an older server that does not report
-            # them; take the version's word for it rather than refusing to constrain.
-            and (not capabilities or _COMPLETION_CAPABILITY in capabilities)
+            # Only a model the runtime positively says cannot write is refused here —
+            # the same reading `writes` gives the same list, so an older server that
+            # reports nothing, or a file it could not read, is taken on the version.
+            and self.writes(capabilities) is not False
         )
 
         return self._profiles.put(
@@ -244,22 +270,22 @@ class OllamaProvider(LLMProvider):
     def capabilities(self, model: str) -> Optional[tuple[str, ...]]:
         """What the runtime says this model can do — or None when it will not say.
 
-        `None` and `()` are different answers and the caller has to be able to tell
-        them apart. `()` is a server that reported a capability list with nothing in
-        it; `None` is a server too old to report capabilities at all, or one that
-        could not be reached. Only the first is grounds for keeping a model out of a
-        picker — refusing a model because we failed to ask about it would hide every
-        model on an older runtime.
+        The list is returned as reported; what it *means* is `writes`'s decision,
+        not the caller's. `None` is a server too old to report capabilities, or one
+        that could not be reached or could not describe the model.
 
         Usually free: a server that reports capabilities in `/api/tags` has already
         filled the cache this reads — under the full `name:tag`, and found here under
         any spelling of it. The `/api/show` fallback is for servers that do not, and
         its answer is kept for the same reason: the tag list is read on every
         Settings poll, and a probe per model behind each one is a page that waits. A
-        *failed* probe is not kept, for the reason `profile` does not keep one
-        either: a model pulled a moment from now has to be picked up on the next call.
+        *failed* probe is kept only briefly, and as "unknown" — a model whose blob
+        will not read should not cost every poll a timeout, and one pulled a moment
+        from now has to be picked up soon after.
         """
         remembered = self._remembered_capabilities(model)
+        if remembered is _FAILED:
+            return None
         if remembered is not _MISSING:
             return remembered  # type: ignore[return-value]
         show = self._show(
@@ -268,6 +294,10 @@ class OllamaProvider(LLMProvider):
             timeout=_CAPABILITY_PROBE_TIMEOUT,
         )
         if show is None:
+            self._capabilities[(self.base_url, model)] = (
+                _FAILED,
+                time.monotonic() + _FAILED_PROBE_TTL_SECONDS,
+            )
             return None
         return self._remember_capabilities(model, show)
 
@@ -279,7 +309,9 @@ class OllamaProvider(LLMProvider):
         every poll, which is exactly what `local_status` exists not to do.
         """
         remembered = self._remembered_capabilities(model)
-        return None if remembered is _MISSING else remembered  # type: ignore[return-value]
+        if remembered is _MISSING or remembered is _FAILED:
+            return None
+        return remembered  # type: ignore[return-value]
 
     def capabilities_for(self, models: Iterable[str]) -> dict[str, tuple[str, ...]]:
         """`{model: capabilities}` for every model the runtime will describe.
@@ -306,20 +338,30 @@ class OllamaProvider(LLMProvider):
     def writes(capabilities: Optional[Iterable[str]]) -> Optional[bool]:
         """Whether a capability list says the model completes text; None if unknown.
 
-        The one place the runtime's vocabulary is interpreted. A list that is present
-        but lacks `completion` — `["embedding"]`, or an explicit `[]` — is a definite
-        no; only an absent list is "unknown", and unknown never blocks anything.
+        The one place the runtime's vocabulary is interpreted, and it only says no on
+        positive evidence. The runtime decides `completion` against `embedding` by
+        reading the model file; when it cannot read the file it reports neither, and
+        whatever the template adds (`tools`, say) is all that is left. So `[]` and
+        `["tools"]` are "could not tell", not "cannot write" — treating them as a no
+        would refuse a working chat model the moment its file hiccupped. What is a
+        no is `embedding` reported without `completion`. Unknown never blocks.
         """
         if capabilities is None:
             return None
-        return _COMPLETION_CAPABILITY in tuple(capabilities)
+        reported = tuple(capabilities)
+        if _COMPLETION_CAPABILITY in reported:
+            return True
+        if _EMBEDDING_CAPABILITY in reported:
+            return False
+        return None
 
     def _remembered_capabilities(self, model: str) -> object:
-        """The remembered answer under any spelling of `model`, or `_MISSING`."""
+        """The live answer under any spelling of `model`, `_FAILED`, or `_MISSING`."""
+        now = time.monotonic()
         for name in _spellings(model):
-            hit = self._capabilities.get((self.base_url, name), _MISSING)
-            if hit is not _MISSING:
-                return hit
+            entry = self._capabilities.get((self.base_url, name))
+            if entry is not None and entry[1] > now:
+                return entry[0]
         return _MISSING
 
     def _remember_capabilities(self, model: str, show: dict) -> Optional[tuple[str, ...]]:
@@ -333,7 +375,10 @@ class OllamaProvider(LLMProvider):
         caps = (
             tuple(str(c) for c in reported) if isinstance(reported, (list, tuple)) else None
         )
-        self._capabilities[(self.base_url, model)] = caps
+        self._capabilities[(self.base_url, model)] = (
+            caps,
+            time.monotonic() + _CAPABILITY_TTL_SECONDS,
+        )
         return caps
 
     def _show(
@@ -359,7 +404,16 @@ class OllamaProvider(LLMProvider):
             return None
 
     def is_same_machine(self) -> bool:
-        """Whether Ollama runs where this process does, so local RAM is its RAM."""
+        """Whether the runtime shares this machine's memory, so local RAM is its RAM.
+
+        Configured when it is set (`OLLAMA_SAME_MACHINE`), inferred from the address
+        when it is not. The address can only say "loopback": a runtime in a sibling
+        container under docker compose is `http://ollama:11434` and shares this host's
+        RAM all the same, and leaving it unclamped sends a model's full trained window
+        — 128k tokens is tens of GiB of KV cache — to a machine that cannot hold it.
+        """
+        if settings.ollama_same_machine is not None:
+            return bool(settings.ollama_same_machine)
         host = urlparse(self.base_url).hostname or ""
         return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
@@ -373,10 +427,15 @@ class OllamaProvider(LLMProvider):
         not what any model can do, so it leaves every capability exactly where it is;
         wiping them made choosing a model re-probe all of the others inline.
         """
-        self._profiles.forget((self.base_url, model) if model else None)
-        if model:
-            for name in _spellings(model):
-                self._capabilities.pop((self.base_url, name), None)
+        if not model:
+            self._profiles.forget(None)
+            return
+        # Both caches, under every spelling. The profile holds the window and the
+        # schema support the next prompt is budgeted with, and a pull of `llama3.1`
+        # that left `llama3.1:latest`'s profile behind kept budgeting for the old one.
+        for name in _spellings(model):
+            self._profiles.forget((self.base_url, name))
+            self._capabilities.pop((self.base_url, name), None)
 
     # ── generation ────────────────────────────────────────────────────────────
     def generate(
