@@ -21,6 +21,9 @@ services:
     environment:
       # Reach the Ollama service by its compose hostname.
       OLLAMA_BASE_URL: http://ollama:11434
+      # A sibling container, not another computer: it shares this host's RAM, so
+      # the context window must still be clamped by it. The hostname cannot say so.
+      OLLAMA_SAME_MACHINE: "true"
       CORS_ORIGINS: http://localhost:3000
       # DATABASE_URL: postgresql+psycopg://aiteam:aiteam@postgres:5432/aiteam
     volumes:

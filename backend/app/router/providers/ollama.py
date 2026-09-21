@@ -10,9 +10,10 @@ return rather than the bare string `"json"`, which only ever promised valid JSON
 the right JSON.
 """
 from __future__ import annotations
-from typing import Optional
+from typing import Iterable, Optional
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from urllib.parse import urlparse
 
@@ -38,6 +39,58 @@ log = get_logger(__name__)
 _SCHEMA_FORMAT_MIN_VERSION = (0, 5, 0)
 #: A model that cannot complete text (an embedding model, say) cannot be constrained.
 _COMPLETION_CAPABILITY = "completion"
+#: A capability probe is one small JSON answer from a runtime that is already known to
+#: be up — the tag list just came back. Anything slower than this is a runtime in
+#: trouble, and the Settings page should not wait the ten seconds a profile probe
+#: (which may be loading a model) is allowed.
+_CAPABILITY_PROBE_TIMEOUT = 3.0
+#: Probes for models the tag list did not describe run side by side, so ten pulled
+#: models on an older runtime cost one timeout rather than ten in a row.
+_MAX_PARALLEL_PROBES = 8
+#: The runtime's word for a model that turns text into vectors instead of writing.
+#: Its presence *without* `completion` is the one definite "cannot write": the two are
+#: decided by the same branch when the runtime reads the model file.
+_EMBEDDING_CAPABILITY = "embedding"
+#: How long an answer from `/api/show` is trusted. The tag list refreshes its own
+#: answers every time it is read; this bounds the ones it does not carry, so a model
+#: re-created from the CLI under the same name is re-read within minutes rather than
+#: at the next restart.
+_CAPABILITY_TTL_SECONDS = 300.0
+#: How long a *failed* probe is left alone before it is tried again. Long enough that
+#: a model whose blob is broken does not cost every Settings poll a timeout; short
+#: enough that one pulled a moment from now is picked up almost at once.
+_FAILED_PROBE_TTL_SECONDS = 30.0
+#: "Not remembered" — distinct from a remembered `None`, which is an answer.
+_MISSING = object()
+#: "Asked, and the probe failed" — unknown, but not worth asking again just yet.
+_FAILED = object()
+
+
+def _spellings(model: str) -> tuple[str, ...]:
+    """Every name the runtime treats as this model: an untagged name means `:latest`.
+
+    The tag list always reports the full `name:tag`, while a configured default or a
+    pull request is often written without one. Looking either up under only the
+    spelling it arrived in is how a cached answer went unfound — and, the other way,
+    how dropping it after a re-pull left the stale one behind. The tag is whatever
+    follows the *last* colon, unless that colon belongs to a registry `host:port`.
+    """
+    name, sep, tag = model.rpartition(":")
+    if not sep or "/" in tag:
+        return (model, f"{model}:latest")
+    return (model, name) if tag == "latest" else (model,)
+
+
+def _canonical(model: str) -> str:
+    """The one spelling a model's capabilities are kept under: always `name:tag`.
+
+    One key per model, not one per spelling. With several, an answer written under
+    `nomic-embed-text` (a failed probe, say) and a fresher one from the tag list under
+    `nomic-embed-text:latest` both stayed live, and whichever spelling was looked up
+    first won — so the stale one could hide the fresh one for its whole lifetime.
+    """
+    name, sep, tag = model.rpartition(":")
+    return f"{model}:latest" if not sep or "/" in tag else model
 
 
 def _parse_version(text: str) -> tuple[int, int, int]:
@@ -97,6 +150,11 @@ class OllamaProvider(LLMProvider):
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self._profiles = ProfileCache()
         self._version: Optional[tuple[int, ...]] = None
+        #: What each model says it can do: `(answer, expires_at)` on the monotonic
+        #: clock. A plain dict is enough: every write is the same answer to the same
+        #: question, so two threads racing cost one duplicate HTTP call and nothing
+        #: else.
+        self._capabilities: dict[tuple[str, str], tuple[object, float]] = {}
 
     def available(self) -> bool:
         try:
@@ -110,21 +168,44 @@ class OllamaProvider(LLMProvider):
         return [m.get("name", "") for m in self._tags() if m.get("name")]
 
     def has_model(self, model: str) -> bool:
-        """True if `model` (exact tag, or same base when no tag given) is pulled."""
-        models = self.list_models()
-        if model in models:
-            return True
-        base = model.split(":", 1)[0]
-        return any(m.split(":", 1)[0] == base for m in models)
+        """True if `model`, as written, names something that is pulled."""
+        return self.resolves(model, self.list_models())
+
+    @staticmethod
+    def resolves(model: str, pulled: Iterable[str]) -> bool:
+        """Whether `model` names one of `pulled`, by the runtime's own rule.
+
+        An untagged name means `:latest` and nothing else. The looser rule this
+        replaced — any pulled model with the same base — called `nomic-embed-text`
+        present when only `nomic-embed-text:v1.5` was, which the runtime would then
+        refuse to load; and it disagreed with the capability lookup, so the two
+        checks before a run could reach opposite answers about one name.
+        """
+        names = set(pulled)
+        return any(name in names for name in _spellings(model))
 
     # ── capability probe ──────────────────────────────────────────────────────
     def _tags(self) -> list[dict]:
         try:
             r = httpx.get(f"{self.base_url}/api/tags", timeout=2.0)
             r.raise_for_status()
-            return r.json().get("models", []) or []
+            entries = r.json().get("models", []) or []
         except Exception:  # noqa: BLE001 - server not running / unexpected payload
             return []
+        # Recent servers report capabilities in the tag list itself, which answers
+        # for every pulled model in the one round trip the caller was making anyway.
+        # Taken as it goes past, so `capabilities` below falls back to a probe per
+        # model only on a server old enough not to say — and so the answers refresh
+        # whenever the list is read, rather than aging in a cache of their own.
+        #
+        # Only an entry that actually carries the key is remembered. Recording a
+        # missing key as "reported nothing" would cache the older server's silence
+        # as an answer and stop the probe that *can* get one.
+        for entry in entries:
+            name = entry.get("name")
+            if name and isinstance(entry.get("capabilities"), (list, tuple)):
+                self._remember_capabilities(name, entry)
+        return entries
 
     def server_version(self) -> Optional[tuple[int, ...]]:
         """The server's version, asked once — but only remembered once it answers.
@@ -171,16 +252,20 @@ class OllamaProvider(LLMProvider):
         # The KV cache lives in the Ollama process. When that is on another host — or
         # in its own container — this machine's RAM says nothing about what fits there,
         # and a confident clamp built on it would be a number about the wrong computer.
+        # This is the only place that may read local RAM, because it is the only place
+        # that knows where the runtime is; `None` reaches `build_profile` as "unknown,
+        # so do not clamp", which is a different answer from "not passed".
         ram = total_ram_bytes() if self.is_same_machine() else None
 
-        capabilities = [str(c) for c in (show.get("capabilities") or [])]
+        capabilities = list(self._remember_capabilities(model, show) or ())
         version = self.server_version()
         supports_schema = bool(
             version
             and version >= _SCHEMA_FORMAT_MIN_VERSION
-            # An empty capability list means an older server that does not report
-            # them; take the version's word for it rather than refusing to constrain.
-            and (not capabilities or _COMPLETION_CAPABILITY in capabilities)
+            # Only a model the runtime positively says cannot write is refused here —
+            # the same reading `writes` gives the same list, so an older server that
+            # reports nothing, or a file it could not read, is taken on the version.
+            and self.writes(capabilities) is not False
         )
 
         return self._profiles.put(
@@ -194,31 +279,173 @@ class OllamaProvider(LLMProvider):
             ),
         )
 
-    def _show(self, model: str) -> Optional[dict]:
+    def capabilities(self, model: str) -> Optional[tuple[str, ...]]:
+        """What the runtime says this model can do — or None when it will not say.
+
+        The list is returned as reported; what it *means* is `writes`'s decision,
+        not the caller's. `None` is a server too old to report capabilities, or one
+        that could not be reached or could not describe the model.
+
+        Usually free: a server that reports capabilities in `/api/tags` has already
+        filled the cache this reads — under the full `name:tag`, and found here under
+        any spelling of it. The `/api/show` fallback is for servers that do not, and
+        its answer is kept for the same reason: the tag list is read on every
+        Settings poll, and a probe per model behind each one is a page that waits. A
+        *failed* probe is kept only briefly, and as "unknown" — a model whose blob
+        will not read should not cost every poll a timeout, and one pulled a moment
+        from now has to be picked up soon after.
+        """
+        remembered = self._remembered_capabilities(model)
+        if remembered is _FAILED:
+            return None
+        if remembered is not _MISSING:
+            return remembered  # type: ignore[return-value]
+        show = self._show(
+            model,
+            note="; its capabilities are unknown until it answers.",
+            timeout=_CAPABILITY_PROBE_TIMEOUT,
+        )
+        if show is None:
+            self._capabilities[(self.base_url, _canonical(model))] = (
+                _FAILED,
+                time.monotonic() + _FAILED_PROBE_TTL_SECONDS,
+            )
+            return None
+        return self._remember_capabilities(model, show)
+
+    def known_capabilities(self, model: str) -> Optional[tuple[str, ...]]:
+        """What is already remembered about `model` — never a network call.
+
+        For callers that must not wait: a Settings request asking about the default
+        model while the runtime is down would otherwise spend a probe timeout on
+        every poll, which is exactly what `local_status` exists not to do.
+        """
+        remembered = self._remembered_capabilities(model)
+        if remembered is _MISSING or remembered is _FAILED:
+            return None
+        return remembered  # type: ignore[return-value]
+
+    def capabilities_for(self, models: Iterable[str]) -> dict[str, tuple[str, ...]]:
+        """`{model: capabilities}` for every model the runtime will describe.
+
+        Normally free — the tag list that produced `models` already filled the cache.
+        What it did not describe is probed in parallel, with the short timeout, so an
+        older runtime with many models costs one wait rather than one per model.
+        Models it will not describe are left out: unknown is not the same as empty.
+        """
+        names = list(dict.fromkeys(m for m in models if m))
+        unasked = [m for m in names if self._remembered_capabilities(m) is _MISSING]
+        if unasked:
+            workers = min(len(unasked), _MAX_PARALLEL_PROBES)
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="caps") as pool:
+                list(pool.map(self.capabilities, unasked))
+        out: dict[str, tuple[str, ...]] = {}
+        for name in names:
+            caps = self.known_capabilities(name)
+            if caps is not None:
+                out[name] = caps
+        return out
+
+    @staticmethod
+    def writes(capabilities: Optional[Iterable[str]]) -> Optional[bool]:
+        """Whether a capability list says the model completes text; None if unknown.
+
+        The one place the runtime's vocabulary is interpreted, and it only says no on
+        positive evidence. The runtime decides `completion` against `embedding` by
+        reading the model file; when it cannot read the file it reports neither, and
+        whatever the template adds (`tools`, say) is all that is left. So `[]` and
+        `["tools"]` are "could not tell", not "cannot write" — treating them as a no
+        would refuse a working chat model the moment its file hiccupped. What is a
+        no is `embedding` reported without `completion`. Unknown never blocks.
+        """
+        if capabilities is None:
+            return None
+        reported = tuple(capabilities)
+        if _COMPLETION_CAPABILITY in reported:
+            return True
+        if _EMBEDDING_CAPABILITY in reported:
+            return False
+        return None
+
+    def _remembered_capabilities(self, model: str) -> object:
+        """The live answer for `model` however it is spelled, `_FAILED`, or `_MISSING`."""
+        entry = self._capabilities.get((self.base_url, _canonical(model)))
+        if entry is not None and entry[1] > time.monotonic():
+            return entry[0]
+        return _MISSING
+
+    def _remember_capabilities(self, model: str, show: dict) -> Optional[tuple[str, ...]]:
+        """Record what one `/api/show` payload said about capabilities, and return it.
+
+        Shared so that the capability probe and the profile probe cannot drift, and
+        so a profiled model does not get asked a second time for the half of the
+        payload the first call already had in its hands.
+        """
+        reported = show.get("capabilities")
+        caps = (
+            tuple(str(c) for c in reported) if isinstance(reported, (list, tuple)) else None
+        )
+        self._capabilities[(self.base_url, _canonical(model))] = (
+            caps,
+            time.monotonic() + _CAPABILITY_TTL_SECONDS,
+        )
+        return caps
+
+    def _show(
+        self, model: str, *, note: Optional[str] = None, timeout: float = 10.0
+    ) -> Optional[dict]:
         try:
-            r = httpx.post(f"{self.base_url}/api/show", json={"model": model}, timeout=10.0)
+            r = httpx.post(f"{self.base_url}/api/show", json={"model": model}, timeout=timeout)
             r.raise_for_status()
             payload = r.json()
             return payload if isinstance(payload, dict) else None
         except Exception as e:  # noqa: BLE001 - unreachable, or the model is not pulled
             log.warning(
-                "Could not probe '%s' on %s (%s); falling back to the configured window "
-                "of %s tokens.",
+                "Could not probe '%s' on %s (%s)%s",
                 model,
                 self.base_url,
                 e,
-                settings.model_context_fallback_tokens,
+                note
+                or (
+                    "; falling back to the configured window of "
+                    f"{settings.model_context_fallback_tokens} tokens."
+                ),
             )
             return None
 
     def is_same_machine(self) -> bool:
-        """Whether Ollama runs where this process does, so local RAM is its RAM."""
+        """Whether the runtime shares this machine's memory, so local RAM is its RAM.
+
+        Configured when it is set (`OLLAMA_SAME_MACHINE`), inferred from the address
+        when it is not. The address can only say "loopback": a runtime in a sibling
+        container under docker compose is `http://ollama:11434` and shares this host's
+        RAM all the same, and leaving it unclamped sends a model's full trained window
+        — 128k tokens is tens of GiB of KV cache — to a machine that cannot hold it.
+        """
+        if settings.ollama_same_machine is not None:
+            return bool(settings.ollama_same_machine)
         host = urlparse(self.base_url).hostname or ""
         return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
     def forget_profile(self, model: Optional[str] = None) -> None:
-        """Drop cached probes — after a pull, or when the host changes underneath us."""
-        self._profiles.forget((self.base_url, model) if model else None)
+        """Drop cached probes — after a pull, or when the default model changes.
+
+        Capabilities are dropped only for a *named* model. A pull replaces that
+        model's weights, so what it can do may have changed with them — under every
+        spelling of its name, or re-pulling `llama3.1` would leave the answer cached
+        under `llama3.1:latest` untouched. A new default changes which model runs,
+        not what any model can do, so it leaves every capability exactly where it is;
+        wiping them made choosing a model re-probe all of the others inline.
+        """
+        if not model:
+            self._profiles.forget(None)
+            return
+        # Both caches, under every spelling. The profile holds the window and the
+        # schema support the next prompt is budgeted with, and a pull of `llama3.1`
+        # that left `llama3.1:latest`'s profile behind kept budgeting for the old one.
+        for name in _spellings(model):
+            self._profiles.forget((self.base_url, name))
+        self._capabilities.pop((self.base_url, _canonical(model)), None)
 
     # ── generation ────────────────────────────────────────────────────────────
     def generate(

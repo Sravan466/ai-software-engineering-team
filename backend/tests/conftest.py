@@ -13,6 +13,10 @@ import tempfile
 # Must be set BEFORE importing the app (settings are read at import time).
 _tmp = tempfile.mkdtemp(prefix="aiteam_test_")
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
+# The graph's checkpointer is a second SQLite file, opened at import. Left at its
+# default it is the developer's real `data/checkpoints.sqlite`, and every pipeline
+# test wrote its throwaway builds into it.
+os.environ["CHECKPOINT_DB_PATH"] = f"{_tmp}/checkpoints.sqlite"
 os.environ["DEFAULT_ROUTING_MODE"] = "local_only"
 os.environ["ENABLE_DEBATE"] = "true"
 # The compile gate never installs anything from a test. If this checkout's frontend

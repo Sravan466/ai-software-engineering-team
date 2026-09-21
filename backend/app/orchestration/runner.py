@@ -20,6 +20,7 @@ from typing import Optional
 
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -57,8 +58,53 @@ from app.schemas.llm import LLMResponse, Usage
 
 log = get_logger(__name__)
 
-# Serialise access to the (single-connection) checkpointer.
-_lock = threading.Lock()
+# ── one lock per build, not one for the whole process ────────────────────────
+#
+# This used to be a single `threading.Lock()` held around `graph.invoke` — which is
+# the model call. One slow generation therefore stalled every other build in the
+# process: eight agents, one at a time, globally.
+#
+# The lock is now per project, and it still covers the model call: a phase is a
+# read-modify-write on that build's checkpoint (`invoke` reads the state, generates,
+# writes the next one; `redo` reads a snapshot, generates, patches it), and holding
+# it across the pair is what stops one writer's patch landing on top of another's.
+# What changed is who waits: another writer of the *same* build, rather than every
+# build in the process.
+#
+# What it does not do is stop a build having two drivers. Stop marks a build
+# cancelled without interrupting the call in flight, Resume clears the flag and
+# claims it straight back, and the first driver — no longer seeing the flag — carries
+# on beside the second. The lock makes their checkpoint writes take turns; it does
+# not make the second one wait for the first to *finish*, and the two can both
+# advance the run. That race is older than this lock (the process-wide one allowed it
+# too); closing it needs a claim each driver holds and checks, not a lock.
+#
+# The SQLite connection itself does not need this. `SqliteSaver` holds its own lock
+# around every cursor it opens, so writes from two builds cannot interleave on it.
+#
+# What this does not cover: the database rows around a phase (`_complete_row`,
+# `_delete_rows`) are written outside it, exactly as they were under the old lock,
+# and it is a lock in *this process*. Several workers would each have their own and
+# would share `checkpoints.sqlite` unguarded — the status claim in the routes is the
+# only thing that spans processes, and a multi-worker deployment needs a
+# checkpointer that is built for one.
+#
+# Weak values, so a lock is collected once nothing holds it: a `with` block keeps its
+# own reference alive for as long as it is held, so two threads asking at the same
+# time still get the same object, and the table cannot grow with every project the
+# process has ever seen.
+_locks: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
+_locks_guard = threading.Lock()
+
+
+def _checkpoint_lock(project_id: str) -> threading.RLock:
+    """The lock guarding one project's checkpoint reads and writes."""
+    with _locks_guard:
+        lock = _locks.get(project_id)
+        if lock is None:
+            lock = threading.RLock()
+            _locks[project_id] = lock
+        return lock
 
 
 def _now() -> datetime:
@@ -335,7 +381,7 @@ class PipelineRunner:
         try:
             with _heartbeat(project.id):
                 cfg = _config(project.id)
-                with _lock:
+                with _checkpoint_lock(project.id):
                     snapshot = graph.get_state(cfg)
                     values: PipelineState = dict(snapshot.values)  # type: ignore[assignment]
 
@@ -365,6 +411,12 @@ class PipelineRunner:
                         # exception lives rather than here.
                         charter=binding_on(phase_key, values.get("charter")),
                     )
+                    # Inside the lock, model call and all. This is a read-modify-write:
+                    # the patch below is built from the snapshot above, so a write to this
+                    # checkpoint in between would be silently overwritten by it. The lock
+                    # keeps every other writer of *this* build out until the patch lands;
+                    # it is per project, so it holds up nothing else. It does not stop a
+                    # second driver existing — see `_checkpoint_lock`.
                     result = agent.run(ctx)
 
                     from app.orchestration.graph import _last_debate, _serialize_result
@@ -587,7 +639,9 @@ class PipelineRunner:
 
         try:
             with _heartbeat(project.id):
-                with _lock:
+                # This build's checkpoint gets one writer at a time; every other build
+                # in the process generates alongside it. See `_checkpoint_lock`.
+                with _checkpoint_lock(project.id):
                     state = graph.invoke(
                         None if started else _initial_state(project), _config(project.id)
                     )
@@ -857,7 +911,7 @@ class PipelineRunner:
         rather than the DB keeps the runner honest about where execution actually is,
         even if a crash left the two disagreeing.
         """
-        with _lock:
+        with _checkpoint_lock(project_id):
             snapshot = graph.get_state(_config(project_id))
         started = bool(snapshot.created_at) or bool(snapshot.values)
         next_node = snapshot.next[0] if snapshot.next else None
@@ -888,7 +942,7 @@ class PipelineRunner:
         ):
             return row
 
-        with _lock:
+        with _checkpoint_lock(project.id):
             values = dict(graph.get_state(_config(project.id)).values)
         salvaged = values.get("last_result")
         if salvaged and salvaged.get("phase") == row.phase:
@@ -961,7 +1015,7 @@ class PipelineRunner:
     def _finalize(self, db: Session, project: Project) -> None:
         """Mark the project complete and write a long-term memory summary."""
         try:
-            with _lock:
+            with _checkpoint_lock(project.id):
                 values = dict(graph.get_state(_config(project.id)).values)
         except Exception:  # noqa: BLE001
             values = {}

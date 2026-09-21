@@ -35,6 +35,7 @@ def _blank_is_default(default):
 
 #: Numeric settings that survive being left blank in the environment.
 OptionalInt = Annotated[Optional[int], BeforeValidator(_blank_is_unset)]
+OptionalBool = Annotated[Optional[bool], BeforeValidator(_blank_is_unset)]
 
 
 def BlankTolerantInt(default: int):  # noqa: N802 - reads as a type where it is used
@@ -62,6 +63,10 @@ class Settings(BaseSettings):
 
     # ── Database ──
     database_url: str = "sqlite:///./data/aiteam.db"
+    #: Where the pipeline graph checkpoints each build's position. Its own file, not a
+    #: table in `database_url`: LangGraph owns the schema. Configurable so the test
+    #: suite can keep its throwaway builds out of the real one.
+    checkpoint_db_path: str = "./data/checkpoints.sqlite"
 
     # ── Routing ──
     default_routing_mode: str = "local_only"  # auto | manual | local_only
@@ -91,6 +96,12 @@ class Settings(BaseSettings):
     #: Lower the local context window to at most this many tokens (unset = only the
     #: model's own limit and RAM decide). Useful for handing memory back.
     ollama_context_ceiling: OptionalInt = None
+    #: Whether the model runtime shares this machine's memory, when its address
+    #: cannot say. Unset, a loopback URL means yes and any other host means no —
+    #: right for a runtime on another computer, wrong for one in a sibling container
+    #: on the same host (`http://ollama:11434` under docker compose), which shares
+    #: this machine's RAM and needs the clamp. Set it true there.
+    ollama_same_machine: OptionalBool = None
     #: Share of physical RAM the KV cache may claim once the weights are loaded.
     ollama_ram_fraction: BlankTolerantFloat(0.6) = 0.6
     #: The window assumed *only* when a provider will not report one at all.

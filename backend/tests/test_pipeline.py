@@ -210,3 +210,259 @@ def test_delete_removes_the_build(client):
     pid = _create(client)
     assert client.delete(f"/api/projects/{pid}").status_code == 204
     assert client.get(f"/api/projects/{pid}").status_code == 404
+
+
+# ── two builds, two model calls, one process ─────────────────────────────────
+def test_two_builds_on_two_projects_generate_at_the_same_time(client, monkeypatch):
+    """The runner's lock used to wrap the model call, so builds ran one at a time.
+
+    A rendezvous is the assertion: both runs have to be *inside* a model call at the
+    same moment for it to clear. Serialised, the second never arrives, the first
+    times out, and `overlapped` stays unset — which is what this test does against
+    the code before the fix.
+
+    The checkpoints are then read back per project. Concurrency that let one build's
+    writes land in another's thread would be a far worse bug than the one being
+    fixed, so both halves are asserted, not just the fast one.
+    """
+    import threading
+
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.orchestration.graph import graph
+    from app.orchestration.runner import _config, runner
+    from app.router.router import router as model_router
+    from tests.conftest import _fake_complete
+
+    rendezvous = threading.Barrier(2, timeout=15)
+    overlapped = threading.Event()
+    guard = threading.Lock()
+    done = False
+
+    def meeting_complete(messages, **kwargs):
+        # Only the first call from each run waits: once the two have met there is
+        # nothing left to prove, and a second wait would hang on a reset barrier.
+        nonlocal done
+        with guard:
+            wait = not done
+        if wait:
+            try:
+                rendezvous.wait()
+                overlapped.set()
+            except threading.BrokenBarrierError:
+                pass  # serialised — the assertion below is what reports it
+            with guard:
+                done = True
+        return _fake_complete(messages, **kwargs)
+
+    monkeypatch.setattr(model_router, "complete", meeting_complete)
+
+    ideas = {
+        _create(client, idea="A parking app for a university campus", require_approval=False):
+            "A parking app for a university campus",
+        _create(client, idea="A reading tracker for a book club", require_approval=False):
+            "A reading tracker for a book club",
+    }
+
+    def drive(project_id: str) -> None:
+        db = SessionLocal()
+        try:
+            runner.continue_run(db, db.get(Project, project_id))
+        finally:
+            db.close()
+
+    threads = [
+        threading.Thread(target=drive, args=(pid,), name=f"build-{pid[:8]}")
+        for pid in ideas
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+        assert not t.is_alive(), "a build never finished"
+
+    assert overlapped.is_set(), "the two builds never generated at the same time"
+
+    for project_id, idea in ideas.items():
+        proj = client.get(f"/api/projects/{project_id}").json()
+        assert proj["status"] == "completed", proj.get("last_error")
+        values = graph.get_state(_config(project_id)).values
+        assert values["idea"] == idea, "one build's checkpoint holds another's idea"
+        assert set(values["prior_outputs"]) == set(PHASES)
+
+
+def test_a_redo_holds_its_own_build_while_it_generates_and_no_other(client, monkeypatch):
+    """The read-modify-write in `redo` stays one critical section, per project.
+
+    A redo builds its checkpoint patch from a snapshot read before the model call.
+    Stop marks a build cancelled without interrupting that call and Resume can claim
+    it straight back, so a second driver on the *same* build is possible mid-call —
+    and releasing the lock across generation let that driver's writes be overwritten
+    by a patch built from a snapshot that no longer existed. The same lock must not
+    hold up any *other* build, or this is the process-wide lock over again.
+    """
+    import threading
+
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.orchestration.runner import _checkpoint_lock, runner
+    from app.router.router import router as model_router
+    from tests.conftest import _fake_complete
+
+    busy = _create(client, require_approval=True)
+    other = _create(client, require_approval=True)
+    client.post(f"/api/projects/{busy}/run")
+    assert client.get(f"/api/projects/{busy}").json()["status"] == "awaiting_approval"
+
+    generating = threading.Event()
+    release = threading.Event()
+
+    def held_complete(messages, **kwargs):
+        generating.set()
+        release.wait(timeout=15)
+        return _fake_complete(messages, **kwargs)
+
+    monkeypatch.setattr(model_router, "complete", held_complete)
+
+    def drive_redo() -> None:
+        db = SessionLocal()
+        try:
+            runner.redo(db, db.get(Project, busy), "product_manager", "Tighten the scope")
+        finally:
+            db.close()
+
+    redo = threading.Thread(target=drive_redo, name="redo")
+    redo.start()
+    try:
+        assert generating.wait(timeout=15), "the redo never reached its model call"
+
+        def try_lock(project_id: str, out: list) -> None:
+            # From another thread: the lock is re-entrant, so asking from the redo's
+            # own thread would always succeed and prove nothing.
+            lock = _checkpoint_lock(project_id)
+            got = lock.acquire(timeout=0.3)
+            if got:
+                lock.release()
+            out.append(got)
+
+        same: list = []
+        elsewhere: list = []
+        for project_id, out in ((busy, same), (other, elsewhere)):
+            t = threading.Thread(target=try_lock, args=(project_id, out))
+            t.start()
+            t.join()
+        assert same == [False], "another driver could write this build's checkpoint mid-redo"
+        assert elsewhere == [True], "a redo on one build held up a different build"
+    finally:
+        release.set()
+        redo.join(timeout=30)
+    assert not redo.is_alive(), "the redo never finished"
+
+
+def test_the_vector_stores_share_one_client_opened_once(monkeypatch, tmp_path):
+    """Two builds' first phases used to be serialised by the process-wide lock.
+
+    With builds side by side, the knowledge base and project memory could each build
+    a Chroma client on the same directory at the same moment. They now share one,
+    opened once behind a lock. A stand-in client records overlap, so this runs
+    whether or not Chroma is installed.
+    """
+    import sys
+    import threading
+    import time
+    import types
+
+    from app.core.config import settings
+    from app.memory.store import MemoryStore
+    from app.rag import chroma
+    from app.rag.knowledge_base import KnowledgeBase
+
+    guard = threading.Lock()
+    seen = {"open": 0, "peak": 0, "made": 0}
+
+    class _Client:
+        def __init__(self, path):
+            with guard:
+                seen["made"] += 1
+                seen["open"] += 1
+                seen["peak"] = max(seen["peak"], seen["open"])
+            time.sleep(0.05)  # long enough that an unguarded second open overlaps
+            with guard:
+                seen["open"] -= 1
+
+        def get_or_create_collection(self, **_):
+            return object()
+
+    monkeypatch.setitem(sys.modules, "chromadb", types.SimpleNamespace(PersistentClient=_Client))
+    monkeypatch.setattr(settings, "chroma_persist_dir", str(tmp_path))
+    # Module state, shared with every other test: start from "never opened".
+    monkeypatch.setattr(chroma, "_client", None)
+    monkeypatch.setattr(chroma, "_failed_until", 0.0)
+
+    stores = [KnowledgeBase(), MemoryStore()]
+    callers = [threading.Thread(target=stores[i % 2]._get_collection) for i in range(8)]
+    for t in callers:
+        t.start()
+    for t in callers:
+        t.join(timeout=10)
+
+    assert seen["peak"] == 1, "two Chroma clients were opened on one directory at once"
+    assert seen["made"] == 1, "the two stores did not share one client"
+    assert all(s._collection is not None for s in stores)
+
+
+def test_a_chroma_directory_that_will_not_open_is_not_retried_on_every_call(monkeypatch):
+    """Behind a lock, retrying on every call made concurrent builds queue to fail."""
+    import sys
+    import types
+
+    from app.rag import chroma
+
+    attempts: list[str] = []
+
+    def _broken(path):
+        attempts.append(path)
+        raise RuntimeError("incompatible persist dir")
+
+    clock = [1000.0]
+    monkeypatch.setitem(sys.modules, "chromadb", types.SimpleNamespace(PersistentClient=_broken))
+    monkeypatch.setattr(chroma, "_client", None)
+    monkeypatch.setattr(chroma, "_failed_until", 0.0)
+    monkeypatch.setattr(chroma.time, "monotonic", lambda: clock[0])
+
+    for _ in range(5):
+        assert chroma.collection("knowledge_base", None, owner="Knowledge base") is None
+    assert len(attempts) == 1, "a failed open was retried on every call"
+
+    clock[0] += chroma._RETRY_AFTER_SECONDS + 1
+    chroma.collection("knowledge_base", None, owner="Knowledge base")
+    assert len(attempts) == 2, "a failed open was never tried again"
+
+
+def test_every_route_that_starts_model_calls_checks_readiness_first(client, monkeypatch):
+    """Approve, send back and redo used to start the next phase on whatever the
+    default had become — `run` and `resume` asked first, these did not."""
+    from app.router.router import Readiness, router as model_router
+
+    pid = _create(client, require_approval=True)
+    client.post(f"/api/projects/{pid}/run")
+    assert client.get(f"/api/projects/{pid}").json()["status"] == "awaiting_approval"
+
+    monkeypatch.setattr(
+        model_router,
+        "readiness",
+        lambda *a, **k: Readiness(ok=False, reason="The default can't write."),
+    )
+    calls = {
+        "approve": client.post(f"/api/projects/{pid}/approve"),
+        "reject": client.post(f"/api/projects/{pid}/reject", json={"feedback": "Tighter."}),
+        "redo": client.post(
+            f"/api/projects/{pid}/redo",
+            json={"phase": "product_manager", "feedback": "Tighter."},
+        ),
+    }
+    for route, response in calls.items():
+        assert response.status_code == 409, f"/{route} started a phase it could not run"
+        assert "can't write" in response.json()["detail"]
+    # Refused before the claim, so the build is exactly where it was.
+    assert client.get(f"/api/projects/{pid}").json()["status"] == "awaiting_approval"

@@ -216,6 +216,15 @@ class ProjectOut(BaseModel):
     model_config = {"from_attributes": True, "populate_by_name": True}
 
 
+class PreflightRequest(BaseModel):
+    """The routing half of a build, asked about before the build exists."""
+
+    routing_mode: str = Field(..., description="auto | manual | local_only")
+    preferred_model: Optional[str] = Field(
+        None, description="`provider:model` pinned to the run, for Manual routing."
+    )
+
+
 class ApprovalRequest(BaseModel):
     feedback: Optional[str] = Field(
         None, description="Optional guidance, required-ish when rejecting."

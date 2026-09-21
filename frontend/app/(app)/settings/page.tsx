@@ -9,6 +9,7 @@ import {
   RoleRow,
   RoleSettings,
 } from "@/lib/api";
+import { canRunABuild, runtimeSays } from "@/lib/capabilities";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
@@ -187,7 +188,29 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
             </div>
           )}
 
-          {status?.reachable && status.has_default && model && (
+          {/* The same verdict the composer and the run itself act on. One warning,
+              here, beside the "Use this" buttons that are the way out of it. */}
+          {status?.reachable &&
+            status.has_default &&
+            model &&
+            !canRunABuild(model, status.cannot_build) && (
+              <div className="notice notice-warn" role="status">
+                {Icon.alert}
+                <div className="notice-body">
+                  <span className="notice-title">
+                    <span className="mono">{model}</span> can&apos;t run a build
+                  </span>
+                  <span className="notice-text">
+                    The runtime {runtimeSays(status.model_capabilities?.[model] ?? [])} — it
+                    can&apos;t write, and every agent has to. Builds refuse to start on it,
+                    however each agent below is set. Choose a model that writes from the list
+                    below.
+                  </span>
+                </div>
+              </div>
+            )}
+
+          {status?.reachable && status.has_default && model && canRunABuild(model, status.cannot_build) && (
             <div className="notice">
               <span className="dot dot-ok" style={{ marginTop: 7 }} aria-hidden="true" />
               <div className="notice-body">
@@ -214,7 +237,12 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
             </div>
           )}
 
-          {status?.profile && <ModelCapability profile={status.profile} />}
+          {/* The window, the prompt budget and the notes on them describe a model
+              writing. For one that cannot, they contradicted the warning above —
+              "it will follow the required output shape" of an embedding model. */}
+          {status?.profile && model && canRunABuild(model, status.cannot_build) && (
+            <ModelCapability profile={status.profile} />
+          )}
 
           {status?.reachable && !status.has_default && model && (
             <div className="notice notice-warn">
@@ -262,10 +290,27 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                 <ul className="model-rows">
                   {status.models.map((m) => {
                     const current = m === model;
+                    // Asked of the runtime, never of the name. A model that only
+                    // makes embeddings is a working model doing a different job:
+                    // it is named and kept, and the one thing it cannot be is the
+                    // model eight agents write with. The badge below prints what
+                    // the runtime actually said rather than a word for the kind of
+                    // model we assume it is — the rule upstream is only that
+                    // `completion` is absent.
+                    const canBuild = canRunABuild(m, status.cannot_build);
+                    const reported = status.model_capabilities?.[m] ?? [];
                     return (
                       <li key={m} className="model-row" data-current={current || undefined}>
                         <span className="model-row-name mono">{m}</span>
-                        {status.code_models.includes(m) && (
+                        {!canBuild && (
+                          <span
+                            className="badge"
+                            title={`The runtime ${runtimeSays(reported)}. It can't write, so no agent can run on it — which is why it isn't offered as a build model.`}
+                          >
+                            {reported.length > 0 ? `${reported.join(" · ")} only` : "can't write"}
+                          </span>
+                        )}
+                        {canBuild && status.code_models.includes(m) && (
                           <span
                             className="badge"
                             title="Its name suggests it was trained on code — a guess from the name, not a measurement."
@@ -282,7 +327,12 @@ function LocalModelCard({ onModelsChanged }: { onModelsChanged: () => void }) {
                           <button
                             className="btn btn-sm"
                             onClick={() => select(m)}
-                            disabled={busy}
+                            disabled={busy || !canBuild}
+                            title={
+                              canBuild
+                                ? undefined
+                                : `The runtime ${runtimeSays(reported)}. It can't write, so every agent would fail on its first call.`
+                            }
                             aria-label={`Run agents on ${m} by default`}
                           >
                             {selecting === m && <span className="btn-spinner" aria-hidden="true" />}
@@ -626,15 +676,37 @@ function RoleLine({
   // rather than snapping back to a default it is not using.
   const options = useMemo(() => {
     // Embeddings run against Ollama's own endpoint and nothing else, so offering a
-    // cloud model here would be offering a choice that cannot be honoured.
-    const all =
-      row.role === "embeddings"
-        ? [...state.local_models]
-        : [...state.local_models, ...state.cloud_models];
+    // cloud model here would be offering a choice that cannot be honoured — and it
+    // is the one role an embedding-only model is the *right* answer for, so the
+    // capability filter below deliberately does not apply to it.
+    if (row.role === "embeddings") {
+      const all = [...state.local_models];
+      return row.assigned && !all.includes(row.assigned) ? [...all, row.assigned] : all;
+    }
+    // Every other role is an agent that has to write. Same rule and same map as the
+    // build picker, so a model missing from one is missing from both.
+    const all = [
+      ...state.local_models.filter((m) => canRunABuild(m, state.cannot_build)),
+      ...state.cloud_models,
+    ];
     return row.assigned && !all.includes(row.assigned) ? [...all, row.assigned] : all;
-  }, [state.local_models, state.cloud_models, row.assigned, row.role]);
+  }, [state.local_models, state.cloud_models, state.cannot_build, row.assigned, row.role]);
   const missing =
     Boolean(row.assigned) && row.provider === "ollama" && !state.local_models.includes(row.model ?? "");
+  // The explicit list above is filtered, but "Default" is the value every unpinned
+  // row holds — so a default that cannot write would otherwise sit in each select
+  // reading as a perfectly good choice. Embeddings is exempt for the same reason it
+  // is exempt from the filter.
+  const defaultCannotWrite =
+    row.role !== "embeddings" && !canRunABuild(state.default_model, state.cannot_build);
+  // A role pinned to such a model before this check existed (or through the API)
+  // is still shown as set — hiding it would misreport the role — but it is said
+  // plainly, since a build refuses to start while any agent is set to it.
+  const assignedCannotWrite =
+    row.role !== "embeddings" &&
+    Boolean(row.assigned) &&
+    row.provider === "ollama" &&
+    !canRunABuild(row.model ?? "", state.cannot_build);
 
   return (
     <li className="role-row" style={{ ["--agent" as string]: agent?.accent }}>
@@ -655,15 +727,28 @@ function RoleLine({
           disabled={disabled}
           onChange={(e) => onChoose(row.role, e.target.value)}
         >
-          <option value="">Default — {state.default_model}</option>
+          <option value="">
+            Default — {state.default_model}
+            {defaultCannotWrite ? " · can't write" : ""}
+          </option>
           {options.map((m) => (
             <option key={m} value={m}>
               {m}
+              {assignedCannotWrite && m === row.assigned ? " · can't write" : ""}
             </option>
           ))}
         </select>
         {busy && <span className="btn-spinner" aria-hidden="true" />}
       </span>
+      {assignedCannotWrite && (
+        <span className="role-warn" role="status">
+          {Icon.alert}
+          <span>
+            <span className="mono">{row.model}</span> can&apos;t write — a build won&apos;t start
+            while this agent is set to it.
+          </span>
+        </span>
+      )}
       {missing && (
         <span className="role-warn" role="status">
           {Icon.alert}

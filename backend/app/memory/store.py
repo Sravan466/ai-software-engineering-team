@@ -7,10 +7,8 @@ vector store is unavailable.
 from __future__ import annotations
 from typing import Optional
 
-import os
-
-from app.core.config import settings
 from app.core.logging import get_logger
+from app.rag import chroma
 from app.rag.embeddings import OllamaEmbeddingFunction
 
 log = get_logger(__name__)
@@ -20,25 +18,15 @@ _COLLECTION = "project_memory"
 
 class MemoryStore:
     def __init__(self) -> None:
-        self._client = None
         self._collection = None
 
     def _get_collection(self):
-        if self._collection is not None:
-            return self._collection
-        try:
-            import chromadb
-
-            os.makedirs(settings.chroma_persist_dir, exist_ok=True)
-            self._client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
-            self._collection = self._client.get_or_create_collection(
-                name=_COLLECTION,
-                embedding_function=OllamaEmbeddingFunction(),
-                metadata={"hnsw:space": "cosine"},
+        if self._collection is None:
+            # The shared client lives in `app.rag.chroma`, which opens it once,
+            # behind the lock both stores take — see there for why.
+            self._collection = chroma.collection(
+                _COLLECTION, OllamaEmbeddingFunction(), owner="Memory store"
             )
-        except Exception as e:  # noqa: BLE001
-            log.warning("Memory store disabled (Chroma init failed): %s", e)
-            return None
         return self._collection
 
     def remember(self, project_id: str, idea: str, summary: str) -> None:

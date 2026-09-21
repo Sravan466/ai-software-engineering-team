@@ -285,6 +285,12 @@ export const api = {
 
   // ── Pipeline control — all of these return in well under a second ──
   run: (id: string) => req<RunResponse>(`/api/projects/${id}/run`, { method: "POST" }),
+  /** Would a build with these settings start? The same answer `run` will give. */
+  preflight: (body: { routing_mode: string; preferred_model?: string }) =>
+    req<Preflight>("/api/projects/preflight", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   approve: (id: string) =>
     req<RunResponse>(`/api/projects/${id}/approve`, { method: "POST" }),
   reject: (id: string, feedback: string) =>
@@ -583,12 +589,40 @@ export type LocalStatus = {
   /** Null while Ollama is unreachable or the default model isn't pulled yet. */
   profile: ModelProfile | null;
   /**
+   * What each pulled model says it can do — `completion`, `embedding`, `tools`,
+   * `vision`, and whatever a runtime reports next. Keyed by model name.
+   *
+   * A model is a key here only when the runtime answered about it. One that is
+   * **absent is unknown, not incapable**, and readers have to keep it: an older
+   * runtime reports no capabilities at all, and a rule that hid everything it
+   * serves would empty the picker on exactly the setups least able to say why.
+   */
+  model_capabilities: ModelCapabilities;
+  /**
+   * Models the runtime says cannot complete text, so cannot run a build. Decided by
+   * the backend and read as-is — see `lib/capabilities.ts` for why the page no longer
+   * re-derives it. May include the default under the name it is configured by.
+   */
+  cannot_build: string[];
+  /**
    * Pulled models whose name suggests they were trained for code. A suggestion for
    * the code phases, derived from what you actually have — never a default the
    * router reaches for, because a name is not a capability.
    */
   code_models: string[];
 };
+
+/** The server's answer to "would this build start?", asked before one is created. */
+export type Preflight = {
+  ok: boolean;
+  /** One sentence, ready to show. Null when the build can start. */
+  reason: string | null;
+  /** True when the local runtime itself is not answering. */
+  unreachable: boolean;
+};
+
+/** `{ "nomic-embed-text": ["embedding"] }` — see `LocalStatus.model_capabilities`. */
+export type ModelCapabilities = Record<string, string[]>;
 
 /** One role a model can be chosen for: the eight agents, plus the support tasks. */
 export type RoleRow = {
@@ -614,6 +648,9 @@ export type RoleSettings = {
    * was missing `codellama`, which the other card was already badging as code.
    */
   code_models: string[];
+  /** The same view `LocalStatus` carries, decided by the same rule. */
+  model_capabilities: ModelCapabilities;
+  cannot_build: string[];
   /** `provider:model` for each cloud provider with a key configured. */
   cloud_models: string[];
 };
