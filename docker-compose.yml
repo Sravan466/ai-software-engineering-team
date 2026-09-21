@@ -1,4 +1,5 @@
-# Local stack: Ollama (local models) + backend + frontend.
+# Local stack: a model runtime (Ollama here) + backend + frontend. Any other local
+# runtime works the same way — name it in LOCAL_SOURCES below, or add it in Settings.
 # Postgres is included but optional — SQLite is the default; uncomment DATABASE_URL to use it.
 services:
   ollama:
@@ -19,11 +20,16 @@ services:
     env_file:
       - .env
     environment:
-      # Reach the Ollama service by its compose hostname.
-      OLLAMA_BASE_URL: http://ollama:11434
-      # A sibling container, not another computer: it shares this host's RAM, so
-      # the context window must still be clamped by it. The hostname cannot say so.
-      OLLAMA_SAME_MACHINE: "true"
+      # Inside this container, loopback is the container itself, so the runtime is
+      # named rather than found: reached by its compose hostname, with a label that
+      # keeps its source id stable across restarts. `same_machine`: a sibling
+      # container, not another computer — it shares this host's RAM, so the context
+      # window must still be clamped by it. The hostname cannot say so.
+      LOCAL_SOURCES: '[{"label": "Ollama", "base_url": "http://ollama:11434", "runtime": "ollama", "same_machine": true}]'
+      LOCAL_DETECT: "false"
+      # Blank the deprecated address an older .env may carry: inside this container
+      # `localhost` is not the runtime, and it would only be listed as unreachable.
+      OLLAMA_BASE_URL: ""
       CORS_ORIGINS: http://localhost:3000
       # DATABASE_URL: postgresql+psycopg://aiteam:aiteam@postgres:5432/aiteam
     volumes:

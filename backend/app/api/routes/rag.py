@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -28,15 +29,17 @@ async def upload_document(
     db.refresh(doc)
 
     chunks = chunk_text(text)
-    stored = knowledge_base.add_chunks(doc.id, chunks, doc.filename)
+    # Embedding calls a model runtime over the network. Off the event loop, so one
+    # upload does not stall every other request while the runtime works.
+    stored = await run_in_threadpool(knowledge_base.add_chunks, doc.id, chunks, doc.filename)
     doc.chunks = stored
     db.commit()
 
     if stored == 0:
         raise HTTPException(
             503,
-            "Document saved but indexing failed — is Ollama running with the embedding "
-            "model pulled? (`ollama pull nomic-embed-text`)",
+            "Document saved but indexing failed — no local runtime is serving an embedding "
+            "model, or the one chosen isn't answering. Settings shows which one is in use.",
         )
     return {"id": doc.id, "filename": doc.filename, "chunks": stored}
 

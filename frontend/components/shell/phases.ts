@@ -61,7 +61,7 @@ export const ROUTING_MODES: RoutingModeMeta[] = [
     id: "local",
     label: "Local",
     backend: "local_only",
-    hint: "Runs entirely on your own machine through Ollama. Free, private, slower.",
+    hint: "Runs entirely on models you host, on whichever local runtime serves them. Free, private, slower.",
   },
   {
     id: "auto",

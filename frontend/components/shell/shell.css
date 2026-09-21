@@ -188,7 +188,7 @@
 .sb-link svg { width: 16px; height: 16px; flex: none; color: var(--ink-3); }
 .sb-link:hover svg, .sb-link[aria-current="page"] svg { color: var(--ink-2); }
 
-/* Runtime status. Ollama being down means the product cannot build anything,
+/* Runtime status. No local runtime answering means the product cannot build anything,
    so it is a button that explains itself — not a dim caption. */
 .sb-runtime {
   display: flex;
@@ -771,6 +771,87 @@
 .model-row:hover .btn,
 .model-row .btn:focus-visible { opacity: 1; }
 
+/* ── Local model sources ────────────────────────────────────────────────────
+   One block per source, read top to bottom like a rack: a status line, where it
+   is, then what it serves. Whether it answers is said in words beside the dot —
+   never by the dot's colour alone — and a source that stopped keeps its place in
+   the list, dimmed, rather than vanishing along with the choices made for it. */
+.source-list { display: flex; flex-direction: column; margin: 18px 0 0; padding: 0; list-style: none; }
+.source { padding: 16px 0 14px; border-top: 1px solid var(--line); }
+.source:first-child { border-top: 0; padding-top: 4px; }
+.source-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.source-head > .dot { margin-top: 1px; }
+.source-name { margin: 0; font-size: var(--t-base); font-weight: 600; color: var(--ink); }
+.source-runtime { font-size: var(--t-sm); color: var(--ink-3); }
+.source-state { font-size: var(--t-xs); font-weight: 600; letter-spacing: 0.02em; color: var(--ok); }
+.source-state-down { color: var(--warn); }
+.source-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.source-address {
+  margin: 4px 0 10px 17px;
+  font-size: var(--t-xs);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.source[data-down] .source-address { color: var(--ink-3); }
+.source .model-rows { margin-left: 7px; }
+.source-note { margin: 0 0 0 17px; }
+.source .model-rows + .source-note,
+.source .model-rows + .source-download { margin-top: 10px; }
+.source-note svg { width: 12px; height: 12px; vertical-align: -1px; }
+.source-download { margin: 12px 0 0 17px; }
+.source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 10px 0 0 11px;
+}
+.source-actions .btn-ghost svg { width: 14px; height: 14px; }
+.source-key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.source-key .input { min-width: 220px; min-height: 32px; }
+.source-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* Answered on loopback, recognised by nothing: listed so the answer is visible,
+   never used until someone says what it is. */
+.source-unknown { margin-top: 18px; }
+.unknown-rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.unknown-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.unknown-row:first-child { border-top: 0; }
+.unknown-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.unknown-url { font-size: var(--t-sm); color: var(--ink); }
+
+/* Adding a source is the rarer act, so it waits behind one button. */
+.source-add { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.source-add-closed { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.source-add-closed svg { width: 14px; height: 14px; }
+.source-form { display: flex; flex-direction: column; gap: 12px; }
+.source-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.source-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* The remote confirmation is a notice you tick: the warning and the decision are
+   one object, so the box cannot be ticked without the sentence beside it. */
+.check-line { cursor: pointer; align-items: flex-start; }
+.check-line input[type="checkbox"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.check-line input[type="checkbox"]:disabled { cursor: not-allowed; }
+
 /* ── Which model each agent runs on ─────────────────────────────────────────
    A table, not eight cards: the question is "what is each of these set to?",
    which is a scan down one column. The sprite carries the identity, so the row
@@ -1075,6 +1156,12 @@
   .role-what { white-space: normal; }
   /* No hover on a touch device, so a control that resolves on hover never does. */
   .model-row .btn { opacity: 1; }
+  /* A source's badges drop under its name; the address and models lose their indent. */
+  .source-badges { margin-left: 0; width: 100%; }
+  .source-address, .source-note, .source-download { margin-left: 0; }
+  .source .model-rows, .source-actions { margin-left: 0; }
+  .source-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .unknown-row { flex-direction: column; align-items: flex-start; }
   .composer-page { padding: 5vh 16px 56px; }
   .composer-h1 { line-height: 1.4; }
   .build-head h1 { font-size: var(--t-xl); }

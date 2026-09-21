@@ -4,10 +4,11 @@ All settings have offline-friendly defaults so the platform runs with zero API k
 """
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import BeforeValidator
+from pydantic import AliasChoices, BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Annotated
 
@@ -46,12 +47,24 @@ def BlankTolerantFloat(default: float):  # noqa: N802
     return Annotated[float, BeforeValidator(_blank_is_default(default))]
 
 
+def _renamed(name: str, *old: str) -> AliasChoices:
+    """Read a setting under its runtime-neutral name first, then its old ones.
+
+    The context ceiling, the RAM share and the same-machine flag apply to any local
+    runtime, but they were named after one. Renaming them would break every `.env`
+    written before, so the old names stay readable as deprecated aliases, and the
+    new name wins when both are set.
+    """
+    return AliasChoices(name, *old)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     # ── App ──
@@ -70,10 +83,29 @@ class Settings(BaseSettings):
 
     # ── Routing ──
     default_routing_mode: str = "local_only"  # auto | manual | local_only
-    ollama_base_url: str = "http://localhost:11434"
-    #: The local model every role falls back to — the one place a model name is
-    #: configured at all. Settings writes the user's choice over it at runtime.
-    ollama_default_model: str = "qwen2.5:7b"
+    #: Local model sources beyond the ones found on this machine, comma-separated:
+    #: `http://127.0.0.1:1234`, or `label=url`. A JSON list of objects
+    #: (`label`, `base_url`, `api_key`, `runtime`, `same_machine`) says more. An
+    #: address on another computer is honoured here because whoever edits this file
+    #: runs the backend; the Settings page asks for explicit confirmation instead.
+    local_sources: str = ""
+    #: Look for model runtimes on this machine — loopback only, on the default ports
+    #: in the runtime adapter table. Nothing beyond loopback is ever probed.
+    local_detect: bool = True
+    #: Deprecated: a runtime address from before model sources existed. Set, it is
+    #: one more configured source; unset, the runtime is found on loopback anyway.
+    ollama_base_url: Optional[str] = None
+    #: The local model every role falls back to, when nobody has chosen one in
+    #: Settings. `source:model`, or a bare model name looked up on every running
+    #: source. Nothing found under it, the first model that can write is used.
+    local_default_model: str = Field(
+        "qwen2.5:7b", validation_alias=_renamed("local_default_model", "ollama_default_model")
+    )
+    #: Sampling sent with every call to an OpenAI-compatible runtime. Sent always,
+    #: because some servers default to a greedy temperature or a 512-token reply
+    #: that no agent asked for. Callers that set their own temperature win.
+    local_temperature: BlankTolerantFloat(0.7) = 0.7
+    local_top_p: BlankTolerantFloat(0.9) = 0.9
     #: Extra `provider:model` links to try after the primary choice, comma-separated.
     #: Deliberately empty. The router already appends the local default as the last
     #: link of every chain, so naming a model here as well wrote it down twice —
@@ -91,19 +123,25 @@ class Settings(BaseSettings):
 
     # ── Model capability & prompt budgets ──
     # Nothing below is a context size this app assumes about a local model. That
-    # window is probed from the model itself (`POST /api/show`) and clamped by RAM;
-    # these are the ceilings and the last resorts, all of them user-settable.
+    # window is asked of the runtime serving the model and clamped by RAM; these are
+    # the ceilings and the last resorts, all of them user-settable.
     #: Lower the local context window to at most this many tokens (unset = only the
     #: model's own limit and RAM decide). Useful for handing memory back.
-    ollama_context_ceiling: OptionalInt = None
-    #: Whether the model runtime shares this machine's memory, when its address
-    #: cannot say. Unset, a loopback URL means yes and any other host means no —
-    #: right for a runtime on another computer, wrong for one in a sibling container
-    #: on the same host (`http://ollama:11434` under docker compose), which shares
-    #: this machine's RAM and needs the clamp. Set it true there.
-    ollama_same_machine: OptionalBool = None
+    local_context_ceiling: OptionalInt = Field(
+        None, validation_alias=_renamed("local_context_ceiling", "ollama_context_ceiling")
+    )
+    #: Whether a source on another hostname shares this machine's memory. Unset, a
+    #: loopback URL means yes and any other host means no — right for a runtime on
+    #: another computer, wrong for one in a sibling container on the same host
+    #: (a compose service name), which shares this machine's RAM and needs the
+    #: clamp. Set it true there.
+    local_same_machine: OptionalBool = Field(
+        None, validation_alias=_renamed("local_same_machine", "ollama_same_machine")
+    )
     #: Share of physical RAM the KV cache may claim once the weights are loaded.
-    ollama_ram_fraction: BlankTolerantFloat(0.6) = 0.6
+    local_ram_fraction: BlankTolerantFloat(0.6) = Field(
+        0.6, validation_alias=_renamed("local_ram_fraction", "ollama_ram_fraction")
+    )
     #: The window assumed *only* when a provider will not report one at all.
     model_context_fallback_tokens: BlankTolerantInt(8192) = 8192
     #: Ceiling on tokens one call may generate. The resolved window can lower this,
@@ -217,6 +255,9 @@ class Settings(BaseSettings):
 
     # ── Vector store ──
     chroma_persist_dir: str = "./data/chroma"
+    #: The embedding model to look for when nobody has chosen one in Settings:
+    #: `source:model`, or a bare name looked up on every running source. Not found,
+    #: the first model a runtime reports as embedding-only is used.
     embedding_model: str = "nomic-embed-text"
 
     # ── Pipeline ──
@@ -235,8 +276,42 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
+    def configured_sources(self) -> list[dict]:
+        """`LOCAL_SOURCES`, plus the deprecated runtime address when it was set.
+
+        Each entry is `{label?, base_url, api_key?, runtime?, same_machine?}`. A
+        malformed JSON value is not a startup failure — it reads as no sources, and
+        the Settings page shows the runtimes it can find instead.
+        """
+        entries: list[dict] = []
+        raw = (self.local_sources or "").strip()
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = []
+            entries += [e for e in parsed if isinstance(e, dict) and e.get("base_url")]
+        elif raw:
+            for item in raw.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                label, sep, url = item.partition("=")
+                entries.append(
+                    {"label": label.strip(), "base_url": url.strip()}
+                    if sep and "://" not in label
+                    else {"base_url": item}
+                )
+        if self.ollama_base_url and self.ollama_base_url.strip():
+            # This name only ever held one runtime's address, so the source is that
+            # runtime, under that runtime's id — which is what choices saved before
+            # model sources existed refer to.
+            entries.append({"base_url": self.ollama_base_url.strip(), "runtime_hint": "legacy"})
+        return entries
+
+    @property
     def fallback_pairs(self) -> list[tuple[str, str]]:
-        """Parse FALLBACK_CHAIN like 'ollama:qwen2.5:7b,anthropic:claude-opus-4-8'.
+        """Parse FALLBACK_CHAIN like 'source:model,anthropic:claude-opus-4-8'.
 
         Only the first ':' separates provider from model, so model names containing
         a colon (e.g. 'qwen2.5:7b') survive intact.

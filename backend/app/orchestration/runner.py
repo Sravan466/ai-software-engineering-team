@@ -726,6 +726,7 @@ class PipelineRunner:
         row.content_md = lr["content_md"]
         row.model_used = lr.get("model_used")
         row.provider_used = lr.get("provider_used")
+        row.is_local = lr.get("is_local")
         row.latency_ms = int(lr.get("latency_ms") or 0)
         row.total_tokens = int(usage.get("total_tokens") or 0)
         row.schema_status = lr.get("schema_status")
@@ -1042,6 +1043,7 @@ class PipelineRunner:
                 "usage": lr.get("usage") or {},
                 "latency_ms": lr.get("latency_ms", 0),
                 "fallback_used": lr.get("fallback_used", False),
+                "is_local": lr.get("is_local"),
             }
         ]
         for call in calls:
@@ -1053,6 +1055,7 @@ class PipelineRunner:
                 usage=Usage(**usage) if usage else Usage(),
                 latency_ms=call.get("latency_ms", 0),
                 fallback_used=call.get("fallback_used", False),
+                is_local=call.get("is_local"),
             )
             tracker.record(db, response=resp, project_id=project.id, phase=lr["phase"])
 
@@ -1078,6 +1081,7 @@ class PipelineRunner:
                     provider=record.get("_provider", "unknown"),
                     model=record.get("_model", "unknown"),
                     usage=Usage(**usage),
+                    is_local=record.get("_is_local"),
                 )
                 tracker.record(db, response=resp, project_id=project.id, phase="debate")
         db.commit()

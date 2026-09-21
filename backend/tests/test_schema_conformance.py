@@ -30,9 +30,11 @@ from app.router.model_profile import (
     ModelProfile,
     build_profile,
     fallback_profile,
-    kv_bytes_per_token,
     resolve_window,
 )
+from app.router.runtimes.ollama import OllamaAdapter, info_from_show, kv_bytes_per_token
+from app.router.runtimes.provider import Source, SourceProvider
+from app.router.runtimes.types import ChatRequest
 from app.schemas.agent_outputs import (
     CostEstimationOutput,
     DevOpsEngineerOutput,
@@ -57,6 +59,19 @@ SHOW = {
 }
 
 
+def _info(show: dict = None, *, supports_schema: bool = True, model: str = "qwen2.5:7b"):
+    """What the Ollama adapter makes of one `/api/show` payload."""
+    return info_from_show(model, SHOW if show is None else show, supports_schema=supports_schema)
+
+
+def _ollama(base_url: str = "http://localhost:11434", source_id: str = "ollama") -> SourceProvider:
+    """A source served by the Ollama adapter, as the router registers one."""
+    return SourceProvider(
+        Source(id=source_id, label="Ollama", base_url=base_url, runtime="ollama", origin="configured"),
+        OllamaAdapter(base_url),
+    )
+
+
 class _Project:
     """The two fields `decide_gate` reads off the live row."""
 
@@ -70,8 +85,7 @@ def test_context_window_comes_from_the_model_not_a_literal():
     profile = build_profile(
         provider="ollama",
         model="qwen2.5:7b",
-        show=SHOW,
-        supports_schema_format=True,
+        info=_info(),
         ram_bytes=64 * 2**30,  # plenty, so the model's own limit is the binding one
     )
     assert profile.context_limit == 32768
@@ -90,7 +104,7 @@ def test_the_kv_cache_cost_is_computed_from_the_model_not_guessed():
 def test_a_small_machine_clamps_the_window_instead_of_swapping(monkeypatch):
     from app.router import model_profile
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", None)
     window, reason = resolve_window(
         context_limit=32768,
         kv_bytes_per_token=kv_bytes_per_token(SHOW["model_info"], "qwen2"),
@@ -110,7 +124,7 @@ def test_an_ordinary_laptop_is_not_clamped_into_uselessness(monkeypatch):
     """
     from app.router import model_profile
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", None)
     window, _ = resolve_window(
         context_limit=32768,
         kv_bytes_per_token=kv_bytes_per_token(SHOW["model_info"], "qwen2"),
@@ -135,8 +149,7 @@ def test_small_models_are_flagged_rather_than_left_to_puzzle_the_user():
     profile = build_profile(
         provider="ollama",
         model="tiny",
-        show=tiny,
-        supports_schema_format=True,
+        info=_info(tiny, model="tiny"),
         ram_bytes=64 * 2**30,
     )
     assert profile.is_small
@@ -145,37 +158,34 @@ def test_small_models_are_flagged_rather_than_left_to_puzzle_the_user():
 
 def test_the_ollama_request_carries_the_window_and_the_output_budget():
     """The whole bug in one assertion: these two keys were absent from every call."""
-    from app.router.providers.ollama import OllamaProvider
-
-    provider = OllamaProvider()
-    profile = ModelProfile(
-        provider="ollama",
-        model="m",
-        context_limit=32768,
-        context_window=32768,
-        max_output_tokens=4096,
-        supports_schema_format=True,
-    )
+    adapter = OllamaAdapter("http://localhost:11434")
     schema = get_agent(Phase.SECURITY_ENGINEER.value).response_schema()
-    payload = provider._payload(
-        [], "m", GenerationOptions(json_mode=True, json_schema=schema), profile, schema=True
+    payload = adapter._payload(
+        ChatRequest(
+            model="m",
+            messages=[],
+            max_tokens=4096,
+            context_window=32768,
+            json_mode=True,
+            json_schema=schema,
+            structured_output="schema",
+        ),
+        schema=True,
     )
     assert payload["options"]["num_ctx"] == 32768
     assert payload["options"]["num_predict"] == 4096
     # …and `format` carries the shape, not merely the word "json".
     assert payload["format"] == schema
 
-    downgraded = provider._payload(
-        [],
-        "m",
-        GenerationOptions(json_mode=True, json_schema=schema),
-        ModelProfile(
-            provider="ollama",
+    downgraded = adapter._payload(
+        ChatRequest(
             model="m",
-            context_limit=8192,
+            messages=[],
+            max_tokens=2048,
             context_window=8192,
-            max_output_tokens=2048,
-            supports_schema_format=False,
+            json_mode=True,
+            json_schema=schema,
+            structured_output="json",
         ),
         schema=True,
     )
@@ -199,17 +209,14 @@ def test_schema_constrained_decoding_degrades_rather_than_failing(
     """Every path out of "this model can't be grammar-constrained" is plain JSON mode."""
     from unittest.mock import patch
 
-    from app.router.providers.ollama import OllamaProvider
-
-    provider = OllamaProvider()
-    provider._version = version
+    provider = _ollama()
     show = {
         "capabilities": capabilities,
         "details": {"family": "qwen2"},
         "model_info": {"general.architecture": "qwen2", "qwen2.context_length": 8192},
     }
-    with patch.object(OllamaProvider, "_show", return_value=show), patch.object(
-        OllamaProvider, "server_version", return_value=version
+    with patch.object(OllamaAdapter, "_show", return_value=show), patch.object(
+        OllamaAdapter, "server_version", return_value=version
     ):
         profile = provider.profile(f"m-{why}")
 
@@ -226,7 +233,6 @@ def test_a_failure_that_was_never_about_the_schema_keeps_its_advice():
     import httpx
 
     from app.router.base import ProviderError
-    from app.router.providers.ollama import OllamaProvider
 
     class _NotFound:
         status_code = 404
@@ -235,8 +241,8 @@ def test_a_failure_that_was_never_about_the_schema_keeps_its_advice():
         def raise_for_status(self):
             raise httpx.HTTPStatusError("404", request=None, response=self)
 
-    provider = OllamaProvider()
-    with patch.object(OllamaProvider, "_show", return_value=None), patch(
+    provider = _ollama()
+    with patch.object(OllamaAdapter, "_show", return_value=None), patch(
         "httpx.post", return_value=_NotFound()
     ):
         with pytest.raises(ProviderError) as caught:
@@ -629,11 +635,14 @@ def test_unattended_still_means_unattended():
 
 # ── 5. what a review pass found, kept found ──────────────────────────────────
 def test_a_setting_left_blank_does_not_take_the_app_down():
-    """`.env.example` ships `OLLAMA_CONTEXT_CEILING=` and the README says to copy it."""
+    """`.env.example` ships `LOCAL_CONTEXT_CEILING=` and the README says to copy it —
+    and older copies still say `OLLAMA_CONTEXT_CEILING=`, which must read the same."""
     from app.core.config import Settings
 
-    assert Settings(_env_file=None, ollama_context_ceiling="").ollama_context_ceiling is None
-    assert Settings(_env_file=None, ollama_context_ceiling="4096").ollama_context_ceiling == 4096
+    assert Settings(_env_file=None, local_context_ceiling="").local_context_ceiling is None
+    assert Settings(_env_file=None, local_context_ceiling="4096").local_context_ceiling == 4096
+    assert Settings(_env_file=None, ollama_context_ceiling="").local_context_ceiling is None
+    assert Settings(_env_file=None, ollama_context_ceiling="4096").local_context_ceiling == 4096
 
 
 def test_a_null_does_not_mask_the_alias_that_holds_the_findings():
@@ -774,12 +783,12 @@ def test_a_configured_ceiling_is_not_overridden_by_a_floor(monkeypatch):
     from app.core import config
     from app.router import model_profile
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", 2048)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", 2048)
     window, reason = model_profile.resolve_window(
         context_limit=32768, kv_bytes_per_token=None, ram_bytes=None
     )
     assert window == 2048
-    assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
+    assert "LOCAL_CONTEXT_CEILING" in (reason or "")
 
 
 def test_a_ram_estimate_below_what_runs_is_floored_and_says_so(monkeypatch):
@@ -790,7 +799,7 @@ def test_a_ram_estimate_below_what_runs_is_floored_and_says_so(monkeypatch):
     """
     from app.router import model_profile
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", None)
     window, reason = model_profile.resolve_window(
         context_limit=32768,
         kv_bytes_per_token=57344,
@@ -817,20 +826,18 @@ def test_a_user_set_ceiling_is_never_floored(monkeypatch):
     """A cap someone typed is a fact about what they want, not an estimate to correct."""
     from app.router import model_profile
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", 1024)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", 1024)
     window, reason = model_profile.resolve_window(
         context_limit=32768, kv_bytes_per_token=None, ram_bytes=None
     )
     assert window == 1024, "the floor overrode a ceiling the user set"
-    assert "OLLAMA_CONTEXT_CEILING" in (reason or "")
+    assert "LOCAL_CONTEXT_CEILING" in (reason or "")
 
 
-def test_the_ram_clamp_is_skipped_when_ollama_is_on_another_machine():
+def test_the_ram_clamp_is_skipped_when_the_runtime_is_on_another_machine():
     """This process's RAM says nothing about a KV cache allocated somewhere else."""
-    from app.router.providers.ollama import OllamaProvider
-
-    assert OllamaProvider("http://localhost:11434").is_same_machine()
-    assert not OllamaProvider("http://ollama.internal:11434").is_same_machine()
+    assert _ollama("http://localhost:11434").is_same_machine()
+    assert not _ollama("http://ollama.internal:11434").is_same_machine()
 
 
 @pytest.mark.parametrize(
@@ -840,7 +847,7 @@ def test_the_ram_clamp_is_skipped_when_ollama_is_on_another_machine():
 def test_version_parsing_pads_and_refuses(text, expected):
     """`"0.5"` as `(0, 5)` compares below `(0, 5, 0)` — rejecting the first release
     that supports the feature being checked for."""
-    from app.router.providers.ollama import _parse_version
+    from app.router.runtimes.ollama import _parse_version
 
     assert _parse_version(text) == expected
 
@@ -848,9 +855,7 @@ def test_version_parsing_pads_and_refuses(text, expected):
 def test_an_unreadable_version_is_retried_rather_than_cached():
     from unittest.mock import patch
 
-    from app.router.providers.ollama import OllamaProvider
-
-    provider = OllamaProvider()
+    provider = OllamaAdapter("http://localhost:11434")
     with patch("httpx.get") as get:
         get.return_value.json.return_value = {"version": "unknown"}
         get.return_value.raise_for_status.return_value = None
@@ -1017,19 +1022,19 @@ def test_a_runtime_on_another_machine_is_not_clamped_by_this_machines_ram(monkey
     passed before the fix and after it.
     """
     from app.router import model_profile
-    from app.router.providers import ollama as ollama_module
-    from app.router.providers.ollama import OllamaProvider
+    from app.router.runtimes import provider as provider_module
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", None)
+    monkeypatch.setattr(model_profile.settings, "local_same_machine", None)
     # Far too little for a 32k window of this model's KV cache — so if this figure
     # is consulted at all, the assertion below fails.
     monkeypatch.setattr(model_profile, "total_ram_bytes", lambda: 2 * 2**30)
-    monkeypatch.setattr(ollama_module, "total_ram_bytes", lambda: 2 * 2**30)
+    monkeypatch.setattr(provider_module, "total_ram_bytes", lambda: 2 * 2**30)
 
     def _probed(base_url: str):
-        prov = OllamaProvider(base_url)
-        monkeypatch.setattr(prov, "_show", lambda model, **_: SHOW)
-        monkeypatch.setattr(prov, "server_version", lambda: (0, 5, 0))
+        prov = _ollama(base_url)
+        monkeypatch.setattr(prov.adapter, "_show", lambda model, **_: SHOW)
+        monkeypatch.setattr(prov.adapter, "server_version", lambda: (0, 5, 0))
         return prov.profile("qwen2.5:7b")
 
     remote = _probed("http://ollama.internal:11434")
@@ -1047,13 +1052,12 @@ def test_unknown_ram_is_not_silently_replaced_with_this_machines(monkeypatch):
     """The unit underneath: `None` means "do not clamp", never "go and look"."""
     from app.router import model_profile
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", None)
     monkeypatch.setattr(model_profile, "total_ram_bytes", lambda: 2 * 2**30)
     profile = build_profile(
         provider="ollama",
         model="qwen2.5:7b",
-        show=SHOW,
-        supports_schema_format=True,
+        info=_info(),
         ram_bytes=None,
     )
     assert profile.context_window == 32768
@@ -1069,20 +1073,22 @@ EMBEDDING_SHOW = {
 
 
 def _stubbed_local(monkeypatch, models: dict, *, tags_report: bool = False):
-    """Point the router's local provider at a fixed runtime.
+    """Give the router one source, served by the Ollama adapter against a fixed runtime.
 
-    Only the HTTP edge is stubbed. `available()`, `list_models()` and `_tags()` run
-    for real, so a test exercises the caching the tag list does in production rather
-    than a copy of it; and `/api/show` resolves a name the way the runtime does, so
-    `nomic-embed-text` finds `nomic-embed-text:latest`. `tags_report` is whether the
-    tag list carries capabilities (a recent runtime) or leaves them to `/api/show`.
+    Only the HTTP edge is stubbed. The source's state, the tag list and the adapter's
+    caches run for real, so a test exercises the caching the tag list does in
+    production rather than a copy of it; and `/api/show` resolves a name the way the
+    runtime does, so `nomic-embed-text` finds `nomic-embed-text:latest`. `tags_report`
+    is whether the tag list carries capabilities (a recent runtime) or leaves them to
+    `/api/show`.
     """
-    from app.router.model_profile import ProfileCache
-    from app.router.providers import ollama as ollama_module
-    from app.router.providers.ollama import _spellings
+    import time
+
+    from app.router.runtimes import ollama as ollama_module
+    from app.router.runtimes.ollama import _spellings
     from app.router.router import router as model_router
 
-    prov = model_router._providers["ollama"]
+    prov = _ollama()
 
     class _Tags:
         status_code = 200
@@ -1114,14 +1120,26 @@ def _stubbed_local(monkeypatch, models: dict, *, tags_report: bool = False):
         return None
 
     monkeypatch.setattr(ollama_module.httpx, "get", lambda url, **_: _Tags())
-    monkeypatch.setattr(prov, "_show", _show)
-    monkeypatch.setattr(prov, "server_version", lambda: (0, 5, 0))
-    # Swapped rather than emptied: the provider is a process-wide singleton, and
-    # monkeypatch puts the real caches back afterwards — so these stubbed answers
-    # cannot outlive the test that asked for them.
-    monkeypatch.setattr(prov, "_capabilities", {})
-    monkeypatch.setattr(prov, "_profiles", ProfileCache())
+    monkeypatch.setattr(prov.adapter, "_show", _show)
+    monkeypatch.setattr(prov.adapter, "server_version", lambda: (0, 5, 0))
+    # The registry is a process-wide singleton; swapped rather than edited, so the
+    # stubbed source cannot outlive the test that asked for it.
+    monkeypatch.setattr(model_router.sources, "_providers", {"ollama": prov})
+    monkeypatch.setattr(model_router.sources, "_loaded", True)
+    monkeypatch.setattr(model_router.sources, "_detected_at", time.monotonic() + 3600)
+    monkeypatch.setattr(model_router, "_chosen_local", "ollama:qwen2.5:7b")
     return model_router
+
+
+def _down(monkeypatch, prov) -> None:
+    """The runtime stops answering: every list call now fails to connect."""
+    from app.router.base import ProviderError
+
+    def _refused():
+        raise ProviderError("connection refused", unreachable=True)
+
+    monkeypatch.setattr(prov.adapter, "list_models", _refused)
+    prov.invalidate()
 
 
 def test_local_status_says_what_each_pulled_model_can_do(monkeypatch):
@@ -1131,20 +1149,24 @@ def test_local_status_says_what_each_pulled_model_can_do(monkeypatch):
     )
     status = model_router.local_status()
     caps = status["model_capabilities"]
-    assert caps["nomic-embed-text"] == ["embedding"]
-    assert "completion" in caps["qwen2.5:7b"]
+    assert caps["ollama:nomic-embed-text"] == ["embedding"]
+    assert "completion" in caps["ollama:qwen2.5:7b"]
     # The verdict is decided here, once — the pages read it rather than re-derive it.
-    assert status["cannot_build"] == ["nomic-embed-text"]
+    assert status["cannot_build"] == ["ollama:nomic-embed-text"]
     # The same view reaches the per-role picker, so the two cannot disagree.
     roles = model_router.role_settings()
     assert roles["model_capabilities"] == caps
     assert roles["cannot_build"] == status["cannot_build"]
+    # And the source itself is listed, with its models, as one entry among many.
+    (source,) = status["sources"]
+    assert source["id"] == "ollama" and source["reachable"] is True
+    assert {m["spec"] for m in source["models"]} == set(status["models"])
 
 
 def test_a_runtime_that_will_not_say_leaves_the_model_unlisted(monkeypatch):
     """"Did not report" is not "reported nothing", and only one hides a model.
 
-    An Ollama old enough not to return `capabilities` would otherwise have every
+    A runtime old enough not to return `capabilities` would otherwise have every
     model it serves read as incapable — and a picker applying the rule would go
     empty on the runtimes least able to explain why.
     """
@@ -1159,10 +1181,9 @@ def test_a_failed_probe_is_left_alone_briefly_then_asked_again(monkeypatch):
     The failure is remembered as *unknown* — never as a verdict — for a short while,
     then forgotten, so the model is asked again on the next call after that.
     """
-    from app.router.providers import ollama as ollama_module
-    from app.router.providers.ollama import OllamaProvider
+    from app.router.runtimes import ollama as ollama_module
 
-    prov = OllamaProvider("http://localhost:11434")
+    prov = OllamaAdapter("http://localhost:11434")
     asked: list[str] = []
 
     def _show(model, **_):
@@ -1185,13 +1206,12 @@ def test_a_failed_probe_is_left_alone_briefly_then_asked_again(monkeypatch):
 def test_the_tag_list_answers_for_every_model_in_one_round_trip(monkeypatch):
     """A server that reports capabilities in `/api/tags` is not probed again.
 
-    `local_status` is polled by the sidebar. One `/api/show` per pulled model
-    behind every poll is a page that waits on a list it already had — so the real
-    HTTP call is stubbed here rather than the method, to prove the tag list itself
-    is what fills the answer.
+    Local status is polled by the sidebar. One `/api/show` per pulled model behind
+    every poll is a page that waits on a list it already had — so the real HTTP call
+    is stubbed here rather than the method, to prove the tag list itself is what
+    fills the answer.
     """
-    from app.router.providers import ollama as ollama_module
-    from app.router.providers.ollama import OllamaProvider
+    from app.router.runtimes import ollama as ollama_module
 
     class _Response:
         status_code = 200
@@ -1222,8 +1242,10 @@ def test_the_tag_list_answers_for_every_model_in_one_round_trip(monkeypatch):
 
     monkeypatch.setattr(ollama_module.httpx, "post", _refuse)
 
-    prov = OllamaProvider("http://localhost:11434")
-    assert prov.list_models() == ["qwen2.5:7b", "nomic-embed-text:latest"]
+    prov = OllamaAdapter("http://localhost:11434")
+    entries = prov.list_models()
+    assert [e.name for e in entries] == ["qwen2.5:7b", "nomic-embed-text:latest"]
+    assert [e.kind for e in entries] == ["chat", "embedding"]
     assert prov.capabilities("nomic-embed-text:latest") == ("embedding",)
     assert prov.capabilities("qwen2.5:7b") == ("completion", "tools")
     assert calls == ["http://localhost:11434/api/tags"], "the answer cost more than one call"
@@ -1236,59 +1258,54 @@ def test_a_tag_list_that_omits_capabilities_still_gets_probed(monkeypatch):
     Remembering the missing key as "reported nothing" would hide every model it
     serves behind a probe that never runs.
     """
-    from app.router.providers.ollama import OllamaProvider
+    from app.router.runtimes.types import ModelEntry
 
-    prov = OllamaProvider("http://localhost:11434")
-    monkeypatch.setattr(prov, "_tags", lambda: [{"name": "llama3.1:8b"}])
+    prov = OllamaAdapter("http://localhost:11434")
     monkeypatch.setattr(prov, "_show", lambda model, **_: {"capabilities": ["completion"]})
-    assert prov.list_models() == ["llama3.1:8b"]
-    assert prov.capabilities("llama3.1:8b") == ("completion",)
+    described = prov.describe([ModelEntry(name="llama3.1:8b")])
+    assert described["llama3.1:8b"].capabilities == ("completion",)
+    assert described["llama3.1:8b"].kind == "chat"
 
 
-def test_the_default_model_is_a_key_even_when_the_tag_list_spells_it_differently(
-    monkeypatch,
-):
-    """`OLLAMA_MODEL=nomic-embed-text`, tag list says `nomic-embed-text:latest`.
+def test_the_default_is_reported_the_way_the_list_spells_it(monkeypatch):
+    """Default `nomic-embed-text`, tag list says `nomic-embed-text:latest`.
 
-    The UI looks the default up by the string this same payload handed it. Keyed
-    only by tag, that lookup misses and reads as "unknown" — which is the answer
-    that lets the run start, quietly switching off the check that exists to stop
-    a build on a model that cannot write.
+    The UI looks the default up in the same payload's lists. Spelled the configured
+    way, that lookup missed: no row was marked as the default, "Use this" sat on the
+    model already in use, and the capability check read "unknown" — the answer that
+    lets a run start on a model that cannot write. So the default comes back in the
+    list's own spelling, and every lookup finds it.
     """
     model_router = _stubbed_local(
         monkeypatch,
         {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
         tags_report=True,
     )
-    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
+    monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text")
 
     status = model_router.local_status()
-    assert status["default_model"] == "nomic-embed-text"
-    assert status["model_capabilities"]["nomic-embed-text"] == ["embedding"]
-    assert "nomic-embed-text" in status["cannot_build"]
+    assert status["default_model"] == "ollama:nomic-embed-text:latest"
+    assert status["default_model"] in status["models"]
+    assert status["model_capabilities"][status["default_model"]] == ["embedding"]
+    assert status["default_model"] in status["cannot_build"]
 
 
 # ── what the pre-merge review of #40 found ───────────────────────────────────
 def test_a_runtime_that_is_down_costs_the_settings_page_no_probe(monkeypatch):
-    """Nothing is pulled and nothing is answering, so nothing may be asked.
+    """Nothing is listed and nothing is answering, so nothing may be asked.
 
     Asking about the configured default here spent a probe timeout on every
-    Settings poll whenever the runtime was down — the case `local_status` was
-    already written to keep to a single wait.
+    Settings poll whenever the runtime was down — the case local status was already
+    written to keep to a single wait.
     """
-    from app.router.model_profile import ProfileCache
-    from app.router.router import router as model_router
-
-    prov = model_router._providers["ollama"]
+    model_router = _stubbed_local(monkeypatch, {"qwen2.5:7b": SHOW})
+    prov = model_router.source("ollama")
 
     def _refuse(model, **_):
         raise AssertionError(f"probed '{model}' although the runtime is down")
 
-    monkeypatch.setattr(prov, "available", lambda: False)
-    monkeypatch.setattr(prov, "list_models", lambda: [])
-    monkeypatch.setattr(prov, "_show", _refuse)
-    monkeypatch.setattr(prov, "_capabilities", {})
-    monkeypatch.setattr(prov, "_profiles", ProfileCache())
+    _down(monkeypatch, prov)
+    monkeypatch.setattr(prov.adapter, "_show", _refuse)
 
     status = model_router.local_status()
     assert status["reachable"] is False
@@ -1302,7 +1319,7 @@ def test_models_the_tag_list_did_not_describe_are_probed_side_by_side(monkeypatc
 
     shows = {f"model-{i}:latest": SHOW for i in range(3)}
     model_router = _stubbed_local(monkeypatch, shows)  # tags do not report
-    prov = model_router._providers["ollama"]
+    prov = model_router.source("ollama").adapter
 
     together = threading.Barrier(len(shows), timeout=5)
     serial: list[str] = []
@@ -1333,7 +1350,7 @@ def test_readiness_refuses_a_model_that_cannot_write(monkeypatch):
         {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
         tags_report=True,
     )
-    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
+    monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text")
 
     ready = model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=["product_manager"])
     assert not ready.ok
@@ -1342,7 +1359,7 @@ def test_readiness_refuses_a_model_that_cannot_write(monkeypatch):
     assert "ollama" not in (ready.reason or "").lower(), "#26: no runtime name in copy"
 
     # And a model that writes is let through by the same check.
-    monkeypatch.setitem(model_router._default_model, "ollama", "qwen2.5:7b")
+    monkeypatch.setattr(model_router, "_chosen_local", "ollama:qwen2.5:7b")
     assert model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=["product_manager"]).ok
 
 
@@ -1362,8 +1379,8 @@ def test_a_list_without_completion_or_embedding_is_could_not_tell(monkeypatch, r
         tags_report=True,
     )
     status = model_router.local_status()
-    assert status["model_capabilities"]["odd:latest"] == reported
-    assert status["cannot_build"] == ["nomic-embed-text:latest"]
+    assert status["model_capabilities"]["ollama:odd:latest"] == reported
+    assert status["cannot_build"] == ["ollama:nomic-embed-text:latest"]
 
 
 def test_choosing_a_default_does_not_forget_what_every_model_can_do(monkeypatch):
@@ -1371,31 +1388,29 @@ def test_choosing_a_default_does_not_forget_what_every_model_can_do(monkeypatch)
     model_router = _stubbed_local(
         monkeypatch, {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW}
     )
-    prov = model_router._providers["ollama"]
-    prov.capabilities_for(prov.list_models())
-    remembered = dict(prov._capabilities)
+    prov = model_router.source("ollama")
+    prov.describe()
+    remembered = dict(prov.adapter._capabilities)
     assert remembered
 
-    prov.forget_profile()  # what `_apply` does when the default changes
-    assert prov._capabilities == remembered
+    prov.forget()  # what choosing a new default does
+    assert prov.adapter._capabilities == remembered
 
 
 def test_forgetting_a_re_pulled_model_forgets_every_spelling_of_it(monkeypatch):
     """The pull route passes `llama3.1`; the tag list cached `llama3.1:latest`."""
-    from app.router.providers.ollama import OllamaProvider
-
-    prov = OllamaProvider("http://localhost:11434")
+    prov = _ollama()
     for name in ("llama3.1:latest", "qwen2.5:7b"):
-        prov._remember_capabilities(name, {"capabilities": ["completion"]})
-        prov._profiles.put((prov.base_url, name), _profile(8192))
+        prov.adapter._remember_capabilities(name, {"capabilities": ["completion"]})
+        prov._profiles.put((prov.name, name), _profile(8192))
 
-    prov.forget_profile("llama3.1")
-    assert prov.known_capabilities("llama3.1:latest") is None
-    assert prov._profiles.get((prov.base_url, "llama3.1:latest")) is None, (
+    prov.forget("llama3.1")
+    assert prov.adapter.known_capabilities("llama3.1:latest") is None
+    assert prov._profiles.get((prov.name, "llama3.1:latest")) is None, (
         "the profile a re-pull made stale was kept under the other spelling"
     )
-    assert prov.known_capabilities("qwen2.5:7b") == ("completion",), "forgot an unrelated model"
-    assert prov._profiles.get((prov.base_url, "qwen2.5:7b")) is not None
+    assert prov.adapter.known_capabilities("qwen2.5:7b") == ("completion",), "forgot an unrelated model"
+    assert prov._profiles.get((prov.name, "qwen2.5:7b")) is not None
 
 
 @pytest.mark.parametrize(
@@ -1409,46 +1424,58 @@ def test_forgetting_a_re_pulled_model_forgets_every_spelling_of_it(monkeypatch):
     ],
 )
 def test_a_model_name_is_known_by_each_way_the_runtime_spells_it(name, spellings):
-    from app.router.providers.ollama import _spellings
+    from app.router.runtimes.ollama import _spellings
 
     assert _spellings(name) == spellings
 
 
 # ── what the second pre-merge review of #40 found ─────────────────────────────
 def test_a_runtime_in_a_sibling_container_is_still_clamped_by_this_hosts_ram(monkeypatch):
-    """docker compose: `http://ollama:11434` is another hostname, not another computer.
+    """docker compose: a service hostname is another hostname, not another computer.
 
     Inferring "remote" from the name left the shipped Docker setup unclamped, sending
     a model's full trained window to a host that cannot hold its KV cache. The
     configured answer wins over the hostname.
     """
     from app.router import model_profile
-    from app.router.providers import ollama as ollama_module
-    from app.router.providers.ollama import OllamaProvider
+    from app.router.runtimes import provider as provider_module
 
-    monkeypatch.setattr(model_profile.settings, "ollama_context_ceiling", None)
-    monkeypatch.setattr(ollama_module, "total_ram_bytes", lambda: 2 * 2**30)
+    monkeypatch.setattr(model_profile.settings, "local_context_ceiling", None)
+    monkeypatch.setattr(provider_module, "total_ram_bytes", lambda: 2 * 2**30)
 
-    def _probed():
-        prov = OllamaProvider("http://ollama:11434")
-        monkeypatch.setattr(prov, "_show", lambda model, **_: SHOW)
-        monkeypatch.setattr(prov, "server_version", lambda: (0, 5, 0))
+    def _probed(override=None):
+        prov = _ollama("http://ollama:11434")
+        prov.source.same_machine_override = override
+        monkeypatch.setattr(prov.adapter, "_show", lambda model, **_: SHOW)
+        monkeypatch.setattr(prov.adapter, "server_version", lambda: (0, 5, 0))
         return prov.profile("qwen2.5:7b")
 
-    monkeypatch.setattr(ollama_module.settings, "ollama_same_machine", True)
+    monkeypatch.setattr(provider_module.settings, "local_same_machine", True)
     assert _probed().context_window < 32768, "a same-host container went unclamped"
-
-    monkeypatch.setattr(ollama_module.settings, "ollama_same_machine", None)
+    monkeypatch.setattr(provider_module.settings, "local_same_machine", None)
     assert _probed().context_window == 32768, "unset must keep inferring from the address"
+    # Said per source, it wins over the global setting and over the address.
+    assert _probed(override=True).context_window < 32768
 
 
 def test_the_docker_compose_backend_declares_its_runtime_on_the_same_host():
-    """The shipped deployment has to actually set the knob, or the fix is not on."""
+    """The shipped deployment has to actually name its runtime and set the knob.
+
+    Inside the backend container, loopback is the container itself — so the compose
+    file's runtime is named as a source, and marked as sharing this host's RAM.
+    """
+    import json
     import pathlib
+    import re
 
     compose = (pathlib.Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
-    assert "OLLAMA_BASE_URL: http://ollama:11434" in compose
-    assert 'OLLAMA_SAME_MACHINE: "true"' in compose
+    raw = re.search(r"LOCAL_SOURCES: '(.+)'", compose)
+    assert raw, "the compose backend names no model source"
+    (source,) = json.loads(raw.group(1))
+    assert source["base_url"] == "http://ollama:11434"
+    assert source["same_machine"] is True
+    # Labelled, so its source id — and every model chosen from it — stays stable.
+    assert source["label"]
 
 
 @pytest.mark.parametrize("mode", ["auto", "local_only"])
@@ -1468,7 +1495,7 @@ def test_a_default_that_cannot_write_blocks_even_with_every_agent_pinned(monkeyp
         {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
         tags_report=True,
     )
-    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text:latest")
+    monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text:latest")
     roles = ["product_manager", "system_design"]
     monkeypatch.setattr(model_roles, "get", lambda role: "ollama:qwen2.5:7b" if role in roles else None)
 
@@ -1478,21 +1505,25 @@ def test_a_default_that_cannot_write_blocks_even_with_every_agent_pinned(monkeyp
 
 
 def test_an_answer_from_api_show_is_re_read_once_it_is_stale(monkeypatch):
-    """`ollama create mymodel` from the CLI must not leave the old verdict forever."""
-    from app.router.providers import ollama as ollama_module
-    from app.router.providers.ollama import OllamaProvider
+    """A model re-created from the CLI must not leave the old verdict forever."""
+    from app.router.runtimes import ollama as ollama_module
+    from app.router.runtimes.ollama import kind_from_capabilities
+    from app.router.runtimes.types import writes
 
-    prov = OllamaProvider("http://localhost:11434")
+    prov = OllamaAdapter("http://localhost:11434")
     answers = [EMBEDDING_SHOW, SHOW]
     clock = [1000.0]
     monkeypatch.setattr(ollama_module.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(prov, "_show", lambda model, **_: answers.pop(0))
 
-    assert prov.writes(prov.capabilities("mymodel")) is False
+    def verdict():
+        return writes(kind_from_capabilities(prov.capabilities("mymodel")))
+
+    assert verdict() is False
     clock[0] += ollama_module._CAPABILITY_TTL_SECONDS - 1
-    assert prov.writes(prov.capabilities("mymodel")) is False, "re-probed while still fresh"
+    assert verdict() is False, "re-probed while still fresh"
     clock[0] += 2
-    assert prov.writes(prov.capabilities("mymodel")) is True, "a stale verdict kept blocking"
+    assert verdict() is True, "a stale verdict kept blocking"
 
 
 @pytest.mark.parametrize(
@@ -1507,9 +1538,7 @@ def test_an_answer_from_api_show_is_re_read_once_it_is_stale(monkeypatch):
     ],
 )
 def test_presence_uses_the_runtimes_naming_rule(configured, pulled, present):
-    from app.router.providers.ollama import OllamaProvider
-
-    assert OllamaProvider.resolves(configured, pulled) is present
+    assert OllamaAdapter("http://localhost:11434").resolves(configured, pulled) is present
 
 
 # ── what the third pre-merge review of #40 found ──────────────────────────────
@@ -1525,15 +1554,21 @@ def test_the_preflight_gives_the_answer_run_will_give(monkeypatch):
         tags_report=True,
     )
     with TestClient(app) as client:
-        monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
+        monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text")
         refused = client.post("/api/projects/preflight", json={"routing_mode": "local_only"}).json()
         assert refused["ok"] is False and "cannot write" in refused["reason"]
 
-        monkeypatch.setitem(model_router._default_model, "ollama", "qwen2.5:7b")
+        monkeypatch.setattr(model_router, "_chosen_local", "ollama:qwen2.5:7b")
         assert client.post("/api/projects/preflight", json={"routing_mode": "auto"}).json()["ok"]
 
         bad = client.post("/api/projects/preflight", json={"routing_mode": "sideways"})
         assert bad.status_code == 400
+
+        # A pinned model that does not say where it comes from is refused, not guessed.
+        bare = client.post(
+            "/api/projects/preflight", json={"routing_mode": "manual", "preferred_model": "qwen2.5:7b"}
+        ).json()
+        assert bare["ok"] is False and "source" in bare["reason"]
 
 
 def test_a_model_that_cannot_write_is_refused_when_it_is_chosen(monkeypatch):
@@ -1547,15 +1582,15 @@ def test_a_model_that_cannot_write_is_refused_when_it_is_chosen(monkeypatch):
     )
     # Both raise before anything is persisted — neither reaches the settings files.
     with pytest.raises(ValueError, match="can't be the default"):
-        model_router.set_default_model("ollama", "nomic-embed-text")
+        model_router.set_local_default("ollama:nomic-embed-text")
     with pytest.raises(ValueError, match="can't be an agent's model"):
-        model_router.set_role_model("backend_engineer", "nomic-embed-text:latest")
+        model_router.set_role_model("backend_engineer", "ollama:nomic-embed-text:latest")
 
     # Embeddings is the one role an embedding model is the right answer for.
     recorded: list = []
     monkeypatch.setattr(model_roles, "set_role", lambda role, spec: recorded.append((role, spec)))
-    model_router.set_role_model("embeddings", "nomic-embed-text:latest")
-    assert recorded == [("embeddings", "nomic-embed-text:latest")]
+    model_router.set_role_model("embeddings", "ollama:nomic-embed-text:latest")
+    assert recorded == [("embeddings", "ollama:nomic-embed-text:latest")]
 
 
 def test_a_cached_verdict_is_not_reported_while_the_runtime_is_down(monkeypatch):
@@ -1565,12 +1600,10 @@ def test_a_cached_verdict_is_not_reported_while_the_runtime_is_down(monkeypatch)
         {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
         tags_report=True,
     )
-    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
-    assert "nomic-embed-text" in model_router.local_status()["cannot_build"]  # primes the cache
+    monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text")
+    assert "ollama:nomic-embed-text:latest" in model_router.local_status()["cannot_build"]  # primes
 
-    prov = model_router._providers["ollama"]
-    monkeypatch.setattr(prov, "available", lambda: False)
-    monkeypatch.setattr(prov, "list_models", lambda: [])
+    _down(monkeypatch, model_router.source("ollama"))
     status = model_router.local_status()
     assert status["reachable"] is False
     assert status["cannot_build"] == [], "a cached verdict outlived the runtime it was about"
@@ -1579,10 +1612,9 @@ def test_a_cached_verdict_is_not_reported_while_the_runtime_is_down(monkeypatch)
 
 def test_one_model_is_remembered_once_however_it_is_spelled(monkeypatch):
     """A failed probe under one spelling must not hide the tag list's answer under another."""
-    from app.router.providers import ollama as ollama_module
-    from app.router.providers.ollama import OllamaProvider
+    from app.router.runtimes import ollama as ollama_module
 
-    prov = OllamaProvider("http://localhost:11434")
+    prov = OllamaAdapter("http://localhost:11434")
     monkeypatch.setattr(prov, "_show", lambda model, **_: None)  # the runtime is busy
     assert prov.capabilities("nomic-embed-text") is None  # remembered as a failure
 
@@ -1595,14 +1627,15 @@ def test_one_model_is_remembered_once_however_it_is_spelled(monkeypatch):
     assert ollama_module._canonical("nomic-embed-text") == "nomic-embed-text:latest"
 
 
-def test_readiness_reads_the_tag_list_once_however_many_models(monkeypatch):
+def test_readiness_reads_the_model_list_once_however_many_models(monkeypatch):
     """One fetch per model asked about was a timeout each when the runtime was slow."""
     from app.core import model_roles
     from app.core.constants import RoutingMode
-    from app.router.providers import ollama as ollama_module
+    from app.router.runtimes import ollama as ollama_module
 
     shows = {"qwen2.5:7b": SHOW, "llama3.1:8b": SHOW, "mistral:7b": SHOW}
     model_router = _stubbed_local(monkeypatch, shows, tags_report=True)
+    # Saved before sources existed: bare names, read with the meaning they had.
     pins = {"product_manager": "llama3.1:8b", "system_design": "mistral:7b"}
     monkeypatch.setattr(model_roles, "get", lambda role: pins.get(role))
 
@@ -1615,5 +1648,6 @@ def test_readiness_reads_the_tag_list_once_however_many_models(monkeypatch):
 
     monkeypatch.setattr(ollama_module.httpx, "get", _counting_get)
     assert model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=list(pins)).ok
-    # One for reachability, one for the list — not one more per model.
-    assert len(tag_reads) == 2, tag_reads
+    # The source's state is the reachability check and the list at once: one call,
+    # however many models and however many roles ask about them.
+    assert len(tag_reads) == 1, tag_reads

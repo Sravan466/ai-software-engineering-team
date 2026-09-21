@@ -191,10 +191,12 @@ function relaySummary(project: Project, doneCount: number): string {
 
 /** "SCOPE", "SCOPE and ATLAS", "SCOPE, ATLAS and FORGE". */
 function localPct(project: Project): number | null {
-  const withProvider = project.phases.filter((p) => p.provider_used);
-  if (withProvider.length === 0) return null;
-  const local = withProvider.filter((p) => /ollama|local/i.test(p.provider_used || "")).length;
-  return Math.round((local / withProvider.length) * 100);
+  // Where each phase ran is the backend's answer, recorded per call — never read
+  // off a provider's name, which says nothing about where its model runs.
+  const known = project.phases.filter((p) => p.provider_used && p.is_local !== null);
+  if (known.length === 0) return null;
+  const local = known.filter((p) => p.is_local).length;
+  return Math.round((local / known.length) * 100);
 }
 
 // Cost is only meaningful once something has actually cost money.
@@ -529,8 +531,8 @@ function RunInterrupted({
     failed: {
       title: "This build stopped after a model error",
       text:
-        "The most common cause is the local runtime being unavailable. Check that Ollama is " +
-        "running and the model is downloaded, then pick it back up from where it left off.",
+        "The most common cause is the local runtime being unavailable. Check in Settings that " +
+        "it's running and has the model, then pick it back up from where it left off.",
       action: "Resume from checkpoint",
     },
   };

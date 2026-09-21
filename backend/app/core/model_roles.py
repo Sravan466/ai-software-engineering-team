@@ -1,7 +1,6 @@
 """Which model each role runs on, chosen by the user and persisted locally.
 
-The platform used to have exactly one local model: whatever `OLLAMA_DEFAULT_MODEL`
-said. A user could download a second one through Settings, watch the progress bar
+The platform used to have exactly one local model: whatever `.env` said. A user could download a second one through Settings, watch the progress bar
 finish, and every agent would carry on running on the first — because the only way
 to *select* a model was an endpoint that rejected the local provider outright.
 
@@ -11,16 +10,19 @@ the provider's default model", which is the state every role starts in — so th
 file is empty until somebody makes a choice, and a fresh install behaves exactly as
 it did before.
 
-Values are `provider:model` pairs, or a bare model name meaning the local runtime
-(the same spelling `FALLBACK_CHAIN` uses, parsed by the same function). No model
-name is ever written here by the application itself.
+Values are `source:model` pairs (or `provider:model` for the cloud), parsed by the
+router. A bare model name in a file written before model sources existed is read
+with the meaning it had then. No model name is ever written here by the
+application itself.
 """
 from __future__ import annotations
 
 import json
-import os
+import threading
 from pathlib import Path
 from typing import Optional
+
+from app.core.atomic import write_private
 
 from app.core.constants import PHASE_LABELS, PHASE_ORDER
 
@@ -36,6 +38,9 @@ EXTRA_ROLES: tuple[tuple[str, str, str], ...] = (
     ("preview", "Mockup", "The visual preview of the front end"),
     ("embeddings", "Embeddings", "Long-term memory and the knowledge base"),
 )
+
+#: The support role whose model turns documents and memories into vectors.
+EMBEDDINGS_ROLE = "embeddings"
 
 #: The role a caller names when it has none of its own — spelled once so the router
 #: and the API cannot disagree about what "no role" is called.
@@ -79,12 +84,11 @@ def _read() -> dict:
 
 
 def _write(data: dict) -> None:
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    _PATH.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    try:
-        os.chmod(_PATH, 0o600)
-    except OSError:
-        pass
+    write_private(_PATH, json.dumps(data, indent=2, sort_keys=True))
+
+
+#: One read-modify-write at a time, so two roles set at once both stay set.
+_LOCK = threading.Lock()
 
 
 def get_all() -> dict[str, str]:
@@ -114,14 +118,16 @@ def set_role(role: str, spec: Optional[str]) -> None:
     """
     if role not in known_roles():
         raise ValueError(f"'{role}' is not a role a model can be chosen for.")
-    data = _read()
-    if spec and spec.strip():
-        data[role] = spec.strip()
-    else:
-        data.pop(role, None)
-    _write(data)
+    with _LOCK:
+        data = _read()
+        if spec and spec.strip():
+            data[role] = spec.strip()
+        else:
+            data.pop(role, None)
+        _write(data)
 
 
 def clear_all() -> None:
     """Put every role back on the default model."""
-    _write({})
+    with _LOCK:
+        _write({})

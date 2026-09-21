@@ -1,84 +1,43 @@
-"""Local embedding function backed by Ollama, for ChromaDB collections.
+"""The embedding function Chroma collections use, served by whichever source has one.
 
-Uses Ollama's batch `/api/embed` endpoint so memory + RAG stay fully offline. If the
-embedding model isn't available, callers degrade gracefully (memory/RAG become no-ops).
+Embeddings go through the router's `embed` operation, like every other model call:
+the model is the one chosen for the embeddings role in Settings, or the configured
+`EMBEDDING_MODEL` wherever a running source has it, or the first model any source
+reports as embedding-only. So document search and memory work on any local runtime
+that serves an embedding model — and when none does, callers degrade gracefully
+(memory and RAG become no-ops) and Settings says why.
+
+The model is resolved on every call rather than when a collection is opened, so
+choosing a different one in Settings takes effect without a restart.
 """
 from __future__ import annotations
-from typing import Optional
 
-import httpx
-
-from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.model_roles import EMBEDDINGS_ROLE
 
 log = get_logger(__name__)
 
 #: The role embeddings run under, so they can be pointed at their own model in
-#: Settings. They are a real share of a run's calls and had nowhere to be chosen —
-#: the model came from `.env` and stayed there.
-ROLE = "embeddings"
+#: Settings. They are a real share of a run's calls.
+ROLE = EMBEDDINGS_ROLE
 
 
-def _chosen_model() -> str:
-    """The embedding model the user selected, or the configured default.
-
-    This endpoint is Ollama's and nothing else's — there is no cloud path here — so a
-    selection naming another provider is declined rather than forwarded. Sending
-    `anthropic:claude-…` on to `/api/embed` as a model name would fail every RAG and
-    memory write from that moment on, with an error about a model Ollama has never
-    heard of.
-
-    The spec is split by the router's own parser rather than by a second copy of the
-    rule. Splitting on the first colon here looked right and was not: every tag the
-    Settings dropdown writes carries one (`nomic-embed-text:latest`), so a hand-rolled
-    partition read the tag as the provider, decided it was not local, and quietly
-    ignored every selection the user could actually make.
-    """
-    from app.core import model_roles
-    from app.router.router import ModelRouter
-
-    spec = model_roles.get(ROLE)
-    if not spec:
-        return settings.embedding_model
-    provider, model = ModelRouter._parse_pair(spec)
-    if provider != "ollama":
-        log.warning(
-            "Embeddings are set to '%s', which is not a local model — they run "
-            "against Ollama only. Using '%s' instead.",
-            spec,
-            settings.embedding_model,
-        )
-        return settings.embedding_model
-    return model
-
-
-class OllamaEmbeddingFunction:
+class SourceEmbeddingFunction:
     """Implements Chroma's EmbeddingFunction protocol: __call__(input) -> embeddings."""
-
-    def __init__(self, model: Optional[str] = None, base_url: Optional[str] = None) -> None:
-        self.model = model or _chosen_model()
-        self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
 
     # Chroma calls this with a list of strings and expects a list of float vectors.
     def __call__(self, input: list[str]) -> list[list[float]]:  # noqa: A002 - Chroma's name
         if not input:
             return []
+        from app.router.base import ProviderError
+        from app.router.router import router
+
         try:
-            r = httpx.post(
-                f"{self.base_url}/api/embed",
-                json={"model": self.model, "input": input},
-                timeout=120.0,
-            )
-            r.raise_for_status()
-            data = r.json()
-            return data.get("embeddings", [])
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(
-                f"Ollama embeddings failed (model '{self.model}'). "
-                f"Pull it with `ollama pull {self.model}`. Cause: {e}"
-            ) from e
+            return router.embed(list(input))
+        except ProviderError as e:
+            raise RuntimeError(f"Embeddings failed: {e}") from e
 
     # Chroma >=0.5 also looks for a name() on custom embedding functions.
     @staticmethod
     def name() -> str:
-        return "ollama-embed"
+        return "source-embed"

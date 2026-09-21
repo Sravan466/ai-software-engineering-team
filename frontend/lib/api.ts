@@ -17,6 +17,12 @@ export type PhaseResult = {
   content_md: string;
   model_used: string | null;
   provider_used: string | null;
+  /**
+   * Whether the model ran on hardware the user controls — the backend's answer,
+   * recorded per call. Never guessed from `provider_used`: a source's name says
+   * nothing about where its model runs.
+   */
+  is_local: boolean | null;
   feedback: string | null;
   created_at: string;
   started_at: string | null;
@@ -174,7 +180,7 @@ export type Project = {
 
 // Fast CRUD calls should fail fast so a hung/restarting backend surfaces an error
 // instead of an infinite "Loading…". LLM-driven endpoints (generate / edit a preview)
-// drive a local Ollama model that can take far longer than 15s, so they pass the
+// drive a local model that can take far longer than 15s, so they pass the
 // longer cap below.
 //
 // Pipeline control (run / approve / reject / stop / resume) is deliberately NOT in
@@ -332,7 +338,7 @@ export const api = {
   undoPreview: (id: string) =>
     req<PreviewState>(`/api/projects/${id}/preview/undo`, { method: "POST" }),
 
-  // ── Settings: cloud API keys + local model ──
+  // ── Settings: cloud API keys + local model sources ──
   getProviders: () =>
     req<{ providers: Record<string, ProviderSetting>; default_mode: string }>(
       "/api/settings/providers"
@@ -345,13 +351,31 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
-  getLocalModel: () => req<LocalStatus>("/api/settings/local"),
-  /** Select which model the local runtime runs. The reason the pull button exists. */
-  setLocalModel: (model: string) =>
-    req<LocalStatus>("/api/settings/providers/ollama", {
+  /** Every model source and what it serves. `refresh` probes loopback again. */
+  getLocalModel: (refresh = false) =>
+    req<LocalStatus>(`/api/settings/local${refresh ? "?refresh=true" : ""}`),
+  /** Make `source:model` the model every agent falls back to. */
+  setLocalModel: (spec: string) =>
+    req<LocalStatus>("/api/settings/local/default", {
       method: "PUT",
-      body: JSON.stringify({ default_model: model }),
+      body: JSON.stringify({ model: spec }),
     }),
+  /** Add a source by address. It must answer, so its runtime can be identified. */
+  addSource: (body: {
+    base_url: string;
+    label?: string;
+    api_key?: string;
+    confirm_remote?: boolean;
+  }) =>
+    req<LocalStatus>("/api/settings/sources", { method: "POST", body: JSON.stringify(body) }),
+  /** `""` clears the key, a value sets it. */
+  setSourceKey: (id: string, api_key: string) =>
+    req<LocalStatus>(`/api/settings/sources/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ api_key }),
+    }),
+  removeSource: (id: string) =>
+    req<LocalStatus>(`/api/settings/sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // ── Settings: which model each agent runs on ──
   getRoles: () => req<RoleSettings>("/api/settings/roles"),
@@ -415,12 +439,14 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) },
       LLM_TIMEOUT_MS
     ),
-  // Streams NDJSON pull progress; calls onLine for each parsed object.
+  // Streams NDJSON download progress from one source; calls onLine per object.
+  // Only sources whose runtime has a download API (`can_download`) accept it.
   pullLocalModel: async (
+    sourceId: string,
     model: string,
     onLine: (line: PullProgress) => void
   ): Promise<void> => {
-    const res = await fetch(`${BASE}/api/settings/local/pull`, {
+    const res = await fetch(`${BASE}/api/settings/sources/${encodeURIComponent(sourceId)}/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
@@ -539,9 +565,10 @@ export type GithubPushResult = {
 
 export type RouterStatus = {
   default_mode: string;
+  /** Cloud providers and local sources alike, keyed by id. */
   providers: Record<
     string,
-    { available: boolean; is_local: boolean; default_model: string | null }
+    { available: boolean; is_local: boolean; default_model: string | null; label: string }
   >;
   fallback_chain: string[];
 };
@@ -580,17 +607,71 @@ export type ModelProfile = {
   warnings: string[];
 };
 
-export type LocalStatus = {
+/** One model a source serves. Everything is keyed by `spec`: `source:model`. */
+export type SourceModel = {
+  spec: string;
+  name: string;
+  /** chat · embedding · vision · base — or null when the runtime didn't say. */
+  kind: string | null;
+  /** The runtime's own words, quoted; null when it reported none. */
+  capabilities: string[] | null;
+  /** False for a model the runtime sends to a hosted service to run. */
+  is_local: boolean;
+  can_build: boolean;
+};
+
+/** Somewhere local models come from: a runtime found, configured, or added. */
+export type LocalSource = {
+  id: string;
+  label: string;
+  /** The runtime's id in the adapter table; null until something answers. */
+  runtime: string | null;
+  runtime_label: string | null;
   base_url: string;
+  origin: "detected" | "configured" | "added";
+  /** Not on this machine. Prompts sent here leave it. */
+  remote: boolean;
+  same_machine: boolean;
   reachable: boolean;
-  models: string[];
-  default_model: string;
+  error: string | null;
+  version: string | null;
+  models: SourceModel[];
+  /** Whether this runtime downloads models through its API. */
+  can_download: boolean;
+  /** How to get another model onto it, when it can't be done from here. */
+  add_model: string;
+  library: string | null;
+  home: string | null;
+  key_hint: string | null;
+  removable: boolean;
+};
+
+/** Something on loopback that answered but isn't a runtime this app recognises. */
+export type UnknownEndpoint = {
+  base_url: string;
+  /** It does at least answer the OpenAI API. */
+  openai: boolean;
+  note: string;
+};
+
+export type LocalStatus = {
+  sources: LocalSource[];
+  unknown: UnknownEndpoint[];
+  /** Every address a runtime was looked for at. */
+  tried: string[];
+  /** Any source answering at all. */
+  reachable: boolean;
+  /** `source:model`, or null when nothing can be resolved. */
+  default_model: string | null;
+  /** chosen (in Settings) · configured (in .env) · detected (first model that writes). */
+  default_origin: "chosen" | "configured" | "detected" | null;
   has_default: boolean;
-  /** Null while Ollama is unreachable or the default model isn't pulled yet. */
+  /** Null while the default's source is down or doesn't have it. */
   profile: ModelProfile | null;
+  /** Every model on every answering source, as specs. */
+  models: string[];
   /**
-   * What each pulled model says it can do — `completion`, `embedding`, `tools`,
-   * `vision`, and whatever a runtime reports next. Keyed by model name.
+   * What each model says it can do, in the runtime's words. Keyed by spec.
    *
    * A model is a key here only when the runtime answered about it. One that is
    * **absent is unknown, not incapable**, and readers have to keep it: an older
@@ -600,16 +681,20 @@ export type LocalStatus = {
   model_capabilities: ModelCapabilities;
   /**
    * Models the runtime says cannot complete text, so cannot run a build. Decided by
-   * the backend and read as-is — see `lib/capabilities.ts` for why the page no longer
-   * re-derives it. May include the default under the name it is configured by.
+   * the backend and read as-is — see `lib/capabilities.ts`. May include the default
+   * under the name it is configured by.
    */
   cannot_build: string[];
-  /**
-   * Pulled models whose name suggests they were trained for code. A suggestion for
-   * the code phases, derived from what you actually have — never a default the
-   * router reaches for, because a name is not a capability.
-   */
+  /** Models whose name suggests they were trained for code — a hint, never a default. */
   code_models: string[];
+  /** Models a runtime reports as embedding-only: what memory and search can use. */
+  embedding_models: string[];
+  /** What memory and document search embed with right now, or null (they're off). */
+  embedding_model: string | null;
+  embedding_origin: "chosen" | "configured" | "detected" | null;
+  /** What "Automatic" would embed with — differs from the above once one is chosen. */
+  embedding_automatic: string | null;
+  embedding_automatic_origin: "configured" | "detected" | null;
 };
 
 /** The server's answer to "would this build start?", asked before one is created. */
@@ -617,11 +702,11 @@ export type Preflight = {
   ok: boolean;
   /** One sentence, ready to show. Null when the build can start. */
   reason: string | null;
-  /** True when the local runtime itself is not answering. */
+  /** True when no local runtime the build needs is answering. */
   unreachable: boolean;
 };
 
-/** `{ "nomic-embed-text": ["embedding"] }` — see `LocalStatus.model_capabilities`. */
+/** `{ "src:embedder": ["embedding"] }` — see `LocalStatus.model_capabilities`. */
 export type ModelCapabilities = Record<string, string[]>;
 
 /** One role a model can be chosen for: the eight agents, plus the support tasks. */
@@ -639,9 +724,16 @@ export type RoleRow = {
 
 export type RoleSettings = {
   roles: RoleRow[];
-  /** What a role with no choice of its own runs on. */
-  default_model: string;
+  /** What a role with no choice of its own runs on, as `source:model`. */
+  default_model: string | null;
+  default_origin: LocalStatus["default_origin"];
+  /** Every model on every answering source, as specs. */
   local_models: string[];
+  sources: { id: string; label: string; reachable: boolean }[];
+  embedding_models: string[];
+  embedding_model: string | null;
+  embedding_origin: LocalStatus["embedding_origin"];
+  embedding_automatic: string | null;
   /**
    * Pulled models whose name suggests they were trained on code. Derived by the
    * backend so there is one rule rather than two that disagree — a second copy here

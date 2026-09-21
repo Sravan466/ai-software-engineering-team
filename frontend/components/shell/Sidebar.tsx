@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api, type LocalStatus, type Project } from "@/lib/api";
 import { canRunABuild } from "@/lib/capabilities";
+import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
 
@@ -112,16 +113,36 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
   // default that is pulled but cannot write used to show green here while the
   // composer refused to start on it — two answers about one model.
   const writes = canRunABuild(local?.default_model ?? "", local?.cannot_build);
-  const ready = !localError && local?.reachable && local?.has_default && writes;
+  // A default its runtime sends to a hosted service is not a local model, and Local
+  // builds refuse it — so it is not "ready" here either.
+  const hosted = modelFor(local, local?.default_model)?.is_local === false;
+  const ready = !localError && local?.reachable && local?.has_default && writes && !hosted;
+  const home = sourceFor(local, local?.default_model);
+  const name = modelName(local?.default_model);
   const runtimeLabel = localError
     ? "Backend unreachable"
     : !local?.reachable
-      ? "Ollama not running"
-      : !local.has_default
-        ? `${local.default_model} not downloaded`
-        : !writes
-          ? `${local.default_model} can't write`
-          : `${local.default_model} ready`;
+      ? "No local runtime reachable"
+      : !local.default_model
+        ? "No local model can write"
+        : home && !home.reachable
+          ? `${home.label} not answering`
+          : !local.has_default
+            ? `${name} not available`
+            : !writes
+              ? `${name} can't write`
+              : hosted
+                ? `${name} runs hosted`
+                : `${name} ready`;
+  // The whole answer on hover: which source, and — when nothing answered — where
+  // this looked, so "unreachable" is never a claim without its evidence.
+  const runtimeTitle = !local
+    ? undefined
+    : !local.reachable
+      ? `Tried ${triedText(local.tried)}`
+      : home
+        ? `${local.default_model} on ${home.label} at ${home.base_url}`
+        : local.default_model ?? undefined;
 
   return (
     <aside className="sidebar">
@@ -225,12 +246,12 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
       </div>
 
       <div className="sb-foot">
-        {/* Nothing can be built while the local runtime is down, so this is a
+        {/* Nothing can be built while no local runtime answers, so this is a
             link to the fix rather than a caption about the problem. */}
         <Link
           className={"sb-runtime" + (ready ? "" : " down")}
           href="/settings"
-          title={local?.base_url}
+          title={runtimeTitle}
         >
           <span className={"dot " + (ready ? "dot-ok" : "dot-warn")} />
           <span className="sb-runtime-text">{runtimeLabel}</span>

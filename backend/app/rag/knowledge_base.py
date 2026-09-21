@@ -1,6 +1,6 @@
 """RAG knowledge base over ChromaDB.
 
-Documents uploaded by the user are chunked, embedded (locally via Ollama), and stored.
+Documents uploaded by the user are chunked, embedded (by a local source), and stored.
 Agents query it for relevant context. Everything degrades to a no-op if Chroma or the
 embedding model is unavailable, so the pipeline never hard-fails on RAG.
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from app.core.logging import get_logger
 from app.rag import chroma
-from app.rag.embeddings import OllamaEmbeddingFunction
+from app.rag.embeddings import SourceEmbeddingFunction
 
 log = get_logger(__name__)
 
@@ -24,7 +24,7 @@ class KnowledgeBase:
             # The shared client lives in `app.rag.chroma`, which opens it once,
             # behind the lock both stores take — see there for why.
             self._collection = chroma.collection(
-                _COLLECTION, OllamaEmbeddingFunction(), owner="Knowledge base"
+                _COLLECTION, SourceEmbeddingFunction(), owner="Knowledge base"
             )
         return self._collection
 

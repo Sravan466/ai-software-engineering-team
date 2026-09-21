@@ -1,58 +1,40 @@
-"""What a model can actually do — asked of the model, never assumed.
+"""What a model can actually do — asked of the source serving it, never assumed.
 
 Every number this application used to guess about the model lives here, and every
-one of them is now either read from the model itself or set by the user:
+one of them is now either reported by the runtime or set by the user. The runtime's
+own field names stop at its adapter: this module reads the normalised `ModelInfo`
+record every adapter returns —
 
-    model_info["<arch>.context_length"]        the window it was trained for
-    model_info["<arch>.block_count"] + heads   what one token of KV cache costs in RAM
-    details.parameter_size                     how big it is, in words a person reads
-    capabilities                               whether decoding can be schema-constrained
+    context_window + context_source     the window it can run at, and who said so
+    kv_bytes_per_token                  what one token of KV cache costs in RAM
+    parameters_total, parameter_label   how big it is, in words a person reads
+    structured_output                   whether decoding can be schema-constrained
 
-That matters because the alternative is silent. Ollama's default window is small,
-and a request that exceeds it is truncated **from the head** — the system prompt,
+That matters because the alternative is silent. A runtime left at its own default
+window truncates a request that exceeds it **from the head** — the system prompt,
 where the required output shape is written, is the first thing discarded — and the
 truncation is logged on the server where no client ever sees it. Half the pipeline
 was generating against a prompt with its instructions cut off, and the two safety
 gates downstream read keys that were no longer being produced.
 
-Nothing here is a constant a user cannot move: the probe reports the ceiling, RAM
-decides what fits under it, and `OLLAMA_CONTEXT_CEILING` lowers it further if they
+Nothing here is a constant a user cannot move: the runtime reports the ceiling, RAM
+decides what fits under it, and `LOCAL_CONTEXT_CEILING` lowers it further if they
 want the memory back.
 """
 from __future__ import annotations
 
 import os
-import re
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from app.core.config import settings
 from app.core.logging import get_logger
 
+if TYPE_CHECKING:
+    from app.router.runtimes.types import ModelInfo
+
 log = get_logger(__name__)
-
-#: Bytes per element in the KV cache (f16 — Ollama's default). A property of the
-#: runtime's cache format, not a budget: it is what one number in the cache weighs.
-_KV_BYTES_PER_ELEMENT = 2
-#: K and V are both cached, so a token costs two of everything below.
-_KV_TENSORS_PER_TOKEN = 2
-
-
-def _int(value: object) -> Optional[int]:
-    """A positive int, or None. Model metadata is occasionally a string or a list."""
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, (list, tuple)):
-        # Per-layer head counts show up as a list; the largest is what must fit.
-        numbers = [n for n in (_int(v) for v in value) if n]
-        return max(numbers) if numbers else None
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
-
 
 def total_ram_bytes() -> Optional[int]:
     """Physical RAM, or None where the platform will not say."""
@@ -85,6 +67,15 @@ class ModelProfile:
     capabilities: tuple[str, ...] = ()
     #: True when the provider can constrain decoding to a JSON Schema, not just JSON.
     supports_schema_format: bool = False
+    #: The strongest structured mode to ask this model for: schema, grammar, json or
+    #: none. `supports_schema_format` is this, read as a yes or no for the UI.
+    structured_output: str = "json"
+    #: What the model is for (chat, embedding, vision, base), when the runtime said.
+    kind: Optional[str] = None
+    #: Whether it thinks before answering, and whether that can be switched off.
+    thinking: Optional[str] = None
+    #: False for a model a local runtime lists but sends elsewhere to run.
+    is_local: bool = True
     #: "probe" (asked the model), "configured" (a documented provider window), or
     #: "fallback" (nobody could say — the configured fallback window is in force).
     source: str = "fallback"
@@ -153,6 +144,10 @@ class ModelProfile:
             "quantization": self.quantization,
             "capabilities": list(self.capabilities),
             "supports_schema_format": self.supports_schema_format,
+            "structured_output": self.structured_output,
+            "kind": self.kind,
+            "thinking": self.thinking,
+            "is_local": self.is_local,
             "source": self.source,
             "clamp_reason": self.clamp_reason,
             "is_small": self.is_small,
@@ -183,9 +178,9 @@ def fallback_profile(
     """A profile for a model nobody could probe: the configured window, and no schema.
 
     Used for cloud providers (which publish their window rather than exposing a probe)
-    and for a local model while Ollama is unreachable — the run still needs budgets.
-    `local` says whether `OLLAMA_CONTEXT_CEILING` applies: it is a knob about the
-    memory on *this* machine, and has no business shrinking a cloud model's window.
+    and for a local model while its source is unreachable — the run still needs
+    budgets. `local` says whether `LOCAL_CONTEXT_CEILING` applies: it is a knob about
+    the memory the runtime has, and has no business shrinking a cloud model's window.
     """
     limit = context_limit or settings.model_context_fallback_tokens
     window = _apply_ceiling(limit) if local else limit
@@ -207,7 +202,7 @@ def _apply_ceiling(window: int) -> int:
     resolver enforces on the other: a cap someone typed is a fact about what they
     want, not an estimate to be corrected.
     """
-    ceiling = settings.ollama_context_ceiling
+    ceiling = settings.local_context_ceiling
     if ceiling and ceiling > 0:
         return min(window, ceiling)
     return window
@@ -249,7 +244,7 @@ def resolve_window(
         gib = (ram_bytes or 0) / 2**30
         note = (
             f"clamped to {{window:,}} tokens by RAM — {gib:.0f} GiB total, "
-            f"{settings.ollama_ram_fraction:.0%} of it available to the KV cache"
+            f"{settings.local_ram_fraction:.0%} of it available to the KV cache"
         )
         if ram_tokens < _MIN_WORKABLE_TOKENS:
             # This one is an *estimate* — f16 cache, and blind to GPU or unified
@@ -269,12 +264,12 @@ def resolve_window(
         else:
             candidates.append((ram_tokens, note.format(window=ram_tokens)))
 
-    ceiling = settings.ollama_context_ceiling
+    ceiling = settings.local_context_ceiling
     if ceiling and ceiling > 0:
         candidates.append(
             (
                 ceiling,
-                f"clamped to the configured OLLAMA_CONTEXT_CEILING of {ceiling:,} tokens",
+                f"clamped to the configured LOCAL_CONTEXT_CEILING of {ceiling:,} tokens",
             )
         )
 
@@ -289,63 +284,27 @@ def _tokens_that_fit_in_ram(
 ) -> Optional[int]:
     """How many tokens of KV cache the machine can hold.
 
-    The weights are deliberately not part of this. Ollama mmaps them, so they are
-    page-cache backed and evictable rather than a fixed deduction from what is
-    available, and on unified-memory machines they may not sit in system RAM at all.
+    The weights are deliberately not part of this. llama.cpp-family runtimes mmap
+    them, so they are page-cache backed and evictable rather than a fixed deduction
+    from what is available, and on unified-memory machines they may not sit in system RAM at all.
     Subtracting them turned an ordinary 8 GiB laptop running a 7B model into a
     2,048-token window — a worse outcome than having no clamp, which is the wrong
     way for a safety margin to be wrong. The fraction below the total is the margin.
     """
     if not kv_bytes_per_token or not ram_bytes:
         return None
-    spare = ram_bytes * settings.ollama_ram_fraction
+    spare = ram_bytes * settings.local_ram_fraction
     return int(spare // kv_bytes_per_token)
-
-
-def kv_bytes_per_token(model_info: dict, arch: str) -> Optional[int]:
-    """Bytes of KV cache one token costs, from the model's own architecture.
-
-    `2 (K and V) × layers × kv-heads × head-dim × 2 bytes (f16)`. Every term comes
-    from `model_info`; if any is missing the RAM clamp is simply not applied rather
-    than being invented.
-    """
-    layers = _int(model_info.get(f"{arch}.block_count"))
-    kv_heads = _int(model_info.get(f"{arch}.attention.head_count_kv"))
-    embedding = _int(model_info.get(f"{arch}.embedding_length"))
-    heads = _int(model_info.get(f"{arch}.attention.head_count"))
-    if not (layers and kv_heads and embedding and heads):
-        return None
-    head_dim = embedding // heads
-    if head_dim <= 0:
-        return None
-    return _KV_TENSORS_PER_TOKEN * layers * kv_heads * head_dim * _KV_BYTES_PER_ELEMENT
-
-
-def parameter_count_from(model_info: dict, details: dict) -> Optional[int]:
-    """The parameter count, from the exact number or from the "7.6B" label."""
-    exact = _int(model_info.get("general.parameter_count"))
-    if exact:
-        return exact
-    label = str(details.get("parameter_size") or "")
-    match = re.match(r"\s*([\d.]+)\s*([KMB])", label, re.IGNORECASE)
-    if not match:
-        return None
-    scale = {"k": 10**3, "m": 10**6, "b": 10**9}[match.group(2).lower()]
-    try:
-        return int(float(match.group(1)) * scale)
-    except ValueError:
-        return None
 
 
 def build_profile(
     *,
     provider: str,
     model: str,
-    show: dict,
-    supports_schema_format: bool,
+    info: ModelInfo,
     ram_bytes: Optional[int],
 ) -> ModelProfile:
-    """Turn one `/api/show` payload into the profile the rest of the app runs on.
+    """Turn one normalised `ModelInfo` into the profile the rest of the app runs on.
 
     `ram_bytes` has no default, and `None` means **unknown — do not clamp**, never
     "read this machine's RAM". It used to default to `None` and fall back to
@@ -353,42 +312,33 @@ def build_profile(
     "unknown" says it precisely because the runtime is on *another* host, and the
     fallback then clamped that model's window by the memory of the machine the
     backend happens to run on — a confident number about the wrong computer. Only a
-    caller that has established the runtime is local may read local RAM and pass it
-    in; that decision lives in the provider, which is the only code that knows.
+    caller that has established the runtime shares this machine may read local RAM
+    and pass it in; that decision belongs to the source, which is the only code that
+    knows where the runtime is.
     """
-    model_info = show.get("model_info") or {}
-    details = show.get("details") or {}
-    arch = str(model_info.get("general.architecture") or details.get("family") or "").strip()
-
-    context_limit = _int(model_info.get(f"{arch}.context_length")) if arch else None
-    if context_limit is None:
-        # Some architectures spell it differently; take the only context length there is.
-        lengths = [
-            _int(v) for k, v in model_info.items() if k.endswith(".context_length")
-        ]
-        found = [n for n in lengths if n]
-        context_limit = max(found) if found else None
-
+    context_limit = info.context_window
     window, clamp_reason = resolve_window(
         context_limit=context_limit,
-        kv_bytes_per_token=kv_bytes_per_token(model_info, arch) if arch else None,
+        kv_bytes_per_token=info.kv_bytes_per_token,
         ram_bytes=ram_bytes,
     )
 
-    parameters = parameter_count_from(model_info, details)
+    parameters = info.parameters_total
     warnings: list[str] = []
     if parameters and parameters < settings.small_model_parameter_count:
         warnings.append(
-            f"{details.get('parameter_size') or f'{parameters/1e9:.1f}B'} parameters is a "
-            "small model. It will follow the required output shape, but the content inside "
-            "it will be thin — a larger model is worth the download for real builds."
+            f"{info.parameter_label or f'{parameters/1e9:.1f}B'} parameters is a small "
+            "model. It will follow the required output shape, but the content inside it "
+            "will be thin — a larger model is worth the download for real builds."
         )
     if context_limit is None:
         warnings.append(
-            "This model does not report a context length, so the configured fallback "
-            f"window of {settings.model_context_fallback_tokens:,} tokens is in force."
+            "This model's runtime does not report a context length, so the configured "
+            f"fallback window of {settings.model_context_fallback_tokens:,} tokens is in force."
         )
+    warnings.extend(info.warnings)
 
+    structured = info.structured_output or "none"
     return ModelProfile(
         provider=provider,
         model=model,
@@ -396,13 +346,17 @@ def build_profile(
         context_window=window,
         max_output_tokens=_output_budget(window),
         parameter_count=parameters,
-        parameter_size=details.get("parameter_size") or None,
-        quantization=details.get("quantization_level") or None,
-        capabilities=tuple(str(c) for c in (show.get("capabilities") or [])),
-        supports_schema_format=supports_schema_format,
+        parameter_size=info.parameter_label or None,
+        quantization=info.quantization or None,
+        capabilities=tuple(info.capabilities or ()),
+        supports_schema_format=structured == "schema",
+        structured_output=structured,
+        kind=info.kind,
+        thinking=info.thinking,
+        is_local=info.is_local,
         source="probe" if context_limit else "fallback",
         clamp_reason=clamp_reason,
-        architecture=arch or None,
+        architecture=info.architecture,
         warnings=tuple(warnings),
     )
 
@@ -412,7 +366,8 @@ class ProfileCache:
 
     A pipeline run is eight agents plus a debate against the same model; the probe is
     a network round trip that returns the same answer every time. Failures are *not*
-    cached — a model pulled after Ollama came up should be picked up on the next call.
+    cached — a model added after its runtime came up should be picked up on the next
+    call.
     """
 
     def __init__(self) -> None:
@@ -434,4 +389,10 @@ class ProfileCache:
             if key is None:
                 self._entries.clear()
             else:
+                self._entries.pop(key, None)
+
+    def forget_where(self, matches) -> None:
+        """Drop every entry whose key `matches` — every spelling of one model, say."""
+        with self._lock:
+            for key in [k for k in self._entries if matches(k)]:
                 self._entries.pop(key, None)
