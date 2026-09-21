@@ -40,6 +40,7 @@ from app.orchestration.runner import runner
 from app.router.router import router as model_router
 from app.schemas.project import (
     ApprovalRequest,
+    PreflightRequest,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
@@ -335,16 +336,39 @@ def _require_models(project: Project) -> None:
     404 from Ollama for a message, having already moved the project into a state the
     user had to work out how to get back out of.
     """
-    ready = model_router.readiness(
-        RoutingMode(project.routing_mode),
-        project.preferred_model,
+    ready = _readiness(RoutingMode(project.routing_mode), project.preferred_model)
+    if not ready.ok:
+        raise HTTPException(status_code=409, detail=ready.reason)
+
+
+def _readiness(mode: RoutingMode, preferred_model: Optional[str]):
+    """The one readiness question, shared by every route that starts a run and by
+    the preflight the composer asks before it creates one."""
+    return model_router.readiness(
+        mode,
+        preferred_model,
         # Embeddings are left out: they never go through the chat router, so
         # resolving that role here would check the wrong model entirely. RAG and
         # memory degrade to no-ops when their model is missing; a build does not.
         roles=[r["role"] for r in model_roles.catalogue() if r["role"] != "embeddings"],
     )
-    if not ready.ok:
-        raise HTTPException(status_code=409, detail=ready.reason)
+
+
+@router.post("/preflight")
+def preflight(payload: PreflightRequest) -> dict:
+    """Would a build with these settings start? Asked before one is created.
+
+    The composer used to answer this itself, from a copy of the rules below — and
+    three reviews in a row found the copy disagreeing with the original, each time
+    leaving a project created and then refused. It now asks. Same readiness check,
+    same roles, same answer as `/run` will give.
+    """
+    try:
+        mode = RoutingMode(payload.routing_mode)
+    except ValueError:
+        raise HTTPException(400, f"'{payload.routing_mode}' is not a routing mode.")
+    ready = _readiness(mode, payload.preferred_model)
+    return {"ok": ready.ok, "reason": ready.reason, "unreachable": ready.unreachable}
 
 
 @router.post("/{project_id}/run", response_model=RunResponse)
@@ -412,6 +436,9 @@ def approve_phase(
             else HTTPException(400, f"Nothing to approve (status '{project.status}').")
         )
     _require_findings_settled(db, project)
+    # Every route that starts model calls asks first, as `run` and `resume` do —
+    # a default changed since the last phase would otherwise fail inside it.
+    _require_models(project)
     if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
         raise _conflict(project, "approve")
 
@@ -445,6 +472,9 @@ def reject_phase(
             if project.status == PipelineStatus.RUNNING.value
             else HTTPException(400, f"Nothing to reject (status '{project.status}').")
         )
+    # Every route that starts model calls asks first, as `run` and `resume` do —
+    # a default changed since the last phase would otherwise fail inside it.
+    _require_models(project)
     if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
         raise _conflict(project, "reject")
 
@@ -549,6 +579,9 @@ def fix_finding(
             if project.status == PipelineStatus.RUNNING.value
             else HTTPException(400, f"This build isn't waiting for a decision (status '{project.status}').")
         )
+    # Every route that starts model calls asks first, as `run` and `resume` do —
+    # a default changed since the last phase would otherwise fail inside it.
+    _require_models(project)
     if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
         raise _conflict(project, "fix")
 
@@ -630,6 +663,9 @@ def redo_phase(
         raise HTTPException(
             400, f"The {payload.phase} phase hasn't produced anything to redo yet."
         )
+    # Every route that starts model calls asks first, as `run` and `resume` do —
+    # a default changed since the last phase would otherwise fail inside it.
+    _require_models(project)
     if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
         raise _conflict(project, "redo")
 

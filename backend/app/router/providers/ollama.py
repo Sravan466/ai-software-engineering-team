@@ -81,6 +81,18 @@ def _spellings(model: str) -> tuple[str, ...]:
     return (model, name) if tag == "latest" else (model,)
 
 
+def _canonical(model: str) -> str:
+    """The one spelling a model's capabilities are kept under: always `name:tag`.
+
+    One key per model, not one per spelling. With several, an answer written under
+    `nomic-embed-text` (a failed probe, say) and a fresher one from the tag list under
+    `nomic-embed-text:latest` both stayed live, and whichever spelling was looked up
+    first won — so the stale one could hide the fresh one for its whole lifetime.
+    """
+    name, sep, tag = model.rpartition(":")
+    return f"{model}:latest" if not sep or "/" in tag else model
+
+
 def _parse_version(text: str) -> tuple[int, int, int]:
     """'0.30.10' -> (0, 30, 10). Always three parts, so comparisons mean what they read.
 
@@ -294,7 +306,7 @@ class OllamaProvider(LLMProvider):
             timeout=_CAPABILITY_PROBE_TIMEOUT,
         )
         if show is None:
-            self._capabilities[(self.base_url, model)] = (
+            self._capabilities[(self.base_url, _canonical(model))] = (
                 _FAILED,
                 time.monotonic() + _FAILED_PROBE_TTL_SECONDS,
             )
@@ -356,12 +368,10 @@ class OllamaProvider(LLMProvider):
         return None
 
     def _remembered_capabilities(self, model: str) -> object:
-        """The live answer under any spelling of `model`, `_FAILED`, or `_MISSING`."""
-        now = time.monotonic()
-        for name in _spellings(model):
-            entry = self._capabilities.get((self.base_url, name))
-            if entry is not None and entry[1] > now:
-                return entry[0]
+        """The live answer for `model` however it is spelled, `_FAILED`, or `_MISSING`."""
+        entry = self._capabilities.get((self.base_url, _canonical(model)))
+        if entry is not None and entry[1] > time.monotonic():
+            return entry[0]
         return _MISSING
 
     def _remember_capabilities(self, model: str, show: dict) -> Optional[tuple[str, ...]]:
@@ -375,7 +385,7 @@ class OllamaProvider(LLMProvider):
         caps = (
             tuple(str(c) for c in reported) if isinstance(reported, (list, tuple)) else None
         )
-        self._capabilities[(self.base_url, model)] = (
+        self._capabilities[(self.base_url, _canonical(model))] = (
             caps,
             time.monotonic() + _CAPABILITY_TTL_SECONDS,
         )
@@ -435,7 +445,7 @@ class OllamaProvider(LLMProvider):
         # that left `llama3.1:latest`'s profile behind kept budgeting for the old one.
         for name in _spellings(model):
             self._profiles.forget((self.base_url, name))
-            self._capabilities.pop((self.base_url, name), None)
+        self._capabilities.pop((self.base_url, _canonical(model)), None)
 
     # ── generation ────────────────────────────────────────────────────────────
     def generate(

@@ -190,6 +190,8 @@ class ModelRouter:
                 f"'{provider}' runs on this machine and has no API key to set. "
                 f"API keys apply to {', '.join(self.CLOUD_PROVIDERS)}."
             )
+        if provider == "ollama" and default_model:
+            self._refuse_if_it_cannot_write(default_model, "the default every agent runs on")
         self._apply(provider, api_key, default_model)
         from app.core import secrets_store
 
@@ -208,7 +210,31 @@ class ModelRouter:
 
     def set_role_model(self, role: str, spec: Optional[str]) -> None:
         """Point one role at its own model. Blank puts it back on the default."""
+        if spec and spec.strip() and role != "embeddings":
+            provider, model = self._parse_pair(spec.strip())
+            if provider == "ollama":
+                self._refuse_if_it_cannot_write(model, "an agent's model")
         model_roles.set_role(role, spec)
+
+    def _refuse_if_it_cannot_write(self, model: str, what: str) -> None:
+        """Refuse a model the runtime says cannot write, at the moment it is chosen.
+
+        The pickers never offer one, but they are one client of this API. Accepted
+        here, it becomes a setting every later build is refused on — the refusal
+        arriving far from the choice that caused it. Only a definite answer
+        refuses; a runtime that cannot say lets the choice through, as everywhere.
+        Embeddings is the one role exempt: an embedding model is its right answer.
+        """
+        prov = self._providers["ollama"]
+        if not hasattr(prov, "capabilities") or not hasattr(prov, "writes"):
+            return
+        caps = prov.capabilities(model)
+        if prov.writes(caps) is False:
+            raise ValueError(
+                f"'{model}' can't be {what}: the runtime lists it as "
+                f"{', '.join(caps or ())}, not completion, and every agent has to write. "
+                "Choose a model that writes."
+            )
 
     def provider_settings(self) -> dict:
         """Per-cloud-provider config for the Settings UI (never exposes the raw key)."""
@@ -256,7 +282,10 @@ class ModelRouter:
             #: what stops an embedding-only model being offered as something to run a
             #: build on: the tag list alone cannot tell the two apart, and offering
             #: one is a build that fails on its first call for a knowable reason.
-            **self._capability_view(models, default),
+            # The default is judged only when the runtime answered with a list to
+            # judge it against. Down, a cached verdict about a local model says
+            # nothing about a run that Auto would send to the cloud instead.
+            **self._capability_view(models, default if models else None),
             #: Pulled models whose name suggests they were trained for code. A hint
             #: for the code phases, offered — never a default the router reaches for,
             #: because a name is not a capability.
@@ -300,7 +329,7 @@ class ModelRouter:
             "code_models": [m for m in models if _looks_like_a_coder(m)],
             #: Same view, same rule, same reason as on `local_status` — a role pinned
             #: to a model that cannot complete text fails exactly as a build does.
-            **self._capability_view(models, self._default_model["ollama"]),
+            **self._capability_view(models, self._default_model["ollama"] if models else None),
             "cloud_models": [
                 f"{name}:{self._default_model[name]}"
                 for name in self.CLOUD_PROVIDERS
@@ -375,10 +404,17 @@ class ModelRouter:
                 ),
             )
 
+        # One tag list for every model asked about, rather than one fetch each.
+        pulled = prov.list_models() if hasattr(prov, "list_models") else []
+        present = (
+            (lambda m: prov.resolves(m, pulled))
+            if hasattr(prov, "resolves")
+            else prov.has_model
+        )
         missing = [
             {"role": role, "model": model}
             for model, role in wanted.items()
-            if not prov.has_model(model)
+            if not present(model)
         ]
         if not missing:
             return self._able_to_write(prov, wanted)
@@ -421,7 +457,7 @@ class ModelRouter:
             return Readiness(ok=True)
 
         first = incapable[0]
-        does = ", ".join(first["capabilities"]) or "nothing it can do"
+        does = ", ".join(first["capabilities"])
         names = sorted({str(m["model"]) for m in incapable})
         listed = ", ".join(f"'{n}'" for n in names)
         return Readiness(

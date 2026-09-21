@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type Artifacts, type Project, type RunResponse } from "@/lib/api";
+import { listOf } from "@/lib/text";
 import { APPROVAL_BY_ID, PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
 import { AGENT_BY_KEY, type Persona } from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
@@ -189,11 +190,6 @@ function relaySummary(project: Project, doneCount: number): string {
 }
 
 /** "SCOPE", "SCOPE and ATLAS", "SCOPE, ATLAS and FORGE". */
-function joinNames(names: string[]): string {
-  if (names.length <= 1) return names[0] ?? "";
-  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-}
-
 function localPct(project: Project): number | null {
   const withProvider = project.phases.filter((p) => p.provider_used);
   if (withProvider.length === 0) return null;
@@ -1112,7 +1108,7 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
               haven't got there yet. */}
           {shipped.length > 0 && silent.length > 0 && (
             <p className="field-hint" style={{ margin: 0 }}>
-              {joinNames(silent.map((ph) => AGENT_BY_KEY[ph.key].codename))}{" "}
+              {listOf(silent.map((ph) => AGENT_BY_KEY[ph.key].codename))}{" "}
               {stillRunning(art.status)
                 ? `${silent.length === 1 ? "hasn’t" : "haven’t"} produced anything yet.`
                 : `produced nothing in this run.`}

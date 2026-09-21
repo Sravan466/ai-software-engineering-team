@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, type LocalStatus, type RouterStatus } from "@/lib/api";
+import { api, type LocalStatus, type Preflight, type RouterStatus } from "@/lib/api";
 import { EXAMPLES } from "@/components/shell/phases";
 import { AGENTS } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
@@ -61,11 +61,43 @@ export default function NewBuildPage() {
     probe();
   }, [probe]);
 
+  // The server's own answer to "would this start?", for the routing chosen. Asked
+  // again whenever the routing or the runtime changes; a stale reply is dropped, and
+  // a failed one is no answer at all rather than a refusal — the same "only on a
+  // definite negative" rule `runtimeBlocker` works by.
+  const [preflight, setPreflight] = useState<Preflight | null>(null);
+  const [preflighting, setPreflighting] = useState(true);
+  useEffect(() => {
+    if (checking) return;
+    let live = true;
+    setPreflighting(true);
+    api
+      .preflight({
+        routing_mode: config.routing.backend,
+        preferred_model: config.model || undefined,
+      })
+      .then((answer) => live && setPreflight(answer))
+      .catch(() => live && setPreflight(null))
+      .finally(() => live && setPreflighting(false));
+    return () => {
+      live = false;
+    };
+  }, [checking, config.routing.backend, config.model, local, models]);
+
   const options = useMemo(() => modelOptions(local, models), [local, models]);
   // What the list above left out, so the panel can say so rather than leaving a
   // model visible in Settings and missing here with no explanation anywhere.
   const omitted = useMemo(() => modelsThatCannotBuild(local), [local]);
-  const blocker = runtimeBlocker(config, local, models);
+  const blocker =
+    runtimeBlocker(config, local, models) ??
+    (preflight && !preflight.ok && preflight.reason
+      ? {
+          title: "This build can't start yet",
+          text: preflight.reason,
+          action: "Fix it in Settings",
+          href: "/settings",
+        }
+      : null);
 
   async function start() {
     const trimmed = idea.trim();
@@ -154,7 +186,7 @@ export default function NewBuildPage() {
             ) : (
               <button
                 className="btn btn-primary"
-                disabled={!idea.trim() || busy || checking}
+                disabled={!idea.trim() || busy || checking || preflighting}
                 onClick={start}
               >
                 {busy && <span className="btn-spinner" aria-hidden="true" />}

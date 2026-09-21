@@ -285,6 +285,12 @@ export const api = {
 
   // ── Pipeline control — all of these return in well under a second ──
   run: (id: string) => req<RunResponse>(`/api/projects/${id}/run`, { method: "POST" }),
+  /** Would a build with these settings start? The same answer `run` will give. */
+  preflight: (body: { routing_mode: string; preferred_model?: string }) =>
+    req<Preflight>("/api/projects/preflight", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   approve: (id: string) =>
     req<RunResponse>(`/api/projects/${id}/approve`, { method: "POST" }),
   reject: (id: string, feedback: string) =>
@@ -604,6 +610,15 @@ export type LocalStatus = {
    * router reaches for, because a name is not a capability.
    */
   code_models: string[];
+};
+
+/** The server's answer to "would this build start?", asked before one is created. */
+export type Preflight = {
+  ok: boolean;
+  /** One sentence, ready to show. Null when the build can start. */
+  reason: string | null;
+  /** True when the local runtime itself is not answering. */
+  unreachable: boolean;
 };
 
 /** `{ "nomic-embed-text": ["embedding"] }` — see `LocalStatus.model_capabilities`. */

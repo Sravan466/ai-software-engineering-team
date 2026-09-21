@@ -64,15 +64,20 @@ log = get_logger(__name__)
 # the model call. One slow generation therefore stalled every other build in the
 # process: eight agents, one at a time, globally.
 #
-# The lock is now per project, and it still covers the model call. It has to: a
-# phase is a read-modify-write on that build's checkpoint (`invoke` reads the state,
-# generates, writes the next one; `redo` reads a snapshot, generates, patches it), and
-# a build *can* have a second driver while the first is mid-generation — Stop marks
-# it cancelled immediately without interrupting the call, Resume can claim it
-# straight back, and a stalled `running` build can be taken over. Without the lock
-# the second driver's writes would be overwritten by a patch built from a snapshot
-# that no longer exists. What changed is who waits: another writer of the *same*
-# build, rather than every build in the process.
+# The lock is now per project, and it still covers the model call: a phase is a
+# read-modify-write on that build's checkpoint (`invoke` reads the state, generates,
+# writes the next one; `redo` reads a snapshot, generates, patches it), and holding
+# it across the pair is what stops one writer's patch landing on top of another's.
+# What changed is who waits: another writer of the *same* build, rather than every
+# build in the process.
+#
+# What it does not do is stop a build having two drivers. Stop marks a build
+# cancelled without interrupting the call in flight, Resume clears the flag and
+# claims it straight back, and the first driver — no longer seeing the flag — carries
+# on beside the second. The lock makes their checkpoint writes take turns; it does
+# not make the second one wait for the first to *finish*, and the two can both
+# advance the run. That race is older than this lock (the process-wide one allowed it
+# too); closing it needs a claim each driver holds and checks, not a lock.
 #
 # The SQLite connection itself does not need this. `SqliteSaver` holds its own lock
 # around every cursor it opens, so writes from two builds cannot interleave on it.
@@ -407,13 +412,11 @@ class PipelineRunner:
                         charter=binding_on(phase_key, values.get("charter")),
                     )
                     # Inside the lock, model call and all. This is a read-modify-write:
-                    # the patch below is built from the snapshot above, so anything that
-                    # wrote this checkpoint in between would be silently overwritten. And
-                    # something can — Stop marks the project cancelled while this call is
-                    # still generating, Resume can claim it straight back, and a second
-                    # driver then runs `graph.invoke` on the same thread. The lock is
-                    # what makes that second driver wait. It is per project, so the only
-                    # thing it holds up is another writer of *this* build.
+                    # the patch below is built from the snapshot above, so a write to this
+                    # checkpoint in between would be silently overwritten by it. The lock
+                    # keeps every other writer of *this* build out until the patch lands;
+                    # it is per project, so it holds up nothing else. It does not stop a
+                    # second driver existing — see `_checkpoint_lock`.
                     result = agent.run(ctx)
 
                     from app.orchestration.graph import _last_debate, _serialize_result

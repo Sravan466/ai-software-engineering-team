@@ -144,7 +144,12 @@ export type RuntimeBlocker = {
 };
 
 /**
- * Why this run cannot start, or null when it can.
+ * Why this run cannot start, or null when it can — for the cases this page can
+ * explain best from what it already knows: the runtime is down, or the model is not
+ * downloaded. Anything subtler (a default or an agent's model that cannot write, a
+ * run Auto would send elsewhere) is the server's to answer, through `preflight`;
+ * this used to hold a copy of those rules too, and three reviews in a row found the
+ * copy disagreeing with the original.
  *
  * Only ever returns a blocker on a *definite* negative: if the probe itself failed
  * we know nothing, and refusing to start on our own inability to ask is worse than
@@ -175,27 +180,10 @@ export function runtimeBlocker(
     action: "Pull the model",
     href: "/settings",
   };
-  // Downloaded, running, and still unable to write a line. Left to the run, this
-  // fails on the first agent's first call — for a reason that is knowable here,
-  // before a project has been created. The reason quotes what the runtime actually
-  // reported rather than assuming which kind of model this is.
-  const cannotWrite: RuntimeBlocker | null =
-    local?.default_model && !canRunABuild(local.default_model, local.cannot_build)
-      ? {
-          title: `${local.default_model} can't run a build`,
-          text:
-            `The runtime ${runtimeSays(local.model_capabilities?.[local.default_model] ?? [])}` +
-            ". Every agent here has to produce prose, code and JSON, so pick a model " +
-            "that writes and this build can go.",
-          action: "Choose another model",
-          href: "/settings",
-        }
-      : null;
-
   if (config.routing.backend === "local_only") {
     if (!localReachable) return notRunning;
     if (!localReady) return notPulled;
-    return cannotWrite;
+    return null;
   }
 
   if (config.routing.backend === "manual") {
@@ -204,7 +192,10 @@ export function runtimeBlocker(
       // "found nothing" and "could not ask" look identical from here, and only one of
       // them is a reason to refuse to start.
       if (!local && !models) return null;
-      const onlyNonWriting = modelsThatCannotBuild(local).length > 0;
+      // Every pulled model was left out as unable to write — not merely some of them.
+      const onlyNonWriting =
+        modelsThatCannotBuild(local).length > 0 &&
+        !(local?.models ?? []).some((m) => canRunABuild(m, local?.cannot_build));
       return {
         title: "No model to pin",
         text: onlyNonWriting
@@ -234,11 +225,6 @@ export function runtimeBlocker(
   if (!localReady && !cloudAvailable(models)) {
     return localReachable ? notPulled : notRunning;
   }
-  // Unconditionally, not "unless a cloud key is set": Auto's chain is headed by the
-  // local default whatever keys exist, and the run's own readiness check resolves
-  // the rest of the run to it. Exempting a cloud key here only moved the refusal to
-  // after the project had been created.
-  if (cannotWrite) return cannotWrite;
   return null;
 }
 

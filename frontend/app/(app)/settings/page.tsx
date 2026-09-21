@@ -699,6 +699,14 @@ function RoleLine({
   // is exempt from the filter.
   const defaultCannotWrite =
     row.role !== "embeddings" && !canRunABuild(state.default_model, state.cannot_build);
+  // A role pinned to such a model before this check existed (or through the API)
+  // is still shown as set — hiding it would misreport the role — but it is said
+  // plainly, since a build refuses to start while any agent is set to it.
+  const assignedCannotWrite =
+    row.role !== "embeddings" &&
+    Boolean(row.assigned) &&
+    row.provider === "ollama" &&
+    !canRunABuild(row.model ?? "", state.cannot_build);
 
   return (
     <li className="role-row" style={{ ["--agent" as string]: agent?.accent }}>
@@ -726,11 +734,21 @@ function RoleLine({
           {options.map((m) => (
             <option key={m} value={m}>
               {m}
+              {assignedCannotWrite && m === row.assigned ? " · can't write" : ""}
             </option>
           ))}
         </select>
         {busy && <span className="btn-spinner" aria-hidden="true" />}
       </span>
+      {assignedCannotWrite && (
+        <span className="role-warn" role="status">
+          {Icon.alert}
+          <span>
+            <span className="mono">{row.model}</span> can&apos;t write — a build won&apos;t start
+            while this agent is set to it.
+          </span>
+        </span>
+      )}
       {missing && (
         <span className="role-warn" role="status">
           {Icon.alert}

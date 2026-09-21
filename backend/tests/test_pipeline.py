@@ -359,12 +359,13 @@ def test_a_redo_holds_its_own_build_while_it_generates_and_no_other(client, monk
     assert not redo.is_alive(), "the redo never finished"
 
 
-def test_the_vector_stores_never_open_the_shared_directory_twice_at_once(monkeypatch, tmp_path):
+def test_the_vector_stores_share_one_client_opened_once(monkeypatch, tmp_path):
     """Two builds' first phases used to be serialised by the process-wide lock.
 
     With builds side by side, the knowledge base and project memory could each build
-    a Chroma client on the same directory at the same moment. A stand-in client
-    records overlap, so this runs whether or not Chroma is installed.
+    a Chroma client on the same directory at the same moment. They now share one,
+    opened once behind a lock. A stand-in client records overlap, so this runs
+    whether or not Chroma is installed.
     """
     import sys
     import threading
@@ -373,6 +374,7 @@ def test_the_vector_stores_never_open_the_shared_directory_twice_at_once(monkeyp
 
     from app.core.config import settings
     from app.memory.store import MemoryStore
+    from app.rag import chroma
     from app.rag.knowledge_base import KnowledgeBase
 
     guard = threading.Lock()
@@ -393,15 +395,74 @@ def test_the_vector_stores_never_open_the_shared_directory_twice_at_once(monkeyp
 
     monkeypatch.setitem(sys.modules, "chromadb", types.SimpleNamespace(PersistentClient=_Client))
     monkeypatch.setattr(settings, "chroma_persist_dir", str(tmp_path))
+    # Module state, shared with every other test: start from "never opened".
+    monkeypatch.setattr(chroma, "_client", None)
+    monkeypatch.setattr(chroma, "_failed_until", 0.0)
 
     stores = [KnowledgeBase(), MemoryStore()]
-    callers = [
-        threading.Thread(target=stores[i % 2]._get_collection) for i in range(8)
-    ]
+    callers = [threading.Thread(target=stores[i % 2]._get_collection) for i in range(8)]
     for t in callers:
         t.start()
     for t in callers:
         t.join(timeout=10)
 
     assert seen["peak"] == 1, "two Chroma clients were opened on one directory at once"
-    assert seen["made"] == 2, "a store opened its collection more than once"
+    assert seen["made"] == 1, "the two stores did not share one client"
+    assert all(s._collection is not None for s in stores)
+
+
+def test_a_chroma_directory_that_will_not_open_is_not_retried_on_every_call(monkeypatch):
+    """Behind a lock, retrying on every call made concurrent builds queue to fail."""
+    import sys
+    import types
+
+    from app.rag import chroma
+
+    attempts: list[str] = []
+
+    def _broken(path):
+        attempts.append(path)
+        raise RuntimeError("incompatible persist dir")
+
+    clock = [1000.0]
+    monkeypatch.setitem(sys.modules, "chromadb", types.SimpleNamespace(PersistentClient=_broken))
+    monkeypatch.setattr(chroma, "_client", None)
+    monkeypatch.setattr(chroma, "_failed_until", 0.0)
+    monkeypatch.setattr(chroma.time, "monotonic", lambda: clock[0])
+
+    for _ in range(5):
+        assert chroma.collection("knowledge_base", None, owner="Knowledge base") is None
+    assert len(attempts) == 1, "a failed open was retried on every call"
+
+    clock[0] += chroma._RETRY_AFTER_SECONDS + 1
+    chroma.collection("knowledge_base", None, owner="Knowledge base")
+    assert len(attempts) == 2, "a failed open was never tried again"
+
+
+def test_every_route_that_starts_model_calls_checks_readiness_first(client, monkeypatch):
+    """Approve, send back and redo used to start the next phase on whatever the
+    default had become — `run` and `resume` asked first, these did not."""
+    from app.router.router import Readiness, router as model_router
+
+    pid = _create(client, require_approval=True)
+    client.post(f"/api/projects/{pid}/run")
+    assert client.get(f"/api/projects/{pid}").json()["status"] == "awaiting_approval"
+
+    monkeypatch.setattr(
+        model_router,
+        "readiness",
+        lambda *a, **k: Readiness(ok=False, reason="The default can't write."),
+    )
+    calls = {
+        "approve": client.post(f"/api/projects/{pid}/approve"),
+        "reject": client.post(f"/api/projects/{pid}/reject", json={"feedback": "Tighter."}),
+        "redo": client.post(
+            f"/api/projects/{pid}/redo",
+            json={"phase": "product_manager", "feedback": "Tighter."},
+        ),
+    }
+    for route, response in calls.items():
+        assert response.status_code == 409, f"/{route} started a phase it could not run"
+        assert "can't write" in response.json()["detail"]
+    # Refused before the claim, so the build is exactly where it was.
+    assert client.get(f"/api/projects/{pid}").json()["status"] == "awaiting_approval"

@@ -1510,3 +1510,110 @@ def test_presence_uses_the_runtimes_naming_rule(configured, pulled, present):
     from app.router.providers.ollama import OllamaProvider
 
     assert OllamaProvider.resolves(configured, pulled) is present
+
+
+# ── what the third pre-merge review of #40 found ──────────────────────────────
+def test_the_preflight_gives_the_answer_run_will_give(monkeypatch):
+    """The composer asks this instead of re-deriving the rules, so it must agree."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    model_router = _stubbed_local(
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
+        tags_report=True,
+    )
+    with TestClient(app) as client:
+        monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
+        refused = client.post("/api/projects/preflight", json={"routing_mode": "local_only"}).json()
+        assert refused["ok"] is False and "cannot write" in refused["reason"]
+
+        monkeypatch.setitem(model_router._default_model, "ollama", "qwen2.5:7b")
+        assert client.post("/api/projects/preflight", json={"routing_mode": "auto"}).json()["ok"]
+
+        bad = client.post("/api/projects/preflight", json={"routing_mode": "sideways"})
+        assert bad.status_code == 400
+
+
+def test_a_model_that_cannot_write_is_refused_when_it_is_chosen(monkeypatch):
+    """Accepted, it becomes a setting every later build is refused on, far from the choice."""
+    from app.core import model_roles
+
+    model_router = _stubbed_local(
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
+        tags_report=True,
+    )
+    # Both raise before anything is persisted — neither reaches the settings files.
+    with pytest.raises(ValueError, match="can't be the default"):
+        model_router.set_default_model("ollama", "nomic-embed-text")
+    with pytest.raises(ValueError, match="can't be an agent's model"):
+        model_router.set_role_model("backend_engineer", "nomic-embed-text:latest")
+
+    # Embeddings is the one role an embedding model is the right answer for.
+    recorded: list = []
+    monkeypatch.setattr(model_roles, "set_role", lambda role, spec: recorded.append((role, spec)))
+    model_router.set_role_model("embeddings", "nomic-embed-text:latest")
+    assert recorded == [("embeddings", "nomic-embed-text:latest")]
+
+
+def test_a_cached_verdict_is_not_reported_while_the_runtime_is_down(monkeypatch):
+    """Down, Auto sends the run to the cloud — a stale local verdict must not block it."""
+    model_router = _stubbed_local(
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
+        tags_report=True,
+    )
+    monkeypatch.setitem(model_router._default_model, "ollama", "nomic-embed-text")
+    assert "nomic-embed-text" in model_router.local_status()["cannot_build"]  # primes the cache
+
+    prov = model_router._providers["ollama"]
+    monkeypatch.setattr(prov, "available", lambda: False)
+    monkeypatch.setattr(prov, "list_models", lambda: [])
+    status = model_router.local_status()
+    assert status["reachable"] is False
+    assert status["cannot_build"] == [], "a cached verdict outlived the runtime it was about"
+    assert model_router.role_settings()["cannot_build"] == []
+
+
+def test_one_model_is_remembered_once_however_it_is_spelled(monkeypatch):
+    """A failed probe under one spelling must not hide the tag list's answer under another."""
+    from app.router.providers import ollama as ollama_module
+    from app.router.providers.ollama import OllamaProvider
+
+    prov = OllamaProvider("http://localhost:11434")
+    monkeypatch.setattr(prov, "_show", lambda model, **_: None)  # the runtime is busy
+    assert prov.capabilities("nomic-embed-text") is None  # remembered as a failure
+
+    # The tag list then reports it under its full name.
+    prov._remember_capabilities("nomic-embed-text:latest", {"capabilities": ["embedding"]})
+    assert prov.capabilities("nomic-embed-text") == ("embedding",), (
+        "a stale failure under the short spelling hid the fresh answer"
+    )
+    assert len(prov._capabilities) == 1
+    assert ollama_module._canonical("nomic-embed-text") == "nomic-embed-text:latest"
+
+
+def test_readiness_reads_the_tag_list_once_however_many_models(monkeypatch):
+    """One fetch per model asked about was a timeout each when the runtime was slow."""
+    from app.core import model_roles
+    from app.core.constants import RoutingMode
+    from app.router.providers import ollama as ollama_module
+
+    shows = {"qwen2.5:7b": SHOW, "llama3.1:8b": SHOW, "mistral:7b": SHOW}
+    model_router = _stubbed_local(monkeypatch, shows, tags_report=True)
+    pins = {"product_manager": "llama3.1:8b", "system_design": "mistral:7b"}
+    monkeypatch.setattr(model_roles, "get", lambda role: pins.get(role))
+
+    tag_reads: list[str] = []
+    real_get = ollama_module.httpx.get
+
+    def _counting_get(url, **kw):
+        tag_reads.append(url)
+        return real_get(url, **kw)
+
+    monkeypatch.setattr(ollama_module.httpx, "get", _counting_get)
+    assert model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=list(pins)).ok
+    # One for reachability, one for the list — not one more per model.
+    assert len(tag_reads) == 2, tag_reads
