@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api, type LocalStatus, type Project } from "@/lib/api";
 import { canRunABuild } from "@/lib/capabilities";
-import { modelName, sourceFor, triedText } from "@/lib/models";
+import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
 
@@ -113,7 +113,10 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
   // default that is pulled but cannot write used to show green here while the
   // composer refused to start on it — two answers about one model.
   const writes = canRunABuild(local?.default_model ?? "", local?.cannot_build);
-  const ready = !localError && local?.reachable && local?.has_default && writes;
+  // A default its runtime sends to a hosted service is not a local model, and Local
+  // builds refuse it — so it is not "ready" here either.
+  const hosted = modelFor(local, local?.default_model)?.is_local === false;
+  const ready = !localError && local?.reachable && local?.has_default && writes && !hosted;
   const home = sourceFor(local, local?.default_model);
   const name = modelName(local?.default_model);
   const runtimeLabel = localError
@@ -128,7 +131,9 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
             ? `${name} not available`
             : !writes
               ? `${name} can't write`
-              : `${name} ready`;
+              : hosted
+                ? `${name} runs hosted`
+                : `${name} ready`;
   // The whole answer on hover: which source, and — when nothing answered — where
   // this looked, so "unreachable" is never a claim without its evidence.
   const runtimeTitle = !local

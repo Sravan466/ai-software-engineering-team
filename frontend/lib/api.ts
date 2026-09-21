@@ -692,6 +692,9 @@ export type LocalStatus = {
   /** What memory and document search embed with right now, or null (they're off). */
   embedding_model: string | null;
   embedding_origin: "chosen" | "configured" | "detected" | null;
+  /** What "Automatic" would embed with — differs from the above once one is chosen. */
+  embedding_automatic: string | null;
+  embedding_automatic_origin: "configured" | "detected" | null;
 };
 
 /** The server's answer to "would this build start?", asked before one is created. */
@@ -730,6 +733,7 @@ export type RoleSettings = {
   embedding_models: string[];
   embedding_model: string | null;
   embedding_origin: LocalStatus["embedding_origin"];
+  embedding_automatic: string | null;
   /**
    * Pulled models whose name suggests they were trained on code. Derived by the
    * backend so there is one rule rather than two that disagree — a second copy here

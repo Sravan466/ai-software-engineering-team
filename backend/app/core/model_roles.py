@@ -18,9 +18,11 @@ application itself.
 from __future__ import annotations
 
 import json
-import os
+import threading
 from pathlib import Path
 from typing import Optional
+
+from app.core.atomic import write_private
 
 from app.core.constants import PHASE_LABELS, PHASE_ORDER
 
@@ -82,12 +84,11 @@ def _read() -> dict:
 
 
 def _write(data: dict) -> None:
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    _PATH.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    try:
-        os.chmod(_PATH, 0o600)
-    except OSError:
-        pass
+    write_private(_PATH, json.dumps(data, indent=2, sort_keys=True))
+
+
+#: One read-modify-write at a time, so two roles set at once both stay set.
+_LOCK = threading.Lock()
 
 
 def get_all() -> dict[str, str]:
@@ -117,14 +118,16 @@ def set_role(role: str, spec: Optional[str]) -> None:
     """
     if role not in known_roles():
         raise ValueError(f"'{role}' is not a role a model can be chosen for.")
-    data = _read()
-    if spec and spec.strip():
-        data[role] = spec.strip()
-    else:
-        data.pop(role, None)
-    _write(data)
+    with _LOCK:
+        data = _read()
+        if spec and spec.strip():
+            data[role] = spec.strip()
+        else:
+            data.pop(role, None)
+        _write(data)
 
 
 def clear_all() -> None:
     """Put every role back on the default model."""
-    _write({})
+    with _LOCK:
+        _write({})

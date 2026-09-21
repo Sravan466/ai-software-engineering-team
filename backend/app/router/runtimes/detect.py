@@ -11,6 +11,7 @@ it at least speaks the OpenAI dialect — and is not used until someone confirms
 """
 from __future__ import annotations
 
+import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -28,27 +29,66 @@ from app.router.runtimes.types import Hello
 log = get_logger(__name__)
 
 LOOPBACK_HOSTS = ("127.0.0.1", "::1")
-_LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
 #: A closed port on loopback refuses at once; this only bounds a filtered one.
 _CONNECT_TIMEOUT = 0.4
+#: How long a port that accepted a connection gets to answer HTTP at all. A
+#: listener that never replies would otherwise cost every fingerprint its timeout.
+_HTTP_TIMEOUT = 1.0
 
 
 def is_loopback(base_url: str) -> bool:
-    host = (urlparse(base_url).hostname or "").lower()
-    return host in _LOOPBACK_NAMES or host.startswith("127.")
+    """Whether an address is this machine: a loopback IP literal, or `localhost`.
+
+    Only those. A name is never read by its spelling — `127.x.10.0.0.5.nip.io`
+    starts like loopback and resolves to another computer — and resolving names
+    here would make "is this machine" depend on whatever DNS says at the moment.
+    `0.0.0.0` is not an address anyone connects to, so it is not this machine either.
+    """
+    try:
+        host = (urlparse(base_url).hostname or "").strip("[]").rstrip(".").lower()
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool(address.is_loopback or (mapped is not None and mapped.is_loopback))
 
 
 def url_for(host: str, port: int) -> str:
     return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
+def _port(url: str) -> int:
+    try:
+        parsed = urlparse(url)
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return -1
+
+
 def same_address(a: str, b: str) -> bool:
     """Whether two URLs name the same server, reading every loopback spelling as one."""
-    pa, pb = urlparse(a), urlparse(b)
-    if (pa.port or 80) != (pb.port or 80):
+    port_a, port_b = _port(a), _port(b)
+    if port_a < 0 or port_a != port_b:
         return False
-    ha, hb = (pa.hostname or "").lower(), (pb.hostname or "").lower()
+    try:
+        ha, hb = (urlparse(a).hostname or "").lower(), (urlparse(b).hostname or "").lower()
+    except ValueError:
+        return False
     return ha == hb or (is_loopback(a) and is_loopback(b))
+
+
+def answers_http(base_url: str) -> bool:
+    """Whether anything answers HTTP here at all — any status counts."""
+    try:
+        httpx.get(base_url.rstrip("/") + "/", timeout=_HTTP_TIMEOUT)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _accepts(host: str, port: int) -> bool:
@@ -92,13 +132,14 @@ class Detection:
     tried: list[str] = field(default_factory=list)
 
 
-def _describe_unknown(base_url: str) -> dict:
-    openai = speaks_openai(base_url)
+def _describe_unknown(base_url: str, *, http: bool = True) -> dict:
     status: Optional[int] = None
-    try:
-        status = httpx.get(base_url + "/", timeout=1.0).status_code
-    except Exception:  # noqa: BLE001
-        pass
+    if http:
+        try:
+            status = httpx.get(base_url + "/", timeout=_HTTP_TIMEOUT).status_code
+        except Exception:  # noqa: BLE001
+            pass
+    openai = http and speaks_openai(base_url)
     if openai:
         note = "Answers the OpenAI API, but not as any runtime this app recognises."
     elif status is not None:
@@ -134,16 +175,20 @@ def detect() -> Detection:
                 seen.add(port)
                 ordered.append((h, port))
 
-    def _ask(target: tuple[str, int]) -> tuple[str, Optional[Hello]]:
+    def _ask(target: tuple[str, int]) -> tuple[str, bool, Optional[Hello]]:
         url = url_for(*target)
-        return url, identify(url)
+        # One short request first: a listener that never answers HTTP would
+        # otherwise cost every adapter's fingerprint its timeout, in turn.
+        if not answers_http(url):
+            return url, False, None
+        return url, True, identify(url)
 
     if ordered:
         with ThreadPoolExecutor(max_workers=min(len(ordered), 8), thread_name_prefix="identify") as pool:
             answers = list(pool.map(_ask, ordered))
-        for url, hello in answers:
+        for url, http, hello in answers:
             if hello is not None:
                 result.found.append(hello)
             else:
-                result.unknown.append(_describe_unknown(url))
+                result.unknown.append(_describe_unknown(url, http=http))
     return result

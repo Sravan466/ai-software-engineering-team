@@ -86,6 +86,24 @@ class LMStudioAdapter(OpenAICompatAdapter):
             for d in self._rich()
         ]
 
+    def _loaded_window(self, model: str) -> Optional[int]:
+        """The window a loaded instance was loaded with, from LM Studio's v1 listing.
+
+        Only v1 (LM Studio 0.4 and later) reports it — `loaded_instances[].config.
+        context_length` — and it is read defensively (unverified against a running
+        server): any other shape reads as "not reported".
+        """
+        data = get_json(self.base_url, "/api/v1/models", self.api_key, timeout=FINGERPRINT_TIMEOUT)
+        entries = data.get("models") if isinstance(data, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or model not in (entry.get("key"), entry.get("id")):
+                continue
+            for inst in entry.get("loaded_instances") or []:
+                window = _positive(((inst or {}).get("config") or {}).get("context_length"))
+                if window:
+                    return window
+        return None
+
     def model_info(self, model: str) -> Optional[ModelInfo]:
         raw = self.raw_entry(model)
         if not raw:
@@ -94,29 +112,28 @@ class LMStudioAdapter(OpenAICompatAdapter):
             except Exception:  # noqa: BLE001
                 return None
             raw = self.raw_entry(model)
-        # A loaded instance reports the window it was loaded with (unverified field);
-        # otherwise the longest the model can be loaded with.
-        loaded = next(
-            (
-                _positive((inst.get("config") or {}).get("context_length"))
-                for inst in (raw.get("loaded_instances") or [])
-                if isinstance(inst, dict)
-            ),
-            None,
-        )
-        window = loaded or _positive(raw.get("max_context_length"))
         kind = _LMSTUDIO_KINDS.get(str(raw.get("type")))
+        loaded = self._loaded_window(model)
+        longest = _positive(raw.get("max_context_length"))
         warnings: tuple[str, ...] = ()
-        if not loaded and raw.get("state") != "loaded":
+        if loaded:
+            window, source = loaded, CONTEXT_REPORTED
+        else:
+            # The window it will actually run at is the one it is loaded with, which
+            # this LM Studio does not report — and it is often far below the longest
+            # the model supports. Budgeting for the longest is how a prompt gets cut;
+            # the configured fallback is the stated assumption instead.
+            window, source = None, None
             warnings = (
-                "LM Studio loads this model on first use with the context length set in "
-                "its own model settings. Load it there with a window at least this large, "
-                "or long prompts are cut short.",
+                "LM Studio doesn't report the window this model is loaded with"
+                + (f" (it supports up to {longest:,} tokens)" if longest else "")
+                + ", so the configured fallback is in force. Load it in LM Studio with at "
+                "least that window, or long prompts are cut short.",
             )
         return ModelInfo(
             name=model,
             context_window=window,
-            context_source=CONTEXT_REPORTED if window else None,
+            context_source=source,
             quantization=raw.get("quantization") or None,
             kind=kind,
             capabilities=(str(raw["type"]),) if raw.get("type") else None,

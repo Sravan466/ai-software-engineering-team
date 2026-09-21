@@ -82,9 +82,10 @@ class OpenAICompatAdapter(RuntimeAdapter):
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         super().__init__(api_root(base_url), api_key)
-        #: The strongest structured mode each model has actually accepted, once it
-        #: has refused a stronger one. Remembered so the refusal is paid for once.
-        self._structured: dict[str, str] = {}
+        #: The structured modes each model has refused, remembered per mode so each
+        #: refusal is paid for once — and so a refusal of one mode never switches off
+        #: another. A server that takes schemas but not bare JSON mode is common.
+        self._refused: dict[str, set[str]] = {}
         #: The last list's raw entries by id, for the extension fields in them.
         self._raw: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -145,19 +146,26 @@ class OpenAICompatAdapter(RuntimeAdapter):
         )
 
     def structured_mode(self, model: str) -> str:
-        """What to ask this model for: the dialect's best, until it has refused it."""
-        return self._structured.get(model, STRUCTURED_SCHEMA)
+        """The strongest mode this model has not refused — what a schema call asks for."""
+        refused = self._refused.get(model, set())
+        for mode in (STRUCTURED_SCHEMA, STRUCTURED_JSON):
+            if mode not in refused:
+                return mode
+        return STRUCTURED_NONE
 
     # ── chat ─────────────────────────────────────────────────────────────────
     def chat(self, request: ChatRequest) -> ChatResult:
         wants_json = bool(request.json_schema) or request.json_mode
-        start = self._structured.get(request.model, request.structured_output)
+        refused = self._refused.setdefault(request.model, set())
         if not wants_json:
             modes = [STRUCTURED_NONE]
         else:
-            if start == STRUCTURED_SCHEMA and not request.json_schema:
-                start = STRUCTURED_JSON
-            modes = list(_LADDER[_LADDER.index(start) if start in _LADDER else 0 :])
+            modes = [m for m in _LADDER if m == STRUCTURED_NONE or m not in refused]
+            if not request.json_schema:
+                modes = [m for m in modes if m != STRUCTURED_SCHEMA]
+            # Never stronger than the caller believes this model takes.
+            if request.structured_output in modes:
+                modes = modes[modes.index(request.structured_output) :]
 
         rejected = False
         last: Optional[Exception] = None
@@ -189,7 +197,7 @@ class OpenAICompatAdapter(RuntimeAdapter):
                     (r.text or "")[:160],
                 )
                 rejected = True
-                self._structured[request.model] = modes[modes.index(mode) + 1]
+                refused.add(mode)
                 continue
             try:
                 r.raise_for_status()

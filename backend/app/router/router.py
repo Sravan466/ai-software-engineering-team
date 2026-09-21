@@ -117,6 +117,11 @@ class ModelRouter:
         self.sources = SourceRegistry()
         #: The local default the user chose in Settings, as `source:model`.
         self._chosen_local: Optional[str] = None
+        #: The embedding model found automatically, kept once found. Re-resolving it
+        #: on every call switched models whenever a source came or went — and the
+        #: vectors of two models in one collection are either an error or, when the
+        #: sizes happen to match, search results that are quietly wrong.
+        self._embedding_pin: Optional[tuple[tuple[str, str], str]] = None
         # Apply any keys/models saved at runtime via the Settings UI (overrides .env).
         self._load_persisted()
 
@@ -173,6 +178,22 @@ class ModelRouter:
     @staticmethod
     def _spec(pair: tuple[str, str]) -> str:
         return f"{pair[0]}:{pair[1]}"
+
+    def _listed(self, pair: tuple[str, str]) -> tuple[str, str]:
+        """`pair`, spelled the way its source lists the model — when the source lists it.
+
+        A default written as `nomic-embed-text` and a list that says
+        `nomic-embed-text:latest` are one model to the runtime and two strings to a
+        page comparing them, which then marks neither as the default. Every spec the
+        pages are handed is spelled the list's way.
+        """
+        prov = self.sources.get(pair[0])
+        if prov is None:
+            return pair
+        for name in prov.list_models():
+            if prov.resolves(pair[1], [name]):
+                return (pair[0], name)
+        return pair
 
     # ── the local default ────────────────────────────────────────────────────
     def local_default(self) -> Optional[tuple[str, str]]:
@@ -323,6 +344,13 @@ class ModelRouter:
         if prov is None:
             raise ValueError(f"No model source is called '{pair[0]}'.")
         self._refuse_if_it_cannot_write(pair, "the default every agent runs on")
+        entry = self._entry(prov, pair[1])
+        if entry is not None and not entry.is_local:
+            raise ValueError(
+                f"'{pair[1]}' runs on a hosted service that {prov.source.label} sends it to, "
+                "so it can't be the local default — Local builds would refuse it. Pin it to "
+                "one agent instead."
+            )
         self._chosen_local = self._spec(pair)
         secrets_store.set_local_default(self._chosen_local, CLOUD_PROVIDERS)
         # The window, the parameter count and whether decoding can be schema
@@ -343,6 +371,9 @@ class ModelRouter:
                 self._refuse_if_it_cannot_write(pair, "an agent's model")
             spec = self._spec(pair)
         model_roles.set_role(role, spec)
+        if role == model_roles.EMBEDDINGS_ROLE:
+            # A choice made — or cleared — is a new answer to "which model embeds".
+            self._embedding_pin = None
 
     def _refuse_if_it_cannot_write(self, pair: tuple[str, str], what: str) -> None:
         """Refuse a model the runtime says cannot write, at the moment it is chosen.
@@ -390,7 +421,8 @@ class ModelRouter:
         self.sources.set_key(source_id, api_key)
 
     def rescan(self) -> None:
-        self.sources.rescan()
+        """Look again, now: load what is configured first, then probe, then re-list."""
+        self.sources.ensure(max_age=0, wait=True)
         for prov in self.sources.providers():
             prov.invalidate()
 
@@ -472,7 +504,9 @@ class ModelRouter:
                     cannot.append(spec)
                 if entry.kind == KIND_EMBEDDING:
                     embedding.append(spec)
-                elif _looks_like_a_coder(entry.name) and verdict is not False:
+                elif _looks_like_a_coder(entry.name) and verdict is not False and entry.is_local:
+                    # A hosted model is never suggested for the building phases: the
+                    # suggestion pins four agents at once, and Local builds refuse it.
                     code.append(spec)
             meta = table.spec_for(prov.source.runtime)
             sources.append(
@@ -499,6 +533,8 @@ class ModelRouter:
             )
 
         default, origin = self._local_default()
+        if default is not None:
+            default = self._listed(default)
         default_spec = self._spec(default) if default else None
         # The configured default need not be spelled the way the list spells it
         # (`nomic-embed-text` against `nomic-embed-text:latest`); it is judged by the
@@ -517,6 +553,7 @@ class ModelRouter:
                 if default_spec not in cannot:
                     profile = prov.profile(default[1]).as_dict()
         target, target_origin = self._embedding_target()
+        automatic, automatic_origin = self._embedding_target(automatic=True)
         return {
             "sources": sources,
             "unknown": self.sources.unknown,
@@ -531,8 +568,12 @@ class ModelRouter:
             "cannot_build": cannot,
             "code_models": code,
             "embedding_models": embedding,
-            "embedding_model": self._spec(target) if target else None,
+            "embedding_model": self._spec(self._listed(target)) if target else None,
             "embedding_origin": target_origin,
+            #: What "Automatic" would embed with — not the same as the above when a
+            #: model has been chosen, and the Settings row has to say which is which.
+            "embedding_automatic": self._spec(self._listed(automatic)) if automatic else None,
+            "embedding_automatic_origin": automatic_origin,
         }
 
     def local_status(self, *, refresh: bool = False) -> dict:
@@ -549,7 +590,7 @@ class ModelRouter:
         rows = []
         for entry in model_roles.catalogue():
             spec = model_roles.get(entry["role"])
-            pair = self._saved_pair(spec) if spec else None
+            pair = self._listed(self._saved_pair(spec)) if spec else None
             rows.append(
                 {
                     **entry,
@@ -572,6 +613,7 @@ class ModelRouter:
             "embedding_models": view["embedding_models"],
             "embedding_model": view["embedding_model"],
             "embedding_origin": view["embedding_origin"],
+            "embedding_automatic": view["embedding_automatic"],
             "cloud_models": [
                 f"{name}:{self._default_model[name]}"
                 for name in CLOUD_PROVIDERS
@@ -580,9 +622,21 @@ class ModelRouter:
         }
 
     def _tried(self) -> list[str]:
-        """Every address a local runtime was looked for at, for "nothing answered"."""
-        tried = [p.source.base_url for p in self.sources.providers() if p.source.origin != "detected"]
-        return list(dict.fromkeys([*tried, *self.sources.tried]))
+        """Every address a runtime was looked for at and none answered, once each.
+
+        Ports that answered as something else are left out — they did answer — and
+        every spelling of loopback is one address, so none is listed twice.
+        """
+        from app.router.runtimes.detect import same_address
+
+        answered = [u["base_url"] for u in self.sources.unknown]
+        configured = [p.source.base_url for p in self.sources.providers() if p.source.origin != "detected"]
+        out: list[str] = []
+        for url in [*configured, *self.sources.tried]:
+            if any(same_address(url, other) for other in [*answered, *out]):
+                continue
+            out.append(url)
+        return out
 
     def _nothing_local(self) -> Readiness:
         """Readiness when no local model can be resolved at all."""
@@ -816,23 +870,40 @@ class ModelRouter:
     def embedding_target(self) -> Optional[tuple[str, str]]:
         return self._embedding_target()[0]
 
-    def _embedding_target(self) -> tuple[Optional[tuple[str, str]], Optional[str]]:
+    def _embedding_target(
+        self, *, automatic: bool = False
+    ) -> tuple[Optional[tuple[str, str]], Optional[str]]:
         """(the model RAG and memory embed with, how it was arrived at).
 
         Chosen in Settings first; then `EMBEDDING_MODEL`, wherever a running source
         has it; then the first model any running source reports as embedding-only.
         None means no source serves one, and document search and memory are off.
+        `automatic` skips the choice, for saying what "Automatic" would pick.
+
+        What is found automatically is kept for as long as its source is known, even
+        while it is down: a switch to another model would put that model's vectors
+        into collections built with this one's.
         """
-        spec = model_roles.get(model_roles.EMBEDDINGS_ROLE)
-        if spec:
-            pair = self._saved_pair(spec)
-            if pair[0] not in CLOUD_PROVIDERS:
-                return pair, DEFAULT_CHOSEN
-            log.warning(
-                "Embeddings are set to '%s', a cloud model; they come from a local source. "
-                "Choosing one automatically instead.",
-                spec,
-            )
+        if not automatic:
+            spec = model_roles.get(model_roles.EMBEDDINGS_ROLE)
+            if spec:
+                pair = self._saved_pair(spec)
+                if pair[0] not in CLOUD_PROVIDERS:
+                    return pair, DEFAULT_CHOSEN
+                log.warning(
+                    "Embeddings are set to '%s', a cloud model; they come from a local "
+                    "source. Choosing one automatically instead.",
+                    spec,
+                )
+        pinned = self._embedding_pin
+        if pinned is not None and self.sources.get(pinned[0][0]) is not None:
+            return pinned
+        found = self._resolve_embedding()
+        if found[0] is not None:
+            self._embedding_pin = (found[0], found[1] or DEFAULT_DETECTED)
+        return found
+
+    def _resolve_embedding(self) -> tuple[Optional[tuple[str, str]], Optional[str]]:
         self.sources.ensure()
         hint = (settings.embedding_model or "").strip()
         if hint:

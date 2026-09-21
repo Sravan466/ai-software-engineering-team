@@ -29,6 +29,9 @@ os.environ["BUILD_CHECK_PROVISION"] = "false"
 os.environ["LOCAL_DETECT"] = "false"
 os.environ["LOCAL_SOURCES"] = ""
 os.environ["OLLAMA_BASE_URL"] = ""
+# The vector store is cwd-relative too. With Chroma installed, the suite's memory and
+# knowledge-base calls would open the developer's real `data/chroma`.
+os.environ["CHROMA_PERSIST_DIR"] = f"{_tmp}/chroma"
 _frontend = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
 if os.path.isfile(os.path.join(_frontend, "node_modules", "typescript", "package.json")):
     os.environ["BUILD_TOOLCHAIN_DIR"] = os.path.abspath(_frontend)

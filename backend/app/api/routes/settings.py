@@ -14,13 +14,15 @@ from __future__ import annotations
 import json
 import re
 from typing import Optional
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.router.runtimes.sources import SourceError
+from app.router.runtimes.detect import is_loopback
+from app.router.runtimes.sources import SourceError, normalise_url
 from app.router.router import router as model_router
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -123,9 +125,37 @@ def set_local_default(body: LocalDefaultUpdate) -> dict:
     return model_router.local_status()
 
 
+def _trusted_host(request: Request) -> bool:
+    """Whether this request reached the backend under a name it is actually served at.
+
+    A page on some other site can rebind its own hostname to this machine and then
+    call this API "same-origin". What it cannot change is the `Host` it sends, which
+    still names that site. Loopback, and the configured public URL, are the names
+    this backend is served at.
+    """
+    host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower()
+    public = (urlparse(settings.backend_public_url).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1") or (bool(public) and host == public)
+
+
 @router.post("/sources", status_code=201)
-def add_source(body: SourceCreate) -> dict:
+def add_source(body: SourceCreate, request: Request) -> dict:
     """Add a source by address. It has to answer, so its runtime can be identified."""
+    try:
+        remote = not is_loopback(normalise_url(body.base_url))
+    except SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if remote and not _trusted_host(request):
+        # Sending every prompt to another computer is the one change here worth a
+        # rebinding page's effort, so it is only taken from a name this backend is
+        # served at. Set BACKEND_PUBLIC_URL to the name you reach it by.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "A source on another computer can only be added from an address this "
+                "backend is served at (localhost, or BACKEND_PUBLIC_URL)."
+            ),
+        )
     try:
         model_router.add_source(
             body.base_url,

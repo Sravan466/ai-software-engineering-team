@@ -1267,15 +1267,14 @@ def test_a_tag_list_that_omits_capabilities_still_gets_probed(monkeypatch):
     assert described["llama3.1:8b"].kind == "chat"
 
 
-def test_the_default_model_is_a_key_even_when_the_tag_list_spells_it_differently(
-    monkeypatch,
-):
+def test_the_default_is_reported_the_way_the_list_spells_it(monkeypatch):
     """Default `nomic-embed-text`, tag list says `nomic-embed-text:latest`.
 
-    The UI looks the default up by the string this same payload handed it. Keyed
-    only by tag, that lookup misses and reads as "unknown" — which is the answer
-    that lets the run start, quietly switching off the check that exists to stop
-    a build on a model that cannot write.
+    The UI looks the default up in the same payload's lists. Spelled the configured
+    way, that lookup missed: no row was marked as the default, "Use this" sat on the
+    model already in use, and the capability check read "unknown" — the answer that
+    lets a run start on a model that cannot write. So the default comes back in the
+    list's own spelling, and every lookup finds it.
     """
     model_router = _stubbed_local(
         monkeypatch,
@@ -1285,9 +1284,10 @@ def test_the_default_model_is_a_key_even_when_the_tag_list_spells_it_differently
     monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text")
 
     status = model_router.local_status()
-    assert status["default_model"] == "ollama:nomic-embed-text"
-    assert status["model_capabilities"]["ollama:nomic-embed-text"] == ["embedding"]
-    assert "ollama:nomic-embed-text" in status["cannot_build"]
+    assert status["default_model"] == "ollama:nomic-embed-text:latest"
+    assert status["default_model"] in status["models"]
+    assert status["model_capabilities"][status["default_model"]] == ["embedding"]
+    assert status["default_model"] in status["cannot_build"]
 
 
 # ── what the pre-merge review of #40 found ───────────────────────────────────
@@ -1601,7 +1601,7 @@ def test_a_cached_verdict_is_not_reported_while_the_runtime_is_down(monkeypatch)
         tags_report=True,
     )
     monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text")
-    assert "ollama:nomic-embed-text" in model_router.local_status()["cannot_build"]  # primes
+    assert "ollama:nomic-embed-text:latest" in model_router.local_status()["cannot_build"]  # primes
 
     _down(monkeypatch, model_router.source("ollama"))
     status = model_router.local_status()

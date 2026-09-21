@@ -53,12 +53,42 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40]
 
 
+def redact(url: object) -> str:
+    """An address safe to log: scheme, host and port, and nothing someone typed after."""
+    try:
+        parsed = urlparse(str(url))
+        host = parsed.hostname or "?"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme or 'http'}://{host}{port}"
+    except ValueError:
+        return "(unreadable address)"
+
+
+def clean_key(key: Optional[str]) -> Optional[str]:
+    """A key as it will be sent: trimmed, and refused if it holds spaces or line breaks.
+
+    A header value with a line break in it is refused by the HTTP client — whose
+    error message then quotes the whole key — so it is stopped here instead, where
+    the message can say what is wrong without repeating the secret.
+    """
+    if key is None:
+        return None
+    key = key.strip()
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in key):
+        raise SourceError("An API key can't contain spaces, tabs or line breaks.")
+    return key or None
+
+
 def normalise_url(raw: str) -> str:
-    """A base URL, checked: http(s), a host, no credentials, no path beyond `/v1`."""
+    """A base URL, checked: http(s), a host, a valid port, no credentials, no path beyond `/v1`."""
     url = (raw or "").strip()
     if "://" not in url:
         url = "http://" + url
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        parsed.port  # raises on a port that is not a number in range
+    except ValueError:
+        raise SourceError(f"'{raw}' isn't an address this can read — check the host and port.")
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise SourceError(f"'{raw}' isn't an http(s) address with a host.")
     if parsed.username or parsed.password:
@@ -70,6 +100,20 @@ def normalise_url(raw: str) -> str:
     return api_root(f"{parsed.scheme}://{parsed.netloc}")
 
 
+def _address_id(url: str) -> str:
+    """A source id from its address alone — so it is the same whether or not it answered.
+
+    An id decided by the answer was a different id on a morning the runtime was
+    slow to start, and every choice saved against the old one quietly pointed at
+    a different server.
+    """
+    parsed = urlparse(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if detect.is_loopback(url):
+        return f"local-{port}"
+    return f"{_slug(parsed.hostname or 'source')}-{port}"
+
+
 class SourceRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, SourceProvider] = {}
@@ -79,19 +123,43 @@ class SourceRegistry:
         #: monotonic clock can start near zero, and "probed at 0" would read as fresh.
         self._detected_at: Optional[float] = None
         self._loaded = False
+        #: Guards the providers and the lists. Never held while waiting on the
+        #: detection lock — the order is always detection first, then this.
         self._lock = threading.RLock()
-        #: Serialises detection itself, so concurrent status requests share one probe.
+        #: Serialises detection itself, so concurrent callers share one probe.
         self._detect_lock = threading.Lock()
+        self._background: Optional[threading.Thread] = None
 
     # ── what is known ────────────────────────────────────────────────────────
-    def ensure(self, *, max_age: float = DETECT_TTL_SECONDS) -> None:
-        """Load the configured and added sources once, and re-probe loopback when stale."""
+    def ensure(self, *, max_age: float = DETECT_TTL_SECONDS, wait: bool = False) -> None:
+        """Load the configured and added sources once, and keep detection fresh.
+
+        Only the very first probe is waited for — without it there is nothing to
+        route to. After that a stale snapshot is refreshed in the background, so an
+        agent call never pays for a loopback scan, and a port that accepts a
+        connection and then says nothing costs a background thread its time, not
+        the build. `wait` is for the explicit "look again" a person asked for.
+        """
         with self._lock:
             if not self._loaded:
-                self._load()
-                self._loaded = True
-        if self._detected_at is None or time.monotonic() - self._detected_at >= max_age:
+                try:
+                    self._load()
+                finally:
+                    # Whatever one entry did, the rest are loaded and this is not
+                    # retried on every call — which is how one bad port in `.env`
+                    # used to take routing down for good.
+                    self._loaded = True
+        now = time.monotonic()
+        if self._detected_at is not None and now - self._detected_at < max_age:
+            return
+        if self._detected_at is None or wait:
             self.rescan()
+            return
+        with self._lock:
+            if self._background is not None and self._background.is_alive():
+                return
+            self._background = threading.Thread(target=self.rescan, name="rescan-sources", daemon=True)
+            self._background.start()
 
     def providers(self) -> list[SourceProvider]:
         """Every source, configured first, then added, then detected."""
@@ -119,50 +187,77 @@ class SourceRegistry:
 
     # ── loading ──────────────────────────────────────────────────────────────
     def _load(self) -> None:
+        """The configured and saved sources, as written — no network, no guessing.
+
+        A source's runtime is decided by what answers, in the first probe that
+        follows; loading only records what someone said.
+        """
         for entry in settings.configured_sources:
             try:
-                url = normalise_url(str(entry.get("base_url")))
+                self._load_configured(entry)
+            except Exception as e:  # noqa: BLE001 - one bad entry must not stop the rest
+                log.warning("Ignoring the configured source at %s: %s", redact(entry.get("base_url")), e)
+        renamed = False
+        for entry in secrets_store.get_sources():
+            try:
+                url = normalise_url(entry["base_url"])
+                key = clean_key(entry.get("api_key"))
             except SourceError as e:
-                log.warning("Ignoring the configured source %r: %s", entry.get("base_url"), e)
+                log.warning("Ignoring the saved source at %s: %s", redact(entry.get("base_url")), e)
                 continue
-            if any(detect.same_address(url, p.source.base_url) for p in self._providers.values()):
-                continue
-            hint = entry.get("runtime") or (
-                table.LEGACY_BARE_RUNTIME if entry.get("runtime_hint") == "legacy" else None
-            )
-            label = str(entry.get("label") or "").strip()
-            runtime = hint if hint in table.BY_ID else None
-            if runtime is None:
-                hello = detect.identify(url, entry.get("api_key"))
-                runtime = hello.runtime if hello else None
-            source_id = self._free_id(_slug(label) if label else (runtime or f"source-{urlparse(url).port or 80}"), url)
-            same = entry.get("same_machine")
+            source_id = entry["id"]
+            if source_id in self._providers or source_id in CLOUD_PROVIDERS:
+                # Taken since it was saved — by a source now in `.env`, say. Kept under
+                # a free id rather than dropped, and dropped with it its key.
+                source_id = self._free_id(source_id, url)
+                renamed = True
+            runtime = entry.get("runtime")
             self._register(
                 Source(
                     id=source_id,
-                    label=label or (table.spec_for(runtime).label if runtime else url),
+                    label=entry.get("label") or source_id,
                     base_url=url,
-                    runtime=runtime,
-                    origin=ORIGIN_CONFIGURED,
-                    api_key=entry.get("api_key") or None,
-                    same_machine_override=same if isinstance(same, bool) else None,
-                )
-            )
-        for entry in secrets_store.get_sources():
-            if entry["id"] in self._providers:
-                continue
-            self._register(
-                Source(
-                    id=entry["id"],
-                    label=entry.get("label") or entry["id"],
-                    base_url=entry["base_url"],
-                    runtime=entry.get("runtime") or table.GENERIC,
+                    runtime=runtime if runtime in table.BY_ID else table.GENERIC,
                     origin=ORIGIN_ADDED,
-                    api_key=entry.get("api_key") or None,
+                    api_key=key,
                 )
             )
+        if renamed:
+            self._save()
+
+    def _load_configured(self, entry: dict) -> None:
+        url = normalise_url(str(entry.get("base_url")))
+        if any(detect.same_address(url, p.source.base_url) for p in self._providers.values()):
+            return
+        try:
+            key = clean_key(entry.get("api_key"))
+        except SourceError:
+            log.warning("The configured source at %s has an unusable API key; it is ignored.", redact(url))
+            key = None
+        hint = entry.get("runtime") or (
+            table.LEGACY_BARE_RUNTIME if entry.get("runtime_hint") == "legacy" else None
+        )
+        runtime = hint if hint in table.BY_ID else None
+        label = str(entry.get("label") or "").strip()
+        wanted = _slug(label) if label else (runtime or _address_id(url))
+        same = entry.get("same_machine")
+        self._register(
+            Source(
+                id=self._free_id(wanted, url),
+                label=label or (table.spec_for(runtime).label if runtime else redact(url)),
+                base_url=url,
+                runtime=runtime,
+                origin=ORIGIN_CONFIGURED,
+                api_key=key,
+                same_machine_override=same if isinstance(same, bool) else None,
+            )
+        )
 
     def _register(self, source: Source) -> SourceProvider:
+        # Two sources that read the same in a picker are one source to the person
+        # choosing — so a repeated label says where each one is.
+        if any(p.source.label == source.label for p in self._providers.values() if p.source.id != source.id):
+            source.label = f"{source.label} · {redact(source.base_url).split('://', 1)[1]}"
         adapter = table.adapter_for(source.runtime)(source.base_url, source.api_key)
         provider = SourceProvider(source, adapter)
         self._providers[source.id] = provider
@@ -178,7 +273,10 @@ class SourceRegistry:
         taken = set(self._providers) | set(CLOUD_PROVIDERS)
         if base not in taken:
             return base
-        port = urlparse(url).port
+        try:
+            port = urlparse(url).port
+        except ValueError:
+            port = None
         if port and f"{base}-{port}" not in taken:
             return f"{base}-{port}"
         n = 2
@@ -195,12 +293,22 @@ class SourceRegistry:
                 return
         try:
             found = detect.detect()
-            # A source someone named that nobody could identify when it was loaded —
-            # its runtime was still starting, say — is asked again, wherever it is.
+            # A source someone named that nobody has identified yet — its runtime
+            # was still starting, say — is asked again, wherever it is.
             with self._lock:
                 pending = [p for p in self._providers.values() if p.source.runtime is None]
             for provider in pending:
+                if not detect.answers_http(provider.source.base_url):
+                    continue
                 hello = detect.identify(provider.source.base_url, provider.source.api_key)
+                if hello is None and provider.source.origin == ORIGIN_CONFIGURED:
+                    # Someone configured this address, so an OpenAI-compatible
+                    # answer is enough: they have already said it is a source.
+                    from app.router.runtimes.openai_compat import OpenAICompatAdapter
+
+                    hello = OpenAICompatAdapter.fingerprint(
+                        provider.source.base_url, provider.source.api_key
+                    )
                 if hello is not None:
                     with self._lock:
                         self._identified(provider, hello)
@@ -251,9 +359,12 @@ class SourceRegistry:
         source = provider.source
         source.runtime = hello.runtime
         source.version = hello.version
-        if source.label == source.base_url:
+        if source.label == redact(source.base_url):
             source.label = table.spec_for(hello.runtime).label
         provider.adapter = table.adapter_for(hello.runtime)(source.base_url, source.api_key)
+        # Everything learned through the old adapter was learned in the wrong
+        # dialect — a fallback window, no per-request `num_ctx` — so it goes too.
+        provider.forget()
         provider.invalidate()
 
     # ── changes from Settings ────────────────────────────────────────────────
@@ -273,21 +384,22 @@ class SourceRegistry:
         prompts sent there leave this machine.
         """
         url = normalise_url(base_url)
+        key = clean_key(api_key)
         if not detect.is_loopback(url) and not confirm_remote:
             raise SourceError(
                 f"{url} is on another computer. Every prompt a build sends it leaves "
                 "this machine — confirm that this is intended to add it."
             )
-        with self._lock:
-            self.ensure()
-            for provider in self._providers.values():
-                if detect.same_address(url, provider.source.base_url):
-                    raise SourceError(f"{url} is already listed as '{provider.source.label}'.")
-        hello = detect.identify(url, api_key)
+        # Loaded and probed before the lock is taken: detection takes its own lock
+        # first and this one second, and taking them the other way round here is a
+        # deadlock with any probe already running.
+        self.ensure()
+        self._refuse_duplicate(url)
+        hello = detect.identify(url, key)
         if hello is None:
             from app.router.runtimes.openai_compat import OpenAICompatAdapter
 
-            hello = OpenAICompatAdapter.fingerprint(url, api_key)
+            hello = OpenAICompatAdapter.fingerprint(url, key)
         if hello is None:
             raise SourceError(
                 f"Nothing at {url} answered as a model runtime. Check it is running and "
@@ -295,19 +407,27 @@ class SourceRegistry:
             )
         spec = table.spec_for(hello.runtime)
         with self._lock:
+            # Checked again: detection may have adopted it while it was being asked.
+            self._refuse_duplicate(url)
             source = Source(
-                id=self._free_id(_slug(label) if label else spec.id, url),
+                id=self._free_id(_slug(label) if label and _slug(label) else spec.id, url),
                 label=(label or "").strip() or spec.label,
                 base_url=url,
                 runtime=hello.runtime,
                 origin=ORIGIN_ADDED,
-                api_key=api_key or None,
+                api_key=key,
                 version=hello.version,
             )
             provider = self._register(source)
             self._unknown = [u for u in self._unknown if not detect.same_address(u["base_url"], url)]
             self._save()
         return provider
+
+    def _refuse_duplicate(self, url: str) -> None:
+        with self._lock:
+            for provider in self._providers.values():
+                if detect.same_address(url, provider.source.base_url):
+                    raise SourceError(f"{url} is already listed as '{provider.source.label}'.")
 
     def remove(self, source_id: str) -> None:
         with self._lock:
@@ -329,6 +449,7 @@ class SourceRegistry:
 
     def set_key(self, source_id: str, api_key: Optional[str]) -> SourceProvider:
         """Set ("…"), clear ("") or keep (None) a source's API key."""
+        key = clean_key(api_key) if api_key else None
         with self._lock:
             provider = self._providers.get(source_id)
             if provider is None:
@@ -337,8 +458,8 @@ class SourceRegistry:
                 raise SourceError("This source's key comes from the backend's configuration.")
             if api_key is None:
                 return provider
-            provider.source.api_key = api_key or None
-            provider.adapter.api_key = api_key or None
+            provider.source.api_key = key
+            provider.adapter.api_key = key
             provider.invalidate()
             if provider.source.origin == ORIGIN_DETECTED:
                 # A key makes a detected source something the user configured.

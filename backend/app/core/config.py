@@ -303,8 +303,9 @@ class Settings(BaseSettings):
                     else {"base_url": item}
                 )
         if self.ollama_base_url and self.ollama_base_url.strip():
-            # The runtime this name belonged to is recorded as a hint, not decided:
-            # the source is still fingerprinted, and answers as whatever it is.
+            # This name only ever held one runtime's address, so the source is that
+            # runtime, under that runtime's id — which is what choices saved before
+            # model sources existed refer to.
             entries.append({"base_url": self.ollama_base_url.strip(), "runtime_hint": "legacy"})
         return entries
 

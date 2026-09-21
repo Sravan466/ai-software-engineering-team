@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
   LocalSource,
@@ -13,7 +13,7 @@ import {
   UnknownEndpoint,
 } from "@/lib/api";
 import { canRunABuild, runtimeSays } from "@/lib/capabilities";
-import { hostOf, modelName, sourceFor, triedText } from "@/lib/models";
+import { hostOf, modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
@@ -69,15 +69,25 @@ export default function SettingsPage() {
   );
 }
 
-/** Whether an address is this machine. Anything else sends prompts off it. */
+/**
+ * Whether an address is this machine: a loopback IP literal, or `localhost`.
+ *
+ * A name is never read by its spelling — `127.x.10.0.0.5.nip.io` starts like
+ * loopback and resolves to another computer. The server applies the same rule and
+ * is the authority; this only decides whether to ask before it does.
+ */
 function isLoopback(address: string): boolean {
+  let host: string;
   try {
-    const url = new URL(address.includes("://") ? address : `http://${address}`);
-    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    return host === "localhost" || host === "::1" || host === "0.0.0.0" || host.startsWith("127.");
+    host = new URL(address.includes("://") ? address : `http://${address}`).hostname;
   } catch {
     return true; // not an address yet; the server says what is wrong with it
   }
+  host = host.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+  if (host.startsWith("::ffff:")) host = host.slice("::ffff:".length);
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return Boolean(v4 && v4.slice(1).every((n) => Number(n) <= 255) && v4[1] === "127");
 }
 
 const ORIGIN_LABEL: Record<LocalSource["origin"], string> = {
@@ -138,6 +148,7 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
 
   function changed(next: LocalStatus) {
     setStatus(next);
+    setError("");
     onModelsChanged();
   }
 
@@ -194,7 +205,10 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
                 selecting={selecting}
                 onSelect={select}
                 onChanged={changed}
-                onRefresh={() => refresh()}
+                onRefresh={() => {
+                  refresh();
+                  onModelsChanged();
+                }}
                 onError={setError}
               />
             ))}
@@ -304,6 +318,22 @@ function DefaultNotice({
       </div>
     );
   }
+  if (modelFor(status, spec)?.is_local === false) {
+    return (
+      <div className="notice notice-warn" role="status">
+        {Icon.alert}
+        <div className="notice-body">
+          <span className="notice-title">
+            <span className="mono">{name}</span> runs on a hosted service
+          </span>
+          <span className="notice-text">
+            {home?.label ?? "Its runtime"} sends this model elsewhere to run, so Local builds refuse
+            it. Choose a model that runs on your own hardware as the default.
+          </span>
+        </div>
+      </div>
+    );
+  }
   if (!writes) {
     return (
       <div className="notice notice-warn" role="status">
@@ -373,7 +403,20 @@ function SourceBlock({
   const [editingKey, setEditingKey] = useState(false);
   const [key, setKey] = useState("");
   const [savingKey, setSavingKey] = useState(false);
-  const headingId = `source-${source.id}`;
+  const headingId = `source-heading-${source.id}`;
+  // Where focus goes when a small inline form closes: back to what opened it, and
+  // onto the safe choice ("Keep") when a removal asks to be confirmed.
+  const keyButton = useRef<HTMLButtonElement>(null);
+  const removeButton = useRef<HTMLButtonElement>(null);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  const focusNext = useRef<"key" | "remove" | "keep" | null>(null);
+  useEffect(() => {
+    const target = focusNext.current;
+    focusNext.current = null;
+    if (target === "key") keyButton.current?.focus();
+    if (target === "remove") removeButton.current?.focus();
+    if (target === "keep") keepButton.current?.focus();
+  }, [editingKey, confirming]);
 
   async function remove() {
     setRemoving(true);
@@ -392,6 +435,7 @@ function SourceBlock({
     try {
       onChanged(await api.setSourceKey(source.id, value));
       setKey("");
+      focusNext.current = "key";
       setEditingKey(false);
     } catch (e: any) {
       onError(e.message);
@@ -437,6 +481,12 @@ function SourceBlock({
           {source.origin === "detected"
             ? "It answered earlier and has stopped. Start it again and rescan."
             : "Nothing answers at this address. Check it's running, and that the address and key are right."}
+          {source.error && (
+            <>
+              {" "}
+              <span className="dim">({source.error})</span>
+            </>
+          )}
         </p>
       ) : source.models.length === 0 ? (
         <p className="field-hint source-note">Serves no models yet. {source.add_model}</p>
@@ -491,6 +541,7 @@ function SourceBlock({
                 autoComplete="off"
                 className="input input-mono"
                 placeholder={source.key_hint ? "Enter a new key to replace it" : "API key"}
+                autoFocus
                 value={key}
                 disabled={savingKey}
                 onChange={(e) => setKey(e.target.value)}
@@ -504,12 +555,19 @@ function SourceBlock({
                   Clear key
                 </button>
               )}
-              <button className="btn btn-sm btn-ghost" type="button" onClick={() => setEditingKey(false)}>
+              <button
+                className="btn btn-sm btn-ghost"
+                type="button"
+                onClick={() => {
+                  focusNext.current = "key";
+                  setEditingKey(false);
+                }}
+              >
                 Cancel
               </button>
             </form>
           ) : (
-            <button className="btn btn-sm btn-ghost" onClick={() => setEditingKey(true)}>
+            <button ref={keyButton} className="btn btn-sm btn-ghost" onClick={() => setEditingKey(true)}>
               {source.key_hint ? "Change key" : "Set a key"}
             </button>
           )}
@@ -521,12 +579,27 @@ function SourceBlock({
                   {removing && <span className="btn-spinner" aria-hidden="true" />}
                   Remove
                 </button>
-                <button className="btn btn-sm" onClick={() => setConfirming(false)} disabled={removing}>
+                <button
+                  ref={keepButton}
+                  className="btn btn-sm"
+                  onClick={() => {
+                    focusNext.current = "remove";
+                    setConfirming(false);
+                  }}
+                  disabled={removing}
+                >
                   Keep
                 </button>
               </span>
             ) : (
-              <button className="btn btn-sm btn-ghost" onClick={() => setConfirming(true)}>
+              <button
+                ref={removeButton}
+                className="btn btn-sm btn-ghost"
+                onClick={() => {
+                  focusNext.current = "keep";
+                  setConfirming(true);
+                }}
+              >
                 {Icon.trash} Remove
               </button>
             ))}
@@ -599,11 +672,13 @@ function SourceModelRow({
         <button
           className="btn btn-sm"
           onClick={() => onSelect(model.spec)}
-          disabled={busy || !canBuild}
+          disabled={busy || !canBuild || !model.is_local}
           title={
-            canBuild
-              ? undefined
-              : `The runtime ${runtimeSays(reported)}. It can't write, so every agent would fail on its first call.`
+            !canBuild
+              ? `The runtime ${runtimeSays(reported)}. It can't write, so every agent would fail on its first call.`
+              : !model.is_local
+                ? "It runs on a hosted service, so it can't be the local default. Pin it to one agent below instead."
+                : undefined
           }
           aria-label={`Run agents on ${model.name} by default`}
         >
@@ -630,6 +705,7 @@ function useDownload(source: LocalSource, onDone: () => void) {
     setPct(null);
     setPhase("Starting…");
     let failed = false;
+    let finished = false;
     try {
       await api.pullLocalModel(source.id, name, (line) => {
         if (line.error) {
@@ -638,10 +714,18 @@ function useDownload(source: LocalSource, onDone: () => void) {
           return;
         }
         if (line.status) setPhase(line.status);
+        if (line.status === "success") finished = true;
         if (line.total && line.completed) setPct(Math.round((line.completed / line.total) * 100));
       });
-      if (!failed) setPhase("Done");
-      onDone();
+      if (!failed && !finished) {
+        // The stream closed without the runtime saying it finished.
+        failed = true;
+        setError(`The download of ${name} stopped before ${source.label} said it was complete.`);
+      }
+      if (!failed) {
+        setPhase("Done");
+        onDone();
+      }
     } catch (e: any) {
       failed = true;
       setError(e.message);
@@ -819,12 +903,34 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
   const [label, setLabel] = useState("");
   const [key, setKey] = useState("");
   const [remoteOk, setRemoteOk] = useState(false);
+  // The server decides what counts as this machine. When it says an address is not,
+  // the confirmation is shown whatever this page's own reading of it was.
+  const [serverSaysRemote, setServerSaysRemote] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [added, setAdded] = useState("");
+  const trigger = useRef<HTMLButtonElement>(null);
+  const reopen = useRef(false);
+  const ids = useId();
+  const id = (part: string) => `${ids}-${part}`;
 
-  const remote = url.trim() !== "" && !isLoopback(url.trim());
+  // Focus goes back to the button that opened the form, so closing it does not drop
+  // a keyboard user at the top of the page.
+  useEffect(() => {
+    if (!open && reopen.current) {
+      reopen.current = false;
+      trigger.current?.focus();
+    }
+  }, [open]);
+
+  const remote = url.trim() !== "" && (serverSaysRemote || !isLoopback(url.trim()));
   const ready = url.trim() !== "" && (!remote || remoteOk);
+
+  function close() {
+    reopen.current = true;
+    setOpen(false);
+    setError("");
+  }
 
   async function submit() {
     if (!ready || saving) return;
@@ -845,8 +951,10 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
       setLabel("");
       setKey("");
       setRemoteOk(false);
-      setOpen(false);
+      setServerSaysRemote(false);
+      close();
     } catch (e: any) {
+      if (/another computer/i.test(e.message ?? "")) setServerSaysRemote(true);
       setError(e.message);
     } finally {
       setSaving(false);
@@ -855,12 +963,16 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
 
   return (
     <div className="source-add">
+      {/* Mounted once and kept, so the confirmation is announced when it changes. */}
+      <p className="sr-only" aria-live="polite">
+        {added ? `Added ${added}.` : ""}
+      </p>
       {!open ? (
         <div className="source-add-closed">
-          <button className="btn btn-sm" onClick={() => setOpen(true)} aria-expanded={false}>
+          <button ref={trigger} className="btn btn-sm" onClick={() => setOpen(true)}>
             {Icon.plus} Add a source
           </button>
-          <span className="field-hint" aria-live="polite">
+          <span className="field-hint">
             {added ? `Added ${added}.` : "A runtime on another port, another machine, or one that needs a key."}
           </span>
         </div>
@@ -875,9 +987,9 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
         >
           <div className="source-form-grid">
             <div className="field source-form-url">
-              <label htmlFor="source-url">Address</label>
+              <label htmlFor={id("url")}>Address</label>
               <input
-                id="source-url"
+                id={id("url")}
                 className="input input-mono"
                 placeholder="http://127.0.0.1:1234"
                 value={url}
@@ -886,17 +998,18 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
                 onChange={(e) => {
                   setUrl(e.target.value);
                   setRemoteOk(false);
+                  setServerSaysRemote(false);
                 }}
-                aria-describedby="source-url-hint"
+                aria-describedby={id("url-hint")}
               />
-              <span className="field-hint" id="source-url-hint">
+              <span className="field-hint" id={id("url-hint")}>
                 The server&apos;s root — a trailing <span className="mono">/v1</span> is fine.
               </span>
             </div>
             <div className="field">
-              <label htmlFor="source-label">Name (optional)</label>
+              <label htmlFor={id("label")}>Name (optional)</label>
               <input
-                id="source-label"
+                id={id("label")}
                 className="input"
                 placeholder="GPU box"
                 value={label}
@@ -905,9 +1018,9 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
               />
             </div>
             <div className="field">
-              <label htmlFor="source-key">API key (optional)</label>
+              <label htmlFor={id("key")}>API key (optional)</label>
               <input
-                id="source-key"
+                id={id("key")}
                 type="password"
                 autoComplete="off"
                 className="input input-mono"
@@ -920,9 +1033,9 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
           </div>
 
           {remote && (
-            <label className="check-line notice notice-warn" htmlFor="source-remote">
+            <label className="check-line notice notice-warn" htmlFor={id("remote")}>
               <input
-                id="source-remote"
+                id={id("remote")}
                 type="checkbox"
                 checked={remoteOk}
                 disabled={saving}
@@ -943,15 +1056,7 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
               {saving && <span className="btn-spinner" aria-hidden="true" />}
               {saving ? "Checking it answers…" : "Add source"}
             </button>
-            <button
-              className="btn btn-ghost"
-              type="button"
-              disabled={saving}
-              onClick={() => {
-                setOpen(false);
-                setError("");
-              }}
-            >
+            <button className="btn btn-ghost" type="button" disabled={saving} onClick={close}>
               Cancel
             </button>
           </div>
@@ -1280,9 +1385,10 @@ function RoleLine({
   const assignedCannotWrite =
     !embeddings && Boolean(row.assigned) && !canRunABuild(row.assigned ?? "", state.cannot_build);
 
+  // What "Automatic" means is what it would pick — not what a choice picked.
   const defaultText = embeddings
-    ? state.embedding_model
-      ? `Automatic — ${optionLabel(state, state.embedding_model)}`
+    ? state.embedding_automatic
+      ? `Automatic — ${optionLabel(state, state.embedding_automatic)}`
       : "Automatic — none found, so memory and search are off"
     : state.default_model
       ? `Default — ${optionLabel(state, state.default_model)}${defaultCannotWrite ? " · can't write" : ""}`
@@ -1331,7 +1437,10 @@ function RoleLine({
           {Icon.alert}
           <span>
             <span className="mono">{modelName(row.assigned)}</span> isn&apos;t served by any running
-            source — a build using this {embeddings ? "role" : "agent"} won&apos;t start until it is.
+            source —{" "}
+            {embeddings
+              ? "memory and document search are off until it is."
+              : "a build using this agent won't start until it is."}
           </span>
         </span>
       )}

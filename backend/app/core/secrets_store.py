@@ -20,9 +20,11 @@ the local default under the runtime's own name (`{"<runtime>": {"default_model":
 from __future__ import annotations
 
 import json
-import os
+import threading
 from pathlib import Path
 from typing import Optional
+
+from app.core.atomic import write_private
 
 # Relative to the backend process cwd, mirroring `sqlite:///./data/aiteam.db`.
 _PATH = Path("data") / "providers.local.json"
@@ -38,12 +40,13 @@ def _read() -> dict:
 
 
 def _write(data: dict) -> None:
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    _PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    try:
-        os.chmod(_PATH, 0o600)
-    except OSError:
-        pass
+    write_private(_PATH, json.dumps(data, indent=2))
+
+
+#: Every change is read-modify-write of the whole file. Without one lock around each,
+#: two saves at once — a key and a source, say — each write back the file as it was
+#: before the other, and one of them is lost; with keys in it, that is a key gone.
+_LOCK = threading.RLock()
 
 
 #: Keys in the file that are not a provider's entry.
@@ -79,6 +82,11 @@ def get_local_default(cloud: tuple[str, ...]) -> Optional[str]:
 
 def set_local_default(spec: Optional[str], cloud: tuple[str, ...]) -> None:
     """Record (or, with None, clear) the local default, dropping the old-shape copy."""
+    with _LOCK:
+        _set_local_default(spec, cloud)
+
+
+def _set_local_default(spec: Optional[str], cloud: tuple[str, ...]) -> None:
     data = _read()
     for name in [n for n in data if n not in RESERVED and n not in cloud]:
         entry = data.get(name)
@@ -102,12 +110,13 @@ def get_sources() -> list[dict]:
 
 
 def save_sources(sources: list[dict]) -> None:
-    data = _read()
-    if sources:
-        data[SOURCES_KEY] = sources
-    else:
-        data.pop(SOURCES_KEY, None)
-    _write(data)
+    with _LOCK:
+        data = _read()
+        if sources:
+            data[SOURCES_KEY] = sources
+        else:
+            data.pop(SOURCES_KEY, None)
+        _write(data)
 
 
 def set_provider(
@@ -121,6 +130,11 @@ def set_provider(
     - api_key == ""    -> remove the stored key
     - api_key == "..." -> store it
     """
+    with _LOCK:
+        _set_provider(provider, api_key, default_model)
+
+
+def _set_provider(provider: str, api_key: Optional[str], default_model: Optional[str]) -> None:
     data = _read()
     entry = dict(data.get(provider, {}))
 

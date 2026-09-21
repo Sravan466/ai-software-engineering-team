@@ -630,3 +630,304 @@ def test_cancel_closes_the_request_it_names():
     client = _Client()
     adapter._inflight["req-1"] = client
     assert adapter.cancel("req-1") is True and client.closed
+
+
+# ── what the first review of #43 found ───────────────────────────────────────
+def _registry(monkeypatch, *providers: SourceProvider):
+    from app.router.runtimes.sources import SourceRegistry
+
+    registry = SourceRegistry()
+    registry._providers = {p.name: p for p in providers}
+    registry._loaded = True
+    monkeypatch.setattr("app.router.runtimes.sources.secrets_store.save_sources", lambda sources: None)
+    return registry
+
+
+def test_adding_a_source_during_a_probe_does_not_deadlock(monkeypatch):
+    """B1: `add()` held the registry lock while waiting on the detection lock."""
+    from app.router.runtimes import sources as sources_module
+
+    registry = _registry(monkeypatch)
+    started = threading.Event()
+
+    def _slow_detect():
+        started.set()
+        time.sleep(0.4)
+        return detect.Detection()
+
+    monkeypatch.setattr(sources_module.detect, "detect", _slow_detect)
+    monkeypatch.setattr(
+        sources_module.detect, "identify",
+        lambda url, key=None, **_: Hello(runtime="llamacpp", base_url=url),
+    )
+    probe = threading.Thread(target=registry.rescan)
+    probe.start()
+    started.wait(2)
+    registry._detected_at = time.monotonic() - 3600  # stale: add() will want a probe too
+    adder = threading.Thread(target=lambda: registry.add("http://127.0.0.1:18080"))
+    adder.start()
+    probe.join(5)
+    adder.join(5)
+    assert not probe.is_alive() and not adder.is_alive(), "add() and a probe deadlocked"
+    assert "llamacpp" in registry.ids()
+
+
+def test_a_stale_snapshot_is_refreshed_in_the_background(monkeypatch):
+    """B2: an agent call must never wait for a loopback scan after the first one."""
+    from app.router.runtimes import sources as sources_module
+
+    registry = _registry(monkeypatch)
+    ran = threading.Event()
+
+    def _slow_detect():
+        time.sleep(1.0)
+        ran.set()
+        return detect.Detection()
+
+    monkeypatch.setattr(sources_module.detect, "detect", _slow_detect)
+    registry._detected_at = time.monotonic() - 3600
+    began = time.monotonic()
+    registry.ensure()
+    assert time.monotonic() - began < 0.5, "a hot path waited on a probe"
+    assert ran.wait(3), "the background probe never ran"
+
+
+def test_a_configured_source_keeps_its_id_whether_or_not_it_answered(monkeypatch):
+    """B3: the id came from whichever runtime answered, so it moved between restarts."""
+    from app.router.runtimes import sources as sources_module
+    from app.router.runtimes.sources import SourceRegistry
+
+    monkeypatch.setattr(sources_module.settings, "local_sources", "http://127.0.0.1:8081,http://gpu-box.lan:8000")
+    monkeypatch.setattr(sources_module.settings, "ollama_base_url", None)
+    monkeypatch.setattr(sources_module.secrets_store, "get_sources", lambda: [])
+
+    def _no_network(*a, **k):
+        raise AssertionError("loading asked the network; the id would depend on the answer")
+
+    monkeypatch.setattr(sources_module.detect, "identify", _no_network)
+    registry = SourceRegistry()
+    registry._load()
+    assert sorted(registry.ids()) == ["gpu-box-lan-8000", "local-8081"]
+
+
+def test_a_bad_port_in_the_configuration_is_skipped_not_fatal(monkeypatch):
+    """S3: one malformed entry made every routing call raise, for good."""
+    from app.router.runtimes import sources as sources_module
+    from app.router.runtimes.sources import SourceError, SourceRegistry, normalise_url
+
+    for bad in ("http://127.0.0.1:1234x", "http://[::1", "http://127.0.0.1:99999"):
+        with pytest.raises(SourceError):
+            normalise_url(bad)
+    monkeypatch.setattr(sources_module.settings, "local_sources", "http://127.0.0.1:1234x, http://127.0.0.1:1234")
+    monkeypatch.setattr(sources_module.settings, "ollama_base_url", None)
+    monkeypatch.setattr(sources_module.settings, "local_detect", False)
+    monkeypatch.setattr(sources_module.secrets_store, "get_sources", lambda: [])
+    registry = SourceRegistry()
+    registry.ensure()
+    registry.ensure()
+    assert registry.ids() == {"local-1234"}
+
+
+def test_a_saved_source_whose_id_was_taken_is_kept(monkeypatch):
+    """S4: it was skipped at load, then deleted — key and all — on the next save."""
+    from app.router.runtimes import sources as sources_module
+    from app.router.runtimes.sources import SourceRegistry
+
+    saved: list = []
+    monkeypatch.setattr(sources_module.settings, "local_sources", '[{"base_url": "http://127.0.0.1:1234", "runtime": "lmstudio"}]')
+    monkeypatch.setattr(sources_module.settings, "ollama_base_url", None)
+    monkeypatch.setattr(
+        sources_module.secrets_store, "get_sources",
+        lambda: [{"id": "lmstudio", "label": "Office", "base_url": "http://10.0.0.9:1234",
+                  "runtime": "lmstudio", "api_key": "sk-office-5678"}],
+    )
+    monkeypatch.setattr(sources_module.secrets_store, "save_sources", saved.append)
+    registry = SourceRegistry()
+    registry._load()
+    office = next(p for p in registry.providers() if p.source.label == "Office")
+    assert office.name != "lmstudio" and office.source.api_key == "sk-office-5678"
+    assert saved and any(e["api_key"] == "sk-office-5678" for e in saved[-1])
+
+
+@pytest.mark.parametrize(
+    "url,loopback",
+    [
+        ("http://127.x.10.0.0.5.nip.io:8080", False),
+        ("http://127.0.0.1.nip.io:8080", False),
+        ("http://127.0.0.1:8080", True),
+        ("http://127.8.9.10:8080", True),
+        ("http://localhost:1234", True),
+        ("http://localhost.:1234", True),
+        ("http://[::1]:1234", True),
+        ("http://[::ffff:127.0.0.1]:1234", True),
+        ("http://0.0.0.0:1234", False),
+        ("http://10.0.0.5:1234", False),
+    ],
+)
+def test_only_a_loopback_literal_or_localhost_is_this_machine(url, loopback):
+    """S1: a name that merely starts with `127.` can resolve to anywhere."""
+    assert detect.is_loopback(url) is loopback
+
+
+def test_a_name_that_looks_like_loopback_still_needs_confirmation(router_with, monkeypatch):
+    from app.router.runtimes import sources as sources_module
+    from app.router.runtimes.sources import SourceError
+
+    model_router = router_with()
+    monkeypatch.setattr(sources_module.secrets_store, "save_sources", lambda s: None)
+    with pytest.raises(SourceError, match="another computer"):
+        model_router.add_source("http://127.x.10.0.0.5.nip.io:8080")
+
+
+def test_concurrent_settings_writes_keep_every_key(tmp_path, monkeypatch):
+    """S2: two writers raced a read-modify-write and a truncating write; keys vanished."""
+    import os
+    import stat
+
+    from app.core import secrets_store
+
+    monkeypatch.setattr(secrets_store, "_PATH", tmp_path / "providers.local.json")
+    secrets_store.set_provider("anthropic", api_key="sk-ant-keep")
+    secrets_store.set_provider("openai", api_key="sk-oai-keep")
+    cloud = ("anthropic", "openai", "gemini")
+
+    def _defaults():
+        for i in range(150):
+            secrets_store.set_local_default(f"src:model-{i}", cloud)
+
+    def _sources():
+        for i in range(150):
+            secrets_store.save_sources([{"id": f"s{i}", "base_url": "http://127.0.0.1:1"}])
+
+    threads = [threading.Thread(target=_defaults), threading.Thread(target=_sources)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    data = json.loads((tmp_path / "providers.local.json").read_text())
+    assert data["anthropic"]["api_key"] == "sk-ant-keep" and data["openai"]["api_key"] == "sk-oai-keep"
+    assert data["local"]["default_model"] == "src:model-149"
+    assert data["sources"][0]["id"] == "s149"
+    assert stat.S_IMODE(os.stat(tmp_path / "providers.local.json").st_mode) == 0o600
+
+
+def test_a_key_is_never_quoted_back(router_with, monkeypatch):
+    """S5: a key with a line break came back in full inside an HTTP client's error."""
+    from app.router.runtimes.sources import SourceError, clean_key
+
+    # Around the key is trimmed; inside it is refused — that is what a header cannot hold.
+    assert clean_key("  sk-abc\n") == "sk-abc"
+    for bad in ("sk-abc\ndef", "sk a", "sk\tb", "sk\x00b"):
+        with pytest.raises(SourceError):
+            clean_key(bad)
+    source = _source("lmstudio", [CHAT], up=False)
+    source.source.api_key = "sk-very-secret-9999"
+    source.adapter.list_models = lambda: (_ for _ in ()).throw(
+        ProviderError("Illegal header value b'Bearer sk-very-secret-9999'")
+    )
+    router_with(source)
+    assert "sk-very-secret" not in (source.state(max_age=0).error or "")
+
+
+def test_a_sibling_container_is_not_another_computer():
+    """S6: the compose runtime was badged "Another computer" beside `same_machine`."""
+    source = Source(id="ollama", label="Ollama", base_url="http://ollama:11434", runtime="ollama",
+                    origin="configured", same_machine_override=True)
+    assert source.remote is False and source.same_machine is True
+    assert Source(id="x", label="x", base_url="http://gpu:8000", runtime=None, origin="added").remote
+
+
+def test_a_remote_source_is_refused_from_an_untrusted_host(router_with):
+    """S7: a page that rebinds its own name to this machine cannot redirect prompts."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    router_with()
+    with TestClient(app) as client:
+        refused = client.post(
+            "/api/settings/sources",
+            json={"base_url": "http://10.0.0.5:8000", "confirm_remote": True},
+            headers={"host": "evil.example:8000"},
+        )
+        assert refused.status_code == 403
+
+
+def test_a_refused_json_mode_does_not_switch_schemas_off(monkeypatch):
+    """B4: the debate asks for bare JSON; its refusal silenced every agent's schema."""
+    seen: list = []
+
+    def _chat(body):
+        kind = (body.get("response_format") or {}).get("type")
+        if kind == "json_object":
+            return _Resp(400, {"error": "response_format type must be json_schema or text"})
+        return _Resp(200, {"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+
+    _serve(monkeypatch, {}, {"/v1/chat/completions": _chat}, seen)
+    adapter = OpenAICompatAdapter("http://127.0.0.1:1234")
+    adapter.chat(ChatRequest(model="m", messages=[], max_tokens=10, context_window=100,
+                             json_mode=True, structured_output="schema"))
+    seen.clear()
+    result = adapter.chat(ChatRequest(model="m", messages=[], max_tokens=10, context_window=100,
+                                      json_mode=True, json_schema={"type": "object"},
+                                      structured_output=adapter.structured_mode("m")))
+    assert [(b.get("response_format") or {}).get("type") for _, b in seen] == ["json_schema"]
+    assert result.structured_output == "schema"
+
+
+def test_identifying_a_source_late_forgets_what_the_old_adapter_learned(monkeypatch):
+    """B5: the generic adapter's fallback window outlived the switch to the real one."""
+    from app.router.runtimes.sources import SourceRegistry
+
+    provider = SourceProvider(
+        Source(id="local-8080", label="http://127.0.0.1:8080", base_url="http://127.0.0.1:8080",
+               runtime=None, origin="configured"),
+        OpenAICompatAdapter("http://127.0.0.1:8080"),
+    )
+    provider._profiles.put(("local-8080", "m"), _fallback("m"))
+    SourceRegistry._identified(provider, Hello(runtime="llamacpp", base_url="http://127.0.0.1:8080"))
+    assert provider._profiles.get(("local-8080", "m")) is None
+    assert isinstance(provider.adapter, LlamaCppAdapter) and provider.source.label == "llama.cpp"
+
+
+def _fallback(model: str):
+    from app.router.model_profile import fallback_profile
+
+    return fallback_profile("local-8080", model, local=True)
+
+
+def test_the_embedding_model_found_automatically_stays_put(router_with, monkeypatch):
+    """B7: a source going down switched embedding models mid-collection."""
+    from app.router import router as router_module
+
+    monkeypatch.setattr(router_module.settings, "embedding_model", "not-here")
+    first = _source("ollama", [EMBED])
+    second = _source("lmstudio", [ModelEntry(name="other-vectors", kind="embedding")])
+    model_router = router_with(first, second)
+    monkeypatch.setattr(model_router, "_embedding_pin", None)
+    assert model_router.embedding_target() == ("ollama", "vectors")
+    first.adapter.up = False
+    first.invalidate()
+    assert model_router.embedding_target() == ("ollama", "vectors"), "switched to another model's vectors"
+
+
+def test_a_hosted_model_is_never_the_local_default_or_a_code_suggestion(router_with):
+    """F2: a hosted model became the default, and every Local build was then refused."""
+    hosted = ModelEntry(name="qwen3-coder:480b-cloud", kind="chat", is_local=False)
+    local = ModelEntry(name="qwen2.5-coder:7b", kind="chat")
+    model_router = router_with(_source("ollama", [hosted, local]), chosen="ollama:qwen2.5-coder:7b")
+    with pytest.raises(ValueError, match="hosted service"):
+        model_router.set_local_default("ollama:qwen3-coder:480b-cloud")
+    assert model_router.local_status()["code_models"] == ["ollama:qwen2.5-coder:7b"]
+
+
+def test_tried_addresses_are_listed_once_and_only_where_nothing_answered(router_with, monkeypatch):
+    """F10: `localhost` and `127.0.0.1` were listed twice, and ports that answered were listed."""
+    configured = SourceProvider(
+        Source(id="ollama", label="Ollama", base_url="http://localhost:11434", runtime="ollama", origin="configured"),
+        FakeAdapter([], up=False),
+    )
+    model_router = router_with(configured)
+    monkeypatch.setattr(model_router.sources, "_tried", ["http://127.0.0.1:11434", "http://127.0.0.1:5000", "http://127.0.0.1:1234"])
+    monkeypatch.setattr(model_router.sources, "_unknown", [{"base_url": "http://127.0.0.1:5000", "openai": False, "note": ""}])
+    assert model_router._tried() == ["http://localhost:11434", "http://127.0.0.1:1234"]

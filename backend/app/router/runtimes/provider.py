@@ -66,9 +66,14 @@ class Source:
 
     @property
     def remote(self) -> bool:
+        """Another computer: not loopback, and not said to share this machine.
+
+        A sibling container marked `same_machine` is on this host whatever its name,
+        so prompts sent to it do not leave this computer.
+        """
         from app.router.runtimes.detect import is_loopback
 
-        return not is_loopback(self.base_url)
+        return not is_loopback(self.base_url) and self.same_machine_override is not True
 
     @property
     def same_machine(self) -> bool:
@@ -112,6 +117,10 @@ class SourceProvider(LLMProvider):
         self._profiles = ProfileCache()
         self._state: Optional[SourceState] = None
         self._state_lock = threading.Lock()
+        #: Bumped by anything that makes the current state wrong (a new key, a
+        #: refused connection). A refresh that started before the bump does not get
+        #: to write its now-stale answer over the change.
+        self._generation = 0
 
     # ── state ────────────────────────────────────────────────────────────────
     def state(self, max_age: float = STATE_TTL_SECONDS) -> SourceState:
@@ -128,21 +137,36 @@ class SourceProvider(LLMProvider):
             current = self._state
             if current is not None and time.monotonic() - current.checked_at < max_age:
                 return current
+            generation = self._generation
             try:
                 models = self.adapter.list_models()
                 current = SourceState(reachable=True, models=models, checked_at=time.monotonic())
             except ProviderError as e:
-                current = SourceState(reachable=False, error=str(e), checked_at=time.monotonic())
+                current = SourceState(reachable=False, error=self.scrub(str(e)), checked_at=time.monotonic())
             except Exception as e:  # noqa: BLE001 - a malformed answer is "down", not a crash
-                current = SourceState(reachable=False, error=str(e), checked_at=time.monotonic())
-            self._state = current
+                current = SourceState(reachable=False, error=self.scrub(str(e)), checked_at=time.monotonic())
+            if generation == self._generation:
+                self._state = current
             return current
 
     def invalidate(self) -> None:
+        self._generation += 1
         self._state = None
 
     def _mark_down(self, error: str) -> None:
-        self._state = SourceState(reachable=False, error=error, checked_at=time.monotonic())
+        self._generation += 1
+        self._state = SourceState(reachable=False, error=self.scrub(error), checked_at=time.monotonic())
+
+    def scrub(self, text: str) -> str:
+        """`text` with this source's key taken out, wherever an error quoted it."""
+        key = self.source.api_key
+        return text.replace(key, "…") if key else text
+
+    def _scrubbed(self, error: ProviderError) -> ProviderError:
+        message = self.scrub(str(error))
+        if message == str(error):
+            return error
+        return ProviderError(message, retryable=error.retryable, unreachable=error.unreachable)
 
     def available(self) -> bool:
         return self.state().reachable
@@ -256,12 +280,18 @@ class SourceProvider(LLMProvider):
         except ProviderError as e:
             if e.unreachable:
                 self._mark_down(str(e))
-            raise
+            clean = self._scrubbed(e)
+            if clean is e:
+                raise
+            raise clean from None
         latency = int((time.perf_counter() - started) * 1000)
 
-        if result.structured_output_rejected:
+        if result.structured_output_rejected and request.json_schema:
             # Remembered, so the next call asks for what this model takes instead of
-            # paying for the refusal again.
+            # paying for the refusal again. Only a refused *schema* request says
+            # anything about schemas: a call that sent none (the debate asks for plain
+            # JSON) and was refused JSON mode must not switch schemas off for every
+            # agent after it.
             self._profiles.put(
                 (self.source.id, model),
                 replace(
@@ -330,7 +360,10 @@ class SourceProvider(LLMProvider):
         except ProviderError as e:
             if e.unreachable:
                 self._mark_down(str(e))
-            raise
+            clean = self._scrubbed(e)
+            if clean is e:
+                raise
+            raise clean from None
 
     def cancel(self, request_id: str) -> bool:
         return self.adapter.cancel(request_id)

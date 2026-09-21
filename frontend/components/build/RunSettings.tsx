@@ -60,6 +60,10 @@ export type ModelOption = {
   label: string;
   group: string;
   available: boolean;
+  /** The local default — what picking Manual pins first. */
+  isDefault?: boolean;
+  /** Served from another computer; never pinned without the user choosing it. */
+  remote?: boolean;
 };
 
 // ── what can this machine actually run? ──────────────────────────────────────
@@ -116,6 +120,8 @@ export function modelOptions(
           (m.is_local ? "" : " · runs on a hosted service"),
         group,
         available: true,
+        isDefault: m.spec === preferred,
+        remote: source.remote,
       });
     }
   }
@@ -311,10 +317,14 @@ export default function RunSettings({
   const [capText, setCapText] = useState(costCap === null ? "" : String(costCap));
 
   // Manual with nothing pinned is the dead control this fixes, so picking Manual
-  // pins something the moment it is picked — the first model that actually works.
+  // pins something the moment it is picked: the default, else the first model that
+  // works on this machine or a configured cloud. Never, silently, a source on
+  // another computer — prompts sent there leave this one, so that is picked by hand.
   useEffect(() => {
     if (!routing.needsModel || model) return;
-    const first = options.find((o) => o.available);
+    const first =
+      options.find((o) => o.available && o.isDefault) ??
+      options.find((o) => o.available && !o.remote);
     if (first) onChange({ ...config, model: first.value });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routing.needsModel, model, options]);

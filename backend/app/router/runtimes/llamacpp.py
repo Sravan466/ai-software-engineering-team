@@ -41,7 +41,12 @@ _OWNER = "llamacpp"
 #: How long a kind probe's answer is kept. A server's mode is fixed at start, so
 #: this only bounds how long a restarted server on the same port is misdescribed.
 _KIND_TTL_SECONDS = 300.0
+#: How long a probe that got no answer is left alone. Without it, a busy server
+#: cost every caller that asked about its models a timeout of its own.
+_FAILED_KIND_TTL_SECONDS = 30.0
 _KIND_PROBE_TIMEOUT = 5.0
+#: "Asked, and got no answer" — unknown, but not worth asking again just yet.
+_UNANSWERED = "?"
 
 
 def _label(n_params: Optional[int]) -> Optional[str]:
@@ -89,7 +94,7 @@ class LlamaCppAdapter(OpenAICompatAdapter):
         with self._kind_lock:
             hit = self._kinds.get(model)
         if hit and hit[1] > time.monotonic():
-            return hit[0]
+            return None if hit[0] == _UNANSWERED else hit[0]
         raw = raw if raw is not None else self.raw_entry(model)
         if raw and not self._loaded(raw):
             return None  # asking would load it; unknown is the honest answer
@@ -100,14 +105,16 @@ class LlamaCppAdapter(OpenAICompatAdapter):
                 headers=self.headers(),
                 timeout=_KIND_PROBE_TIMEOUT,
             )
-        except Exception:  # noqa: BLE001 - busy or gone; ask again next time
-            return None
-        if r.status_code == 200:
+        except Exception:  # noqa: BLE001 - busy or gone; asked again after a pause
+            r = None
+        if r is not None and r.status_code == 200:
             found = KIND_EMBEDDING
-        elif r.status_code == 501 or "not_supported" in (r.text or ""):
+        elif r is not None and (r.status_code == 501 or "not_supported" in (r.text or "")):
             vision = (self._props().get("modalities") or {}).get("vision")
             found = KIND_VISION if vision else KIND_CHAT
         else:
+            with self._kind_lock:
+                self._kinds[model] = (_UNANSWERED, time.monotonic() + _FAILED_KIND_TTL_SECONDS)
             return None
         with self._kind_lock:
             self._kinds[model] = (found, time.monotonic() + _KIND_TTL_SECONDS)
@@ -145,7 +152,9 @@ class LlamaCppAdapter(OpenAICompatAdapter):
     def _known(self, model: str) -> Optional[str]:
         with self._kind_lock:
             hit = self._kinds.get(model)
-        return hit[0] if hit and hit[1] > time.monotonic() else None
+        if not hit or hit[1] <= time.monotonic() or hit[0] == _UNANSWERED:
+            return None
+        return hit[0]
 
     @staticmethod
     def _words(kind: Optional[str]) -> Optional[tuple[str, ...]]:
@@ -204,6 +213,5 @@ class LlamaCppAdapter(OpenAICompatAdapter):
             warnings=warnings,
         )
 
-    def structured_mode(self, model: str) -> str:
-        # `response_format: json_schema` is compiled to a grammar by the server itself.
-        return self._structured.get(model, STRUCTURED_SCHEMA)
+    # `response_format: json_schema` is compiled to a grammar by the server itself,
+    # so the generic ladder's first rung is the right one here too.
