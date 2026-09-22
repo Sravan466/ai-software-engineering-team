@@ -680,3 +680,33 @@ def test_a_model_its_runtime_already_holds_is_not_refused_for_memory(router_with
     src.adapter = _Big(src.adapter.models)
     router_with(src)
     assert src.compatibility("huge").level != compat.BLOCKED
+
+
+# ── final review ─────────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "reply, opened",
+    [
+        # Code that strips reasoning tags, inside the JSON deliverable.
+        ('{"c": "x.split(\\"</think>\\")[-1]"}', True),
+        ('{"c": "x.split(\\"</think>\\")[-1]"}', False),
+        # Prose, then an answer whose own string or code holds the tag.
+        ("Here's the file:\n```js\nconst t = `</think>`;\n```", False),
+        ('Here you go:\n{"content": "a</think>{b}"}', False),
+    ],
+)
+def test_a_close_tag_inside_an_answer_is_never_taken_for_reasoning(reply, opened):
+    assert split_reasoning(reply, opened=opened) == (reply, None)
+
+
+def test_content_is_the_answer_when_the_runtime_split_the_reasoning_out(monkeypatch):
+    answer = '{"files": [{"content": "s.split(\\"</think>\\")[-1].strip()"}]}'
+    _serve(monkeypatch, {}, {"/api/chat": _Resp(200, {"message": {"content": answer, "thinking": "ok"}})})
+    result = OllamaAdapter("http://127.0.0.1:11434").chat(_chat_request(thinking="on"))
+    assert result.text == answer and result.reasoning == "ok"
+
+
+def test_the_short_window_advice_only_offers_what_could_work():
+    always = _profile(context_window=2048, thinking="always")
+    assert "reasoning budget" not in (_check(always).suggestion or "")
+    toggled = _profile(context_window=4096, thinking=THINKS_TOGGLE, tuning={"sampling": {"thinking": "on"}})
+    assert "thinking off" in (_check(toggled).suggestion or "")

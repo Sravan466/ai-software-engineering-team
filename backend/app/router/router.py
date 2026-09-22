@@ -871,7 +871,7 @@ class ModelRouter:
         # per call. Dropping the profile is what makes the first kind apply too.
         prov.forget_profile(model)
         if not prov.state().reachable or not prov.resolves(model):
-            return {"spec": prov.settings_key(model), "values": {}, "reset": True}
+            return {"spec": prov.settings_key(model), "values": cleaned, "reset": not cleaned}
         return self.model_generation(spec)
 
     def _missing(self, missing: list[dict]) -> Readiness:

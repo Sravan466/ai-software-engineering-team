@@ -202,7 +202,8 @@ def assess(
                     if profile.thinking in (THINKS_ALWAYS, THINKS_LEVELS)
                     else ", or turn its thinking off in Tune."
                 )
-                if profile.reasoning_tokens
+                # Only where giving the reasoning's share back would be enough.
+                if profile.reasoning_tokens and window >= MIN_WORKABLE_TOKENS
                 else "."
             )
         )

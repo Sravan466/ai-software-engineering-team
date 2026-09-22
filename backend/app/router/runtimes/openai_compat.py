@@ -325,8 +325,9 @@ class OpenAICompatAdapter(RuntimeAdapter):
         usage = data.get("usage") or {}
         # Reasoning comes back in a field of its own under one of two names, or
         # inline when the server was started without a parser for it.
-        answer, inline = split_reasoning(message.get("content") or "", opened=opened)
         field = message.get("reasoning_content") or message.get("reasoning")
+        # A server that parsed the reasoning out has left the answer alone in `content`.
+        answer, inline = split_reasoning(message.get("content") or "", opened=opened and not field)
         return ChatResult(
             text=answer,
             prompt_tokens=int(usage.get("prompt_tokens") or 0),

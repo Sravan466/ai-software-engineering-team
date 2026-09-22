@@ -60,9 +60,9 @@ def split_reasoning(text: Optional[str], *, opened: bool = False) -> tuple[str, 
             closed = _CLOSE.search(stripped)
             if closed and not _OPEN.search(stripped[: closed.start()]):
                 head, rest = stripped[: closed.start()], stripped[closed.end():]
-                if opened or (
-                    not head.lstrip().startswith(_ANSWER_MARKS)
-                    and rest.lstrip().startswith(_ANSWER_MARKS)
+                # Text that starts as an answer is the answer, whatever tag it quotes.
+                if not head.lstrip().startswith(_ANSWER_MARKS) and (
+                    opened or (rest.lstrip().startswith(_ANSWER_MARKS) and _closed_up(head))
                 ):
                     thoughts.append(head.strip())
                     answer = rest
@@ -70,6 +70,22 @@ def split_reasoning(text: Optional[str], *, opened: bool = False) -> tuple[str, 
     if not thoughts:
         return text, None
     return answer.strip(), _joined(thoughts)
+
+
+def _closed_up(text: str) -> bool:
+    """Whether every brace, bracket and code fence opened in `text` is closed again.
+
+    Reasoning that mentions a shape writes it whole; a tag reached with a brace or a
+    fence still open is inside the answer — a string in its JSON, a line of its code.
+    """
+    depth = 0
+    for char in text:
+        if char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+    fences = text.count("```")
+    return depth == 0 and fences % 2 == 0 and text.replace("```", "").count("`") % 2 == 0
 
 
 def _joined(parts: list[str]) -> Optional[str]:

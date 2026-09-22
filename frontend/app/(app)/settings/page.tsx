@@ -128,9 +128,9 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
   const refresh = useCallback(async (probe = false) => {
     setLoading(true);
     setError("");
-    if (probe) setRescans((n) => n + 1);
     try {
       setStatus(await api.getLocalModel(probe));
+      if (probe) setRescans((n) => n + 1);
     } catch (e: any) {
       setError(e.message);
     } finally {
