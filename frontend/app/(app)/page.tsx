@@ -9,6 +9,7 @@ import { AGENTS } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
+import { PreStartCheck } from "@/components/models/ModelCheck";
 import RunSettings, {
   type RunConfig,
   DEFAULT_RUN_CONFIG,
@@ -196,6 +197,20 @@ export default function NewBuildPage() {
             )}
           </div>
         </div>
+
+        {/* What the server found about each model this build would use, right beside
+            the button that starts it — a model that won't run is refused here, and
+            one that runs with a cost says what the cost is. */}
+        <PreStartCheck
+          checks={preflight?.checks}
+          checking={checking || preflighting}
+          allAgents={AGENTS.length}
+          refused={
+            preflight?.ok === false
+              ? preflight.checks?.find((c) => c.level === "blocked")?.spec
+              : undefined
+          }
+        />
 
         {advanced && (
           <div id="run-settings" className="run-settings">

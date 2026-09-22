@@ -47,6 +47,10 @@ class RuntimeSpec:
     home: Optional[str] = None
     #: Where its models are browsed, when it downloads them itself.
     library: Optional[str] = None
+    #: How to give a model a longer window on it, when the window is too short.
+    window_hint: str = "Start the server with a larger context window."
+    #: Where its KV cache type is set, and what it does when it cannot use one.
+    kv_hint: str = "Set it where the server is started."
 
 
 GENERIC = "openai-compatible"
@@ -60,6 +64,11 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         add_model="Download one below, or run `ollama pull <name>` on the machine it runs on.",
         home="https://ollama.com/download",
         library="https://ollama.com/library",
+        window_hint="Ollama runs a model at the window each call asks for, so this is the model's own limit.",
+        kv_hint=(
+            "Ollama sets it with OLLAMA_KV_CACHE_TYPE, and falls back to f16 without saying "
+            "so on architectures that can't use a quantized cache."
+        ),
     ),
     RuntimeSpec(
         id="lmstudio",
@@ -68,6 +77,8 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         adapter=LMStudioAdapter,
         add_model="Download models from LM Studio's Discover tab, then load one in its Developer tab.",
         home="https://lmstudio.ai",
+        window_hint="Load it in LM Studio with a larger context length.",
+        kv_hint="LM Studio sets it in the model's load settings.",
     ),
     RuntimeSpec(
         id="llamacpp",
@@ -79,6 +90,8 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             "different port for a second model, or run it in router mode."
         ),
         home="https://github.com/ggml-org/llama.cpp",
+        window_hint="Restart llama-server with a larger `-c`.",
+        kv_hint="llama-server sets it with `--cache-type-k` and `--cache-type-v`.",
     ),
     RuntimeSpec(
         id="vllm",
@@ -87,6 +100,8 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         adapter=VLLMAdapter,
         add_model="vLLM serves the model it was started with (`vllm serve <model>`).",
         home="https://docs.vllm.ai",
+        window_hint="Restart vLLM with a larger `--max-model-len`.",
+        kv_hint="vLLM sets it with `--kv-cache-dtype`.",
     ),
     RuntimeSpec(
         id="sglang",
@@ -95,6 +110,8 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         adapter=SGLangAdapter,
         add_model="SGLang serves the model it was launched with (`--model-path`).",
         home="https://docs.sglang.ai",
+        window_hint="Relaunch SGLang with a larger `--context-length`.",
+        kv_hint="SGLang sets it with `--kv-cache-dtype`.",
     ),
     RuntimeSpec(
         id="koboldcpp",
@@ -103,6 +120,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         adapter=KoboldCppAdapter,
         add_model="KoboldCpp serves the model it was launched with.",
         home="https://github.com/LostRuins/koboldcpp",
+        window_hint="Relaunch KoboldCpp with a larger `--contextsize`.",
     ),
     RuntimeSpec(
         id="localai",
@@ -111,6 +129,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         adapter=LocalAIAdapter,
         add_model="Install models from LocalAI's model gallery.",
         home="https://localai.io",
+        window_hint="Raise `context_size` in the model's LocalAI config.",
     ),
     # No adapter of their own yet: they answer as the generic dialect, so detection
     # shows them as unknown until someone confirms what they are.

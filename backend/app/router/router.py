@@ -56,6 +56,7 @@ from app.core import model_roles, secrets_store
 from app.core.config import settings
 from app.core.constants import RoutingMode
 from app.core.logging import get_logger
+from app.router import compat
 from app.router.base import CLOUD_PROVIDERS, LLMProvider, ProviderError
 from app.router.model_profile import ModelProfile, fallback_profile
 from app.router.providers.anthropic_provider import AnthropicProvider
@@ -69,6 +70,9 @@ from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
 
 log = get_logger(__name__)
 
+
+#: Longer than any model name a runtime lists; a spec past this is refused unread.
+_MAX_SPEC_CHARS = 512
 
 #: How the local default was arrived at, for the Settings page to say.
 DEFAULT_CHOSEN = "chosen"  # picked in Settings
@@ -98,6 +102,9 @@ class Readiness:
     unreachable: bool = False
     #: [{role, model, capabilities}] — present, but the runtime says they cannot write.
     incapable: tuple[dict, ...] = field(default_factory=tuple)
+    #: The compatibility check of every local model the run will use — each with its
+    #: verdict (fits, degraded, blocked, unknown), reasons, and the roles using it.
+    checks: tuple[dict, ...] = field(default_factory=tuple)
 
 
 class ModelRouter:
@@ -682,6 +689,8 @@ class ModelRouter:
         # (source, model) -> the role that wants it, so one missing model is
         # reported once however many phases point at it.
         wanted: dict[tuple[str, str], str] = {}
+        #: And every role that wants it, for the pre-Start check to name.
+        users: dict[tuple[str, str], list[str]] = {}
         for role in [*(roles or ()), None]:
             try:
                 chain = self._resolve_chain(mode, preferred_model, "medium", role)
@@ -692,6 +701,8 @@ class ModelRouter:
             head = chain[0]
             if head[0] not in CLOUD_PROVIDERS:
                 wanted.setdefault(head, role or "the rest of the run")
+                if role:
+                    users.setdefault(head, []).append(role)
 
         if not wanted:
             return Readiness(ok=True)
@@ -731,7 +742,137 @@ class ModelRouter:
                     missing.append({"role": role, "model": model, "source": source_id})
         if missing:
             return self._missing(missing)
-        return self._able_to_write(mode, by_source)
+        able = self._able_to_write(mode, by_source)
+        if not able.ok:
+            return able
+        return self._compatible(by_source, users)
+
+    def _compatible(
+        self, by_source: dict[str, list[tuple[str, str]]], users: dict[tuple[str, str], list[str]]
+    ) -> Readiness:
+        """Will each model actually run here? The last question before Start.
+
+        Every model the run will reach for is checked against what is known about it
+        and the computer it runs on. A blocked one stops the run now, with the reason
+        and what to choose instead, rather than halfway through for a reason that was
+        knowable up front. A degraded one lets it start, and the page says why.
+        """
+        checks: list[dict] = []
+        for source_id, items in by_source.items():
+            prov = self.sources.get(source_id)
+            assert prov is not None
+            for model, _role in items:
+                try:
+                    check = prov.compatibility(model)
+                except Exception as e:  # noqa: BLE001 - a check that breaks never blocks a run
+                    log.warning("Could not check %s:%s before the run: %s", source_id, model, e)
+                    continue
+                checks.append(
+                    {
+                        **check.as_dict(),
+                        "model": model,
+                        "source_label": prov.source.label,
+                        "roles": users.get((source_id, model), []),
+                    }
+                )
+        blocked = [c for c in checks if c["level"] == compat.BLOCKED]
+        if not blocked:
+            return Readiness(ok=True, checks=tuple(checks))
+        first = blocked[0]
+        reason = f"This build is set to run on '{first['model']}', which won't run here: {first['summary']}"
+        if first.get("suggestion"):
+            reason += f" {first['suggestion']}"
+        return Readiness(ok=False, reason=reason, checks=tuple(checks))
+
+    # ── the compatibility check and per-model settings (Settings UI) ─────────
+    def compatibility_view(self) -> dict:
+        """Every model on every answering source, checked — for the Settings page.
+
+        Each check needs the model described, which is one round trip per model the
+        first time; they run side by side, and the answers are cached with the
+        profile, so the page asks again for free.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.sources.ensure()
+        jobs: list[tuple[SourceProvider, str]] = []
+        for prov in self.sources.providers():
+            state = prov.state()
+            if state.reachable:
+                jobs.extend((prov, entry.name) for entry in state.models)
+
+        def one(job: tuple[SourceProvider, str]) -> Optional[dict]:
+            prov, model = job
+            try:
+                return prov.compatibility(model).as_dict()
+            except Exception as e:  # noqa: BLE001 - one model's odd answer is not the page's
+                log.warning("Could not check %s:%s: %s", prov.name, model, e)
+                return None
+
+        checks: dict[str, dict] = {}
+        if jobs:
+            with ThreadPoolExecutor(max_workers=min(len(jobs), 6), thread_name_prefix="compat") as pool:
+                for (prov, model), row in zip(jobs, pool.map(one, jobs)):
+                    if row is not None:
+                        checks[f"{prov.name}:{model}"] = row
+        from app.router.model_profile import total_ram_bytes
+
+        return {"checks": checks, "ram_bytes": total_ram_bytes()}
+
+    def _source_model(self, spec: str, *, saved_ok: bool = False) -> tuple[SourceProvider, str]:
+        """The source and model a settings request names — one the source serves.
+
+        A name the source doesn't list is refused, so nothing arbitrary is written to
+        the settings file or sent to the runtime to be described. The one exception
+        is putting back a model's saved settings, which must work after it is gone.
+        """
+        if len(spec or "") > _MAX_SPEC_CHARS:
+            raise ValueError("That model name is too long to be one.")
+        pair = self.parse(spec)
+        if pair[0] in CLOUD_PROVIDERS:
+            raise ValueError(
+                f"'{spec}' is a cloud model. Generation settings are per local model; a cloud "
+                "provider's own defaults apply to it."
+            )
+        prov = self.sources.get(pair[0])
+        if prov is None:
+            raise ValueError(f"No model source is called '{pair[0]}'.")
+        model = self._listed(pair)[1]
+        if saved_ok:
+            from app.core import model_settings
+
+            if model_settings.get(prov.settings_key(model)) is not None:
+                return prov, model
+        state = prov.state()
+        if not state.reachable:
+            raise ValueError(f"{prov.source.label} isn't answering, so '{model}' can't be tuned now.")
+        if not prov.resolves(model, [e.name for e in state.models]):
+            raise ValueError(f"{prov.source.label} doesn't serve a model called '{model}'.")
+        return prov, model
+
+    def model_generation(self, spec: str) -> dict:
+        """One model's generation settings, what its server defaults to, and what it takes."""
+        prov, model = self._source_model(spec)
+        return {**prov.generation_view(model), "check": prov.compatibility(model).as_dict()}
+
+    def set_model_generation(self, spec: str, values: Optional[dict]) -> dict:
+        """Save one model's settings — validated first — and use them from the next call.
+
+        The next request to that model reads them; nothing else changes, and no
+        other model is touched. `None` or `{}` puts every field back on its default.
+        """
+        from app.core import model_settings
+        from app.router import generation
+
+        prov, model = self._source_model(spec, saved_ok=not values)
+        cleaned = generation.validate(values or {})
+        model_settings.put(prov.settings_key(model), cleaned or None)
+        # Window, reply and reasoning ceilings live in the profile; sampling is read
+        # per call. Dropping the profile is what makes the first kind apply too.
+        prov.forget_profile(model)
+        if not prov.state().reachable or not prov.resolves(model):
+            return {"spec": prov.settings_key(model), "values": cleaned, "reset": not cleaned}
+        return self.model_generation(spec)
 
     def _missing(self, missing: list[dict]) -> Readiness:
         names = sorted({str(m["model"]) for m in missing})

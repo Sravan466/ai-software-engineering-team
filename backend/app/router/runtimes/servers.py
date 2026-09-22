@@ -19,6 +19,7 @@ from app.router.runtimes.types import (
     KIND_EMBEDDING,
     KIND_VISION,
     STRUCTURED_NONE,
+    THINKING_SETTINGS,
     Hello,
     ModelEntry,
     ModelInfo,
@@ -49,6 +50,10 @@ class LMStudioAdapter(OpenAICompatAdapter):
     """
 
     runtime = "lmstudio"
+    #: LM Studio documents `top_k` and `repeat_penalty` on its OpenAI endpoint
+    #: (unverified against a running server); `min_p` is not listed, so not sent.
+    sampling_supported = frozenset({*OpenAICompatAdapter.sampling_supported, "top_k", "repeat_penalty"})
+    extra_sampling = {"top_k": "top_k", "repeat_penalty": "repeat_penalty"}
 
     @classmethod
     def fingerprint(
@@ -145,10 +150,19 @@ class LMStudioAdapter(OpenAICompatAdapter):
 
 
 # ── vLLM ─────────────────────────────────────────────────────────────────────
+#: vLLM and SGLang take their own samplers beside the dialect's, and switch thinking
+#: through the chat template (unverified against running servers; from their docs).
+_TEMPLATE_SERVER_SAMPLING = {"top_k": "top_k", "min_p": "min_p", "repeat_penalty": "repetition_penalty"}
+
+
 class VLLMAdapter(OpenAICompatAdapter):
     """vLLM: `owned_by: "vllm"`, with `max_model_len` on every model entry."""
 
     runtime = "vllm"
+    sampling_supported = frozenset({*OpenAICompatAdapter.sampling_supported, *_TEMPLATE_SERVER_SAMPLING})
+    extra_sampling = _TEMPLATE_SERVER_SAMPLING
+    thinking_supported = THINKING_SETTINGS
+    thinking_via_template = True
 
     @classmethod
     def fingerprint(
@@ -170,6 +184,10 @@ class SGLangAdapter(OpenAICompatAdapter):
     """SGLang: `owned_by: "sglang"` (unverified); window from `/get_model_info`."""
 
     runtime = "sglang"
+    sampling_supported = VLLMAdapter.sampling_supported
+    extra_sampling = _TEMPLATE_SERVER_SAMPLING
+    thinking_supported = THINKING_SETTINGS
+    thinking_via_template = True
 
     @classmethod
     def fingerprint(

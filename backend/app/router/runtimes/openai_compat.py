@@ -27,16 +27,20 @@ from app.router.runtimes.base import (
     get_json,
     http_error,
 )
+from app.router.runtimes.reasoning import merge, split_reasoning
 from app.router.runtimes.types import (
     CONTEXT_REPORTED,
     STRUCTURED_JSON,
     STRUCTURED_NONE,
     STRUCTURED_SCHEMA,
+    THINKING_EFFORTS,
+    THINKING_OFF,
     ChatRequest,
     ChatResult,
     Hello,
     ModelEntry,
     ModelInfo,
+    thinks,
 )
 
 log = get_logger(__name__)
@@ -46,6 +50,11 @@ _LADDER = (STRUCTURED_SCHEMA, STRUCTURED_JSON, STRUCTURED_NONE)
 #: Words a 400 uses when it is the structured-output request that was refused, as
 #: opposed to the prompt, the model or the key. Only those are worth retrying weaker.
 _FORMAT_WORDS = ("response_format", "json_schema", "schema", "grammar", "json_object", "format")
+#: Words a 400 uses when it is the thinking fields that were refused. A server that
+#: will not take them is asked again without, and not asked with them again.
+_THINKING_WORDS = ("chat_template_kwargs", "reasoning_effort", "enable_thinking")
+#: The sampling settings every server of this dialect takes at the top level.
+_STANDARD_SAMPLING = ("temperature", "top_p", "seed", "stop", "presence_penalty", "frequency_penalty")
 #: Extension fields servers add to `/v1/models` entries that say how long a prompt
 #: the model takes. Read in this order; the first positive integer wins.
 _CONTEXT_FIELDS = ("max_model_len", "context_length", "max_context_length", "context_window")
@@ -79,6 +88,16 @@ def speaks_openai(base_url: str, api_key: Optional[str] = None, *, timeout: floa
 
 class OpenAICompatAdapter(RuntimeAdapter):
     runtime = "openai-compatible"
+    #: The dialect's own settings. Servers built on it add their samplers below.
+    sampling_supported = frozenset(_STANDARD_SAMPLING)
+    #: `reasoning_effort` is the dialect's one word about thinking — levels only.
+    thinking_supported = THINKING_EFFORTS
+    #: Neutral name -> this server's name, for samplers beyond the dialect's own.
+    extra_sampling: dict[str, str] = {}
+    #: Whether thinking is switched through the chat template (`enable_thinking`),
+    #: which is how servers that render the template themselves take "off".
+    thinking_via_template = False
+    fills_sampling_defaults = True
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         super().__init__(api_root(base_url), api_key)
@@ -88,6 +107,9 @@ class OpenAICompatAdapter(RuntimeAdapter):
         self._refused: dict[str, set[str]] = {}
         #: The last list's raw entries by id, for the extension fields in them.
         self._raw: dict[str, dict] = {}
+        #: Sampling defaults the server reported per model. A setting it has a
+        #: default for is left to it; only one nobody can speak for is filled in.
+        self._defaults: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     # ── identification ───────────────────────────────────────────────────────
@@ -166,11 +188,20 @@ class OpenAICompatAdapter(RuntimeAdapter):
             # Never stronger than the caller believes this model takes.
             if request.structured_output in modes:
                 modes = modes[modes.index(request.structured_output) :]
+            if thinks(request.thinking) and not self.schema_with_reasoning:
+                # Decoding held to a shape from the first token leaves no room to
+                # reason, and the two are known to conflict on servers that compile
+                # the shape to a grammar. The shape stays in the prompt, and
+                # validation with a repair round still holds the answer to it.
+                modes = [STRUCTURED_NONE]
 
         rejected = False
+        send_thinking = "thinking" not in refused
         last: Optional[Exception] = None
-        for mode in modes:
-            body = self._body(request, mode)
+        index = 0
+        while index < len(modes):
+            mode = modes[index]
+            body = self._body(request, mode, thinking=send_thinking)
             try:
                 r = self._post_cancellable(
                     "/v1/chat/completions",
@@ -180,10 +211,25 @@ class OpenAICompatAdapter(RuntimeAdapter):
                 )
             except Exception as e:  # noqa: BLE001
                 raise http_error(e, f"The model server at {self.base_url}") from e
+            said = (r.text or "").lower()
+            if r.status_code in (400, 422) and send_thinking and any(w in said for w in _THINKING_WORDS) and (
+                "chat_template_kwargs" in body or "reasoning_effort" in body
+            ):
+                # Refused the thinking fields, not the request: asked again without
+                # them, and they are not sent to this model again.
+                log.warning(
+                    "%s at %s refused the thinking setting (%s); retrying without it.",
+                    request.model,
+                    self.base_url,
+                    (r.text or "")[:160],
+                )
+                refused.add("thinking")
+                send_thinking = False
+                continue
             if (
                 r.status_code in (400, 422)
                 and "response_format" in body
-                and any(w in (r.text or "").lower() for w in _FORMAT_WORDS)
+                and any(w in said for w in _FORMAT_WORDS)
                 and mode != modes[-1]
             ):
                 # Refused the shape, not the request. Remembered, so the next call
@@ -198,6 +244,7 @@ class OpenAICompatAdapter(RuntimeAdapter):
                 )
                 rejected = True
                 refused.add(mode)
+                index += 1
                 continue
             try:
                 r.raise_for_status()
@@ -205,21 +252,61 @@ class OpenAICompatAdapter(RuntimeAdapter):
             except Exception as e:  # noqa: BLE001
                 last = e
                 break
-            return self._result(data, mode, rejected)
+            unsent = self.unsent(request)
+            if request.thinking is not None and not send_thinking and "thinking" not in unsent:
+                unsent = (*unsent, "thinking")
+            return self._result(data, mode, rejected, unsent, opened=thinks(request.thinking))
         raise http_error(last or RuntimeError("no answer"), f"The model server at {self.base_url}")
 
-    def _body(self, request: ChatRequest, mode: str) -> dict:
+    def _sampling(self, request: ChatRequest) -> dict:
+        """The sampling fields, in this server's names — every one it can take.
+
+        Temperature and top-p are always stated: some servers default to greedy
+        decoding or a 512-token reply that no agent's prompt was written for. A value
+        the server itself reported a default for is left to it; one nobody can speak
+        for gets the configured default instead of the server's silence.
+        """
+        known = self._defaults.get(request.model, {})
+        out: dict = {}
+        for key in _STANDARD_SAMPLING:
+            value = getattr(request, key)
+            if value is not None:
+                out[key] = value
+        for key, wire in self.extra_sampling.items():
+            value = getattr(request, key)
+            if value is not None:
+                out[wire] = value
+        if "temperature" not in out and "temperature" not in known:
+            out["temperature"] = settings.local_temperature
+        if "top_p" not in out and "top_p" not in known:
+            out["top_p"] = settings.local_top_p
+        return out
+
+    def _thinking_fields(self, request: ChatRequest) -> dict:
+        level = request.thinking
+        if level is None:
+            return {}
+        out: dict = {}
+        if self.thinking_via_template:
+            kwargs: dict = {"enable_thinking": level != THINKING_OFF}
+            if level in THINKING_EFFORTS:
+                kwargs["reasoning_effort"] = level
+            out["chat_template_kwargs"] = kwargs
+        if level in THINKING_EFFORTS:
+            out["reasoning_effort"] = level
+        return out
+
+    def _body(self, request: ChatRequest, mode: str, *, thinking: bool = True) -> dict:
         body: dict = {
             "model": request.model,
             "messages": request.messages,
             "stream": False,
             # Always explicit — see the module docstring.
             "max_tokens": request.max_tokens,
-            "temperature": (
-                request.temperature if request.temperature is not None else settings.local_temperature
-            ),
-            "top_p": request.top_p if request.top_p is not None else settings.local_top_p,
+            **self._sampling(request),
         }
+        if thinking:
+            body.update(self._thinking_fields(request))
         if mode == STRUCTURED_SCHEMA and request.json_schema:
             body["response_format"] = {
                 "type": "json_schema",
@@ -230,17 +317,26 @@ class OpenAICompatAdapter(RuntimeAdapter):
         return body
 
     @staticmethod
-    def _result(data: dict, mode: str, rejected: bool) -> ChatResult:
+    def _result(
+        data: dict, mode: str, rejected: bool, unsent: tuple[str, ...] = (), *, opened: bool = False
+    ) -> ChatResult:
         choice = ((data.get("choices") or [{}])[0]) or {}
         message = choice.get("message") or {}
         usage = data.get("usage") or {}
+        # Reasoning comes back in a field of its own under one of two names, or
+        # inline when the server was started without a parser for it.
+        field = message.get("reasoning_content") or message.get("reasoning")
+        # A server that parsed the reasoning out has left the answer alone in `content`.
+        answer, inline = split_reasoning(message.get("content") or "", opened=opened and not field)
         return ChatResult(
-            text=message.get("content") or "",
+            text=answer,
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
             finish_reason=choice.get("finish_reason"),
             structured_output=mode,
             structured_output_rejected=rejected,
+            reasoning=merge(field if isinstance(field, str) else None, inline),
+            unsent=unsent,
         )
 
     # ── embed ────────────────────────────────────────────────────────────────

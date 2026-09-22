@@ -62,6 +62,17 @@ class SourceUpdate(BaseModel):
     api_key: Optional[str] = None
 
 
+class ModelGenerationUpdate(BaseModel):
+    """One model's settings: `{sampling, limits, machine}`, each `{field: value}`.
+
+    A field left out, or set to null, goes back to whatever the running server or
+    the model file says. Every value is range-checked before it is saved.
+    """
+
+    spec: str
+    values: Optional[dict] = None
+
+
 class RoleModelUpdate(BaseModel):
     """Point one role at a model. Blank or null puts it back on the default.
 
@@ -107,6 +118,55 @@ def set_role(role: str, body: RoleModelUpdate) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return model_router.role_settings()
+
+
+# ── Will each model run, and how is it tuned ─────────────────────────────────
+@router.get("/compatibility")
+def get_compatibility() -> dict:
+    """Every model on every answering source: fits, degraded or blocked, and why."""
+    return model_router.compatibility_view()
+
+
+@router.get("/models/generation")
+def get_model_generation(spec: str) -> dict:
+    """One model's generation settings, its server's defaults, and what it can take."""
+    try:
+        return model_router.model_generation(spec)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _require_trusted(request: Request) -> None:
+    if not _trusted_host(request):
+        # A page on another site that rebinds its name to this machine could otherwise
+        # set a ceiling or a stop sequence that stalls every build.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Generation settings can only be changed from an address this backend is "
+                "served at (localhost, or BACKEND_PUBLIC_URL)."
+            ),
+        )
+
+
+@router.put("/models/generation")
+def set_model_generation(body: ModelGenerationUpdate, request: Request) -> dict:
+    """Save one model's settings. The next call to that model uses them."""
+    _require_trusted(request)
+    try:
+        return model_router.set_model_generation(body.spec, body.values)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/models/generation")
+def reset_model_generation(spec: str, request: Request) -> dict:
+    """Put every one of a model's settings back on its server's default."""
+    _require_trusted(request)
+    try:
+        return model_router.set_model_generation(spec, None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ── Local model sources ──────────────────────────────────────────────────────

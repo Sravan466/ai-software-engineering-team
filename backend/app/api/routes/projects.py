@@ -383,9 +383,15 @@ def preflight(payload: PreflightRequest) -> dict:
             model_router.parse(payload.preferred_model)
         except ValueError as e:
             # The same refusal creating the project would give, said before it exists.
-            return {"ok": False, "reason": str(e), "unreachable": False}
+            return {"ok": False, "reason": str(e), "unreachable": False, "checks": []}
     ready = _readiness(mode, payload.preferred_model)
-    return {"ok": ready.ok, "reason": ready.reason, "unreachable": ready.unreachable}
+    return {
+        "ok": ready.ok,
+        "reason": ready.reason,
+        "unreachable": ready.unreachable,
+        # What the pre-Start check found for each model this build would use.
+        "checks": list(ready.checks),
+    }
 
 
 @router.post("/{project_id}/run", response_model=RunResponse)
