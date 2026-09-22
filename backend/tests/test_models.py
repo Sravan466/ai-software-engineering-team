@@ -572,7 +572,8 @@ def test_an_unreadable_settings_file_is_set_aside_not_overwritten(tmp_path, monk
     monkeypatch.setattr(model_settings, "_PATH", path)
     path.write_text('{"src:a": {"sampling": {"seed": 1}}, oops')
     model_settings.put("src:b", {"sampling": {"seed": 2}})
-    assert (tmp_path / "model_settings.local.json.unreadable").read_text().startswith('{"src:a"')
+    [aside] = tmp_path.glob("model_settings.local.json.unreadable-*")
+    assert aside.read_text().startswith('{"src:a"')
     assert model_settings.get("src:b") == {"sampling": {"seed": 2}}
 
 
@@ -648,3 +649,34 @@ def test_a_zero_reasoning_budget_is_learned_once_not_on_every_call(router_with, 
             model_router.complete([ChatMessage(role="user", content="hi")], preferred_model="lmstudio:t",
                                   mode=RoutingMode.MANUAL)
     assert sum("although it was not asked" in r.message for r in caplog.records) == 1
+
+
+# ── round 2 of review ────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "reply, opened, answer, reasoning",
+    [
+        # Reasoning a template opened, full of braces, on a server with no parser.
+        ('The user wants JSON like {"a": 1}, so\n</think>\n\n{"a": 2}', False, '{"a": 2}',
+         'The user wants JSON like {"a": 1}, so'),
+        ('Plan: `{}` first.</think>Done: {"a": 2}', True, 'Done: {"a": 2}', 'Plan: `{}` first.'),
+        # Prose that merely mentions the tag is an answer, not a thought.
+        ("Here is how to strip </think> tags from text.", False,
+         "Here is how to strip </think> tags from text.", None),
+        ('```json\n{"content": "s = \'</think>\'"}\n```', False,
+         '```json\n{"content": "s = \'</think>\'"}\n```', None),
+    ],
+)
+def test_the_splitter_keeps_reasoning_out_without_eating_answers(reply, opened, answer, reasoning):
+    assert split_reasoning(reply, opened=opened) == (answer, reasoning)
+
+
+def test_a_model_its_runtime_already_holds_is_not_refused_for_memory(router_with):
+    class _Big(FakeAdapter):
+        def model_info(self, model):
+            return ModelInfo(name=model, context_window=16384, context_source="reported", kind="chat",
+                             weights_bytes=10**15)
+
+    src = _source("llamacpp", [ModelEntry(name="huge", kind="chat", loaded=True)])
+    src.adapter = _Big(src.adapter.models)
+    router_with(src)
+    assert src.compatibility("huge").level != compat.BLOCKED

@@ -201,8 +201,8 @@ export function PreStartCheck({
   checks: PreflightCheck[] | undefined;
   checking: boolean;
   allAgents: number;
-  /** The build is refused, and the notice below already says what to do instead. */
-  refused?: boolean;
+  /** The model the refusal below is about; its advice is said there, not twice. */
+  refused?: string;
 }) {
   // A new answer is on its way: the old one describes models this build may no
   // longer use, so it is not left standing as if it were current.
@@ -252,7 +252,7 @@ export function PreStartCheck({
                 on {c.source_label} · {rolesText(c.roles, allAgents)}
               </span>
             </div>
-            {c.level !== "fits" && <CheckDetail check={c} notes={false} suggestion={!refused} />}
+            {c.level !== "fits" && <CheckDetail check={c} notes={false} suggestion={c.spec !== refused} />}
           </li>
         ))}
       </ul>

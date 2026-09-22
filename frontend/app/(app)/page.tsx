@@ -205,7 +205,11 @@ export default function NewBuildPage() {
           checks={preflight?.checks}
           checking={checking || preflighting}
           allAgents={AGENTS.length}
-          refused={preflight?.ok === false}
+          refused={
+            preflight?.ok === false
+              ? preflight.checks?.find((c) => c.level === "blocked")?.spec
+              : undefined
+          }
         />
 
         {advanced && (

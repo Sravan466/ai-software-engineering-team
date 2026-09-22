@@ -190,7 +190,15 @@ def assess(
         )
         suggestions.append(
             f"Choose a model, or a runtime setting, that gives it at least {_TIGHT_WINDOW:,} tokens"
-            + (", or turn its thinking off in Tune." if profile.reasoning_tokens else ".")
+            + (
+                (
+                    ", or lower its reasoning budget in Tune."
+                    if profile.thinking in (THINKS_ALWAYS, THINKS_LEVELS)
+                    else ", or turn its thinking off in Tune."
+                )
+                if profile.reasoning_tokens
+                else "."
+            )
         )
     elif usable < _TIGHT_WINDOW:
         add(

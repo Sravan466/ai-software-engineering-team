@@ -122,9 +122,13 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
   const [selecting, setSelecting] = useState<string | null>(null);
   const [error, setError] = useState("");
 
+  // Bumped by a rescan, which is the one time every verdict is worth asking for
+  // again even though the list of models served has not changed.
+  const [rescans, setRescans] = useState(0);
   const refresh = useCallback(async (probe = false) => {
     setLoading(true);
     setError("");
+    if (probe) setRescans((n) => n + 1);
     try {
       setStatus(await api.getLocalModel(probe));
     } catch (e: any) {
@@ -163,7 +167,7 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
     };
     // `status` is read only for `reachable`, which `served` already carries.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [served]);
+  }, [served, rescans]);
   const onCheck = useCallback(
     (spec: string, check: ModelCheck) => {
       savedSince.current[spec] = check;

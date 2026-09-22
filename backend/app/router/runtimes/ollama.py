@@ -58,6 +58,7 @@ from app.router.runtimes.types import (
     Hello,
     ModelEntry,
     ModelInfo,
+    thinks,
     writes,
 )
 
@@ -766,7 +767,7 @@ class OllamaAdapter(RuntimeAdapter):
         message = data.get("message") or {}
         # The answer is `content` — with any inline block a template left there taken
         # out — and nothing else. The reasoning field is kept apart, never parsed.
-        answer, inline = split_reasoning(message.get("content") or "")
+        answer, inline = split_reasoning(message.get("content") or "", opened=thinks(request.thinking))
         return ChatResult(
             text=answer,
             prompt_tokens=data.get("prompt_eval_count", 0) or 0,

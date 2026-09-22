@@ -184,11 +184,16 @@ export default function ModelTune({
     setSaveError("");
     try {
       const next = await api.setModelGeneration(data.spec, toValues(draft, fields));
-      setData(next);
-      setDraft(toDraft(next.values, next.fields));
+      if (!next.fields) {
+        setData({ ...data, values: next.values ?? {} });
+        setDraft(toDraft(next.values ?? {}, data.fields));
+      } else {
+        setData(next);
+        setDraft(toDraft(next.values, next.fields));
+        onSaved(next.check);
+      }
       setTouched({});
       setStatus(`Saved. The next call to ${name} uses these — no other model is touched.`);
-      onSaved(next.check);
       title.current?.focus();
     } catch (e: any) {
       setSaveError(e.message);
@@ -203,11 +208,18 @@ export default function ModelTune({
     setSaveError("");
     try {
       const next = await api.resetModelGeneration(data.spec);
-      setData(next);
-      setDraft(toDraft(next.values, next.fields));
+      if (!next.fields) {
+        // Its source stopped answering: the settings are cleared all the same, but
+        // there is no fresh description to show, so the one already here is kept.
+        setData({ ...data, values: {} });
+        setDraft(toDraft({}, data.fields));
+      } else {
+        setData(next);
+        setDraft(toDraft(next.values, next.fields));
+        onSaved(next.check);
+      }
       setTouched({});
       setStatus(`Back on the server's defaults for ${name}.`);
-      onSaved(next.check);
       title.current?.focus();
     } catch (e: any) {
       setSaveError(e.message);

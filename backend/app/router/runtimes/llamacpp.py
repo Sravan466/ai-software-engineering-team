@@ -254,7 +254,9 @@ class LlamaCppAdapter(OpenAICompatAdapter):
         kind = self.kind(model, raw)
         if kind in (KIND_CHAT, KIND_VISION) and props.get("chat_template") == "":
             # Served with no chat template at all: a base model, which continues text
-            # rather than following an agent's instructions.
+            # rather than following an agent's instructions. Current llama-server
+            # builds substitute a generic template for a model file that has none,
+            # so there this is not visible, and the model is not refused on a guess.
             kind = KIND_BASE
         n_params = _positive(meta.get("n_params"))
         defaults = defaults_from_props(props)

@@ -794,6 +794,8 @@ export type GenerationValues = Partial<Record<GenerationField["group"], Record<s
 /** One model's generation settings, its server's defaults, and what its runtime takes. */
 export type ModelGeneration = {
   spec: string;
+  /** Set when a reset landed while the source was down: only `values` came back. */
+  reset?: boolean;
   source: string;
   runtime: string | null;
   /** The source's own name, as its heading in Settings shows it. */

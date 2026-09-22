@@ -339,8 +339,15 @@ class SourceProvider(LLMProvider):
             window_hint=meta.window_hint,
             kv_hint=meta.kv_hint,
             tuning=self.tuning(model),
-            loaded=entry.loaded if entry is not None else None,
+            loaded=self._loaded(model),
         )
+
+    def _loaded(self, model: str) -> Optional[bool]:
+        """Whether the runtime says `model` is in memory now — from its own list."""
+        for listed in self.state().models:
+            if self.adapter.resolves(model, [listed.name]):
+                return listed.loaded
+        return None
 
     def generation_view(self, model: str) -> dict:
         """What the Settings page needs to tune `model`: every field, what is saved,

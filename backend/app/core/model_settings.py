@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -72,7 +73,7 @@ def put(spec: str, values: Optional[dict]) -> None:
         except _Unreadable as e:
             # Rewriting it now would save this one model and drop every other one's
             # settings; the file is set aside instead, so nothing is lost.
-            aside = _PATH.with_name(f"{_PATH.name}.unreadable")
+            aside = _PATH.with_name(f"{_PATH.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}")
             _PATH.replace(aside)
             log.warning("%s couldn't be read (%s); moved it to %s and started afresh.", _PATH, e, aside)
             data = {}

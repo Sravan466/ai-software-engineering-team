@@ -255,7 +255,7 @@ class OpenAICompatAdapter(RuntimeAdapter):
             unsent = self.unsent(request)
             if request.thinking is not None and not send_thinking and "thinking" not in unsent:
                 unsent = (*unsent, "thinking")
-            return self._result(data, mode, rejected, unsent)
+            return self._result(data, mode, rejected, unsent, opened=thinks(request.thinking))
         raise http_error(last or RuntimeError("no answer"), f"The model server at {self.base_url}")
 
     def _sampling(self, request: ChatRequest) -> dict:
@@ -317,13 +317,15 @@ class OpenAICompatAdapter(RuntimeAdapter):
         return body
 
     @staticmethod
-    def _result(data: dict, mode: str, rejected: bool, unsent: tuple[str, ...] = ()) -> ChatResult:
+    def _result(
+        data: dict, mode: str, rejected: bool, unsent: tuple[str, ...] = (), *, opened: bool = False
+    ) -> ChatResult:
         choice = ((data.get("choices") or [{}])[0]) or {}
         message = choice.get("message") or {}
         usage = data.get("usage") or {}
         # Reasoning comes back in a field of its own under one of two names, or
         # inline when the server was started without a parser for it.
-        answer, inline = split_reasoning(message.get("content") or "")
+        answer, inline = split_reasoning(message.get("content") or "", opened=opened)
         field = message.get("reasoning_content") or message.get("reasoning")
         return ChatResult(
             text=answer,
