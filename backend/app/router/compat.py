@@ -100,6 +100,12 @@ def _gib(n: int) -> str:
     return f"{value:.1f} GB" if value < 10 else f"{value:.0f} GB"
 
 
+def _a(n: int) -> str:
+    """"a" or "an" before a number as it is read aloud: an 8,192, an 11,000, a 16,384."""
+    lead = f"{n:,}".split(",")[0]
+    return "An" if lead.startswith("8") or lead in ("11", "18") else "A"
+
+
 def _billions(n: float) -> str:
     return f"{n / 1e9:.0f}B" if n >= 10e9 else f"{n / 1e9:.1f}B"
 
@@ -203,7 +209,7 @@ def assess(
     elif usable < _TIGHT_WINDOW:
         add(
             DEGRADED,
-            f"A {window:,}-token window is tight: later phases see less of the earlier work.",
+            f"{_a(window)} {window:,}-token window is tight: later phases see less of the earlier work.",
         )
     if profile.source == "fallback" and profile.context_limit is None:
         add(
