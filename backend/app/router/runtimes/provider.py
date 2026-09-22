@@ -20,8 +20,10 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
+from app.core import model_settings
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.router import compat, generation
 from app.router.base import LLMProvider, ProviderError
 from app.router.model_profile import (
     ModelProfile,
@@ -32,9 +34,17 @@ from app.router.model_profile import (
 )
 from app.router.runtimes.base import RuntimeAdapter
 from app.router.runtimes.types import (
+    MACHINE_KEYS,
+    SAMPLING_KEYS,
     STRUCTURED_SCHEMA,
+    THINKING_ON,
+    THINKING_SETTINGS,
+    THINKS_ALWAYS,
+    THINKS_NONE,
     ChatRequest,
     ModelEntry,
+    thinking_for,
+    thinks,
     writes,
 )
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
@@ -120,6 +130,9 @@ class SourceProvider(LLMProvider):
         self._profiles = ProfileCache()
         self._state: Optional[SourceState] = None
         self._state_lock = threading.Lock()
+        #: (model, setting) pairs already reported as unsendable, so a setting the
+        #: runtime cannot take is said once per model rather than once per call.
+        self._reported_unsent: set[tuple[str, str]] = set()
         #: Bumped by anything that makes the current state wrong (a new key, a
         #: refused connection). A refresh that started before the bump does not get
         #: to write its now-stale answer over the change.
@@ -231,6 +244,23 @@ class SourceProvider(LLMProvider):
         self.adapter.forget(model)
         self.invalidate()
 
+    # ── per-model settings ───────────────────────────────────────────────────
+    def settings_key(self, model: str) -> str:
+        """The spec `model`'s settings are saved under, however it is spelled here.
+
+        A saved spelling that names the same model by the runtime's rule is used, so
+        tuning `qwen3` and then running `qwen3:latest` is one model, not two.
+        """
+        prefix = f"{self.source.id}:"
+        for spec in model_settings.all_settings():
+            if spec.startswith(prefix) and self.adapter.resolves(model, [spec[len(prefix):]]):
+                return spec
+        return f"{prefix}{model}"
+
+    def tuning(self, model: str) -> dict:
+        """The settings saved for `model`, re-validated — `{}` when none are."""
+        return generation.read(model_settings.get(self.settings_key(model)))
+
     # ── the profile ──────────────────────────────────────────────────────────
     def profile(self, model: str) -> ModelProfile:
         """Everything known about `model`, asked once and remembered.
@@ -256,8 +286,82 @@ class SourceProvider(LLMProvider):
         # `build_profile` as "unknown, so do not clamp".
         ram = total_ram_bytes() if self.source.same_machine else None
         return self._profiles.put(
-            key, build_profile(provider=self.name, model=model, info=info, ram_bytes=ram)
+            key,
+            build_profile(
+                provider=self.name, model=model, info=info, ram_bytes=ram, tuning=self.tuning(model)
+            ),
         )
+
+    def forget_profile(self, model: str) -> None:
+        """Drop the profile only — after the model's settings changed, not its weights."""
+        self._profiles.forget_where(lambda key: self.adapter.resolves(model, [key[1]]) or key[1] == model)
+
+    def compatibility(self, model: str) -> compat.Compatibility:
+        """Whether `model` will run a build on this source, and why not if it won't."""
+        from app.router.runtimes import table
+
+        profile = self.profile(model)
+        entry = self.entry(model)
+        if entry is not None and entry.kind is not None and profile.kind is None:
+            # The list said what the model is for even though the profile did not.
+            profile = replace(profile, kind=entry.kind)
+        meta = table.spec_for(self.source.runtime)
+        return compat.assess(
+            f"{self.source.id}:{model}",
+            profile,
+            ram_bytes=total_ram_bytes() if self.source.same_machine else None,
+            remote=not self.source.same_machine,
+            probed=profile.described or profile.kind is not None,
+            window_hint=meta.window_hint,
+            kv_hint=meta.kv_hint,
+            tuning=self.tuning(model),
+        )
+
+    def generation_view(self, model: str) -> dict:
+        """What the Settings page needs to tune `model`: every field, what is saved,
+        what the server says by default, and which of them this runtime can send."""
+        profile = self.profile(model)
+        stored = self.tuning(model)
+        supported = {
+            **{k: k in self.adapter.sampling_supported for k in SAMPLING_KEYS if k != "thinking"},
+            **{k: k in self.adapter.machine_supported for k in MACHINE_KEYS},
+            # Only ever read by the memory estimate, so every runtime "takes" it.
+            "kv_cache_type": True,
+            "context_window": True,
+            "max_output_tokens": True,
+            "reasoning_tokens": True,
+        }
+        if profile.thinking == THINKS_NONE:
+            thinking_options: list[str] = []
+        elif profile.thinking == THINKS_ALWAYS:
+            thinking_options = [THINKING_ON]
+        else:
+            fitted = {thinking_for(profile.thinking, s) for s in THINKING_SETTINGS}
+            thinking_options = [
+                s for s in THINKING_SETTINGS if s in fitted and s in self.adapter.thinking_supported
+            ]
+        supported["thinking"] = bool(thinking_options)
+        return {
+            "spec": self.settings_key(model),
+            "source": self.source.id,
+            "runtime": self.source.runtime,
+            "runtime_label": self.source.label,
+            "fields": [f.as_dict() for f in generation.FIELDS],
+            "values": stored,
+            "defaults": dict(profile.defaults),
+            "supported": supported,
+            "thinking": profile.thinking,
+            "thinking_options": thinking_options,
+            "thinking_level": profile.thinking_level,
+            "profile": profile.as_dict(),
+            "fallbacks": {
+                "temperature": settings.local_temperature,
+                "top_p": settings.local_top_p,
+                "thinking": settings.local_thinking,
+                "reasoning_tokens": settings.local_reasoning_tokens,
+                "kv_cache_type": settings.local_kv_cache_type,
+            },
+        }
 
     # ── generation ───────────────────────────────────────────────────────────
     def generate(
@@ -267,12 +371,27 @@ class SourceProvider(LLMProvider):
         options: GenerationOptions,
     ) -> LLMResponse:
         profile = self.profile(model)
+        tuning = self.tuning(model)
+        sampling = tuning.get(generation.SAMPLING) or {}
+        machine = tuning.get(generation.MACHINE) or {}
+        # A setting saved for this model is the most specific thing anyone said about
+        # it, so it wins over the calling agent's own temperature. Anything unset is
+        # left unset, and the runtime's (or the model file's) default applies.
+        values = {key: sampling.get(key) for key in SAMPLING_KEYS if key != "thinking"}
+        if values["temperature"] is None:
+            values["temperature"] = options.temperature
         request = ChatRequest(
             model=model,
             messages=[m.model_dump() for m in messages],
-            max_tokens=options.resolve_max_tokens(profile.max_output_tokens),
+            # The reply's ceiling, plus what is kept for reasoning: a runtime counts
+            # both against the one number, and reasoning comes first.
+            max_tokens=options.resolve_max_tokens(profile.max_output_tokens) + profile.reasoning_tokens,
             context_window=profile.context_window,
-            temperature=options.temperature,
+            **values,
+            thinking=profile.thinking_level,
+            gpu_layers=machine.get("gpu_layers"),
+            threads=machine.get("threads"),
+            keep_alive=machine.get("keep_alive"),
             json_schema=options.json_schema,
             json_mode=options.json_mode,
             structured_output=profile.structured_output,
@@ -288,6 +407,8 @@ class SourceProvider(LLMProvider):
                 raise
             raise clean from None
         latency = int((time.perf_counter() - started) * 1000)
+        self._report_unsent(model, result.unsent, sampling, machine)
+        profile = self._note_reasoning(model, profile, result.reasoning, result.text, result.finish_reason)
 
         if result.structured_output_rejected and request.json_schema:
             # Remembered, so the next call asks for what this model takes instead of
@@ -315,7 +436,72 @@ class SourceProvider(LLMProvider):
             ),
             latency_ms=latency,
             is_local=profile.is_local,
+            reasoning=result.reasoning,
         )
+
+    def _report_unsent(self, model: str, unsent: tuple[str, ...], sampling: dict, machine: dict) -> None:
+        """Say — once per model — that a setting someone saved can't reach this runtime.
+
+        Only what somebody set is reported: the configured thinking default reaching
+        a runtime with no word for "off" is not news, but a saved seed that never
+        arrives is exactly the silent drop the Settings page promises not to make.
+        """
+        for key in unsent:
+            if key not in sampling and key not in machine:
+                continue
+            if (model, key) in self._reported_unsent:
+                continue
+            self._reported_unsent.add((model, key))
+            log.warning(
+                "%s on %s: the saved '%s' setting can't be sent — %s has no way to take it. "
+                "Settings shows it as unsupported.",
+                model,
+                self.source.label,
+                key,
+                self.source.label,
+            )
+
+    def _note_reasoning(
+        self,
+        model: str,
+        profile: ModelProfile,
+        reasoning: Optional[str],
+        answer: str,
+        finish_reason: Optional[str],
+    ) -> ModelProfile:
+        """Learn from a reply that reasoned when it was not expected to.
+
+        A model the runtime did not describe as thinking — or one told not to that
+        did anyway — has no reasoning budget, so its thoughts eat the answer's. Once
+        seen, its profile keeps the budget from then on. A reply whose reasoning used
+        up every token, leaving no answer at all, is said for what it is.
+        """
+        if not reasoning:
+            return profile
+        if not answer.strip() and finish_reason == "length":
+            log.warning(
+                "%s spent its whole output budget reasoning and never answered. Give it a "
+                "larger reasoning budget in Settings, or turn its thinking down.",
+                model,
+            )
+        if thinks(profile.thinking_level) or profile.reasoning_tokens:
+            return profile
+        wanted = self.tuning(model).get(generation.LIMITS, {}).get("reasoning_tokens")
+        budget = settings.local_reasoning_tokens if wanted is None else int(wanted)
+        # What is *sent* stays as it was: a runtime that says the model cannot think
+        # refuses to be told to. Only the budget changes, because it thinks anyway.
+        learned = replace(
+            profile,
+            thinking=THINKS_ALWAYS,
+            reasoning_tokens=max(0, min(budget, profile.context_window // 4)),
+        )
+        log.warning(
+            "%s reasoned before answering although it was not asked to. Its replies now keep "
+            "%s tokens for reasoning, so the answer is not cut short.",
+            model,
+            f"{learned.reasoning_tokens:,}",
+        )
+        return self._profiles.put((self.source.id, model), learned)
 
     def _report_limits(
         self,

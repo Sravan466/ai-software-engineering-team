@@ -46,9 +46,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from app.core import model_roles as _model_roles, secrets_store as _secrets_store  # noqa: E402
+from app.core import model_settings as _model_settings  # noqa: E402
 
 _secrets_store._PATH = Path(_tmp) / "providers.local.json"
 _model_roles._PATH = Path(_tmp) / "model_roles.local.json"
+_model_settings._PATH = Path(_tmp) / "model_settings.local.json"
 
 from app.main import app  # noqa: E402
 from app.router.model_profile import ModelProfile  # noqa: E402

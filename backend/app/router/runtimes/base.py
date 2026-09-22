@@ -19,6 +19,8 @@ import httpx
 from app.core.logging import get_logger
 from app.router.base import RETRYABLE_STATUS, ProviderError
 from app.router.runtimes.types import (
+    MACHINE_KEYS,
+    SAMPLING_KEYS,
     ChatRequest,
     ChatResult,
     Hello,
@@ -67,6 +69,31 @@ class RuntimeAdapter(abc.ABC):
     runtime: str = "base"
     #: Whether this adapter can ask its runtime to download a model.
     can_download: bool = False
+    #: Which of `SAMPLING_KEYS` and `MACHINE_KEYS` this adapter can put on the wire.
+    #: A setting outside these is shown as unsupported and reported on the call,
+    #: never dropped without a word.
+    sampling_supported: frozenset[str] = frozenset()
+    machine_supported: frozenset[str] = frozenset()
+    #: Which thinking settings (`THINKING_SETTINGS`) the runtime can be told.
+    thinking_supported: tuple[str, ...] = ()
+    #: Whether a schema-constrained reply still lets the model reason first. Where
+    #: it does not, decoding is held to the schema from the first token, so a
+    #: request that thinks drops the constraint and relies on validation instead.
+    schema_with_reasoning: bool = False
+
+    def unsent(self, request: ChatRequest) -> tuple[str, ...]:
+        """The settings `request` carries that this adapter cannot send."""
+        out = [
+            key
+            for key in (*SAMPLING_KEYS, *MACHINE_KEYS)
+            if key != "thinking"
+            and getattr(request, key, None) is not None
+            and key not in self.sampling_supported
+            and key not in self.machine_supported
+        ]
+        if request.thinking is not None and request.thinking not in self.thinking_supported:
+            out.append("thinking")
+        return tuple(out)
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         self.base_url = base_url.rstrip("/")

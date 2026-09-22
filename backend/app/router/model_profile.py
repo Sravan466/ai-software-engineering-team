@@ -24,6 +24,7 @@ want the memory back.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
@@ -72,8 +73,14 @@ class ModelProfile:
     structured_output: str = "json"
     #: What the model is for (chat, embedding, vision, base), when the runtime said.
     kind: Optional[str] = None
-    #: Whether it thinks before answering, and whether that can be switched off.
+    #: Whether it thinks before answering, and how that can be set (`THINKS_*`).
     thinking: Optional[str] = None
+    #: The thinking setting calls to this model carry, fitted to what it takes —
+    #: None when nothing is said about thinking at all.
+    thinking_level: Optional[str] = None
+    #: Tokens kept for reasoning on top of `max_output_tokens`, when it thinks.
+    #: Sent as part of the output ceiling, and kept out of the prompt's budget.
+    reasoning_tokens: int = 0
     #: False for a model a local runtime lists but sends elsewhere to run.
     is_local: bool = True
     #: "probe" (asked the model), "configured" (a documented provider window), or
@@ -82,6 +89,22 @@ class ModelProfile:
     #: Set when the window sits below the model's own limit, saying what lowered it.
     clamp_reason: Optional[str] = None
     architecture: Optional[str] = None
+    #: What the weights weigh, and for a mixture of experts how many run per token.
+    weights_bytes: Optional[int] = None
+    experts_total: Optional[int] = None
+    experts_active: Optional[int] = None
+    #: What the KV cache is assumed to be stored as, for the memory estimate.
+    kv_cache_type: str = "f16"
+    #: Bytes of KV cache per token at the assumed cache type, and the sliding
+    #: window after which the windowed layers stop growing — for the memory check.
+    kv_bytes_per_token: Optional[int] = None
+    kv_bytes_per_token_windowed: int = 0
+    sliding_window: Optional[int] = None
+    #: Sampling defaults the running server or the model file reported.
+    defaults: dict = field(default_factory=dict)
+    #: True when the runtime described the model at all; False for a fallback profile,
+    #: which is budgets for a model nobody could say anything about.
+    described: bool = False
     #: Extra notes worth showing a person (e.g. "this model is small").
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -91,9 +114,11 @@ class ModelProfile:
         """Tokens the prompt may occupy, with room kept for the reply.
 
         The safety margin covers what the chat template adds around the messages —
-        a budget that exactly fills the window is a budget that truncates.
+        a budget that exactly fills the window is a budget that truncates. A model
+        that thinks has its reasoning kept out of this too: the runtime counts it
+        against the same window, before the answer starts.
         """
-        room = self.context_window - self.max_output_tokens
+        room = self.context_window - self.max_output_tokens - self.reasoning_tokens
         # Floored so a budget is never absurdly small — but never above the room
         # that exists. Raising it past `room` is how a 512-token ceiling ended up
         # with a 512-token prompt budget *plus* 256 tokens of output against a
@@ -147,10 +172,17 @@ class ModelProfile:
             "structured_output": self.structured_output,
             "kind": self.kind,
             "thinking": self.thinking,
+            "thinking_level": self.thinking_level,
+            "reasoning_tokens": self.reasoning_tokens,
             "is_local": self.is_local,
             "source": self.source,
             "clamp_reason": self.clamp_reason,
             "is_small": self.is_small,
+            "weights_bytes": self.weights_bytes,
+            "experts_total": self.experts_total,
+            "experts_active": self.experts_active,
+            "kv_cache_type": self.kv_cache_type,
+            "defaults": dict(self.defaults),
             "warnings": list(self.warnings),
         }
 
@@ -165,6 +197,10 @@ _MIN_PROMPT_TOKENS = 512
 #: shape sketch alone overruns the budget for every agent in the pipeline, and the
 #: prompt gets truncated from the head exactly as it did before any of this.
 _MIN_WORKABLE_TOKENS = 4096
+MIN_WORKABLE_TOKENS = _MIN_WORKABLE_TOKENS
+#: The most of a window reasoning may be kept for, whatever the configured budget:
+#: a reply and a prompt still have to fit beside it.
+_REASONING_SHARE = 0.25
 
 
 def fallback_profile(
@@ -222,6 +258,9 @@ def resolve_window(
     context_limit: Optional[int],
     kv_bytes_per_token: Optional[int],
     ram_bytes: Optional[int],
+    kv_bytes_per_token_windowed: int = 0,
+    sliding_window: Optional[int] = None,
+    user_ceiling: Optional[int] = None,
 ) -> tuple[int, Optional[str]]:
     """`min(model limit, what RAM holds, configured ceiling)` — and why it landed there.
 
@@ -239,7 +278,9 @@ def resolve_window(
     limit = context_limit or settings.model_context_fallback_tokens
     candidates: list[tuple[int, Optional[str]]] = [(limit, None)]
 
-    ram_tokens = _tokens_that_fit_in_ram(kv_bytes_per_token, ram_bytes)
+    ram_tokens = _tokens_that_fit_in_ram(
+        kv_bytes_per_token, ram_bytes, kv_bytes_per_token_windowed, sliding_window
+    )
     if ram_tokens is not None:
         gib = (ram_bytes or 0) / 2**30
         note = (
@@ -272,6 +313,10 @@ def resolve_window(
                 f"clamped to the configured LOCAL_CONTEXT_CEILING of {ceiling:,} tokens",
             )
         )
+    if user_ceiling and user_ceiling > 0:
+        candidates.append(
+            (user_ceiling, f"clamped to the {user_ceiling:,}-token ceiling set for this model")
+        )
 
     # The model's own limit and a ceiling the user typed are both hard facts, and
     # neither is second-guessed: a cap of 2,048 means 2,048, even though that is a
@@ -280,7 +325,10 @@ def resolve_window(
 
 
 def _tokens_that_fit_in_ram(
-    kv_bytes_per_token: Optional[int], ram_bytes: Optional[int]
+    kv_bytes_per_token: Optional[int],
+    ram_bytes: Optional[int],
+    windowed: int = 0,
+    window: Optional[int] = None,
 ) -> Optional[int]:
     """How many tokens of KV cache the machine can hold.
 
@@ -290,11 +338,38 @@ def _tokens_that_fit_in_ram(
     Subtracting them turned an ordinary 8 GiB laptop running a 7B model into a
     2,048-token window — a worse outcome than having no clamp, which is the wrong
     way for a safety margin to be wrong. The fraction below the total is the margin.
+
+    Layers that attend only to a sliding window stop costing anything once the
+    context passes it, so past the window only the full-attention layers grow.
     """
-    if not kv_bytes_per_token or not ram_bytes:
+    full = kv_bytes_per_token or 0
+    if not ram_bytes or not (full or windowed):
         return None
     spare = ram_bytes * settings.local_ram_fraction
-    return int(spare // kv_bytes_per_token)
+    if not windowed or not window:
+        return int(spare // (full + windowed))
+    at_window = (full + windowed) * window
+    if spare <= at_window:
+        return int(spare // (full + windowed))
+    if not full:
+        return None  # nothing grows past the window; memory sets no limit
+    return int(window + (spare - at_window) // full)
+
+
+def kv_bytes(profile: "ModelProfile", tokens: int) -> Optional[int]:
+    """Bytes the KV cache takes at `tokens` of context, at the assumed cache type."""
+    if profile.kv_bytes_per_token is None and not profile.kv_bytes_per_token_windowed:
+        return None
+    full = profile.kv_bytes_per_token or 0
+    windowed = profile.kv_bytes_per_token_windowed
+    reach = min(tokens, profile.sliding_window) if profile.sliding_window else tokens
+    return full * tokens + windowed * reach
+
+
+def _kv_factor(kv_cache_type: str) -> float:
+    from app.router.generation import KV_CACHE_TYPES
+
+    return KV_CACHE_TYPES.get(kv_cache_type, 1.0)
 
 
 def build_profile(
@@ -303,6 +378,7 @@ def build_profile(
     model: str,
     info: ModelInfo,
     ram_bytes: Optional[int],
+    tuning: Optional[dict] = None,
 ) -> ModelProfile:
     """Turn one normalised `ModelInfo` into the profile the rest of the app runs on.
 
@@ -315,13 +391,45 @@ def build_profile(
     caller that has established the runtime shares this machine may read local RAM
     and pass it in; that decision belongs to the source, which is the only code that
     knows where the runtime is.
+
+    `tuning` is the model's saved settings (`app.router.generation.read`): a ceiling
+    on the window and the reply, the reasoning budget, the thinking setting, and the
+    KV cache type the memory estimate assumes. Each can only lower what the model
+    and the machine allow.
     """
+    from app.router.runtimes.types import THINKING_OFF, THINKING_SETTINGS, thinking_for, thinks
+
+    tuning = tuning or {}
+    limits = tuning.get("limits") or {}
+    sampling = tuning.get("sampling") or {}
+    machine = tuning.get("machine") or {}
+    kv_type = str(machine.get("kv_cache_type") or settings.local_kv_cache_type or "f16")
+    factor = _kv_factor(kv_type)
+    kv_full = int(info.kv_bytes_per_token * factor) if info.kv_bytes_per_token else None
+    kv_windowed = int(info.kv_bytes_per_token_windowed * factor)
+
     context_limit = info.context_window
     window, clamp_reason = resolve_window(
         context_limit=context_limit,
-        kv_bytes_per_token=info.kv_bytes_per_token,
+        kv_bytes_per_token=kv_full,
         ram_bytes=ram_bytes,
+        kv_bytes_per_token_windowed=kv_windowed,
+        sliding_window=info.sliding_window,
+        user_ceiling=limits.get("context_window"),
     )
+
+    wanted_thinking = sampling.get("thinking") or (settings.local_thinking or "").strip().lower()
+    if wanted_thinking not in THINKING_SETTINGS:
+        wanted_thinking = THINKING_OFF
+    level = thinking_for(info.thinking, wanted_thinking)
+    output = _output_budget(window)
+    if limits.get("max_output_tokens"):
+        output = max(1, min(output, int(limits["max_output_tokens"])))
+    reasoning = 0
+    if thinks(level):
+        wanted = limits.get("reasoning_tokens")
+        budget = settings.local_reasoning_tokens if wanted is None else int(wanted)
+        reasoning = max(0, min(budget, int(window * _REASONING_SHARE)))
 
     parameters = info.parameters_total
     warnings: list[str] = []
@@ -344,7 +452,7 @@ def build_profile(
         model=model,
         context_limit=context_limit,
         context_window=window,
-        max_output_tokens=_output_budget(window),
+        max_output_tokens=output,
         parameter_count=parameters,
         parameter_size=info.parameter_label or None,
         quantization=info.quantization or None,
@@ -353,12 +461,52 @@ def build_profile(
         structured_output=structured,
         kind=info.kind,
         thinking=info.thinking,
+        thinking_level=level,
+        reasoning_tokens=reasoning,
         is_local=info.is_local,
         source="probe" if context_limit else "fallback",
         clamp_reason=clamp_reason,
         architecture=info.architecture,
+        weights_bytes=info.weights_bytes or _weights_from(parameters, info.quantization),
+        experts_total=info.experts_total,
+        experts_active=info.experts_active,
+        kv_cache_type=kv_type,
+        kv_bytes_per_token=kv_full,
+        kv_bytes_per_token_windowed=kv_windowed,
+        sliding_window=info.sliding_window,
+        defaults=dict(info.defaults or {}),
+        described=True,
         warnings=tuple(warnings),
     )
+
+
+def bits_per_weight(quantization: Optional[str]) -> Optional[float]:
+    """Roughly how many bits one weight takes, read from the quantization's own name.
+
+    GGUF names carry the width (`Q4_K_M`, `IQ3_XXS`, `Q8_0`, `F16`, `BF16`), and a
+    `K` or `I` scheme adds block scales on top. A property of the format, not of any
+    model; unrecognised names give None, and nothing is estimated from them.
+    """
+    if not quantization:
+        return None
+    name = quantization.upper().replace("-", "_").replace(" ", "")
+    if name.startswith(("F32", "FP32")):
+        return 32.0
+    if name.startswith(("F16", "BF16", "FP16")):
+        return 16.0
+    match = re.search(r"(?:^|_|I)Q(\d)", name) or re.match(r"Q(\d)", name)
+    if not match:
+        return None
+    bits = int(match.group(1))
+    return bits + 0.5 if bits < 8 else 8.5
+
+
+def _weights_from(parameters: Optional[int], quantization: Optional[str]) -> Optional[int]:
+    """What the weights weigh when the runtime reports no size: parameters × width."""
+    bits = bits_per_weight(quantization)
+    if not parameters or not bits:
+        return None
+    return int(parameters * bits / 8)
 
 
 class ProfileCache:

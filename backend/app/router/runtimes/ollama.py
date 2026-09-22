@@ -35,14 +35,24 @@ from app.router.runtimes.base import (
     get_json,
     http_error,
 )
+from app.router.runtimes.reasoning import merge, split_reasoning
 from app.router.runtimes.types import (
     CONTEXT_REPORTED,
+    KIND_BASE,
     KIND_CHAT,
     KIND_EMBEDDING,
     KIND_VISION,
+    MACHINE_KEYS,
+    SAMPLING_KEYS,
     STRUCTURED_JSON,
     STRUCTURED_NONE,
     STRUCTURED_SCHEMA,
+    THINKING_EFFORTS,
+    THINKING_OFF,
+    THINKING_SETTINGS,
+    THINKS_LEVELS,
+    THINKS_NONE,
+    THINKS_TOGGLE,
     ChatRequest,
     ChatResult,
     Hello,
@@ -64,6 +74,9 @@ _COMPLETION_CAPABILITY = "completion"
 _EMBEDDING_CAPABILITY = "embedding"
 _VISION_CAPABILITY = "vision"
 _THINKING_CAPABILITY = "thinking"
+#: What a chat template calls the effort level it is given. A model whose template
+#: reads it thinks at a level and cannot be switched off.
+_THINK_LEVEL_VARIABLE = "ThinkLevel"
 #: A capability probe is one small JSON answer from a runtime that is already known to
 #: be up — the tag list just came back. Anything slower than this is a runtime in
 #: trouble, and the Settings page should not wait the ten seconds a profile probe
@@ -179,29 +192,149 @@ def _int(value: object) -> Optional[int]:
 
 
 #: Bytes per element in the KV cache (f16 — the runtime's default). A property of the
-#: cache format, not a budget: it is what one number in the cache weighs.
+#: cache format, not a budget: it is what one number in the cache weighs. A quantized
+#: cache is accounted for where the estimate is made, from the configured type.
 _KV_BYTES_PER_ELEMENT = 2
-#: K and V are both cached, so a token costs two of everything below.
-_KV_TENSORS_PER_TOKEN = 2
+
+
+def _per_layer(value: object, layers: int) -> Optional[list[int]]:
+    """A per-layer count, whether reported once for every layer or as a list.
+
+    Hybrid models report their KV head count per layer, with 0 for the layers that
+    keep a fixed-size state instead of a cache. Reading that list as its largest
+    entry, as this once did, charged a mostly-Mamba model for attention in every
+    layer — an estimate several times too high.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        counts: list[int] = []
+        for item in value:
+            try:
+                counts.append(max(int(item), 0))
+            except (TypeError, ValueError):
+                return None
+        return counts if len(counts) == layers else None
+    count = _int(value)
+    return [count] * layers if count else None
+
+
+def _windowed_layers(model_info: dict, arch: str, layers: int) -> Optional[list[bool]]:
+    """Which layers attend only to a sliding window, when the model file says.
+
+    Read from the file, never assumed from the architecture's name: a list of flags
+    per layer, or a period N meaning every Nth layer attends to everything. When
+    the file carries a window but no pattern, every layer is charged in full — the
+    estimate is then too high, which is the safe way for it to be wrong.
+    """
+    pattern = model_info.get(f"{arch}.attention.sliding_window_pattern")
+    if isinstance(pattern, (list, tuple)) and len(pattern) == layers:
+        return [bool(p) for p in pattern]
+    period = _int(pattern)
+    if period and period > 1:
+        return [(i % period) < period - 1 for i in range(layers)]
+    return None
+
+
+def kv_layout(model_info: dict, arch: str) -> tuple[Optional[int], int, Optional[int]]:
+    """`(full, windowed, window)`: bytes of KV cache per token, split by attention span.
+
+    `full` is what the layers that attend to the whole context cost per token;
+    `windowed` is what the sliding-window layers cost per token, up to `window`
+    tokens, after which they cost nothing more. Every term is the model's own
+    metadata — layers, KV heads per layer, key and value widths — and when any is
+    missing `full` is None and the RAM clamp is simply not applied.
+    """
+    layers = _int(model_info.get(f"{arch}.block_count"))
+    if not layers:
+        return None, 0, None
+    kv_heads = _per_layer(model_info.get(f"{arch}.attention.head_count_kv"), layers)
+    heads = _int(model_info.get(f"{arch}.attention.head_count"))
+    embedding = _int(model_info.get(f"{arch}.embedding_length"))
+    fallback_dim = embedding // heads if embedding and heads else None
+    key_dim = _int(model_info.get(f"{arch}.attention.key_length")) or fallback_dim
+    value_dim = _int(model_info.get(f"{arch}.attention.value_length")) or key_dim
+    if not (kv_heads and key_dim and value_dim):
+        return None, 0, None
+    window = _int(model_info.get(f"{arch}.attention.sliding_window"))
+    windowed = _windowed_layers(model_info, arch, layers) if window else None
+    full_bytes = windowed_bytes = 0
+    for index, count in enumerate(kv_heads):
+        cost = count * (key_dim + value_dim) * _KV_BYTES_PER_ELEMENT
+        if windowed and windowed[index]:
+            windowed_bytes += cost
+        else:
+            full_bytes += cost
+    if not (full_bytes or windowed_bytes):
+        return None, 0, None
+    return full_bytes, windowed_bytes, window if windowed_bytes else None
 
 
 def kv_bytes_per_token(model_info: dict, arch: str) -> Optional[int]:
-    """Bytes of KV cache one token costs, from the model's own architecture.
+    """Bytes of KV cache one token costs across every layer, before any window ends.
 
-    `2 (K and V) × layers × kv-heads × head-dim × 2 bytes (f16)`. Every term comes
-    from `model_info`; if any is missing the RAM clamp is simply not applied rather
-    than being invented.
+    `Σ layers (K and V) × kv-heads × head-dim × 2 bytes (f16)`. Every term comes from
+    `model_info`; if any is missing the RAM clamp is simply not applied rather than
+    being invented.
     """
-    layers = _int(model_info.get(f"{arch}.block_count"))
-    kv_heads = _int(model_info.get(f"{arch}.attention.head_count_kv"))
-    embedding = _int(model_info.get(f"{arch}.embedding_length"))
-    heads = _int(model_info.get(f"{arch}.attention.head_count"))
-    if not (layers and kv_heads and embedding and heads):
-        return None
-    head_dim = embedding // heads
-    if head_dim <= 0:
-        return None
-    return _KV_TENSORS_PER_TOKEN * layers * kv_heads * head_dim * _KV_BYTES_PER_ELEMENT
+    full, windowed, _ = kv_layout(model_info, arch)
+    return None if full is None else full + windowed
+
+
+#: Ollama's names for the sampling settings, against the runtime-neutral ones.
+_OPTION_NAMES = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "min_p": "min_p",
+    "repeat_penalty": "repeat_penalty",
+    "presence_penalty": "presence_penalty",
+    "frequency_penalty": "frequency_penalty",
+    "seed": "seed",
+    "stop": "stop",
+}
+#: And for the machine-resource ones that travel in `options`.
+_MACHINE_OPTIONS = {"gpu_layers": "num_gpu", "threads": "num_thread"}
+
+
+def defaults_from_parameters(text: object) -> dict:
+    """The sampling defaults a model file declares, from `/api/show`'s `parameters`.
+
+    One `name value` per line, a name repeated for a list (`stop`), strings quoted.
+    Only settings with a runtime-neutral name are kept; the rest are the runtime's.
+    """
+    out: dict = {}
+    if not isinstance(text, str):
+        return out
+    for line in text.splitlines():
+        name, _, raw = line.strip().partition(" ")
+        key = next((k for k, v in _OPTION_NAMES.items() if v == name), None)
+        raw = raw.strip()
+        if key is None or not raw:
+            continue
+        if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+            raw = raw[1:-1]
+        if key == "stop":
+            out.setdefault("stop", []).append(raw)
+            continue
+        try:
+            number = float(raw)
+        except ValueError:
+            continue
+        out[key] = int(number) if key in ("top_k", "seed") else number
+    return out
+
+
+def _is_base(template: object) -> bool:
+    """Whether a model has no chat template — a base model, which won't follow a chat.
+
+    Only positive evidence counts: a template that is present and says nothing but
+    "insert the prompt here". A server that does not report the template at all
+    says nothing about it.
+    """
+    if not isinstance(template, str):
+        return False
+    return re.sub(r"\s+", "", template) in ("", "{{.Prompt}}")
 
 
 def parameter_count_from(model_info: dict, details: dict) -> Optional[int]:
@@ -230,6 +363,22 @@ def context_length_from(model_info: dict, arch: str) -> Optional[int]:
     return max(lengths) if lengths else None
 
 
+def thinking_style(caps: Optional[tuple[str, ...]], template: object) -> Optional[str]:
+    """How this model's thinking is set: not at all, on/off, or by effort level.
+
+    The runtime says a model thinks in its capability list. Whether it takes an
+    effort level instead of a switch is read from its chat template, which names
+    the level it is given — the runtime ignores `true`/`false` for such a model.
+    """
+    if caps is None:
+        return None
+    if _THINKING_CAPABILITY not in caps:
+        return THINKS_NONE
+    if isinstance(template, str) and _THINK_LEVEL_VARIABLE in template:
+        return THINKS_LEVELS
+    return THINKS_TOGGLE
+
+
 def info_from_show(
     model: str,
     show: dict,
@@ -237,6 +386,7 @@ def info_from_show(
     supports_schema: bool,
     version: Optional[str] = None,
     listen_address: Optional[str] = None,
+    weights_bytes: Optional[int] = None,
 ) -> ModelInfo:
     """Turn one `/api/show` payload into the normalised record."""
     model_info = show.get("model_info") or {}
@@ -245,6 +395,10 @@ def info_from_show(
     context = context_length_from(model_info, arch)
     reported = show.get("capabilities")
     caps = tuple(str(c) for c in reported) if isinstance(reported, (list, tuple)) else None
+    kind = kind_from_capabilities(caps)
+    if kind in (KIND_CHAT, KIND_VISION, None) and _is_base(show.get("template")):
+        kind = KIND_BASE
+    full, windowed, window = kv_layout(model_info, arch) if arch else (None, 0, None)
     return ModelInfo(
         name=model,
         context_window=context,
@@ -252,17 +406,19 @@ def info_from_show(
         parameters_total=parameter_count_from(model_info, details),
         parameter_label=details.get("parameter_size") or None,
         quantization=details.get("quantization_level") or None,
-        kind=kind_from_capabilities(caps),
+        kind=kind,
         capabilities=caps,
         structured_output=STRUCTURED_SCHEMA if supports_schema else STRUCTURED_JSON,
-        thinking=(
-            None
-            if caps is None
-            else "toggle" if _THINKING_CAPABILITY in caps else "none"
-        ),
+        thinking=thinking_style(caps, show.get("template")),
         is_local=not _is_remote(model, show),
         architecture=arch or None,
-        kv_bytes_per_token=kv_bytes_per_token(model_info, arch) if arch else None,
+        kv_bytes_per_token=full,
+        kv_bytes_per_token_windowed=windowed,
+        sliding_window=window,
+        experts_total=_int(model_info.get(f"{arch}.expert_count")) if arch else None,
+        experts_active=_int(model_info.get(f"{arch}.expert_used_count")) if arch else None,
+        weights_bytes=weights_bytes,
+        defaults=defaults_from_parameters(show.get("parameters")),
         runtime_version=version,
         listen_address=listen_address,
     )
@@ -292,10 +448,18 @@ def _as_provider_error(error: Exception, model: str) -> ProviderError:
 class OllamaAdapter(RuntimeAdapter):
     runtime = "ollama"
     can_download = True
+    sampling_supported = frozenset(SAMPLING_KEYS)
+    machine_supported = frozenset(MACHINE_KEYS)
+    thinking_supported = THINKING_SETTINGS
+    #: Seen on a running server: with `think` and a schema in `format`, the reasoning
+    #: comes back in its own field and the schema holds the answer.
+    schema_with_reasoning = True
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         super().__init__(base_url, api_key)
         self._version: Optional[tuple[int, ...]] = None
+        #: What each model weighs on disk, from the tag list, by canonical name.
+        self._sizes: dict[str, int] = {}
         #: What each model says it can do: `(answer, expires_at)` on the monotonic
         #: clock. A plain dict is enough: every write is the same answer to the same
         #: question, so two threads racing cost one duplicate HTTP call and nothing
@@ -371,6 +535,8 @@ class OllamaAdapter(RuntimeAdapter):
                 self._remember_capabilities(name, entry)
             remote = _is_remote(name, entry)
             (self._remote.add if remote else self._remote.discard)(_canonical(name))
+            if isinstance(entry.get("size"), int) and entry["size"] > 0:
+                self._sizes[_canonical(name)] = entry["size"]
             caps = self.known_capabilities(name)
             out.append(
                 ModelEntry(
@@ -448,6 +614,7 @@ class OllamaAdapter(RuntimeAdapter):
             supports_schema=supports_schema,
             version=".".join(str(p) for p in version) if version else None,
             listen_address=self.base_url,
+            weights_bytes=self._sizes.get(_canonical(model)),
         )
 
     # ── the capability cache ─────────────────────────────────────────────────
@@ -591,8 +758,12 @@ class OllamaAdapter(RuntimeAdapter):
         schema_sent = not rejected and bool(request.json_schema) and (
             request.structured_output == STRUCTURED_SCHEMA
         )
+        message = data.get("message") or {}
+        # The answer is `content` — with any inline block a template left there taken
+        # out — and nothing else. The reasoning field is kept apart, never parsed.
+        answer, inline = split_reasoning(message.get("content") or "")
         return ChatResult(
-            text=(data.get("message") or {}).get("content", ""),
+            text=answer,
             prompt_tokens=data.get("prompt_eval_count", 0) or 0,
             completion_tokens=data.get("eval_count", 0) or 0,
             finish_reason=data.get("done_reason"),
@@ -602,26 +773,46 @@ class OllamaAdapter(RuntimeAdapter):
                 else STRUCTURED_JSON if (request.json_mode or request.json_schema) else STRUCTURED_NONE
             ),
             structured_output_rejected=rejected,
+            reasoning=merge(message.get("thinking"), inline),
+            unsent=self.unsent(request),
         )
+
+    @staticmethod
+    def _think(level: Optional[str]) -> object:
+        """`think` as this runtime takes it: a level for a level model, else a switch.
+
+        The level arrives already fitted to the model (`thinking_for`), so an effort
+        here means the model takes one, and "on"/"off" means it takes a switch.
+        """
+        if level in THINKING_EFFORTS:
+            return level
+        return level != THINKING_OFF
 
     def _payload(self, request: ChatRequest, *, schema: bool) -> dict:
         """The request body, with the window and the output budget always present."""
+        options: dict = {
+            # The two that were missing. Without num_ctx the server falls back to its
+            # own small default and truncates the prompt from the head; without
+            # num_predict the output budget an agent asked for was never honoured.
+            "num_ctx": request.context_window,
+            "num_predict": request.max_tokens,
+        }
+        for key, name in {**_OPTION_NAMES, **_MACHINE_OPTIONS}.items():
+            value = getattr(request, key, None)
+            if value is not None:
+                options[name] = value
         payload: dict = {
             "model": request.model,
             "messages": request.messages,
             "stream": False,
-            "options": {
-                # The two that were missing. Without num_ctx the server falls back to
-                # its own small default and truncates the prompt from the head; without
-                # num_predict the output budget an agent asked for was never honoured.
-                "num_ctx": request.context_window,
-                "num_predict": request.max_tokens,
-            },
+            "options": options,
         }
-        if request.temperature is not None:
-            payload["options"]["temperature"] = request.temperature
-        if request.top_p is not None:
-            payload["options"]["top_p"] = request.top_p
+        if request.thinking is not None:
+            # Only ever sent for a model the runtime says thinks — asking one that
+            # does not to think is a 400 — and `thinking_for` has already made sure.
+            payload["think"] = self._think(request.thinking)
+        if request.keep_alive is not None:
+            payload["keep_alive"] = request.keep_alive
 
         if request.json_schema and schema and request.structured_output == STRUCTURED_SCHEMA:
             payload["format"] = request.json_schema

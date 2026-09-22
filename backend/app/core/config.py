@@ -106,6 +106,19 @@ class Settings(BaseSettings):
     #: that no agent asked for. Callers that set their own temperature win.
     local_temperature: BlankTolerantFloat(0.7) = 0.7
     local_top_p: BlankTolerantFloat(0.9) = 0.9
+    #: How hard a thinking model is asked to reason on an agent call, unless it is
+    #: set per model in Settings: off, on, low, medium or high. Off by default —
+    #: every call is cheaper, and the JSON an agent returns is more reliable when
+    #: the reply budget is not spent on reasoning first. A model that cannot be
+    #: switched off is run at its lowest level instead.
+    local_thinking: str = "off"
+    #: Tokens kept for reasoning on top of the answer when a model thinks — raised
+    #: into the output ceiling sent to the runtime, and taken out of the prompt's
+    #: budget, so reasoning never eats the answer. At most a quarter of the window.
+    local_reasoning_tokens: BlankTolerantInt(2048) = 2048
+    #: What local runtimes store their KV cache as — set on the runtime itself
+    #: (f16, q8_0 or q4_0). Only the RAM estimate reads it; it is never sent.
+    local_kv_cache_type: str = "f16"
     #: Extra `provider:model` links to try after the primary choice, comma-separated.
     #: Deliberately empty. The router already appends the local default as the last
     #: link of every chain, so naming a model here as well wrote it down twice —

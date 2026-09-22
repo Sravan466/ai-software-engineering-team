@@ -30,6 +30,11 @@ from app.router.runtimes.types import (
     KIND_VISION,
     STRUCTURED_NONE,
     STRUCTURED_SCHEMA,
+    THINKING_SETTINGS,
+    THINKS_ALWAYS,
+    THINKS_LEVELS,
+    THINKS_NONE,
+    THINKS_TOGGLE,
     Hello,
     ModelEntry,
     ModelInfo,
@@ -38,6 +43,46 @@ from app.router.runtimes.types import (
 log = get_logger(__name__)
 
 _OWNER = "llamacpp"
+#: The sampling defaults `/props` reports that have a runtime-neutral name.
+_DEFAULT_KEYS = ("temperature", "top_p", "top_k", "min_p", "repeat_penalty", "presence_penalty", "frequency_penalty")
+#: What `/props` reports as the seed when none is fixed: -1, as an unsigned 32-bit int.
+_RANDOM_SEEDS = (-1, 2**32 - 1)
+
+
+def defaults_from_props(props: dict) -> dict:
+    """The sampling defaults the server runs with, from `/props`.
+
+    Newer servers nest them under `params`; older ones put them beside `n_ctx`.
+    """
+    settings = props.get("default_generation_settings") or {}
+    params = settings.get("params") if isinstance(settings.get("params"), dict) else settings
+    out: dict = {}
+    for key in _DEFAULT_KEYS:
+        value = params.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = int(value) if key == "top_k" else round(float(value), 4)
+    seed = params.get("seed")
+    if isinstance(seed, int) and not isinstance(seed, bool) and seed not in _RANDOM_SEEDS:
+        out["seed"] = seed
+    return out
+
+
+def thinking_from_template(template: object, caps: dict) -> Optional[str]:
+    """How the loaded model's thinking is set, from the chat template the server runs.
+
+    The template is what turns a request into a prompt, so the switch it reads is
+    the switch there is: `enable_thinking` is on/off, `reasoning_effort` is a level,
+    and a template that opens a reasoning block with no way to skip it always thinks.
+    """
+    if not isinstance(template, str) or not template.strip():
+        return None
+    if "enable_thinking" in template:
+        return THINKS_TOGGLE
+    if "reasoning_effort" in template or caps.get("supports_reasoning_effort"):
+        return THINKS_LEVELS
+    if "<think>" in template:
+        return THINKS_ALWAYS
+    return THINKS_NONE
 #: How long a kind probe's answer is kept. A server's mode is fixed at start, so
 #: this only bounds how long a restarted server on the same port is misdescribed.
 _KIND_TTL_SECONDS = 300.0
@@ -57,6 +102,15 @@ def _label(n_params: Optional[int]) -> Optional[str]:
 
 class LlamaCppAdapter(OpenAICompatAdapter):
     runtime = "llamacpp"
+    sampling_supported = frozenset(
+        {*OpenAICompatAdapter.sampling_supported, "top_k", "min_p", "repeat_penalty"}
+    )
+    extra_sampling = {"top_k": "top_k", "min_p": "min_p", "repeat_penalty": "repeat_penalty"}
+    thinking_supported = THINKING_SETTINGS
+    thinking_via_template = True
+    #: Seen on a running server: a JSON Schema in `response_format` is applied once
+    #: the reasoning block closes, and the reasoning comes back in its own field.
+    schema_with_reasoning = True
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         super().__init__(base_url, api_key)
@@ -193,6 +247,9 @@ class LlamaCppAdapter(OpenAICompatAdapter):
         caps = props.get("chat_template_caps") or {}
         kind = self.kind(model, raw)
         n_params = _positive(meta.get("n_params"))
+        defaults = defaults_from_props(props)
+        with self._lock:
+            self._defaults[model] = defaults
         return ModelInfo(
             name=model,
             context_window=window,
@@ -204,10 +261,12 @@ class LlamaCppAdapter(OpenAICompatAdapter):
             capabilities=self._words(kind),
             structured_output=self.structured_mode(model) if kind != KIND_EMBEDDING else STRUCTURED_NONE,
             thinking=(
-                "toggle"
-                if caps.get("supports_reasoning_effort") or caps.get("supports_preserve_reasoning")
-                else None
+                thinking_from_template(props.get("chat_template"), caps)
+                if kind != KIND_EMBEDDING
+                else THINKS_NONE
             ),
+            weights_bytes=_positive(meta.get("size")),
+            defaults=defaults,
             runtime_version=str(props.get("build_info")) if props.get("build_info") else None,
             listen_address=self.base_url,
             warnings=warnings,
