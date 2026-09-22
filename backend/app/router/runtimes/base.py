@@ -80,6 +80,9 @@ class RuntimeAdapter(abc.ABC):
     #: it does not, decoding is held to the schema from the first token, so a
     #: request that thinks drops the constraint and relies on validation instead.
     schema_with_reasoning: bool = False
+    #: Whether an unset temperature or top-p is filled with the configured default
+    #: rather than left to the runtime, for runtimes whose own default is greedy.
+    fills_sampling_defaults: bool = False
 
     def unsent(self, request: ChatRequest) -> tuple[str, ...]:
         """The settings `request` carries that this adapter cannot send."""

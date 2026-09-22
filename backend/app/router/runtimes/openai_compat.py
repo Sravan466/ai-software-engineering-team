@@ -97,6 +97,7 @@ class OpenAICompatAdapter(RuntimeAdapter):
     #: Whether thinking is switched through the chat template (`enable_thinking`),
     #: which is how servers that render the template themselves take "off".
     thinking_via_template = False
+    fills_sampling_defaults = True
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         super().__init__(api_root(base_url), api_key)

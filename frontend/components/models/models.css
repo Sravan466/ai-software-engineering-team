@@ -1,0 +1,228 @@
+/* ===========================================================================
+   WILL IT RUN — the compatibility verdict, and tuning a model in place
+
+   Three verdicts and one colour each from the state vocabulary: ok for "fits",
+   warn for "runs with caveats", bad for "won't run". Always a word beside the dot,
+   never the colour alone. Everything opens inline under the row it belongs to;
+   nothing here is a modal, because nothing here needs to interrupt.
+   =========================================================================== */
+
+/* A model row can now open what it knows; the row and its panel are one item. */
+.model-item { display: flex; flex-direction: column; }
+
+/* ── the verdict chip ───────────────────────────────────────────────────── */
+.verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--sans);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  transition: background var(--tr), border-color var(--tr), color var(--tr);
+}
+.verdict[data-tone="ok"]   { color: var(--ok); }
+.verdict[data-tone="warn"] { color: var(--warn); border-color: var(--accent-line); }
+.verdict[data-tone="bad"]  { color: var(--bad); border-color: rgba(240, 82, 82, 0.4); }
+.verdict[data-tone="none"] { color: var(--ink-3); }
+button.verdict { cursor: pointer; }
+button.verdict:hover { background: var(--bg-raised); border-color: var(--line-3); }
+button.verdict[aria-expanded="true"] { background: var(--bg-raised); }
+.verdict-pending { color: var(--ink-3); font-weight: 500; }
+.verdict-pending .btn-spinner { width: 10px; height: 10px; }
+.verdict-chev { display: inline-grid; place-items: center; transition: transform var(--tr); }
+.verdict-chev svg { width: 11px; height: 11px; }
+.verdict-chev.open { transform: rotate(90deg); }
+
+/* The row's quiet controls keep their hover-to-resolve behaviour; the verdict does
+   not — it is information, and information is always legible. */
+.model-row .verdict { opacity: 1; }
+
+/* ── what the check found ───────────────────────────────────────────────── */
+.model-panel { margin: 4px 0 10px 10px; animation: rise var(--tr) ease both; }
+
+.check-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-sunken);
+}
+.check-reasons { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.check-reason {
+  display: flex;
+  gap: 9px;
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 78ch;
+}
+.check-reason > svg { width: 14px; height: 14px; flex: none; margin-top: 3px; color: var(--ink-3); }
+.check-reason[data-level="blocked"] > svg { color: var(--bad); }
+.check-reason[data-level="blocked"] { color: var(--ink); }
+.check-reason[data-level="degraded"] > svg { color: var(--warn); }
+.check-reason[data-level="fits"] > svg { color: var(--ok); }
+.check-reason[data-level="note"],
+.check-reason[data-level="unknown"] { color: var(--ink-3); }
+
+.check-suggestion {
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink);
+  max-width: 78ch;
+}
+.check-suggestion-label {
+  margin-right: 6px;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+
+/* Weights and cache, to scale, against the memory of the computer that runs the
+   model. The line at three quarters is where it starts to swap. */
+.memory { display: flex; flex-direction: column; gap: 6px; }
+.memory-bar {
+  position: relative;
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--line);
+  overflow: hidden;
+}
+.memory-weights { background: var(--ink-3); }
+.memory-cache { background: var(--line-3); }
+.memory-bar[data-over] .memory-weights { background: var(--warn); }
+.memory-bar[data-over] .memory-cache { background: color-mix(in srgb, var(--warn) 45%, var(--line-2)); }
+.memory-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--ink-2); opacity: 0.6; }
+.memory-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 5px;
+  margin: 0;
+  font-size: var(--t-xs);
+  color: var(--ink-2);
+}
+.memory-key { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+.memory-key + .mono { margin-left: 1px; }
+.memory-key-weights { background: var(--ink-3); }
+.memory-key-cache { margin-left: 8px; background: var(--line-3); }
+.memory-bar[data-over] + .memory-legend .memory-key-weights { background: var(--warn); }
+
+/* ── tuning a model ─────────────────────────────────────────────────────── */
+.tune {
+  padding: 16px 18px 16px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-sunken);
+}
+.tune-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+.tune-title { margin: 0; font-size: var(--t-base); font-weight: 600; color: var(--ink); }
+.tune-head .field-hint { max-width: 70ch; }
+.tune-form { display: flex; flex-direction: column; gap: 20px; }
+
+.tune-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+.tune-group + .tune-group { padding-top: 18px; border-top: 1px solid var(--line); }
+.tune-legend {
+  margin-bottom: 4px;
+  padding: 0;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+.tune-note { margin: 0 0 12px; max-width: 70ch; }
+.tune-group .seg { flex-wrap: wrap; max-width: 100%; margin: 6px 0 8px; }
+
+.tune-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 14px 16px;
+  align-items: start;
+}
+.tune-field[data-wide] { grid-column: span 2; }
+.tune-field .input,
+.tune-field .select { min-height: 34px; padding-top: 6px; padding-bottom: 6px; }
+.tune-field .textarea { min-height: 58px; padding: 7px 10px; }
+/* Tabular figures, so a column of numbers lines up as numbers do. */
+.tune-field .input { font-variant-numeric: tabular-nums; }
+.tune-field[data-unsupported] > label { color: var(--ink-3); }
+.tune-field[data-unsupported] .field-hint { color: var(--ink-3); font-style: italic; }
+.tune-field [aria-invalid="true"] { border-color: var(--bad); }
+.tune-field [aria-invalid="true"]:focus { border-color: var(--bad); }
+.tune-error { font-size: var(--t-xs); color: var(--bad); line-height: 1.45; }
+
+.tune-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.tune-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  font-size: var(--t-xs);
+  color: var(--ok);
+}
+.tune-status svg { width: 13px; height: 13px; flex: none; }
+
+/* ── the check the composer runs before Start ───────────────────────────── */
+.precheck {
+  padding: 11px 16px 13px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+.precheck-title {
+  margin: 0 0 9px;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+.precheck-rows { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.precheck-row { display: flex; flex-direction: column; gap: 8px; }
+.precheck-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.precheck-quiet { color: var(--ink-3); }
+.precheck-quiet .mono { color: var(--ink-2); }
+.precheck-quiet .btn-spinner { width: 11px; height: 11px; }
+.precheck-ok { display: inline-grid; place-items: center; color: var(--ok); }
+.precheck-ok svg { width: 14px; height: 14px; }
+.precheck-model { font-size: var(--t-sm); color: var(--ink); overflow-wrap: anywhere; }
+.precheck-where { font-size: var(--t-sm); color: var(--ink-3); }
+
+@media (max-width: 620px) {
+  .tune { padding: 14px; }
+  .tune-field[data-wide] { grid-column: 1 / -1; }
+  .model-panel { margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-panel { animation: none; }
+  .verdict-chev { transition: none; }
+}

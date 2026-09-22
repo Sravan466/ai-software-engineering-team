@@ -354,6 +354,12 @@ class SourceProvider(LLMProvider):
             "thinking_options": thinking_options,
             "thinking_level": profile.thinking_level,
             "profile": profile.as_dict(),
+            #: What is sent when a field is left unset and the server reports no
+            #: default for it; None means the runtime's own default applies.
+            "sent_when_unset": {
+                key: (getattr(settings, f"local_{key}") if self.adapter.fills_sampling_defaults else None)
+                for key in ("temperature", "top_p")
+            },
             "fallbacks": {
                 "temperature": settings.local_temperature,
                 "top_p": settings.local_top_p,

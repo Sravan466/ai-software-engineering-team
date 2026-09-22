@@ -377,6 +377,22 @@ export const api = {
   removeSource: (id: string) =>
     req<LocalStatus>(`/api/settings/sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
+  // ── Settings: will each model run, and how it is tuned ──
+  /** Every model on every answering source, checked. The first ask describes each. */
+  getCompatibility: () => req<Compatibility>("/api/settings/compatibility", {}, LLM_TIMEOUT_MS),
+  getModelGeneration: (spec: string) =>
+    req<ModelGeneration>(`/api/settings/models/generation?spec=${encodeURIComponent(spec)}`),
+  /** Replaces what is saved for this model; a field left out goes back to its default. */
+  setModelGeneration: (spec: string, values: GenerationValues) =>
+    req<ModelGeneration>("/api/settings/models/generation", {
+      method: "PUT",
+      body: JSON.stringify({ spec, values }),
+    }),
+  resetModelGeneration: (spec: string) =>
+    req<ModelGeneration>(`/api/settings/models/generation?spec=${encodeURIComponent(spec)}`, {
+      method: "DELETE",
+    }),
+
   // ── Settings: which model each agent runs on ──
   getRoles: () => req<RoleSettings>("/api/settings/roles"),
   /** `null` puts the role back on the default model. */
@@ -604,6 +620,12 @@ export type ModelProfile = {
   /** Why the window sits below the model's own limit, when it does. */
   clamp_reason: string | null;
   is_small: boolean;
+  /** none · toggle · levels · always — how its thinking is set. */
+  thinking?: string | null;
+  /** The thinking setting calls carry, fitted to what it takes. */
+  thinking_level?: string | null;
+  /** Tokens kept for reasoning on top of the reply. */
+  reasoning_tokens?: number;
   warnings: string[];
 };
 
@@ -704,6 +726,99 @@ export type Preflight = {
   reason: string | null;
   /** True when no local runtime the build needs is answering. */
   unreachable: boolean;
+  /** The pre-Start check of every local model this build would use. */
+  checks?: PreflightCheck[];
+};
+
+/** fits · degraded (runs, with a cost) · blocked (won't run) · unknown (not assessed). */
+export type CheckLevel = "fits" | "degraded" | "blocked" | "unknown";
+
+/** One finding; `note` informs and never changes the verdict. */
+export type CheckReason = { level: CheckLevel | "note"; text: string };
+
+/** Will this model run a build here — decided by the backend, read as-is. */
+export type ModelCheck = {
+  spec: string;
+  level: CheckLevel;
+  /** The finding that set the verdict, as one sentence. */
+  summary: string;
+  reasons: CheckReason[];
+  /** What to pick instead, when it won't run. Sizes and quantizations, never names. */
+  suggestion: string | null;
+  facts: {
+    context_window?: number;
+    parameter_size?: string | null;
+    quantization?: string | null;
+    weights_bytes?: number | null;
+    memory_needed_bytes?: number | null;
+    ram_bytes?: number | null;
+    experts_total?: number | null;
+    experts_active?: number | null;
+    thinking?: string | null;
+    thinking_level?: string | null;
+    reasoning_tokens?: number;
+    kv_cache_type?: string;
+  };
+};
+
+export type PreflightCheck = ModelCheck & {
+  model: string;
+  source_label: string;
+  /** The roles whose phase runs on this model; empty means "the rest of the run". */
+  roles: string[];
+};
+
+export type Compatibility = {
+  /** Keyed by spec; a model missing here has not been checked (yet). */
+  checks: Record<string, ModelCheck>;
+  ram_bytes: number | null;
+};
+
+/** One setting the Tune panel can show — its range comes from the backend. */
+export type GenerationField = {
+  key: string;
+  group: "sampling" | "limits" | "machine";
+  label: string;
+  kind: "float" | "int" | "choice" | "stops" | "duration";
+  help: string;
+  minimum: number | null;
+  maximum: number | null;
+  step: number | null;
+  choices: string[];
+};
+
+export type GenerationValues = Partial<Record<GenerationField["group"], Record<string, unknown>>>;
+
+/** One model's generation settings, its server's defaults, and what its runtime takes. */
+export type ModelGeneration = {
+  spec: string;
+  source: string;
+  runtime: string | null;
+  runtime_label: string;
+  fields: GenerationField[];
+  /** What is saved for this model — only what someone set. */
+  values: GenerationValues;
+  /** What the running server or the model file reports, by field key. */
+  defaults: Record<string, unknown>;
+  /** Whether this runtime can send each field. */
+  supported: Record<string, boolean>;
+  /** none · toggle · levels · always — or null when the runtime doesn't say. */
+  thinking: string | null;
+  thinking_options: string[];
+  thinking_level: string | null;
+  profile: ModelProfile;
+  /** What is sent for a field left unset that the server has no default for; null
+   *  means the runtime's own default applies. */
+  sent_when_unset: Record<string, number | null>;
+  /** This backend's configured defaults. */
+  fallbacks: {
+    temperature: number;
+    top_p: number;
+    thinking: string;
+    reasoning_tokens: number;
+    kv_cache_type: string;
+  };
+  check: ModelCheck;
 };
 
 /** `{ "src:embedder": ["embedding"] }` — see `LocalStatus.model_capabilities`. */

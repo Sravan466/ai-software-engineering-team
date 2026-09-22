@@ -5,6 +5,7 @@ import {
   api,
   LocalSource,
   LocalStatus,
+  ModelCheck,
   ModelProfile,
   ProviderSetting,
   RoleRow,
@@ -19,6 +20,8 @@ import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
+import { CheckDetail, VerdictChip } from "@/components/models/ModelCheck";
+import ModelTune from "@/components/models/ModelTune";
 
 const PROVIDERS: { key: string; label: string; placeholder: string; console: string }[] = [
   {
@@ -135,6 +138,26 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
     refresh();
   }, [refresh]);
 
+  // Whether each model will run a build here. Asked after the list, never before
+  // it: describing every model can take a moment the first time, and the list
+  // should not wait on it. A failed ask leaves the verdicts out, not the models.
+  const [checks, setChecks] = useState<Record<string, ModelCheck> | null>(null);
+  useEffect(() => {
+    if (!status?.reachable) return;
+    let live = true;
+    api
+      .getCompatibility()
+      .then((next) => live && setChecks(next.checks))
+      .catch(() => live && setChecks({}));
+    return () => {
+      live = false;
+    };
+  }, [status]);
+  const onCheck = useCallback(
+    (spec: string, check: ModelCheck) => setChecks((c) => ({ ...(c ?? {}), [spec]: check })),
+    [],
+  );
+
   /** Make a model every agent's default. */
   async function select(spec: string) {
     setSelecting(spec);
@@ -205,6 +228,8 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
                 key={source.id}
                 source={source}
                 status={status}
+                checks={checks}
+                onCheck={onCheck}
                 selecting={selecting}
                 onSelect={select}
                 onChanged={changed}
@@ -387,6 +412,8 @@ function DefaultNotice({
 function SourceBlock({
   source,
   status,
+  checks,
+  onCheck,
   selecting,
   onSelect,
   onChanged,
@@ -395,6 +422,8 @@ function SourceBlock({
 }: {
   source: LocalSource;
   status: LocalStatus;
+  checks: Record<string, ModelCheck> | null;
+  onCheck: (spec: string, check: ModelCheck) => void;
   selecting: string | null;
   onSelect: (spec: string) => void;
   onChanged: (next: LocalStatus) => void;
@@ -500,6 +529,8 @@ function SourceBlock({
               key={m.spec}
               model={m}
               status={status}
+              check={checks === null ? undefined : checks[m.spec] ?? null}
+              onCheck={onCheck}
               busy={selecting !== null}
               selecting={selecting === m.spec}
               onSelect={onSelect}
@@ -612,20 +643,34 @@ function SourceBlock({
   );
 }
 
-/** A model a source serves; the row is the selection itself. */
+/**
+ * A model a source serves; the row is the selection itself.
+ *
+ * Beside the name: whether it will run a build here, and a way to tune how it is
+ * run. Both open inline under the row — one at a time, so a list of models never
+ * turns into a wall of open panels.
+ */
 function SourceModelRow({
   model,
   status,
+  check,
+  onCheck,
   busy,
   selecting,
   onSelect,
 }: {
   model: SourceModel;
   status: LocalStatus;
+  /** undefined while the checks load; null when this model wasn't checked. */
+  check: ModelCheck | null | undefined;
+  onCheck: (spec: string, check: ModelCheck) => void;
   busy: boolean;
   selecting: boolean;
   onSelect: (spec: string) => void;
 }) {
+  const [open, setOpen] = useState<"check" | "tune" | null>(null);
+  const panelId = useId();
+  const tuneButton = useRef<HTMLButtonElement>(null);
   const current = model.spec === status.default_model;
   // Asked of the runtime, never of the name. A model that only makes embeddings is
   // a working model doing a different job: it is named and kept, and the one thing
@@ -634,60 +679,103 @@ function SourceModelRow({
   const canBuild = canRunABuild(model.spec, status.cannot_build);
   const reported = status.model_capabilities?.[model.spec] ?? [];
   const embeds = status.embedding_model === model.spec;
+  const toggle = (which: "check" | "tune") => setOpen((o) => (o === which ? null : which));
   return (
-    <li className="model-row" data-current={current || undefined}>
-      <span className="model-row-name mono">{model.name}</span>
-      {!canBuild && (
-        <span
-          className="badge"
-          title={`The runtime ${runtimeSays(reported)}. It can't write, so no agent can run on it — which is why it isn't offered as a build model.`}
-        >
-          {reported.length > 0 ? `${reported.join(" · ")} only` : "can't write"}
-        </span>
+    <li className="model-item">
+      <div className="model-row" data-current={current || undefined}>
+        <span className="model-row-name mono">{model.name}</span>
+        {!canBuild && (
+          <span
+            className="badge"
+            title={`The runtime ${runtimeSays(reported)}. It can't write, so no agent can run on it — which is why it isn't offered as a build model.`}
+          >
+            {reported.length > 0 ? `${reported.join(" · ")} only` : "can't write"}
+          </span>
+        )}
+        {embeds && (
+          <span className="badge" title="Memory and document search embed with this model.">
+            memory &amp; search
+          </span>
+        )}
+        {!model.is_local && (
+          <span
+            className="badge badge-warn"
+            title="This runtime sends the model to a hosted service to run. Local-only builds can't use it."
+          >
+            hosted
+          </span>
+        )}
+        {canBuild && status.code_models.includes(model.spec) && (
+          <span
+            className="badge"
+            title="Its name suggests it was trained on code — a guess from the name, not a measurement."
+          >
+            code
+          </span>
+        )}
+        {canBuild && check !== null && (
+          <VerdictChip
+            check={check}
+            expanded={open === "check"}
+            onToggle={check ? () => toggle("check") : undefined}
+            controls={panelId}
+          />
+        )}
+        {canBuild && (
+          <button
+            ref={tuneButton}
+            className="btn btn-sm btn-ghost"
+            aria-expanded={open === "tune"}
+            aria-controls={panelId}
+            onClick={() => toggle("tune")}
+            aria-label={`Tune how ${model.name} generates`}
+          >
+            {Icon.gear}
+            Tune
+          </button>
+        )}
+        {current ? (
+          <span className="badge badge-ok">
+            <span className="dot dot-ok" aria-hidden="true" />
+            Default
+          </span>
+        ) : (
+          <button
+            className="btn btn-sm"
+            onClick={() => onSelect(model.spec)}
+            disabled={busy || !canBuild || !model.is_local}
+            title={
+              !canBuild
+                ? `The runtime ${runtimeSays(reported)}. It can't write, so every agent would fail on its first call.`
+                : !model.is_local
+                  ? "It runs on a hosted service, so it can't be the local default. Pin it to one agent below instead."
+                  : undefined
+            }
+            aria-label={`Run agents on ${model.name} by default`}
+          >
+            {selecting && <span className="btn-spinner" aria-hidden="true" />}
+            Use this
+          </button>
+        )}
+      </div>
+      {open === "check" && check && (
+        <div className="model-panel">
+          <CheckDetail check={check} id={panelId} />
+        </div>
       )}
-      {embeds && (
-        <span className="badge" title="Memory and document search embed with this model.">
-          memory &amp; search
-        </span>
-      )}
-      {!model.is_local && (
-        <span
-          className="badge badge-warn"
-          title="This runtime sends the model to a hosted service to run. Local-only builds can't use it."
-        >
-          hosted
-        </span>
-      )}
-      {canBuild && status.code_models.includes(model.spec) && (
-        <span
-          className="badge"
-          title="Its name suggests it was trained on code — a guess from the name, not a measurement."
-        >
-          code
-        </span>
-      )}
-      {current ? (
-        <span className="badge badge-ok">
-          <span className="dot dot-ok" aria-hidden="true" />
-          Default
-        </span>
-      ) : (
-        <button
-          className="btn btn-sm"
-          onClick={() => onSelect(model.spec)}
-          disabled={busy || !canBuild || !model.is_local}
-          title={
-            !canBuild
-              ? `The runtime ${runtimeSays(reported)}. It can't write, so every agent would fail on its first call.`
-              : !model.is_local
-                ? "It runs on a hosted service, so it can't be the local default. Pin it to one agent below instead."
-                : undefined
-          }
-          aria-label={`Run agents on ${model.name} by default`}
-        >
-          {selecting && <span className="btn-spinner" aria-hidden="true" />}
-          Use this
-        </button>
+      {open === "tune" && (
+        <div className="model-panel">
+          <ModelTune
+            id={panelId}
+            spec={model.spec}
+            name={model.name}
+            onSaved={(next) => onCheck(model.spec, next)}
+            onClose={() => {
+              setOpen(null);
+              tuneButton.current?.focus();
+            }}
+          />
+        </div>
       )}
     </li>
   );
@@ -1110,6 +1198,17 @@ function ModelCapability({ profile }: { profile: ModelProfile }) {
           <div className="fact">
             <dt>Quantization</dt>
             <dd className="mono">{profile.quantization}</dd>
+          </div>
+        )}
+        {profile.thinking && profile.thinking !== "none" && (
+          <div className="fact">
+            <dt>Thinking</dt>
+            <dd>
+              {profile.thinking_level ?? "model default"}
+              {profile.reasoning_tokens ? (
+                <span className="dim"> · {tokens(profile.reasoning_tokens)} kept for it</span>
+              ) : null}
+            </dd>
           </div>
         )}
       </dl>
