@@ -136,9 +136,23 @@ def get_model_generation(spec: str) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _require_trusted(request: Request) -> None:
+    if not _trusted_host(request):
+        # A page on another site that rebinds its name to this machine could otherwise
+        # set a ceiling or a stop sequence that stalls every build.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Generation settings can only be changed from an address this backend is "
+                "served at (localhost, or BACKEND_PUBLIC_URL)."
+            ),
+        )
+
+
 @router.put("/models/generation")
-def set_model_generation(body: ModelGenerationUpdate) -> dict:
+def set_model_generation(body: ModelGenerationUpdate, request: Request) -> dict:
     """Save one model's settings. The next call to that model uses them."""
+    _require_trusted(request)
     try:
         return model_router.set_model_generation(body.spec, body.values)
     except ValueError as e:
@@ -146,8 +160,9 @@ def set_model_generation(body: ModelGenerationUpdate) -> dict:
 
 
 @router.delete("/models/generation")
-def reset_model_generation(spec: str) -> dict:
+def reset_model_generation(spec: str, request: Request) -> dict:
     """Put every one of a model's settings back on its server's default."""
+    _require_trusted(request)
     try:
         return model_router.set_model_generation(spec, None)
     except ValueError as e:

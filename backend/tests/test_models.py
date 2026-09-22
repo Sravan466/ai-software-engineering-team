@@ -237,11 +237,23 @@ def test_a_setting_a_runtime_cannot_take_is_reported_never_dropped_silently(monk
     assert set(result.unsent) == {"top_k", "min_p"}
 
 
-def test_a_thinking_model_is_never_decoded_greedily(monkeypatch):
-    seen: list = []
-    _serve(monkeypatch, {}, {"/v1/chat/completions": _Resp(200, {"choices": [{"message": {"content": "{}"}}]})}, seen)
-    OpenAICompatAdapter("http://127.0.0.1:1337").chat(_chat_request(thinking="high", temperature=0.0))
-    assert seen[0][1]["temperature"] > 0
+def test_a_thinking_model_is_never_decoded_greedily_on_any_runtime(router_with, tmp_path, monkeypatch):
+    """The guard lives above the adapters, so it holds whichever runtime serves the model."""
+    monkeypatch.setattr(model_settings, "_PATH", tmp_path / "model_settings.local.json")
+
+    class _Thinks(FakeAdapter):
+        def model_info(self, model):
+            return ModelInfo(name=model, context_window=16384, context_source="reported", kind="chat",
+                             thinking=THINKS_TOGGLE)
+
+    src = _source("ollama", [ModelEntry(name="thinker", kind="chat")])
+    src.adapter = _Thinks(src.adapter.models)
+    model_router = router_with(src)
+    model_router.set_model_generation("ollama:thinker", {"sampling": {"thinking": "on", "temperature": 0}})
+    model_router.complete([ChatMessage(role="user", content="hi")], preferred_model="ollama:thinker",
+                          mode=RoutingMode.MANUAL)
+    call = src.adapter.calls[-1]
+    assert call.thinking == "on" and call.temperature > 0
 
 
 def test_where_reasoning_and_a_schema_conflict_the_schema_steps_aside(monkeypatch):
@@ -440,7 +452,11 @@ def test_a_reply_ceiling_takes_effect_without_a_restart(router_with, tmp_path, m
 def test_the_api_refuses_an_out_of_range_value(client, router_with, tmp_path, monkeypatch):
     monkeypatch.setattr(model_settings, "_PATH", tmp_path / "model_settings.local.json")
     router_with(_source("lmstudio", [ModelEntry(name="a", kind="chat")]))
-    r = client.put("/api/settings/models/generation", json={"spec": "lmstudio:a", "values": {"sampling": {"top_p": 3}}})
+    r = client.put(
+        "/api/settings/models/generation",
+        json={"spec": "lmstudio:a", "values": {"sampling": {"top_p": 3}}},
+        headers={"host": "localhost:8000"},
+    )
     assert r.status_code == 400 and "Top-p" in r.json()["detail"]
     assert model_settings.get("lmstudio:a") is None, "a refused value was saved anyway"
     ok = client.get("/api/settings/models/generation", params={"spec": "lmstudio:a"})
@@ -509,3 +525,126 @@ def test_a_model_that_reasons_unasked_gets_a_budget_from_then_on(router_with):
     ask()
     assert adapter.calls[-1].max_tokens > first
     assert adapter.calls[-1].thinking == adapter.calls[0].thinking, "what is sent must not change"
+
+
+# ── round 1 of review: what it found, pinned ─────────────────────────────────
+def test_keep_alive_without_a_unit_reaches_the_runtime_as_seconds(monkeypatch):
+    """A string is a duration to the runtime and needs a unit; "-1" as a string is a 400."""
+    seen: list = []
+    _serve(monkeypatch, {}, {"/api/chat": _Resp(200, {"message": {"content": "{}"}})}, seen)
+    adapter = OllamaAdapter("http://127.0.0.1:11434")
+    for sent, wire in (("-1", -1), ("600", 600), ("10m", "10m")):
+        adapter.chat(_chat_request(keep_alive=sent))
+        assert seen[-1][1]["keep_alive"] == wire
+
+
+def test_machine_settings_never_reach_another_computer(router_with, tmp_path, monkeypatch):
+    monkeypatch.setattr(model_settings, "_PATH", tmp_path / "model_settings.local.json")
+    src = _source("lmstudio", [ModelEntry(name="a", kind="chat")])
+    src.source.base_url = "http://192.168.1.20:1234"
+    src.source.same_machine_override = False
+    model_router = router_with(src)
+    model_router.set_model_generation("lmstudio:a", {"machine": {"threads": 4, "keep_alive": "5m"}})
+    model_router.complete([ChatMessage(role="user", content="hi")], preferred_model="lmstudio:a", mode=RoutingMode.MANUAL)
+    call = src.adapter.calls[-1]
+    assert call.threads is None and call.keep_alive is None
+    assert model_router.model_generation("lmstudio:a")["machine_applies"] is False
+
+
+@pytest.mark.parametrize(
+    "values, words",
+    [
+        ({"sampling": {"seed": 10**400}}, "between"),
+        ({"sampling": {"repeat_penalty": 0}}, "between"),
+        ({"sampling": {"stop": ["\n"]}}, "every reply"),
+        ({"sampling": {"stop": ["}"]}}, "every reply"),
+        ({"sampling": {"stop": ["a\u202eb"]}}, "formatting"),
+    ],
+)
+def test_values_that_would_break_generation_are_refused(values, words):
+    with pytest.raises(generation.SettingsError) as caught:
+        generation.validate(values)
+    assert words in str(caught.value)
+
+
+def test_an_unreadable_settings_file_is_set_aside_not_overwritten(tmp_path, monkeypatch):
+    path = tmp_path / "model_settings.local.json"
+    monkeypatch.setattr(model_settings, "_PATH", path)
+    path.write_text('{"src:a": {"sampling": {"seed": 1}}, oops')
+    model_settings.put("src:b", {"sampling": {"seed": 2}})
+    assert (tmp_path / "model_settings.local.json.unreadable").read_text().startswith('{"src:a"')
+    assert model_settings.get("src:b") == {"sampling": {"seed": 2}}
+
+
+def test_settings_are_refused_for_a_model_the_source_does_not_serve(router_with, tmp_path, monkeypatch):
+    monkeypatch.setattr(model_settings, "_PATH", tmp_path / "model_settings.local.json")
+    model_router = router_with(_source("lmstudio", [ModelEntry(name="a", kind="chat")]))
+    with pytest.raises(ValueError, match="doesn't serve"):
+        model_router.set_model_generation("lmstudio:" + "x" * 40, {"sampling": {"seed": 1}})
+    assert model_settings.all_settings() == {}
+
+
+def test_the_new_settings_routes_refuse_an_untrusted_host(client, router_with, tmp_path, monkeypatch):
+    monkeypatch.setattr(model_settings, "_PATH", tmp_path / "model_settings.local.json")
+    router_with(_source("lmstudio", [ModelEntry(name="a", kind="chat")]))
+    r = client.put(
+        "/api/settings/models/generation",
+        json={"spec": "lmstudio:a", "values": {"sampling": {"seed": 1}}},
+        headers={"host": "attacker.example"},
+    )
+    assert r.status_code == 403 and model_settings.get("lmstudio:a") is None
+
+
+def test_ram_alone_blocks_only_where_the_gpu_shares_it():
+    big = _profile(weights_bytes=20 * GIB)
+    assert compat.assess("s:m", big, ram_bytes=16 * GIB, remote=False, unified=True).level == compat.BLOCKED
+    split = compat.assess("s:m", big, ram_bytes=16 * GIB, remote=False, unified=False)
+    assert split.level == compat.DEGRADED and "GPU" in split.summary
+    loaded = compat.assess("s:m", big, ram_bytes=16 * GIB, remote=False, unified=True, loaded=True)
+    assert loaded.level == compat.FITS, "a model its runtime already holds demonstrably fits"
+
+
+def test_the_window_is_judged_after_the_reasoning_budget():
+    thinking = _profile(context_window=4096, thinking=THINKS_TOGGLE, tuning={"sampling": {"thinking": "on"}})
+    check = _check(thinking)
+    assert check.level == compat.BLOCKED and "thinking off" in (check.suggestion or "")
+
+
+def test_a_chat_model_drawn_by_a_built_in_renderer_is_not_a_base_model():
+    rendered = dict(QWEN3_SHOW, capabilities=["completion"], template="{{ .Prompt }}", renderer="qwen3")
+    assert info_from_show("m", rendered, supports_schema=True).kind != KIND_BASE
+    with_tools = dict(QWEN3_SHOW, capabilities=["completion", "tools"], template="{{ .Prompt }}")
+    assert info_from_show("m", with_tools, supports_schema=True).kind != KIND_BASE
+
+
+def test_a_template_that_only_strips_old_reasoning_does_not_think():
+    strips = "{% for m in messages %}{{ m.content.split('</think>')[-1] }}{% endfor %}" \
+        "{% if add_generation_prompt %}<|im_start|>assistant{% endif %}"
+    assert thinking_from_template(strips.replace("</think>", "<think>"), {}) == THINKS_NONE
+    opens = "{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n{% endif %}"
+    assert thinking_from_template(opens, {}) == "always"
+
+
+def test_a_risky_stop_sequence_is_flagged_before_the_run():
+    tuning = {"sampling": {"stop": ["\n\n"]}}
+    check = _check(_profile(tuning=tuning), tuning=tuning)
+    assert check.level == compat.DEGRADED and "stop sequence" in check.summary
+
+
+def test_a_zero_reasoning_budget_is_learned_once_not_on_every_call(router_with, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(model_settings, "_PATH", tmp_path / "model_settings.local.json")
+    src = _source("lmstudio", [ModelEntry(name="t", kind="chat")])
+
+    def _chat(request, _chat=src.adapter.chat):
+        result = _chat(request)
+        result.reasoning = "anyway"
+        return result
+
+    src.adapter.chat = _chat  # type: ignore[method-assign]
+    model_router = router_with(src)
+    model_router.set_model_generation("lmstudio:t", {"limits": {"reasoning_tokens": 0}})
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            model_router.complete([ChatMessage(role="user", content="hi")], preferred_model="lmstudio:t",
+                                  mode=RoutingMode.MANUAL)
+    assert sum("although it was not asked" in r.message for r in caplog.records) == 1

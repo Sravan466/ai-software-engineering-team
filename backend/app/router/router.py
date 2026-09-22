@@ -71,6 +71,9 @@ from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
 log = get_logger(__name__)
 
 
+#: Longer than any model name a runtime lists; a spec past this is refused unread.
+_MAX_SPEC_CHARS = 512
+
 #: How the local default was arrived at, for the Settings page to say.
 DEFAULT_CHOSEN = "chosen"  # picked in Settings
 DEFAULT_CONFIGURED = "configured"  # named in `.env` and found on a source
@@ -816,7 +819,15 @@ class ModelRouter:
 
         return {"checks": checks, "ram_bytes": total_ram_bytes()}
 
-    def _source_model(self, spec: str) -> tuple[SourceProvider, str]:
+    def _source_model(self, spec: str, *, saved_ok: bool = False) -> tuple[SourceProvider, str]:
+        """The source and model a settings request names — one the source serves.
+
+        A name the source doesn't list is refused, so nothing arbitrary is written to
+        the settings file or sent to the runtime to be described. The one exception
+        is putting back a model's saved settings, which must work after it is gone.
+        """
+        if len(spec or "") > _MAX_SPEC_CHARS:
+            raise ValueError("That model name is too long to be one.")
         pair = self.parse(spec)
         if pair[0] in CLOUD_PROVIDERS:
             raise ValueError(
@@ -826,7 +837,18 @@ class ModelRouter:
         prov = self.sources.get(pair[0])
         if prov is None:
             raise ValueError(f"No model source is called '{pair[0]}'.")
-        return prov, self._listed(pair)[1]
+        model = self._listed(pair)[1]
+        if saved_ok:
+            from app.core import model_settings
+
+            if model_settings.get(prov.settings_key(model)) is not None:
+                return prov, model
+        state = prov.state()
+        if not state.reachable:
+            raise ValueError(f"{prov.source.label} isn't answering, so '{model}' can't be tuned now.")
+        if not prov.resolves(model, [e.name for e in state.models]):
+            raise ValueError(f"{prov.source.label} doesn't serve a model called '{model}'.")
+        return prov, model
 
     def model_generation(self, spec: str) -> dict:
         """One model's generation settings, what its server defaults to, and what it takes."""
@@ -842,12 +864,14 @@ class ModelRouter:
         from app.core import model_settings
         from app.router import generation
 
-        prov, model = self._source_model(spec)
+        prov, model = self._source_model(spec, saved_ok=not values)
         cleaned = generation.validate(values or {})
         model_settings.put(prov.settings_key(model), cleaned or None)
         # Window, reply and reasoning ceilings live in the profile; sampling is read
         # per call. Dropping the profile is what makes the first kind apply too.
         prov.forget_profile(model)
+        if not prov.state().reachable or not prov.resolves(model):
+            return {"spec": prov.settings_key(model), "values": {}, "reset": True}
         return self.model_generation(spec)
 
     def _missing(self, missing: list[dict]) -> Readiness:

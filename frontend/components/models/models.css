@@ -9,6 +9,11 @@
 
 /* A model row can now open what it knows; the row and its panel are one item. */
 .model-item { display: flex; flex-direction: column; }
+/* The row holds more than a name and a button now, so it wraps rather than
+   squeezing the name to a column of single letters: the name keeps a readable
+   width, and the controls drop to a second line when they must. */
+.model-item > .model-row { flex-wrap: wrap; row-gap: 6px; }
+.model-item .model-row-name { flex: 1 1 14ch; min-width: 12ch; }
 
 /* ── the verdict chip ───────────────────────────────────────────────────── */
 .verdict {
@@ -217,6 +222,7 @@ button.verdict[aria-expanded="true"] { background: var(--bg-raised); }
 .precheck-where { font-size: var(--t-sm); color: var(--ink-3); }
 
 @media (max-width: 620px) {
+  .model-item .model-row-name { flex-basis: 100%; }
   .tune { padding: 14px; }
   .tune-field[data-wide] { grid-column: 1 / -1; }
   .model-panel { margin-left: 0; }

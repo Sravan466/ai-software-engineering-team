@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   api,
   type GenerationField,
@@ -35,7 +35,7 @@ const GROUPS: { key: GenerationField["group"]; title: string; note: string }[] =
   {
     key: "machine",
     title: "This machine",
-    note: "About the computer the model runs on. Kept on this backend, never pushed to a runtime by a server.",
+    note: "About the computer the model runs on. Set on this backend, and sent only to a runtime on this same machine.",
   },
 ];
 
@@ -49,12 +49,23 @@ const THINKING_WORD: Record<string, string> = {
 
 type Draft = Record<string, string>;
 
+/** A stop sequence as one line of the textarea: newlines and tabs written as escapes. */
+function escapeStop(stop: string): string {
+  return stop.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
+}
+function unescapeStop(line: string): string {
+  return line.replace(/\\(\\|n|t)/g, (_, c) => (c === "n" ? "\n" : c === "t" ? "\t" : "\\"));
+}
+function stopsOf(raw: string): string[] {
+  return raw.split("\n").filter((l) => l !== "").map(unescapeStop);
+}
+
 function toDraft(values: GenerationValues, fields: GenerationField[]): Draft {
   const out: Draft = {};
   for (const f of fields) {
     const v = values[f.group]?.[f.key];
     if (v === undefined || v === null) out[f.key] = "";
-    else if (Array.isArray(v)) out[f.key] = v.join("\n");
+    else if (Array.isArray(v)) out[f.key] = v.map((x) => escapeStop(String(x))).join("\n");
     else out[f.key] = String(v);
   }
   return out;
@@ -82,9 +93,9 @@ function problem(field: GenerationField, raw: string): string | null {
     return "A duration like 30s, 10m or 1h — or 0, or -1.";
   }
   if (field.kind === "stops") {
-    const lines = raw.split("\n").filter((l) => l !== "");
-    if (lines.length > 4) return "At most 4, one per line.";
-    if (lines.some((l) => l.length > 32)) return "Each is at most 32 characters.";
+    const stops = stopsOf(raw);
+    if (stops.length > 4) return "At most 4, one per line.";
+    if (stops.some((l) => l.length > 32)) return "Each is at most 32 characters.";
   }
   return null;
 }
@@ -96,7 +107,7 @@ function toValues(draft: Draft, fields: GenerationField[]): GenerationValues {
     if (!raw.trim()) continue;
     let value: unknown = raw.trim();
     if (f.kind === "float" || f.kind === "int") value = Number(raw.trim());
-    if (f.kind === "stops") value = raw.split("\n").filter((l) => l !== "");
+    if (f.kind === "stops") value = stopsOf(raw);
     (out[f.group] ??= {})[f.key] = value;
   }
   return out;
@@ -122,7 +133,10 @@ export default function ModelTune({
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState<"save" | "reset" | null>(null);
   const [status, setStatus] = useState("");
+  const [invalidCount, setInvalidCount] = useState(0);
   const headingId = useId();
+  const title = useRef<HTMLHeadingElement>(null);
+  const form = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     let live = true;
@@ -153,11 +167,17 @@ export default function ModelTune({
     setDraft((d) => ({ ...d, [key]: value }));
     setStatus("");
     setSaveError("");
+    setInvalidCount(0);
   }
 
   async function save() {
-    if (!data || hasErrors) {
+    if (!data || saving) return;
+    if (hasErrors) {
+      // Every problem is shown at once, one summary is announced, and focus goes to
+      // the first field that needs fixing — not a burst of alerts from every field.
       setTouched(Object.fromEntries(fields.map((f) => [f.key, true])));
+      setInvalidCount(Object.keys(errors).length);
+      requestAnimationFrame(() => form.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus());
       return;
     }
     setSaving("save");
@@ -169,6 +189,7 @@ export default function ModelTune({
       setTouched({});
       setStatus(`Saved. The next call to ${name} uses these — no other model is touched.`);
       onSaved(next.check);
+      title.current?.focus();
     } catch (e: any) {
       setSaveError(e.message);
     } finally {
@@ -187,6 +208,7 @@ export default function ModelTune({
       setTouched({});
       setStatus(`Back on the server's defaults for ${name}.`);
       onSaved(next.check);
+      title.current?.focus();
     } catch (e: any) {
       setSaveError(e.message);
     } finally {
@@ -198,15 +220,16 @@ export default function ModelTune({
   function hint(f: GenerationField): string {
     if (!data) return "";
     if (data.supported[f.key] === false) {
-      return `${data.runtime_label} can't take this, so it isn't sent.`;
+      return `${data.source_label} can't take this, so it isn't sent.`;
     }
-    const profile = data.profile;
-    if (f.key === "context_window") return `Now ${profile.context_window.toLocaleString()} tokens.`;
-    if (f.key === "max_output_tokens") return `Now ${profile.max_output_tokens.toLocaleString()} tokens.`;
+    const base = data.untuned;
+    if (f.key === "context_window") return `Without one: ${base.context_window.toLocaleString()} tokens.`;
+    if (f.key === "max_output_tokens") return `Without one: ${base.max_output_tokens.toLocaleString()} tokens.`;
     if (f.key === "reasoning_tokens") {
-      return profile.reasoning_tokens
-        ? `Now ${profile.reasoning_tokens.toLocaleString()} tokens.`
-        : `Kept only while it thinks — ${data.fallbacks.reasoning_tokens.toLocaleString()} by default.`;
+      return `Kept only while it thinks — ${data.fallbacks.reasoning_tokens.toLocaleString()} by default.`;
+    }
+    if (f.group === "machine" && !data.machine_applies) {
+      return "Not sent: this model runs on another computer, whose own settings apply.";
     }
     if (f.key === "kv_cache_type") return `Assumed ${data.fallbacks.kv_cache_type} unless set.`;
     if (f.group === "machine") return "The runtime decides unless set.";
@@ -238,12 +261,12 @@ export default function ModelTune({
 
   const thinkingField = byKey["thinking"];
   const thinkingValue = draft["thinking"] ?? "";
-  const defaultThinking = data.thinking_level ?? data.fallbacks.thinking;
+  const defaultThinking = data.untuned.thinking_level ?? data.fallbacks.thinking;
 
   return (
     <section className="tune" id={id} aria-labelledby={headingId}>
       <header className="tune-head">
-        <h4 className="tune-title" id={headingId}>
+        <h4 className="tune-title" id={headingId} ref={title} tabIndex={-1}>
           Tune <span className="mono">{name}</span>
         </h4>
         <p className="field-hint">
@@ -253,6 +276,7 @@ export default function ModelTune({
       </header>
 
       <form
+        ref={form}
         className="tune-form"
         onSubmit={(e) => {
           e.preventDefault();
@@ -267,7 +291,7 @@ export default function ModelTune({
             {data.thinking === "none" ? (
               <p className="field-hint">This model answers directly — there is nothing to set.</p>
             ) : data.thinking_options.length === 0 ? (
-              <p className="field-hint">{data.runtime_label} can&apos;t be told how hard this model thinks.</p>
+              <p className="field-hint">{data.source_label} can&apos;t be told how hard this model thinks.</p>
             ) : (
               <>
                 <div className="seg" role="group" aria-label="How hard it thinks">
@@ -293,7 +317,7 @@ export default function ModelTune({
                 </div>
                 <p className="field-hint">
                   {data.thinking === "levels"
-                    ? "This model thinks at a level and can't be switched off; Off runs it at Low."
+                    ? "This model thinks at a level and can't be switched off, so its default is the lowest."
                     : data.thinking === "always"
                       ? "This model always reasons first, so a budget is kept for it."
                       : thinkingField.help}
@@ -314,13 +338,16 @@ export default function ModelTune({
                 {own.map((f) => {
                   const inputId = `${headingId}-${f.key}`;
                   const hintId = `${inputId}-hint`;
+                  const helpId = `${inputId}-help`;
                   const errorId = `${inputId}-error`;
-                  const unsupported = data.supported[f.key] === false;
+                  const unsupported =
+                    data.supported[f.key] === false || (f.group === "machine" && !data.machine_applies);
                   const error = touched[f.key] ? errors[f.key] : null;
-                  const describedBy = [hintId, error ? errorId : null].filter(Boolean).join(" ");
+                  const describedBy = [error ? errorId : null, hintId, helpId].filter(Boolean).join(" ");
                   const common = {
                     id: inputId,
-                    disabled: unsupported || saving !== null,
+                    disabled: unsupported,
+                    readOnly: saving !== null,
                     "aria-describedby": describedBy,
                     "aria-invalid": error ? true : undefined,
                     onBlur: () => setTouched((t) => ({ ...t, [f.key]: true })),
@@ -355,7 +382,7 @@ export default function ModelTune({
                           {...common}
                           className="textarea input-mono"
                           rows={2}
-                          placeholder={placeholder ?? "One per line"}
+                          placeholder={placeholder ?? "One per line — write a newline as \\n"}
                           value={draft[f.key] ?? ""}
                           onChange={(e) => set(f.key, e.target.value)}
                         />
@@ -363,11 +390,9 @@ export default function ModelTune({
                         <input
                           {...common}
                           className="input input-mono"
-                          type={f.kind === "duration" ? "text" : "number"}
+                          type="text"
                           inputMode={f.kind === "int" ? "numeric" : f.kind === "float" ? "decimal" : undefined}
-                          min={f.minimum ?? undefined}
-                          max={f.maximum ?? undefined}
-                          step={f.step ?? undefined}
+                          spellCheck={false}
                           placeholder={placeholder ?? (f.kind === "duration" ? "e.g. 10m" : undefined)}
                           autoComplete="off"
                           value={draft[f.key] ?? ""}
@@ -377,8 +402,12 @@ export default function ModelTune({
                       <span className="field-hint" id={hintId}>
                         {hint(f)}
                       </span>
+                      {/* The field's explanation, for everyone the hover title never reaches. */}
+                      <span className="sr-only" id={helpId}>
+                        {f.help}
+                      </span>
                       {error && (
-                        <span className="tune-error" id={errorId} role="alert">
+                        <span className="tune-error" id={errorId}>
                           {error}
                         </span>
                       )}
@@ -389,6 +418,13 @@ export default function ModelTune({
             </fieldset>
           );
         })}
+
+        {invalidCount > 0 && hasErrors && (
+          <p className="tune-error" role="alert">
+            {invalidCount === 1 ? "One setting needs fixing" : `${invalidCount} settings need fixing`} before
+            it can be saved.
+          </p>
+        )}
 
         {saveError && (
           <div className="notice notice-bad" role="alert">
@@ -401,17 +437,22 @@ export default function ModelTune({
         )}
 
         <div className="tune-actions">
-          <button className="btn btn-sm btn-primary" type="submit" disabled={!dirty || saving !== null}>
+          <button
+            className="btn btn-sm btn-primary"
+            type="submit"
+            disabled={!dirty && saving === null}
+            aria-disabled={saving !== null || undefined}
+          >
             {saving === "save" && <span className="btn-spinner" aria-hidden="true" />}
             {saving === "save" ? "Saving…" : "Save settings"}
           </button>
           {anythingSaved && (
-            <button className="btn btn-sm" type="button" onClick={reset} disabled={saving !== null}>
+            <button className="btn btn-sm" type="button" onClick={() => saving === null && reset()}>
               {saving === "reset" && <span className="btn-spinner" aria-hidden="true" />}
               Reset to defaults
             </button>
           )}
-          <button className="btn btn-sm btn-ghost" type="button" onClick={onClose} disabled={saving !== null}>
+          <button className="btn btn-sm btn-ghost" type="button" onClick={onClose}>
             Close
           </button>
           <span className="tune-status" role="status">

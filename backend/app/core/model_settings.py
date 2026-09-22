@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.atomic import write_private
+from app.core.logging import get_logger
+
+log = get_logger(__name__)
 
 # Relative to the backend process cwd, mirroring `sqlite:///./data/aiteam.db`.
 _PATH = Path("data") / "model_settings.local.json"
@@ -27,14 +30,28 @@ _PATH = Path("data") / "model_settings.local.json"
 _LOCK = threading.Lock()
 
 
-def _read() -> dict:
+class _Unreadable(Exception):
+    """The file is there but isn't a settings file: never write over it blind."""
+
+
+def _load() -> dict:
     try:
         data = json.loads(_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except Exception:  # noqa: BLE001 - a corrupt file must not stop the server booting
+    except Exception as e:  # noqa: BLE001
+        raise _Unreadable(str(e)) from e
+    if not isinstance(data, dict):
+        raise _Unreadable("the file doesn't hold an object")
+    return data
+
+
+def _read() -> dict:
+    """What is saved — `{}` for a corrupt file, which must not stop the server booting."""
+    try:
+        return _load()
+    except _Unreadable:
         return {}
-    return data if isinstance(data, dict) else {}
 
 
 def all_settings() -> dict[str, dict]:
@@ -50,7 +67,15 @@ def get(spec: str) -> Optional[dict]:
 def put(spec: str, values: Optional[dict]) -> None:
     """Save `values` for `spec`, replacing what was there. Empty or None clears it."""
     with _LOCK:
-        data = _read()
+        try:
+            data = _load()
+        except _Unreadable as e:
+            # Rewriting it now would save this one model and drop every other one's
+            # settings; the file is set aside instead, so nothing is lost.
+            aside = _PATH.with_name(f"{_PATH.name}.unreadable")
+            _PATH.replace(aside)
+            log.warning("%s couldn't be read (%s); moved it to %s and started afresh.", _PATH, e, aside)
+            data = {}
         if values:
             data[spec] = values
         else:

@@ -35,6 +35,7 @@ from app.router.model_profile import (
 from app.router.runtimes.base import RuntimeAdapter
 from app.router.runtimes.types import (
     MACHINE_KEYS,
+    ModelInfo,
     SAMPLING_KEYS,
     STRUCTURED_SCHEMA,
     THINKING_ON,
@@ -51,6 +52,9 @@ from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
 log = get_logger(__name__)
 
+#: How long a model that could not be described is left alone before it is asked
+#: again — so a broken one costs the Settings page one timeout, not one per load.
+_FAILED_DESCRIBE_SECONDS = 30.0
 #: How long a source's model list and reachability are trusted. Short, because the
 #: list is how a model downloaded a moment ago appears; long enough that one run's
 #: calls do not each pay a round trip to learn what the last one already knew.
@@ -133,6 +137,12 @@ class SourceProvider(LLMProvider):
         #: (model, setting) pairs already reported as unsendable, so a setting the
         #: runtime cannot take is said once per model rather than once per call.
         self._reported_unsent: set[tuple[str, str]] = set()
+        #: What the runtime last said about each model, so the untuned budgets can be
+        #: shown beside tuned ones without asking it again.
+        self._infos: dict[str, ModelInfo] = {}
+        #: When describing a model last failed. Not an answer — it is asked again —
+        #: but not every Settings load pays a timeout for the same broken model.
+        self._failed_at: dict[str, float] = {}
         #: Bumped by anything that makes the current state wrong (a new key, a
         #: refused connection). A refresh that started before the bump does not get
         #: to write its now-stale answer over the change.
@@ -273,13 +283,19 @@ class SourceProvider(LLMProvider):
         cached = self._profiles.get(key)
         if cached is not None:
             return cached
+        failed = self._failed_at.get(model)
+        if failed is not None and time.monotonic() - failed < _FAILED_DESCRIBE_SECONDS:
+            return fallback_profile(self.name, model, local=True)
         try:
             info = self.adapter.model_info(model)
         except Exception as e:  # noqa: BLE001
             log.warning("Could not describe '%s' on %s: %s", model, self.source.base_url, e)
             info = None
         if info is None:
+            self._failed_at[model] = time.monotonic()
             return fallback_profile(self.name, model, local=True)
+        self._failed_at.pop(model, None)
+        self._infos[model] = info
         # The KV cache lives in the runtime's process. When that is on another host
         # this machine's RAM says nothing about what fits there, and a clamp built on
         # it would be a number about the wrong computer. `None` reaches
@@ -291,6 +307,14 @@ class SourceProvider(LLMProvider):
                 provider=self.name, model=model, info=info, ram_bytes=ram, tuning=self.tuning(model)
             ),
         )
+
+    def untuned(self, model: str) -> ModelProfile:
+        """The profile `model` would have with nothing saved — what "default" means."""
+        info = self._infos.get(model)
+        if info is None:
+            return self.profile(model)
+        ram = total_ram_bytes() if self.source.same_machine else None
+        return build_profile(provider=self.name, model=model, info=info, ram_bytes=ram, tuning=None)
 
     def forget_profile(self, model: str) -> None:
         """Drop the profile only — after the model's settings changed, not its weights."""
@@ -315,6 +339,7 @@ class SourceProvider(LLMProvider):
             window_hint=meta.window_hint,
             kv_hint=meta.kv_hint,
             tuning=self.tuning(model),
+            loaded=entry.loaded if entry is not None else None,
         )
 
     def generation_view(self, model: str) -> dict:
@@ -341,11 +366,19 @@ class SourceProvider(LLMProvider):
                 s for s in THINKING_SETTINGS if s in fitted and s in self.adapter.thinking_supported
             ]
         supported["thinking"] = bool(thinking_options)
+        base = self.untuned(model)
         return {
             "spec": self.settings_key(model),
             "source": self.source.id,
             "runtime": self.source.runtime,
-            "runtime_label": self.source.label,
+            "source_label": self.source.label,
+            "untuned": {
+                "context_window": base.context_window,
+                "max_output_tokens": base.max_output_tokens,
+                "thinking_level": base.thinking_level,
+            },
+            #: Machine settings reach a runtime on this computer only.
+            "machine_applies": self.source.same_machine,
             "fields": [f.as_dict() for f in generation.FIELDS],
             "values": stored,
             "defaults": dict(profile.defaults),
@@ -386,6 +419,24 @@ class SourceProvider(LLMProvider):
         values = {key: sampling.get(key) for key in SAMPLING_KEYS if key != "thinking"}
         if values["temperature"] is None:
             values["temperature"] = options.temperature
+        if thinks(profile.thinking_level):
+            # A thinking model decoded greedily repeats itself, sometimes forever —
+            # whichever runtime serves it, and whoever asked for temperature 0.
+            temperature = values["temperature"]
+            if temperature is None:
+                temperature = profile.defaults.get("temperature")
+            if isinstance(temperature, (int, float)) and temperature <= 0:
+                log.warning(
+                    "%s thinks, and greedy decoding makes thinking models repeat themselves; "
+                    "using temperature %s instead of %s.",
+                    model,
+                    settings.local_temperature,
+                    temperature,
+                )
+                values["temperature"] = settings.local_temperature
+        # GPU layers, threads and how long the model stays loaded are about the
+        # computer it runs on, and are this machine's to decide only for this machine.
+        local = self.source.same_machine
         request = ChatRequest(
             model=model,
             messages=[m.model_dump() for m in messages],
@@ -395,9 +446,9 @@ class SourceProvider(LLMProvider):
             context_window=profile.context_window,
             **values,
             thinking=profile.thinking_level,
-            gpu_layers=machine.get("gpu_layers"),
-            threads=machine.get("threads"),
-            keep_alive=machine.get("keep_alive"),
+            gpu_layers=machine.get("gpu_layers") if local else None,
+            threads=machine.get("threads") if local else None,
+            keep_alive=machine.get("keep_alive") if local else None,
             json_schema=options.json_schema,
             json_mode=options.json_mode,
             structured_output=profile.structured_output,
@@ -490,8 +541,8 @@ class SourceProvider(LLMProvider):
                 "larger reasoning budget in Settings, or turn its thinking down.",
                 model,
             )
-        if thinks(profile.thinking_level) or profile.reasoning_tokens:
-            return profile
+        if thinks(profile.thinking_level) or profile.reasoning_tokens or profile.thinking == THINKS_ALWAYS:
+            return profile  # a budget is already kept, or was deliberately set to none
         wanted = self.tuning(model).get(generation.LIMITS, {}).get("reasoning_tokens")
         budget = settings.local_reasoning_tokens if wanted is None else int(wanted)
         # What is *sent* stays as it was: a runtime that says the model cannot think

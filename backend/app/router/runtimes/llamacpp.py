@@ -25,6 +25,7 @@ from app.router.runtimes.base import FINGERPRINT_TIMEOUT, get_json
 from app.router.runtimes.openai_compat import OpenAICompatAdapter, _positive, api_root
 from app.router.runtimes.types import (
     CONTEXT_REPORTED,
+    KIND_BASE,
     KIND_CHAT,
     KIND_EMBEDDING,
     KIND_VISION,
@@ -80,9 +81,14 @@ def thinking_from_template(template: object, caps: dict) -> Optional[str]:
         return THINKS_TOGGLE
     if "reasoning_effort" in template or caps.get("supports_reasoning_effort"):
         return THINKS_LEVELS
-    if "<think>" in template:
+    # Many instruct templates mention the tag only to strip old reasoning out of the
+    # history. It is the generation prompt opening a block that makes a model think.
+    opens = template.rfind("add_generation_prompt")
+    if opens >= 0 and "<think>" in template[opens:]:
         return THINKS_ALWAYS
     return THINKS_NONE
+
+
 #: How long a kind probe's answer is kept. A server's mode is fixed at start, so
 #: this only bounds how long a restarted server on the same port is misdescribed.
 _KIND_TTL_SECONDS = 300.0
@@ -246,6 +252,10 @@ class LlamaCppAdapter(OpenAICompatAdapter):
             )
         caps = props.get("chat_template_caps") or {}
         kind = self.kind(model, raw)
+        if kind in (KIND_CHAT, KIND_VISION) and props.get("chat_template") == "":
+            # Served with no chat template at all: a base model, which continues text
+            # rather than following an agent's instructions.
+            kind = KIND_BASE
         n_params = _positive(meta.get("n_params"))
         defaults = defaults_from_props(props)
         with self._lock:

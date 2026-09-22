@@ -205,6 +205,7 @@ export default function NewBuildPage() {
           checks={preflight?.checks}
           checking={checking || preflighting}
           allAgents={AGENTS.length}
+          refused={preflight?.ok === false}
         />
 
         {advanced && (

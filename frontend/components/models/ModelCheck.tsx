@@ -24,11 +24,14 @@ export const VERDICT: Record<CheckLevel, { word: string; dot: string; tone: stri
 /** The verdict as a compact chip — a button when it opens the reasons. */
 export function VerdictChip({
   check,
+  name,
   expanded,
   onToggle,
   controls,
 }: {
   check: ModelCheck | null | undefined;
+  /** The model it is about, for the chip's accessible name. */
+  name?: string;
   expanded?: boolean;
   onToggle?: () => void;
   controls?: string;
@@ -67,11 +70,11 @@ export function VerdictChip({
       data-tone={v.tone}
       aria-expanded={expanded}
       aria-controls={controls}
+      aria-label={`${name ? `${name}: ` : ""}${v.word}. Why`}
       onClick={onToggle}
       title={check.summary}
     >
       {inner}
-      <span className="sr-only">: {check.summary} Show why.</span>
     </button>
   );
 }
@@ -128,7 +131,18 @@ const REASON_ICON: Record<CheckReason["level"], keyof typeof Icon> = {
 };
 
 /** Every finding, heaviest first, then what to pick instead and the memory picture. */
-export function CheckDetail({ check, id, notes = true }: { check: ModelCheck; id?: string; notes?: boolean }) {
+export function CheckDetail({
+  check,
+  id,
+  notes = true,
+  suggestion = true,
+}: {
+  check: ModelCheck;
+  id?: string;
+  notes?: boolean;
+  /** Off where the same advice is already said beside it. */
+  suggestion?: boolean;
+}) {
   const order: CheckReason["level"][] = ["blocked", "degraded", "unknown", "note"];
   const reasons = [...check.reasons]
     .filter((r) => notes || r.level !== "note")
@@ -150,7 +164,7 @@ export function CheckDetail({ check, id, notes = true }: { check: ModelCheck; id
           ))}
         </ul>
       )}
-      {check.suggestion && (
+      {suggestion && check.suggestion && (
         <p className="check-suggestion">
           <span className="check-suggestion-label">Instead</span> {check.suggestion}
         </p>
@@ -182,12 +196,17 @@ export function PreStartCheck({
   checks,
   checking,
   allAgents,
+  refused,
 }: {
   checks: PreflightCheck[] | undefined;
   checking: boolean;
   allAgents: number;
+  /** The build is refused, and the notice below already says what to do instead. */
+  refused?: boolean;
 }) {
-  if (!checks || checks.length === 0) {
+  // A new answer is on its way: the old one describes models this build may no
+  // longer use, so it is not left standing as if it were current.
+  if (checking || !checks || checks.length === 0) {
     return checking ? (
       <div className="precheck" aria-live="polite">
         <p className="precheck-line precheck-quiet">
@@ -211,6 +230,7 @@ export function PreStartCheck({
               <span key={c.spec}>
                 {i > 0 && (i === checks.length - 1 ? " and " : ", ")}
                 <span className="mono">{c.model}</span> on {c.source_label}
+                {c.facts.memory_checked === false && <span> (memory not checked)</span>}
               </span>
             ))}{" "}
             {checks.length === 1 ? "fits" : "all fit"}.
@@ -232,7 +252,7 @@ export function PreStartCheck({
                 on {c.source_label} · {rolesText(c.roles, allAgents)}
               </span>
             </div>
-            {c.level !== "fits" && <CheckDetail check={c} notes={false} />}
+            {c.level !== "fits" && <CheckDetail check={c} notes={false} suggestion={!refused} />}
           </li>
         ))}
       </ul>

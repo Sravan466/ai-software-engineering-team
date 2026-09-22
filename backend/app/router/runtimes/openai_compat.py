@@ -280,18 +280,6 @@ class OpenAICompatAdapter(RuntimeAdapter):
             out["temperature"] = settings.local_temperature
         if "top_p" not in out and "top_p" not in known:
             out["top_p"] = settings.local_top_p
-        if thinks(request.thinking):
-            temperature = out.get("temperature", known.get("temperature"))
-            if temperature is not None and temperature <= 0:
-                # A thinking model decoded greedily repeats itself, sometimes forever.
-                log.warning(
-                    "%s thinks, and greedy decoding makes thinking models repeat "
-                    "themselves; using temperature %s instead of %s.",
-                    request.model,
-                    settings.local_temperature,
-                    temperature,
-                )
-                out["temperature"] = settings.local_temperature
         return out
 
     def _thinking_fields(self, request: ChatRequest) -> dict:

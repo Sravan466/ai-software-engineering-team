@@ -17,6 +17,7 @@ says so rather than measuring the wrong machine.
 """
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -57,6 +58,19 @@ _TIGHT_MEMORY_SHARE = 0.75
 _LOW_BITS = 4.0
 #: The width a suggestion is sized at: 4-bit with block scales, the usual default.
 _SUGGESTED_BITS = 4.5
+#: Characters an agent's JSON is made of; a stop sequence holding one can end a reply
+#: in the middle of its deliverable.
+_JSON_CHARACTERS = set('{}[]":,\n')
+
+
+def unified_memory() -> bool:
+    """Whether the GPU shares system memory here, so RAM is the whole story.
+
+    Elsewhere a model can sit in a GPU's own memory, which this backend cannot see —
+    and a check that blocked on system RAM alone would refuse a model that runs
+    fine there. Apple silicon is the case where the two are one pool.
+    """
+    return platform.system() == "Darwin" and platform.machine() in ("arm64", "arm64e")
 
 
 @dataclass
@@ -100,6 +114,8 @@ def assess(
     window_hint: str = "",
     kv_hint: str = "",
     tuning: Optional[dict] = None,
+    loaded: Optional[bool] = None,
+    unified: Optional[bool] = None,
 ) -> Compatibility:
     """The verdict for one model, from its profile and the machine it runs on.
 
@@ -151,23 +167,32 @@ def assess(
         suggestions.append("Choose the instruct or chat version of this model.")
 
     # ── the window it runs at ──────────────────────────────────────────────
+    # What an agent's prompt and reply actually get: a thinking model spends part of
+    # the same window reasoning first.
     window = profile.context_window
-    if window < MIN_WORKABLE_TOKENS:
+    usable = window - profile.reasoning_tokens
+    if usable < MIN_WORKABLE_TOKENS:
         cause = (
             " That is the ceiling set for it in Settings."
             if profile.clamp_reason and "set for this model" in profile.clamp_reason
             else f" {window_hint}" if window_hint
             else ""
         )
+        kept = (
+            f", {profile.reasoning_tokens:,} of them kept for reasoning,"
+            if profile.reasoning_tokens
+            else ""
+        )
         add(
             BLOCKED,
-            f"It runs with a {window:,}-token window, and an agent's prompt needs at least "
+            f"It runs with a {window:,}-token window{kept} and an agent's prompt needs at least "
             f"{MIN_WORKABLE_TOKENS:,}.{cause}",
         )
         suggestions.append(
-            f"Choose a model, or a runtime setting, that gives it at least {_TIGHT_WINDOW:,} tokens."
+            f"Choose a model, or a runtime setting, that gives it at least {_TIGHT_WINDOW:,} tokens"
+            + (", or turn its thinking off in Tune." if profile.reasoning_tokens else ".")
         )
-    elif window < _TIGHT_WINDOW:
+    elif usable < _TIGHT_WINDOW:
         add(
             DEGRADED,
             f"A {window:,}-token window is tight: later phases see less of the earlier work.",
@@ -182,24 +207,40 @@ def assess(
 
     # ── memory, on the computer that runs it ───────────────────────────────
     weights = profile.weights_bytes
+    one_pool = unified_memory() if unified is None else unified
+    facts["memory_checked"] = False
     if remote or ram_bytes is None:
         add(NOTE, "It runs on another computer, whose memory this backend can't see, so memory isn't checked.")
     elif not weights:
         add(NOTE, "Its runtime doesn't report how big the weights are, so memory isn't checked.")
+    elif loaded:
+        facts["memory_checked"] = True
+        add(NOTE, "Its runtime already has it loaded, so it fits in memory.")
     else:
+        facts["memory_checked"] = True
         cache = kv_bytes(profile, min(window, MIN_WORKABLE_TOKENS)) or 0
         need = weights + cache
         facts["memory_needed_bytes"] = need
-        if weights >= ram_bytes * _WEIGHTS_BLOCK_SHARE:
+        fits = ram_bytes * _TIGHT_MEMORY_SHARE * 8 / _SUGGESTED_BITS
+        too_big = (
+            f"Choose a model of about {_billions(fits)} parameters or fewer at 4-bit "
+            "(Q4_K_M), or a smaller quantization of this one."
+        )
+        if weights >= ram_bytes * _WEIGHTS_BLOCK_SHARE and one_pool:
             add(
                 BLOCKED,
                 f"Its weights alone need about {_gib(weights)}, and the computer running it "
                 f"has {_gib(ram_bytes)}.",
             )
-            fits = ram_bytes * _TIGHT_MEMORY_SHARE * 8 / _SUGGESTED_BITS
-            suggestions.append(
-                f"Choose a model of about {_billions(fits)} parameters or fewer at 4-bit "
-                "(Q4_K_M), or a smaller quantization of this one."
+            suggestions.append(too_big)
+        elif weights >= ram_bytes * _WEIGHTS_BLOCK_SHARE:
+            # Only system RAM is visible from here; a GPU with enough memory of its
+            # own runs this fine, so it is said, not refused.
+            add(
+                DEGRADED,
+                f"Its weights need about {_gib(weights)}, more than the {_gib(ram_bytes)} of "
+                "system memory here. It runs only if a GPU with enough memory of its own holds "
+                f"it — otherwise it won't load. {too_big}",
             )
         elif need > ram_bytes * _TIGHT_MEMORY_SHARE:
             add(
@@ -232,7 +273,7 @@ def assess(
 
     # ── thinking ───────────────────────────────────────────────────────────
     sampling = (tuning or {}).get("sampling") or {}
-    wanted = sampling.get("thinking") or settings.local_thinking
+    wanted = sampling.get("thinking") or (settings.local_thinking or "").strip().lower()
     if profile.thinking == THINKS_ALWAYS:
         add(
             DEGRADED,
@@ -252,6 +293,15 @@ def assess(
                 "It thinks, and greedy decoding (temperature 0) makes thinking models repeat "
                 "themselves; a higher temperature is used instead.",
             )
+
+    stops = [s for s in sampling.get("stop") or [] if isinstance(s, str)]
+    risky = [s for s in stops if _JSON_CHARACTERS & set(s)]
+    if risky:
+        add(
+            DEGRADED,
+            f"The stop sequence {risky[0]!r} can appear inside an agent's JSON and cut its "
+            "answer short.",
+        )
 
     # ── shape, hosting and the cache estimate ──────────────────────────────
     if profile.structured_output == STRUCTURED_NONE and profile.kind != KIND_EMBEDDING:

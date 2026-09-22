@@ -758,6 +758,8 @@ export type ModelCheck = {
     thinking_level?: string | null;
     reasoning_tokens?: number;
     kv_cache_type?: string;
+    /** False when the machine's memory couldn't be weighed against the model. */
+    memory_checked?: boolean;
   };
 };
 
@@ -794,7 +796,8 @@ export type ModelGeneration = {
   spec: string;
   source: string;
   runtime: string | null;
-  runtime_label: string;
+  /** The source's own name, as its heading in Settings shows it. */
+  source_label: string;
   fields: GenerationField[];
   /** What is saved for this model — only what someone set. */
   values: GenerationValues;
@@ -807,6 +810,10 @@ export type ModelGeneration = {
   thinking_options: string[];
   thinking_level: string | null;
   profile: ModelProfile;
+  /** What applies with nothing saved: what each "Default" and "Without one" means. */
+  untuned: { context_window: number; max_output_tokens: number; thinking_level: string | null };
+  /** Whether machine settings reach this runtime — only one on this same machine. */
+  machine_applies: boolean;
   /** What is sent for a field left unset that the server has no default for; null
    *  means the runtime's own default applies. */
   sent_when_unset: Record<string, number | null>;

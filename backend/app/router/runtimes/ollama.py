@@ -325,16 +325,21 @@ def defaults_from_parameters(text: object) -> dict:
     return out
 
 
-def _is_base(template: object) -> bool:
+def _is_base(name: str, show: dict, caps: Optional[tuple[str, ...]]) -> bool:
     """Whether a model has no chat template — a base model, which won't follow a chat.
 
     Only positive evidence counts: a template that is present and says nothing but
-    "insert the prompt here". A server that does not report the template at all
-    says nothing about it.
+    "insert the prompt here". And even that is not enough on its own: the runtime
+    draws some chat models with a built-in renderer instead of a template (it says
+    so in `renderer` or `parser`), those keep the bare default, and so do hosted
+    models. A model that calls tools or thinks was plainly trained to chat.
     """
-    if not isinstance(template, str):
+    template = show.get("template")
+    if not isinstance(template, str) or re.sub(r"\s+", "", template) not in ("", "{{.Prompt}}"):
         return False
-    return re.sub(r"\s+", "", template) in ("", "{{.Prompt}}")
+    if show.get("renderer") or show.get("parser") or _is_remote(name, show):
+        return False
+    return not (caps and any(c in caps for c in ("tools", _THINKING_CAPABILITY)))
 
 
 def parameter_count_from(model_info: dict, details: dict) -> Optional[int]:
@@ -396,7 +401,7 @@ def info_from_show(
     reported = show.get("capabilities")
     caps = tuple(str(c) for c in reported) if isinstance(reported, (list, tuple)) else None
     kind = kind_from_capabilities(caps)
-    if kind in (KIND_CHAT, KIND_VISION, None) and _is_base(show.get("template")):
+    if kind in (KIND_CHAT, KIND_VISION, None) and _is_base(model, show, caps):
         kind = KIND_BASE
     full, windowed, window = kv_layout(model_info, arch) if arch else (None, 0, None)
     return ModelInfo(
@@ -812,7 +817,10 @@ class OllamaAdapter(RuntimeAdapter):
             # does not to think is a 400 — and `thinking_for` has already made sure.
             payload["think"] = self._think(request.thinking)
         if request.keep_alive is not None:
-            payload["keep_alive"] = request.keep_alive
+            # The runtime reads a string as a duration and wants a unit on it; a bare
+            # number (and -1, "forever") has to arrive as a number of seconds.
+            ka = request.keep_alive.strip()
+            payload["keep_alive"] = int(ka) if re.fullmatch(r"-?\d+", ka) else ka
 
         if request.json_schema and schema and request.structured_output == STRUCTURED_SCHEMA:
             payload["format"] = request.json_schema

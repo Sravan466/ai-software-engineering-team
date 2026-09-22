@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
@@ -38,6 +39,10 @@ KV_CACHE_TYPES: dict[str, float] = {"f16": 1.0, "q8_0": 8.5 / 16, "q4_0": 4.5 / 
 _KEEP_ALIVE = re.compile(r"^(-1|0|[1-9]\d{0,5}(ms|s|m|h)?)$")
 _MAX_STOPS = 4
 _MAX_STOP_CHARS = 32
+#: Characters every agent's JSON is made of. A stop sequence that is one of these —
+#: or only whitespace, which pretty-printed JSON is full of — ends every reply at its
+#: first brace or line break, so no agent could ever return its deliverable.
+_JSON_STRUCTURE = set('{}[]":,')
 
 
 class SettingsError(ValueError):
@@ -81,7 +86,7 @@ FIELDS: tuple[Field, ...] = (
     Field("min_p", SAMPLING, "Min-p", "float",
           "Drop tokens less likely than this share of the most likely one.", 0.0, 1.0, 0.01),
     Field("repeat_penalty", SAMPLING, "Repeat penalty", "float",
-          "Above 1 discourages repeating recent tokens; 1 turns it off.", 0.0, 2.0, 0.01),
+          "Above 1 discourages repeating recent tokens; 1 turns it off.", 0.5, 2.0, 0.01),
     Field("presence_penalty", SAMPLING, "Presence penalty", "float",
           "Discourages any token that has appeared at all.", -2.0, 2.0, 0.1),
     Field("frequency_penalty", SAMPLING, "Frequency penalty", "float",
@@ -119,7 +124,16 @@ BY_KEY: dict[str, Field] = {f.key: f for f in FIELDS}
 def _number(field: Field, value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SettingsError(f"{field.label} has to be a number.")
-    number = float(value)
+    # A JSON integer can be any length, and one too long for a float overflows on the
+    # way in; anything that far out is outside every range here anyway.
+    if isinstance(value, int) and abs(value) > 10**15:
+        raise SettingsError(
+            f"{field.label} has to be between {_shown(field.minimum)} and {_shown(field.maximum)}."
+        )
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        raise SettingsError(f"{field.label} has to be a finite number.") from None
     if not math.isfinite(number):
         raise SettingsError(f"{field.label} has to be a finite number.")
     if field.kind == "int" and not number.is_integer():
@@ -163,10 +177,17 @@ def _clean(field: Field, value: Any) -> Any:
         if len(stops) > _MAX_STOPS:
             raise SettingsError(f"{field.label}: at most {_MAX_STOPS}.")
         for stop in stops:
-            if len(stop) > _MAX_STOP_CHARS or any(ord(c) < 32 and c not in "\n\t" for c in stop):
+            if len(stop) > _MAX_STOP_CHARS or any(
+                unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") and c not in "\n\t" for c in stop
+            ):
                 raise SettingsError(
                     f"{field.label}: each is at most {_MAX_STOP_CHARS} characters, with no "
-                    "control characters other than newline and tab."
+                    "control or formatting characters other than newline and tab."
+                )
+            if not stop.strip() or (len(stop.strip()) == 1 and stop.strip() in _JSON_STRUCTURE):
+                raise SettingsError(
+                    f"{field.label}: {stop!r} would end every reply at the first place an agent's "
+                    "JSON uses it, so no agent could finish. Use a longer sequence."
                 )
         return list(dict.fromkeys(stops))
     raise SettingsError(f"{field.label} can't be set here.")
@@ -223,7 +244,7 @@ def read(stored: Any) -> dict[str, dict]:
         for key, value in fields.items():
             try:
                 cleaned = validate({group: {key: value}})
-            except SettingsError:
+            except Exception:  # noqa: BLE001 - one bad hand-edited value never stops a call
                 continue
             out.setdefault(group, {}).update(cleaned.get(group, {}))
     return out

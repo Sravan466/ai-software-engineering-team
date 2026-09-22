@@ -142,20 +142,36 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
   // it: describing every model can take a moment the first time, and the list
   // should not wait on it. A failed ask leaves the verdicts out, not the models.
   const [checks, setChecks] = useState<Record<string, ModelCheck> | null>(null);
+  // Asked again only when what is served changes — choosing a default changes no
+  // model's verdict, and re-describing every model on each click is wasted work.
+  const served = status
+    ? JSON.stringify(status.sources.map((s) => [s.id, s.reachable, s.models.map((m) => m.spec)]))
+    : "";
+  // Verdicts a Tune save produced while a fetch was in flight: newer than that
+  // fetch's answer, so they are kept over it rather than overwritten by it.
+  const savedSince = useRef<Record<string, ModelCheck>>({});
   useEffect(() => {
-    if (!status?.reachable) return;
+    if (!served || !status?.reachable) return;
     let live = true;
+    savedSince.current = {};
     api
       .getCompatibility()
-      .then((next) => live && setChecks(next.checks))
-      .catch(() => live && setChecks({}));
+      .then((next) => live && setChecks({ ...next.checks, ...savedSince.current }))
+      .catch(() => live && setChecks((c) => c ?? {}));
     return () => {
       live = false;
     };
-  }, [status]);
+    // `status` is read only for `reachable`, which `served` already carries.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [served]);
   const onCheck = useCallback(
-    (spec: string, check: ModelCheck) => setChecks((c) => ({ ...(c ?? {}), [spec]: check })),
-    [],
+    (spec: string, check: ModelCheck) => {
+      savedSince.current[spec] = check;
+      setChecks((c) => ({ ...(c ?? {}), [spec]: check }));
+      // The card above describes the default; a new ceiling on it changes that.
+      if (spec === status?.default_model) refresh();
+    },
+    [refresh, status?.default_model],
   );
 
   /** Make a model every agent's default. */
@@ -668,8 +684,12 @@ function SourceModelRow({
   selecting: boolean;
   onSelect: (spec: string) => void;
 }) {
-  const [open, setOpen] = useState<"check" | "tune" | null>(null);
-  const panelId = useId();
+  // Two panels, opened independently: reading why a model won't run must never throw
+  // away settings half-typed in the other.
+  const [whyOpen, setWhyOpen] = useState(false);
+  const [tuneOpen, setTuneOpen] = useState(false);
+  const whyId = useId();
+  const tuneId = useId();
   const tuneButton = useRef<HTMLButtonElement>(null);
   const current = model.spec === status.default_model;
   // Asked of the runtime, never of the name. A model that only makes embeddings is
@@ -679,7 +699,6 @@ function SourceModelRow({
   const canBuild = canRunABuild(model.spec, status.cannot_build);
   const reported = status.model_capabilities?.[model.spec] ?? [];
   const embeds = status.embedding_model === model.spec;
-  const toggle = (which: "check" | "tune") => setOpen((o) => (o === which ? null : which));
   return (
     <li className="model-item">
       <div className="model-row" data-current={current || undefined}>
@@ -716,18 +735,19 @@ function SourceModelRow({
         {canBuild && check !== null && (
           <VerdictChip
             check={check}
-            expanded={open === "check"}
-            onToggle={check ? () => toggle("check") : undefined}
-            controls={panelId}
+            name={model.name}
+            expanded={whyOpen}
+            onToggle={check ? () => setWhyOpen((o) => !o) : undefined}
+            controls={whyId}
           />
         )}
         {canBuild && (
           <button
             ref={tuneButton}
             className="btn btn-sm btn-ghost"
-            aria-expanded={open === "tune"}
-            aria-controls={panelId}
-            onClick={() => toggle("tune")}
+            aria-expanded={tuneOpen}
+            aria-controls={tuneId}
+            onClick={() => setTuneOpen((o) => !o)}
             aria-label={`Tune how ${model.name} generates`}
           >
             {Icon.gear}
@@ -758,20 +778,20 @@ function SourceModelRow({
           </button>
         )}
       </div>
-      {open === "check" && check && (
+      {whyOpen && check && (
         <div className="model-panel">
-          <CheckDetail check={check} id={panelId} />
+          <CheckDetail check={check} id={whyId} />
         </div>
       )}
-      {open === "tune" && (
+      {tuneOpen && (
         <div className="model-panel">
           <ModelTune
-            id={panelId}
+            id={tuneId}
             spec={model.spec}
             name={model.name}
             onSaved={(next) => onCheck(model.spec, next)}
             onClose={() => {
-              setOpen(null);
+              setTuneOpen(false);
               tuneButton.current?.focus();
             }}
           />

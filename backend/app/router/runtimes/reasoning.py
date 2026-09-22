@@ -18,6 +18,9 @@ from typing import Optional
 _TAGS = "think|thinking|reasoning"
 _OPEN = re.compile(rf"<({_TAGS})>", re.IGNORECASE)
 _CLOSE = re.compile(rf"</({_TAGS})>", re.IGNORECASE)
+#: What an answer starts with: JSON, or a fenced block. Reasoning a template opened
+#: is prose; text before a closing tag that holds one of these is the answer itself.
+_ANSWER_MARKS = ("{", "[", "`")
 
 
 def split_reasoning(text: Optional[str]) -> tuple[str, Optional[str]]:
@@ -26,11 +29,11 @@ def split_reasoning(text: Optional[str]) -> tuple[str, Optional[str]]:
     Three shapes are recognised, all at the head of the reply, where a chat template
     puts them:
 
-      * `<think>…</think>answer` — a whole block;
+      * `<think>…</think>answer` — a whole block (several in a row are all taken);
       * `…</think>answer` — the template opened the block in the prompt, so only
-        the close is in the reply. Taken as reasoning only when what precedes it
-        does not already look like the answer (an object or list), so a tag quoted
-        inside generated code is not mistaken for one;
+        the close is in the reply. Taken only as the very first thing, and only when
+        nothing before the tag looks like an answer — no brace, bracket or code
+        fence — so a tag quoted inside generated code is never mistaken for one;
       * `<think>…` never closed — the reasoning ran out of budget, and there is no
         answer at all. Reported as such rather than parsed.
     """
@@ -38,6 +41,7 @@ def split_reasoning(text: Optional[str]) -> tuple[str, Optional[str]]:
         return text or "", None
     answer = text
     thoughts: list[str] = []
+    first = True
     while True:
         stripped = answer.lstrip()
         opened = _OPEN.match(stripped)
@@ -48,14 +52,14 @@ def split_reasoning(text: Optional[str]) -> tuple[str, Optional[str]]:
                 return "", _joined(thoughts)
             thoughts.append(stripped[opened.end() : closed.start()].strip())
             answer = stripped[closed.end():]
+            first = False
             continue
-        closed = _CLOSE.search(stripped)
-        if closed and not stripped[: closed.start()].lstrip().startswith(("{", "[")) and not _OPEN.search(
-            stripped[: closed.start()]
-        ):
-            thoughts.append(stripped[: closed.start()].strip())
-            answer = stripped[closed.end():]
-            continue
+        if first:
+            closed = _CLOSE.search(stripped)
+            head = stripped[: closed.start()] if closed else ""
+            if closed and not _OPEN.search(head) and not any(c in head for c in _ANSWER_MARKS):
+                thoughts.append(head.strip())
+                answer = stripped[closed.end():]
         break
     if not thoughts:
         return text, None
