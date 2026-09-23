@@ -42,6 +42,7 @@ from app.preview.brief import SiteBrief, brief_from_idea, site_brief
 from app.preview.jobs import NullReporter, Reporter
 from app.router.base import ProviderError
 from app.router.model_profile import ModelProfile
+from app.core import identity
 from app.router.router import router
 from app.schemas.agent_outputs import response_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
@@ -324,7 +325,8 @@ def _build(brief: SiteBrief, calls: "_Calls", progress: Reporter, today: date) -
             outcomes[section.id] = one(section)
     else:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mockup-section") as pool:
-            futures = {pool.submit(one, section): section for section in todo}
+            # Each worker starts with no account; `carry` hands it the build's.
+            futures = {pool.submit(identity.carry(one), section): section for section in todo}
             try:
                 for future, section in futures.items():
                     outcomes[section.id] = future.result()

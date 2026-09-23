@@ -18,6 +18,7 @@ turns that position into something a person can watch and steer:
 from __future__ import annotations
 from typing import Optional
 
+import functools
 import threading
 import time
 import weakref
@@ -29,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
-from app.core import artifacts
+from app.core import artifacts, identity
 from app.core.config import settings
 from app.core.constants import (
     PHASE_ORDER,
@@ -177,8 +178,25 @@ def _heartbeat(project_id: str):
         stop.set()
 
 
+def _as_owner(method):
+    """Run a runner entry point for the project's owner.
+
+    Whoever called it — a request, a background task, a test's thread — the run
+    spends its owner's keys and models, and searches its owner's documents. Bound
+    here rather than by every caller, so no way of starting a run can forget.
+    """
+
+    @functools.wraps(method)
+    def bound(self, db: Session, project: Project, *args, **kwargs):
+        with identity.acting_as(project.owner_id):
+            return method(self, db, project, *args, **kwargs)
+
+    return bound
+
+
 class PipelineRunner:
     # ── the driving loop ──────────────────────────────────────────────────────
+    @_as_owner
     def continue_run(self, db: Session, project: Project) -> Project:
         """Drive the pipeline forward from wherever it is until it needs a human.
 
@@ -325,6 +343,7 @@ class PipelineRunner:
         self.redo(db, project, phase_key, remediation.fix_instruction(items))
         return True
 
+    @_as_owner
     def reject(self, db: Session, project: Project, feedback: str) -> Project:
         """Send the phase the reviewer is looking at back to its agent.
 
@@ -334,6 +353,7 @@ class PipelineRunner:
         """
         return self.redo(db, project, project.current_phase, feedback)
 
+    @_as_owner
     def redo(
         self, db: Session, project: Project, phase_key: Optional[str], feedback: str
     ) -> Project:
@@ -801,7 +821,8 @@ class PipelineRunner:
         Ship review shows.
         """
         threading.Thread(
-            target=self._draw_mockup,
+            # Carries the run's account: the draw spends the same owner's models.
+            target=identity.carry(self._draw_mockup),
             args=(project_id, source_row_id),
             name=f"mockup-{project_id[:8]}",
             daemon=True,

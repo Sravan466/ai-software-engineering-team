@@ -3,10 +3,16 @@
 Stores a short summary of each completed project so future runs can recall preferred
 frameworks, architectural decisions, and reusable patterns. Degrades to a no-op if the
 vector store is unavailable.
+
+Recall is narrowed to the projects of one account, read from the database, so what
+one account learned is never handed to another's builds.
 """
 from __future__ import annotations
 from typing import Optional
 
+from sqlalchemy import select
+
+from app.core import identity
 from app.core.logging import get_logger
 from app.rag import chroma
 from app.rag.embeddings import SourceEmbeddingFunction
@@ -42,12 +48,44 @@ class MemoryStore:
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to write project memory: %s", e)
 
-    def recall(self, query: str, k: int = 3, exclude_project_id: Optional[str] = None) -> str:
+    @staticmethod
+    def _project_ids(owner_id: str, exclude: Optional[str]) -> list[str]:
+        from app.db.base import SessionLocal
+        from app.db.models import Project
+
+        db = SessionLocal()
+        try:
+            ids = db.execute(select(Project.id).where(Project.owner_id == owner_id)).scalars()
+            return [i for i in ids if i != exclude]
+        finally:
+            db.close()
+
+    def recall(
+        self,
+        query: str,
+        k: int = 3,
+        exclude_project_id: Optional[str] = None,
+        owner_id: Optional[str] = None,
+    ) -> str:
+        owner_id = owner_id or identity.current_user_id()
+        if not owner_id or not query.strip():
+            return ""
+        project_ids = self._project_ids(owner_id, exclude_project_id)
+        if not project_ids:
+            return ""
         col = self._get_collection()
-        if col is None or not query.strip():
+        if col is None:
             return ""
         try:
-            res = col.query(query_texts=[query], n_results=k + 1)
+            res = col.query(
+                query_texts=[query],
+                n_results=k + 1,
+                where=(
+                    {"project_id": project_ids[0]}
+                    if len(project_ids) == 1
+                    else {"project_id": {"$in": project_ids}}
+                ),
+            )
             docs = (res.get("documents") or [[]])[0]
             metas = (res.get("metadatas") or [[]])[0]
             blocks: list[str] = []

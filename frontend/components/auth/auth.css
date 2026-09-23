@@ -1,0 +1,165 @@
+/* ===========================================================================
+   THE DOOR — signing in, and setting an install up.
+
+   Two halves on a wide screen: the crew standing on the floor, waiting for a
+   shift that starts when someone signs in, and the panel that starts it. On a
+   phone the crew becomes one strip above the form, so the form is still the
+   first thing a thumb reaches.
+   =========================================================================== */
+.door {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 460px);
+}
+
+/* ── the crew ─────────────────────────────────────────────────────────────── */
+.door-crew {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 40px;
+  padding: 64px clamp(32px, 6vw, 96px);
+  overflow: hidden;
+}
+.door-shout {
+  margin: 0;
+  max-width: 14ch;
+  font-family: var(--pixel);
+  font-size: clamp(26px, 3.6vw, 44px);
+  font-weight: 700;
+  line-height: 1.32;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+  text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.55);
+}
+.door-shout em {
+  font-style: normal;
+  color: var(--ink-3);
+}
+.door-floor {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 76px));
+  gap: 28px 20px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.door-agent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  /* One authored moment: the crew files in, one after another, and stays. */
+  animation: door-arrive 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: calc(var(--i) * 55ms + 80ms);
+}
+.door-codename {
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  opacity: 0.9;
+}
+@keyframes door-arrive {
+  from { opacity: 0; transform: translateY(10px); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+
+/* ── the panel ────────────────────────────────────────────────────────────── */
+.door-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 32px;
+  padding: 48px clamp(24px, 4vw, 48px);
+  background: var(--bg-panel);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-3);
+}
+.door-brand { display: flex; align-items: center; gap: 10px; }
+
+.door-form { display: flex; flex-direction: column; gap: 18px; }
+.door-head { display: flex; flex-direction: column; gap: 8px; margin-bottom: 6px; }
+.door-head h1 { font-size: var(--t-2xl); letter-spacing: -0.02em; }
+.door-lede { margin: 0; color: var(--ink-2); font-size: var(--t-md); line-height: 1.55; max-width: 44ch; }
+
+.door-optional { color: var(--ink-3); font-weight: 400; margin-left: 4px; }
+
+.door-field-error { font-size: var(--t-xs); color: #ff8a8a; line-height: 1.45; }
+.door-form .input[aria-invalid="true"] { border-color: rgba(240, 82, 82, 0.6); }
+
+.door-error:focus { outline: none; }
+.door-error:focus-visible { outline: 2px solid var(--bad); outline-offset: 2px; }
+
+/* The password field with its show/hide control sitting inside the input. */
+.door-secret { position: relative; }
+.door-secret .input { padding-right: 48px; }
+.door-reveal {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color var(--tr), background var(--tr);
+}
+.door-reveal:hover { color: var(--ink); background: var(--bg-raised); }
+.door-reveal svg { width: 18px; height: 18px; }
+
+.door-submit { width: 100%; justify-content: center; margin-top: 6px; }
+.door-submit svg { width: 16px; height: 16px; }
+
+.door-switch { margin: 0; font-size: var(--t-sm); color: var(--ink-2); text-align: center; }
+.door-quiet { color: var(--ink-3); }
+.door-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--line-3);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.door-link:hover { text-decoration-color: var(--ink); }
+
+.door-wait { display: flex; align-items: center; gap: 10px; color: var(--ink-2); }
+
+/* ── narrow screens ───────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .door { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .door-crew { gap: 16px; padding: 28px 20px 8px; }
+  .door-shout { max-width: none; font-size: 18px; }
+  .door-floor {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 6px;
+    border-bottom: 0;
+  }
+  .door-codename { display: none; }
+  .door-agent .sprite { --sprite-size: 36px !important; }
+  .door-agent .sprite svg { width: 36px; height: 36px; }
+  .door-panel {
+    justify-content: flex-start;
+    gap: 24px;
+    padding: 24px 20px 40px;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    box-shadow: none;
+  }
+  /* 16px inputs: iOS zooms into anything smaller when it takes focus. */
+  .door-form .input { font-size: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .door-agent { animation: none; }
+}

@@ -47,12 +47,14 @@ class Base(DeclarativeBase):
 
 
 def init_db() -> None:
-    """Create missing tables, then add any columns an existing database is missing."""
-    from app.db import models  # noqa: F401
+    """Create missing tables, add any columns an existing database is missing, then
+    give everything from before accounts an owner."""
+    from app.db import accounts, models  # noqa: F401
     from app.db.migrations import run_migrations
 
     Base.metadata.create_all(bind=engine)
     run_migrations(engine)
+    accounts.migrate(engine)
 
 
 def get_db() -> Iterator[Session]:

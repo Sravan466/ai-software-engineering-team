@@ -122,7 +122,17 @@ def _address_id(url: str) -> str:
 
 
 class SourceRegistry:
-    def __init__(self) -> None:
+    def __init__(self, store=None, tuning=None, *, may_add_local: bool = True) -> None:
+        #: Where sources added in Settings are saved: one account's file, or the
+        #: pre-accounts global one (`secrets_store`'s own functions) when not given.
+        self._store = store if store is not None else secrets_store
+        #: Handed to every provider, so its per-model settings are this account's.
+        self._tuning = tuning
+        #: Whether this account may add a source on this server or its private
+        #: network. Such an address is the server's, not the person's; in a hosted
+        #: backend, letting any account point it there is letting any account knock
+        #: on the server's internal services.
+        self._may_add_local = may_add_local
         self._providers: dict[str, SourceProvider] = {}
         self._unknown: list[dict] = []
         self._tried: list[str] = []
@@ -212,7 +222,7 @@ class SourceRegistry:
             except Exception as e:  # noqa: BLE001 - one bad entry must not stop the rest
                 log.warning("Ignoring the configured source at %s: %s", redact(entry.get("base_url")), e)
         renamed = False
-        for entry in secrets_store.get_sources():
+        for entry in self._store.get_sources():
             try:
                 if not isinstance(entry["base_url"], str):
                     raise SourceError("its address isn't text")
@@ -279,7 +289,7 @@ class SourceRegistry:
     def _register(self, source: Source) -> SourceProvider:
         self._unique_label(source)
         adapter = table.adapter_for(source.runtime)(source.base_url, source.api_key)
-        provider = SourceProvider(source, adapter)
+        provider = SourceProvider(source, adapter, self._tuning)
         self._providers[source.id] = provider
         return provider
 
@@ -420,6 +430,12 @@ class SourceRegistry:
         """
         url = normalise_url(base_url)
         key = clean_key(api_key)
+        if not self._may_add_local and detect.reaches_server_network(url):
+            raise SourceError(
+                f"{url} is on the machine this backend runs on or the private network "
+                "around it, and only the account that owns this install can add a source "
+                "there. Add a source at a public address instead."
+            )
         if not detect.is_loopback(url) and not confirm_remote:
             raise SourceError(
                 f"{url} is on another computer. Every prompt a build sends it leaves "
@@ -503,7 +519,7 @@ class SourceRegistry:
             return provider
 
     def _save(self) -> None:
-        secrets_store.save_sources(
+        self._store.save_sources(
             [
                 {
                     "id": p.source.id,

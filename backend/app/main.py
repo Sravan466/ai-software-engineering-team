@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth_middleware import AuthMiddleware
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.base import init_db
@@ -26,11 +27,25 @@ async def lifespan(app: FastAPI):
     # Find the model runtimes on this machine now rather than inside the first
     # request that needs one. Loopback only; in the background, so a runtime that is
     # slow to answer never holds up startup.
+    # Warmed for the owner, whose router is the one a self-hosted install uses; every
+    # other account's router looks for itself the first time it is asked.
     import threading
 
-    from app.router.router import router as model_router
+    from sqlalchemy import select
 
-    threading.Thread(target=model_router.sources.ensure, name="detect-sources", daemon=True).start()
+    from app.db.base import SessionLocal
+    from app.db.models import User
+    from app.router.router import routers
+
+    db = SessionLocal()
+    try:
+        owner = db.execute(select(User).where(User.is_owner.is_(True)).order_by(User.created_at)).scalars().first()
+    finally:
+        db.close()
+    if owner is not None:
+        threading.Thread(
+            target=lambda: routers.for_user(owner.id).sources.ensure(), name="detect-sources", daemon=True
+        ).start()
     yield
     log.info("Shutting down.")
 
@@ -46,6 +61,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Added before CORS so that CORS wraps it: a 401 has to carry CORS headers, or the
+# page sees a network error instead of "sign in".
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -57,6 +75,7 @@ app.add_middleware(
 # Routers (imported here so DB/graph modules initialise after settings are loaded).
 from app.api.routes import (  # noqa: E402
     analytics,
+    auth as auth_routes,
     github,
     models,
     preview,
@@ -66,6 +85,7 @@ from app.api.routes import (  # noqa: E402
     skills,
 )
 
+app.include_router(auth_routes.router)
 app.include_router(projects.router)
 app.include_router(preview.router)
 app.include_router(models.router)

@@ -25,7 +25,7 @@ The backbone is in place and runs end-to-end. Tracking what's done and what's ne
 - [ ] Export deliverables (zip of generated code + docs)
 - [ ] Richer Auto-routing (use the model registry's complexity/cost signals per phase)
 - [ ] More tests: router fallback chain, RAG ingest/query, provider adapters
-- [ ] Auth (JWT/OAuth) + multi-user project isolation
+- [x] Accounts + multi-user isolation (email + password, per-account keys, sources and routers — #30)
 - [ ] Per-phase model overrides (e.g. local for codegen, cloud for security review)
 
 ## Later

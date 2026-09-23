@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_project
+from app.api.deps import current_user, get_project
 from app.core import artifacts, model_roles
 from app.core.config import settings
 from app.core.constants import (
@@ -33,7 +33,7 @@ from app.core.constants import (
 )
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
-from app.db.models import Project, SecurityDisposition
+from app.db.models import Project, SecurityDisposition, User
 from app.orchestration import remediation
 from app.orchestration.approval import decide_gate
 from app.orchestration.runner import runner
@@ -92,11 +92,16 @@ def _checked_model(spec: Optional[str]) -> Optional[str]:
 
 
 @router.post("", response_model=ProjectOut, status_code=201)
-def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Project:
+def create_project(
+    payload: ProjectCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Project:
     mode = (payload.routing_mode or RoutingMode(settings.default_routing_mode)).value
     preferred = _checked_model(payload.preferred_model)
     approval = _resolve_approval_mode(payload)
     project = Project(
+        owner_id=user.id,
         idea=payload.idea,
         name=payload.name,
         routing_mode=mode,
@@ -183,8 +188,12 @@ def update_project(
 
 
 @router.get("", response_model=list[ProjectOut])
-def list_projects(db: Session = Depends(get_db)) -> list[Project]:
-    return list(db.execute(select(Project).order_by(Project.created_at.desc())).scalars())
+def list_projects(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[Project]:
+    return list(
+        db.execute(
+            select(Project).where(Project.owner_id == user.id).order_by(Project.created_at.desc())
+        ).scalars()
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectOut)

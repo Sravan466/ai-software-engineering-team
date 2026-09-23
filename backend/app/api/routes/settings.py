@@ -1,8 +1,13 @@
 """Runtime settings: cloud keys, local model sources, and which model each role runs on.
 
+Everything here is the signed-in account's own: its keys, its added sources, its
+choice of model per role and its per-model settings. `model_router` is that
+account's router (bound by the auth middleware), and nothing one account sets here
+reaches another's builds.
+
 Keys — a cloud provider's, or a local runtime's — are stored on this backend only
-(gitignored `data/providers.local.json`), never returned to the client in full, and
-used immediately by the router.
+(gitignored, one file per account under `data/users/`), never returned to the
+client in full, and used immediately by the router.
 
 Local models come from **sources**: runtimes found running on this machine, sources
 configured in `.env`, and sources added here. Every model is named `source:model`,
@@ -206,6 +211,13 @@ def _trusted_host(request: Request) -> bool:
     return bool(public) and host == public
 
 
+def _known_source(source_id: str) -> None:
+    """A source this account can't see is a 404 — the same answer as one that isn't
+    there, so another account's source ids can't be probed."""
+    if model_router.source(source_id) is None:
+        raise HTTPException(status_code=404, detail=f"No model source is called '{source_id}'.")
+
+
 @router.post("/sources", status_code=201)
 def add_source(body: SourceCreate, request: Request) -> dict:
     """Add a source by address. It has to answer, so its runtime can be identified."""
@@ -238,6 +250,7 @@ def add_source(body: SourceCreate, request: Request) -> dict:
 
 @router.put("/sources/{source_id}")
 def update_source(source_id: str, body: SourceUpdate) -> dict:
+    _known_source(source_id)
     try:
         model_router.set_source_key(source_id, body.api_key)
     except SourceError as e:
@@ -247,6 +260,7 @@ def update_source(source_id: str, body: SourceUpdate) -> dict:
 
 @router.delete("/sources/{source_id}")
 def remove_source(source_id: str) -> dict:
+    _known_source(source_id)
     try:
         model_router.remove_source(source_id)
     except SourceError as e:
@@ -268,6 +282,14 @@ def pull_model(source_id: str, body: PullRequest):
     source = model_router.source(source_id)
     if source is None:
         raise HTTPException(status_code=404, detail=f"No model source is called '{source_id}'.")
+    if not model_router.owner and source.source.origin != "added":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"{source.source.label} runs on the machine this backend is on, and only the "
+                "account that owns this install can download models onto it."
+            ),
+        )
     if not source.adapter.can_download:
         raise HTTPException(
             status_code=400,

@@ -1,5 +1,9 @@
 """The skill library: read it, change it, and see what a build would actually get.
 
+The library is shared by every account on the install — it is files on the server,
+read by every build — so reading it is open to everyone signed in, and changing it
+is for the account that owns the install.
+
 Five endpoints, and the fifth is not a convenience. Selection is a keyword score
 decided before the model call, which makes a miss *silent* — a skill that does not
 match simply never arrives, and nothing in the finished build says so. `POST
@@ -17,12 +21,14 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.deps import require_owner
 from app.core.config import settings
 from app.core.constants import PHASE_LABELS, PHASE_ORDER
 from app.core.logging import get_logger
+from app.db.models import User
 from app.skills import registry
 from app.skills.loader import Skill, check, to_markdown
 from app.skills.selection import Overrides, select
@@ -93,7 +99,7 @@ def list_skills() -> dict:
 
 
 @router.post("", status_code=201)
-def create_skill(payload: SkillBody) -> dict:
+def create_skill(payload: SkillBody, _owner: User = Depends(require_owner)) -> dict:
     """Add a skill on this machine. It is live on the next phase that scores for it."""
     name = (payload.name or "").strip().lower()
     if registry.get(name) is not None:
@@ -106,7 +112,7 @@ def create_skill(payload: SkillBody) -> dict:
 
 
 @router.put("/{name}")
-def update_skill(name: str, payload: SkillBody) -> dict:
+def update_skill(name: str, payload: SkillBody, _owner: User = Depends(require_owner)) -> dict:
     """Change a skill. On a bundled one this writes a local copy that shadows it."""
     if registry.get(name) is None:
         raise HTTPException(404, f"There is no skill called '{name}'.")
@@ -169,7 +175,7 @@ class EnabledUpdate(BaseModel):
 
 
 @router.put("/{name}/enabled")
-def set_enabled(name: str, payload: EnabledUpdate) -> dict:
+def set_enabled(name: str, payload: EnabledUpdate, _owner: User = Depends(require_owner)) -> dict:
     """Switch a skill on or off for every build that does not name it explicitly."""
     skill = registry.get(name)
     if skill is None:
@@ -179,7 +185,7 @@ def set_enabled(name: str, payload: EnabledUpdate) -> dict:
 
 
 @router.delete("/{name}")
-def delete_skill(name: str) -> dict:
+def delete_skill(name: str, _owner: User = Depends(require_owner)) -> dict:
     """Remove a skill added here. On an edited bundled skill, restores the original."""
     if registry.get(name) is None:
         raise HTTPException(404, f"There is no skill called '{name}'.")

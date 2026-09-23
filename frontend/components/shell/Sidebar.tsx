@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { api, type LocalStatus, type Project } from "@/lib/api";
+import { api, type Account, type LocalStatus, type Project } from "@/lib/api";
 import { canRunABuild } from "@/lib/capabilities";
 import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
@@ -60,7 +60,7 @@ const API_DOCS_URL =
  * it out of the tab order — otherwise keyboard focus disappears into an
  * off-screen drawer.
  */
-export default function Sidebar({ onClose }: { onClose: () => void }) {
+export default function Sidebar({ onClose, account }: { onClose: () => void; account: Account }) {
   const pathname = usePathname();
   const router = useRouter();
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -70,6 +70,17 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
   // existed and nothing called it, so a build you no longer want was permanent.
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+
+  const signOut = useCallback(async () => {
+    setSigningOut(true);
+    try {
+      await api.signOut();
+    } catch {
+      // Even if the backend didn't hear it, this browser is done with the session.
+    }
+    router.replace("/signin");
+  }, [router]);
 
   const refresh = useCallback(async () => {
     try {
@@ -285,6 +296,32 @@ export default function Sidebar({ onClose }: { onClose: () => void }) {
           {Icon.api} API reference
           <span style={{ marginLeft: "auto", color: "var(--ink-4)" }}>{Icon.external}</span>
         </a>
+
+        {/* Who these builds belong to — on a shared install, the question that
+            matters before anything is started or deleted. */}
+        <div className="sb-account">
+          <span className="sb-avatar" aria-hidden="true">
+            {(account.display_name || account.email || "?").trim().charAt(0).toUpperCase()}
+          </span>
+          <span className="sb-account-text">
+            <span className="sb-account-name">
+              {account.display_name || account.email}
+              {account.is_owner && <span className="sb-link-tag">owner</span>}
+            </span>
+            {account.display_name && account.email && (
+              <span className="sb-account-email">{account.email}</span>
+            )}
+          </span>
+          <button
+            className="icon-btn sb-signout"
+            onClick={signOut}
+            disabled={signingOut}
+            aria-label="Sign out"
+            title="Sign out"
+          >
+            {signingOut ? <span className="btn-spinner" aria-hidden="true" /> : Icon.signOut}
+          </button>
+        </div>
       </div>
     </aside>
   );

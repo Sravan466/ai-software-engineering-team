@@ -188,6 +188,47 @@
 .sb-link svg { width: 16px; height: 16px; flex: none; color: var(--ink-3); }
 .sb-link:hover svg, .sb-link[aria-current="page"] svg { color: var(--ink-2); }
 
+/* The signed-in account: whose builds these are. Below the links, set off by a
+   rule, because it answers a different question than where to go next. */
+.sb-account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 10px 4px 2px 10px;
+  border-top: 1px solid var(--line);
+}
+.sb-avatar {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+  font-family: var(--pixel);
+  font-size: 12px;
+}
+.sb-account-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sb-account-name,
+.sb-account-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-account-name { display: flex; align-items: center; gap: 6px; font-size: var(--t-sm); font-weight: 500; color: var(--ink); }
+.sb-account-name .sb-link-tag { margin-left: 0; flex: none; }
+.sb-account-email { font-size: var(--t-xs); color: var(--ink-3); }
+.sb-signout:disabled { cursor: progress; opacity: 0.6; }
+
+/* While the session is checked, nothing that would ask for someone's builds is drawn. */
+.shell-gate {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+
 /* Runtime status. No local runtime answering means the product cannot build anything,
    so it is a button that explains itself — not a dim caption. */
 .sb-runtime {

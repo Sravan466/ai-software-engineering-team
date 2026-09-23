@@ -127,10 +127,13 @@ class SourceState:
 class SourceProvider(LLMProvider):
     is_local = True
 
-    def __init__(self, source: Source, adapter: RuntimeAdapter) -> None:
+    def __init__(self, source: Source, adapter: RuntimeAdapter, tuning=None) -> None:
         self.source = source
         self.adapter = adapter
         self.name = source.id
+        #: Where this account's per-model settings are kept — `model_settings`'s own
+        #: functions (the pre-accounts file) when no store is given.
+        self.tuning_store = tuning if tuning is not None else model_settings
         self._profiles = ProfileCache()
         self._state: Optional[SourceState] = None
         self._state_lock = threading.Lock()
@@ -262,14 +265,14 @@ class SourceProvider(LLMProvider):
         tuning `qwen3` and then running `qwen3:latest` is one model, not two.
         """
         prefix = f"{self.source.id}:"
-        for spec in model_settings.all_settings():
+        for spec in self.tuning_store.all_settings():
             if spec.startswith(prefix) and self.adapter.resolves(model, [spec[len(prefix):]]):
                 return spec
         return f"{prefix}{model}"
 
     def tuning(self, model: str) -> dict:
         """The settings saved for `model`, re-validated — `{}` when none are."""
-        return generation.read(model_settings.get(self.settings_key(model)))
+        return generation.read(self.tuning_store.get(self.settings_key(model)))
 
     # ── the profile ──────────────────────────────────────────────────────────
     def profile(self, model: str) -> ModelProfile:

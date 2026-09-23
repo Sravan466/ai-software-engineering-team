@@ -9,7 +9,8 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import UsageEvent
+from app.core import identity
+from app.db.models import Project, UsageEvent
 from app.router.registry import estimate_cost
 from app.schemas.llm import LLMResponse
 
@@ -21,6 +22,9 @@ def record(
     project_id: Optional[str] = None,
     phase: Optional[str] = None,
 ) -> UsageEvent:
+    # Whose call this was: the project's owner, which is who the run was bound to.
+    project = db.get(Project, project_id) if project_id else None
+    owner_id = project.owner_id if project is not None else identity.current_user_id()
     # None means nobody knows what this model costs, which is emphatically not the
     # same as free. The column keeps 0.0 so every existing sum still works; the flag
     # beside it is what says whether that zero is a price or a gap.
@@ -32,6 +36,7 @@ def record(
         is_local=response.is_local,
     )
     event = UsageEvent(
+        owner_id=owner_id,
         project_id=project_id,
         phase=phase,
         provider=response.provider,
@@ -51,9 +56,9 @@ def record(
     return event
 
 
-def summary(db: Session, project_id: Optional[str] = None) -> dict:
-    """Aggregate analytics. If project_id is given, scope to that project."""
-    base = select(UsageEvent)
+def summary(db: Session, owner_id: str, project_id: Optional[str] = None) -> dict:
+    """Aggregate one account's analytics. If project_id is given, scope to that project."""
+    base = select(UsageEvent).where(UsageEvent.owner_id == owner_id)
     if project_id:
         base = base.where(UsageEvent.project_id == project_id)
     events = db.execute(base).scalars().all()
@@ -109,5 +114,7 @@ def summary(db: Session, project_id: Optional[str] = None) -> dict:
     }
 
 
-def project_count(db: Session) -> int:
-    return db.execute(select(func.count()).select_from(UsageEvent)).scalar_one()
+def project_count(db: Session, owner_id: str) -> int:
+    return db.execute(
+        select(func.count()).select_from(UsageEvent).where(UsageEvent.owner_id == owner_id)
+    ).scalar_one()

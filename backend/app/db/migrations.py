@@ -36,6 +36,9 @@ log = get_logger(__name__)
 #: safe to apply to a populated one: nullable, or NOT NULL with a constant default.
 ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     "projects": (
+        # Nullable: filled for every existing row by the accounts migration
+        # (`app.db.accounts`), which runs right after this.
+        "owner_id",
         "phase_started_at",
         "heartbeat_at",
         "cancel_requested",
@@ -77,7 +80,8 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     # `cost_known` is nullable rather than defaulted to true: an existing row cannot
     # say whether its zero was a price or a gap, and claiming it was a price would
     # write a fact nobody checked into every historical event.
-    "usage_events": ("cost_known", "is_local"),
+    "usage_events": ("cost_known", "is_local", "owner_id"),
+    "knowledge_docs": ("owner_id",),
 }
 
 
