@@ -241,10 +241,6 @@ class SourceRegistry:
                     raise SourceError("its address isn't text")
                 url = normalise_url(entry["base_url"])
                 key = clean_key(entry.get("api_key") if isinstance(entry.get("api_key"), str) else None)
-                if not self._may_add_local and detect.reaches_server_network(url):
-                    # Checked again on every load: a name can point somewhere else
-                    # now than it did when it was added.
-                    raise SourceError("it now points at the server's own network")
             except Exception as e:  # noqa: BLE001 - kept as saved, never dropped
                 log.warning("The saved source at %s can't be used: %s", redact(entry.get("base_url")), e)
                 self._unloaded.append(entry)
@@ -307,7 +303,11 @@ class SourceRegistry:
         self._unique_label(source)
         adapter = table.adapter_for(source.runtime)(source.base_url, source.api_key)
         provider = SourceProvider(source, adapter, self._tuning)
-        if not self._may_add_local and source.origin == ORIGIN_ADDED:
+        # Checked on every request rather than once at load: a name can point
+        # somewhere else later, and a DNS blip at load must not drop a source for
+        # good. A runtime on this server shared on purpose needs no guard.
+        shared_here = settings.share_local_runtimes and detect.is_loopback(source.base_url)
+        if not self._may_add_local and source.origin == ORIGIN_ADDED and not shared_here:
             provider.guard = lambda url=source.base_url: _refuse_server_network(url)
         self._providers[source.id] = provider
         return provider

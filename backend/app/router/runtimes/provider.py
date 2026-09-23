@@ -223,6 +223,7 @@ class SourceProvider(LLMProvider):
         if not current.reachable:
             return {}
         try:
+            self._check_guard()
             return self.adapter.describe(current.models)
         except Exception as e:  # noqa: BLE001 - a description is a nicety, never a failure
             log.warning("Could not describe the models on %s: %s", self.source.base_url, e)
@@ -635,4 +636,8 @@ class SourceProvider(LLMProvider):
             raise clean from None
 
     def cancel(self, request_id: str) -> bool:
+        try:
+            self._check_guard()
+        except ProviderError:
+            return False
         return self.adapter.cancel(request_id)
