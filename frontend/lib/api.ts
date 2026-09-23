@@ -198,6 +198,29 @@ const LLM_TIMEOUT_MS = 300000; // 5 min — local generation on CPU is slow
  * not-configured state, not an error worth a red card. Callers that care read
  * `status`; everything else keeps treating it as an ordinary Error.
  */
+/** Fired on `window` whenever the backend says nobody is signed in. */
+export const SIGNED_OUT_EVENT = "aiteam:signed-out";
+
+export type Account = {
+  id: string;
+  email: string | null;
+  display_name: string | null;
+  /** The account that owns this install: the first one. */
+  is_owner: boolean;
+};
+
+export type AuthStatus = {
+  user: Account | null;
+  /** No account can sign in yet — the first one sets the install up. */
+  needs_setup: boolean;
+  /** Setting up from this browser needs the install's SETUP_TOKEN. */
+  setup_needs_token: boolean;
+  /** The install takes new accounts. */
+  signup_open: boolean;
+  /** Builds and settings from before accounts are waiting for the first account. */
+  has_unclaimed_work: boolean;
+};
+
 export class ApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -244,10 +267,15 @@ async function req<T>(
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
       cache: "no-store",
-      // Send/receive the GitHub session cookie (same-site localhost:3000↔:8000).
+      // Send/receive the session cookies (same-site localhost:3000↔:8000).
       credentials: "include",
       signal: ctrl.signal,
     });
+    if (res.status === 401 && !path.startsWith("/api/auth/")) {
+      // The session ended — signed out elsewhere, or it expired. The shell hears
+      // this and takes the person to sign in, back to where they were.
+      if (typeof window !== "undefined") window.dispatchEvent(new Event(SIGNED_OUT_EVENT));
+    }
     if (!res.ok) throw new ApiError(await errorMessage(res), res.status);
     if (res.status === 204) return undefined as T;
     return res.json();
@@ -265,6 +293,14 @@ async function req<T>(
 }
 
 export const api = {
+  // ── Accounts ──
+  authStatus: () => req<AuthStatus>("/api/auth/status"),
+  signIn: (body: { email: string; password: string }) =>
+    req<{ user: Account }>("/api/auth/signin", { method: "POST", body: JSON.stringify(body) }),
+  signUp: (body: { email: string; password: string; display_name?: string; setup_token?: string }) =>
+    req<{ user: Account }>("/api/auth/signup", { method: "POST", body: JSON.stringify(body) }),
+  signOut: () => req<{ ok: boolean }>("/api/auth/signout", { method: "POST" }),
+
   listProjects: () => req<Project[]>("/api/projects"),
   getProject: (id: string) => req<Project>(`/api/projects/${id}`),
   createProject: (body: {
@@ -466,6 +502,7 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
+      credentials: "include",
     });
     if (!res.ok || !res.body) throw new ApiError(await errorMessage(res), res.status);
     const reader = res.body.getReader();

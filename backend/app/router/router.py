@@ -32,6 +32,15 @@ Above all three sits the **role**: which agent, or which support task, is asking
 role pointed at its own model runs on it. A role with nothing recorded resolves
 exactly as it always did, so a fresh install is unchanged.
 
+Accounts
+--------
+Each account has its own router (`routers.for_user`): its own cloud keys, its own
+added sources, its own choice of model per role and per-model settings, and its own
+caches — a profile probed for one account is never served to another, and an
+override one account sets never reaches another's builds. `router`, the name the
+agents import, resolves to the router of whichever account the work is bound to
+(`app.core.identity`), and refuses to guess when none is.
+
 Retries
 -------
 Each link in the chain is attempted more than once before the chain moves on. A local
@@ -41,6 +50,7 @@ missing key, or a model that is not there, is reported at once — those are ans
 not hiccups.
 """
 from __future__ import annotations
+import threading
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator, Optional
 
@@ -52,7 +62,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.core import model_roles, secrets_store
+from app.core import identity, model_roles, model_settings, secrets_store
 from app.core.config import settings
 from app.core.constants import RoutingMode
 from app.core.logging import get_logger
@@ -110,18 +120,40 @@ class Readiness:
 class ModelRouter:
     CLOUD_PROVIDERS = CLOUD_PROVIDERS
 
-    def __init__(self) -> None:
+    def __init__(self, user_id: Optional[str] = None, *, owner: bool = True) -> None:
+        """A router for one account — or, with no `user_id`, for the settings files
+        from before accounts, which is what the tests and the migration read.
+
+        `owner` is whether this account owns the install. Only the owner's router
+        starts from the keys in `.env`: whoever wrote that file runs this backend,
+        and its keys are theirs to spend, not every account's.
+        """
+        self.user_id = user_id
+        self.owner = owner
+        if user_id:
+            self._secrets = secrets_store.for_user(user_id)
+            self._roles = model_roles.for_user(user_id)
+            self.tuning = model_settings.for_user(user_id)
+        else:
+            # The modules' own functions: the global files, read through their
+            # module-level paths, so a test that points one elsewhere is honoured.
+            self._secrets = secrets_store
+            self._roles = model_roles
+            self.tuning = model_settings
         self._cloud: dict[str, LLMProvider] = {
             "anthropic": AnthropicProvider(),
             "openai": OpenAIProvider(),
             "gemini": GeminiProvider(),
         }
+        if not owner:
+            for prov in self._cloud.values():
+                prov.set_api_key(None)
         self._default_model: dict[str, str] = {
             "anthropic": settings.anthropic_default_model,
             "openai": settings.openai_default_model,
             "gemini": settings.gemini_default_model,
         }
-        self.sources = SourceRegistry()
+        self.sources = SourceRegistry(self._secrets, self.tuning, may_add_local=owner)
         #: The local default the user chose in Settings, as `source:model`.
         self._chosen_local: Optional[str] = None
         #: The embedding model found automatically, kept once found. Re-resolving it
@@ -288,23 +320,24 @@ class ModelRouter:
     def _apply(
         self, provider: str, api_key: Optional[str], default_model: Optional[str]
     ) -> None:
-        """Update one cloud provider's key/model in memory + the shared settings object."""
+        """Update one cloud provider's key/model on this account's router.
+
+        Never written into the shared settings object: that is every account's, and a
+        key set there by one would be spent by all.
+        """
         prov = self._cloud.get(provider)
         if prov is None:
             return
         if api_key is not None and hasattr(prov, "set_api_key"):
             prov.set_api_key(api_key)
-            # Reflect into settings so Auto-mode's `configured_cloud_providers()` sees it.
-            setattr(settings, f"{provider}_api_key", api_key or None)
         if default_model:
             self._default_model[provider] = default_model
-            setattr(settings, f"{provider}_default_model", default_model)
 
     def _load_persisted(self) -> None:
-        for pname, entry in secrets_store.get_all().items():
+        for pname, entry in self._secrets.get_all().items():
             if pname in self._cloud:
                 self._apply(pname, entry.get("api_key"), entry.get("default_model"))
-        self._chosen_local = secrets_store.get_local_default(CLOUD_PROVIDERS)
+        self._chosen_local = self._secrets.get_local_default(CLOUD_PROVIDERS)
 
     def set_provider_key(
         self,
@@ -324,7 +357,7 @@ class ModelRouter:
                 "local default."
             )
         self._apply(provider, api_key, default_model)
-        secrets_store.set_provider(provider, api_key, default_model)
+        self._secrets.set_provider(provider, api_key, default_model)
 
     def set_default_model(self, provider: str, model: str) -> None:
         """Point a cloud provider, or the local default, at a different model."""
@@ -361,7 +394,7 @@ class ModelRouter:
                 "one agent instead."
             )
         self._chosen_local = self._spec(pair)
-        secrets_store.set_local_default(self._chosen_local, CLOUD_PROVIDERS)
+        self._secrets.set_local_default(self._chosen_local, CLOUD_PROVIDERS)
         # The window, the parameter count and whether decoding can be schema
         # constrained are all properties of the model, and the model just changed.
         prov.forget()
@@ -379,7 +412,7 @@ class ModelRouter:
             elif pair[0] not in CLOUD_PROVIDERS:
                 self._refuse_if_it_cannot_write(pair, "an agent's model")
             spec = self._spec(pair)
-        model_roles.set_role(role, spec)
+        self._roles.set_role(role, spec)
         if role == model_roles.EMBEDDINGS_ROLE:
             # A choice made — or cleared — is a new answer to "which model embeds".
             self._embedding_pin = None
@@ -423,6 +456,18 @@ class ModelRouter:
     ) -> SourceProvider:
         return self.sources.add(base_url, label=label, api_key=api_key, confirm_remote=confirm_remote)
 
+    def is_shared(self, prov: SourceProvider) -> bool:
+        """Whether `prov` is the server's runtime and this account doesn't own the install.
+
+        Judged by address as well as origin: setting a key on a detected source makes
+        it "added" for that account, and it is still the server's runtime afterwards.
+        """
+        if self.owner:
+            return False
+        from app.router.runtimes.detect import reaches_server_network
+
+        return prov.source.origin != "added" or reaches_server_network(prov.source.base_url)
+
     def remove_source(self, source_id: str) -> None:
         self.sources.remove(source_id)
 
@@ -440,6 +485,11 @@ class ModelRouter:
         prov = self.sources.get(source_id)
         if prov is None:
             raise SourceError(f"No model source is called '{source_id}'.")
+        if self.is_shared(prov):
+            raise SourceError(
+                f"{prov.source.label} runs on the machine this backend is on, and only the "
+                "account that owns this install can download models onto it."
+            )
         if not prov.adapter.can_download:
             raise SourceError(
                 f"{prov.source.label} doesn't download models through its API. "
@@ -598,7 +648,7 @@ class ModelRouter:
         view = self._local_view()
         rows = []
         for entry in model_roles.catalogue():
-            spec = model_roles.get(entry["role"])
+            spec = self._roles.get(entry["role"])
             pair = self._listed(self._saved_pair(spec)) if spec else None
             rows.append(
                 {
@@ -839,9 +889,7 @@ class ModelRouter:
             raise ValueError(f"No model source is called '{pair[0]}'.")
         model = self._listed(pair)[1]
         if saved_ok:
-            from app.core import model_settings
-
-            if model_settings.get(prov.settings_key(model)) is not None:
+            if self.tuning.get(prov.settings_key(model)) is not None:
                 return prov, model
         state = prov.state()
         if not state.reachable:
@@ -861,12 +909,19 @@ class ModelRouter:
         The next request to that model reads them; nothing else changes, and no
         other model is touched. `None` or `{}` puts every field back on its default.
         """
-        from app.core import model_settings
         from app.router import generation
 
         prov, model = self._source_model(spec, saved_ok=not values)
         cleaned = generation.validate(values or {})
-        model_settings.put(prov.settings_key(model), cleaned or None)
+        if cleaned.get("machine") and self.is_shared(prov):
+            # GPU layers, threads and keep-alive decide how the server's own machine
+            # is used, for everyone on it. Sampling stays each account's own.
+            raise ValueError(
+                f"Machine settings for {prov.source.label} decide how the server's own hardware is "
+                "used, so only the account that owns this install can set them. Sampling and "
+                "limits are yours to change."
+            )
+        self.tuning.put(prov.settings_key(model), cleaned or None)
         # Window, reply and reasoning ceilings live in the profile; sampling is read
         # per call. Dropping the profile is what makes the first kind apply too.
         prov.forget_profile(model)
@@ -1028,7 +1083,7 @@ class ModelRouter:
         into collections built with this one's.
         """
         if not automatic:
-            spec = model_roles.get(model_roles.EMBEDDINGS_ROLE)
+            spec = self._roles.get(model_roles.EMBEDDINGS_ROLE)
             if spec:
                 pair = self._saved_pair(spec)
                 if pair[0] not in CLOUD_PROVIDERS:
@@ -1204,7 +1259,7 @@ class ModelRouter:
         # Cheap when fresh: a clock read. What makes a source started a moment ago —
         # or configured, before anything else asked — part of the very first chain.
         self.sources.ensure()
-        role_spec = model_roles.get(role)
+        role_spec = self._roles.get(role)
         role_pair = self._saved_pair(role_spec) if role_spec else None
 
         if mode == RoutingMode.LOCAL_ONLY:
@@ -1251,7 +1306,7 @@ class ModelRouter:
         - High complexity + a cloud key available -> strongest configured cloud model.
         - Otherwise prefer the free local default when its source is answering.
         """
-        cloud = settings.configured_cloud_providers()
+        cloud = [name for name in CLOUD_PROVIDERS if self._cloud[name].available()]
         local = self.local_default()
         local_source = self.sources.get(local[0]) if local else None
         local_up = bool(local_source is not None and local_source.available())
@@ -1288,5 +1343,83 @@ def _looks_like_a_coder(model: str) -> bool:
     return any(hint in name for hint in _CODER_HINTS)
 
 
-# Shared singleton used across the app.
-router = ModelRouter()
+class RouterRegistry:
+    """One router per account, made the first time the account needs one."""
+
+    def __init__(self) -> None:
+        self._routers: dict[str, ModelRouter] = {}
+        self._lock = threading.Lock()
+
+    def for_user(self, user_id: str) -> ModelRouter:
+        with self._lock:
+            found = self._routers.get(user_id)
+        if found is not None:
+            return found
+        # Built outside the lock — it reads the account's files — and the first one
+        # built wins, so two requests racing to make it end up sharing one.
+        made = ModelRouter(user_id, owner=_is_owner(user_id))
+        with self._lock:
+            return self._routers.setdefault(user_id, made)
+
+    def current(self) -> ModelRouter:
+        """The router of the account this work is bound to. Never anyone else's."""
+        return self.for_user(identity.require_user_id())
+
+    def loaded(self) -> list[ModelRouter]:
+        with self._lock:
+            return list(self._routers.values())
+
+    def forget(self, user_id: str) -> None:
+        with self._lock:
+            self._routers.pop(user_id, None)
+
+
+def _is_owner(user_id: str) -> bool:
+    from app.db.base import SessionLocal
+    from app.db.models import User
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        return bool(user is not None and user.is_owner)
+    finally:
+        db.close()
+
+
+routers = RouterRegistry()
+
+
+class _CurrentRouter:
+    """`router`: whichever account's router the current work is bound to.
+
+    The agents, the debate, the mockup and the embedding function all import this
+    one name and call it without a user in hand; the binding (`app.core.identity`)
+    says whose router answers. Attribute reads go through on every access, so a
+    long-lived reference never pins one account's router.
+    """
+
+    def __getattr__(self, name: str):
+        return getattr(routers.current(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        target = routers.current()
+        # Putting back what the class already provides — the old value a test's
+        # monkeypatch restores on the way out — clears the override rather than
+        # pinning a copy of it to this one router, where it would shadow the class.
+        inherited = getattr(type(target), name, None)
+        if inherited is not None and (
+            value is inherited
+            or (getattr(value, "__self__", None) is target and getattr(value, "__func__", None) is inherited)
+        ):
+            target.__dict__.pop(name, None)
+            return
+        setattr(target, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(routers.current(), name)
+
+    def __repr__(self) -> str:
+        return "<router for the current account>"
+
+
+router = _CurrentRouter()

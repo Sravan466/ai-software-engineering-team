@@ -5,6 +5,10 @@ logs in through it into *their own* GitHub. The token that comes back belongs to
 that user and is kept in a per-browser server-side session (an opaque cookie maps
 to an in-memory entry), never written to disk and never sent to the browser. So
 two different people using the same instance push to two different accounts.
+
+Both the connection and the OAuth round trip are also tied to the signed-in
+account: a GitHub connection made while signed in as one account is not usable
+after signing in as another in the same browser.
 """
 from __future__ import annotations
 
@@ -54,6 +58,8 @@ def _session(request: Request) -> Optional[dict]:
     if s and time.time() - s.get("ts", 0) > _SESSION_TTL:
         _sessions.pop(sid, None)
         return None
+    if s and s.get("user_id") != getattr(request.state, "user_id", None):
+        return None
     return s
 
 
@@ -88,7 +94,7 @@ def status(request: Request) -> dict:
 
 # ── OAuth round-trip ─────────────────────────────────────────────────────────
 @router.get("/oauth/start")
-def oauth_start(return_to: str = ""):
+def oauth_start(request: Request, return_to: str = ""):
     if not _configured():
         raise HTTPException(
             400,
@@ -97,7 +103,11 @@ def oauth_start(return_to: str = ""):
         )
     _prune()
     state = secrets.token_urlsafe(24)
-    _pending[state] = {"return_to": _safe_return(return_to), "ts": time.time()}
+    _pending[state] = {
+        "return_to": _safe_return(return_to),
+        "ts": time.time(),
+        "user_id": getattr(request.state, "user_id", None),
+    }
     redirect_uri = settings.backend_public_url.rstrip("/") + "/api/github/oauth/callback"
     authorize = "https://github.com/login/oauth/authorize?" + urlencode(
         {
@@ -112,11 +122,13 @@ def oauth_start(return_to: str = ""):
 
 
 @router.get("/oauth/callback")
-def oauth_callback(code: str = "", state: str = "", error: str = ""):
+def oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     pend = _pending.pop(state, None)
     return_to = (pend or {}).get("return_to") or settings.frontend_base_url.rstrip("/")
+    user_id = getattr(request.state, "user_id", None)
 
-    if error or not code or pend is None:
+    # The round trip has to end in the account it started in.
+    if error or not code or pend is None or pend.get("user_id") != user_id:
         return RedirectResponse(_with_param(return_to, "github", "error"), status_code=302)
 
     try:
@@ -132,6 +144,7 @@ def oauth_callback(code: str = "", state: str = "", error: str = ""):
         "name": user.get("name"),
         "avatar": user.get("avatar_url"),
         "ts": time.time(),
+        "user_id": user_id,
     }
     resp = RedirectResponse(_with_param(return_to, "github", "connected"), status_code=302)
     resp.set_cookie(
@@ -169,7 +182,9 @@ def push(
 ) -> dict:
     s = _session(request)
     if not s:
-        raise HTTPException(401, "Connect your GitHub account first.")
+        # 409, not 401: a 401 means "sign in to this app", and the page would take
+        # the person to the sign-in screen instead of saying what's missing.
+        raise HTTPException(409, "Connect your GitHub account first.")
     try:
         return gh.push_project(
             s["token"],

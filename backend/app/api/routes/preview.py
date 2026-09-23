@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.analytics import tracker
 from app.api.deps import get_project
+from app.core import identity
 from app.core.constants import RoutingMode
 from app.db.base import SessionLocal, get_db
 from app.db.models import PreviewRevision, Project
@@ -128,10 +129,12 @@ def _build_in_background(project_id: str, reporter: Reporter) -> None:
         project = db.get(Project, project_id)
         if project is None:
             return
-        try:
-            service.build_and_save(db, project, reporter)
-        except ProviderError as e:
-            raise RuntimeError(f"A model provider failed while drawing the mockup: {e}.{_provider_hint()}") from e
+        # Its own thread starts with no account; the mockup is drawn on the owner's.
+        with identity.acting_as(project.owner_id):
+            try:
+                service.build_and_save(db, project, reporter)
+            except ProviderError as e:
+                raise RuntimeError(f"A model provider failed while drawing the mockup: {e}.{_provider_hint()}") from e
     finally:
         db.close()
 

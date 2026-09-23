@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from tests.conftest import sign_in
 from pydantic import ValidationError
 
 from app.agents import get_agent
@@ -1128,6 +1130,10 @@ def _stubbed_local(monkeypatch, models: dict, *, tags_report: bool = False):
     monkeypatch.setattr(model_router.sources, "_loaded", True)
     monkeypatch.setattr(model_router.sources, "_detected_at", time.monotonic() + 3600)
     monkeypatch.setattr(model_router, "_chosen_local", "ollama:qwen2.5:7b")
+    # Roles through the module's own functions, which these tests pin and replace.
+    from app.core import model_roles
+
+    monkeypatch.setattr(model_router, "_roles", model_roles)
     return model_router
 
 
@@ -1554,6 +1560,7 @@ def test_the_preflight_gives_the_answer_run_will_give(monkeypatch):
         tags_report=True,
     )
     with TestClient(app) as client:
+        sign_in(client)
         monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text")
         refused = client.post("/api/projects/preflight", json={"routing_mode": "local_only"}).json()
         assert refused["ok"] is False and "cannot write" in refused["reason"]

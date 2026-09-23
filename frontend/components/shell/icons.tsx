@@ -47,7 +47,10 @@ export type IconName =
   | "list"
   | "pointer"
   | "pen"
-  | "book";
+  | "book"
+  | "signOut"
+  | "eye"
+  | "eyeOff";
 
 export const Icon: Record<IconName, ReactNode> = {
   menu: svg(<path d="M4 6h16M4 12h16M4 18h16" />),
@@ -109,4 +112,12 @@ export const Icon: Record<IconName, ReactNode> = {
   book: svg(
     <path d="M12 7.2v12M12 7.2C10.6 6 8.7 5.4 6 5.4H3.5v12H6c2.7 0 4.6.6 6 1.8 1.4-1.2 3.3-1.8 6-1.8h2.5v-12H18c-2.7 0-4.6.6-6 1.8zM6.5 9.4h2.8M6.5 12.4h2.8" />,
   ),
+  signOut: svg(<path d="M14.5 4.5H18a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5h-3.5M10 8l-4 4 4 4M6 12h9.5" />),
+  eye: svg(
+    <>
+      <path d="M2.8 12S6.2 5.5 12 5.5 21.2 12 21.2 12 17.8 18.5 12 18.5 2.8 12 2.8 12z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </>,
+  ),
+  eyeOff: svg(<path d="M4 4l16 16M9.9 6A9.6 9.6 0 0 1 12 5.5c5.8 0 9.2 6.5 9.2 6.5a16 16 0 0 1-2.6 3.4M6.4 7.7C4.1 9.3 2.8 12 2.8 12s3.4 6.5 9.2 6.5c1.4 0 2.6-.4 3.7-.9M10 10a2.8 2.8 0 0 0 4 4" />),
 };

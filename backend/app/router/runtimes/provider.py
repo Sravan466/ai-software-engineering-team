@@ -18,7 +18,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from app.core import model_settings
 from app.core.config import settings
@@ -127,10 +127,18 @@ class SourceState:
 class SourceProvider(LLMProvider):
     is_local = True
 
-    def __init__(self, source: Source, adapter: RuntimeAdapter) -> None:
+    def __init__(self, source: Source, adapter: RuntimeAdapter, tuning=None) -> None:
         self.source = source
         self.adapter = adapter
         self.name = source.id
+        #: Where this account's per-model settings are kept — `model_settings`'s own
+        #: functions (the pre-accounts file) when no store is given.
+        self.tuning_store = tuning if tuning is not None else model_settings
+        #: Asked before every request this source sends, when set: raises if the
+        #: request must not go. Set on a source an account that doesn't own the
+        #: install added — its name is resolved again each time, so a name that
+        #: later points at the server's own network is refused, not followed.
+        self.guard: Optional[Callable[[], None]] = None
         self._profiles = ProfileCache()
         self._state: Optional[SourceState] = None
         self._state_lock = threading.Lock()
@@ -165,6 +173,7 @@ class SourceProvider(LLMProvider):
                 return current
             generation = self._generation
             try:
+                self._check_guard()
                 models = self.adapter.list_models()
                 current = SourceState(reachable=True, models=models, checked_at=time.monotonic())
             except ProviderError as e:
@@ -174,6 +183,10 @@ class SourceProvider(LLMProvider):
             if generation == self._generation:
                 self._state = current
             return current
+
+    def _check_guard(self) -> None:
+        if self.guard is not None:
+            self.guard()
 
     def invalidate(self) -> None:
         self._generation += 1
@@ -210,6 +223,7 @@ class SourceProvider(LLMProvider):
         if not current.reachable:
             return {}
         try:
+            self._check_guard()
             return self.adapter.describe(current.models)
         except Exception as e:  # noqa: BLE001 - a description is a nicety, never a failure
             log.warning("Could not describe the models on %s: %s", self.source.base_url, e)
@@ -262,14 +276,14 @@ class SourceProvider(LLMProvider):
         tuning `qwen3` and then running `qwen3:latest` is one model, not two.
         """
         prefix = f"{self.source.id}:"
-        for spec in model_settings.all_settings():
+        for spec in self.tuning_store.all_settings():
             if spec.startswith(prefix) and self.adapter.resolves(model, [spec[len(prefix):]]):
                 return spec
         return f"{prefix}{model}"
 
     def tuning(self, model: str) -> dict:
         """The settings saved for `model`, re-validated — `{}` when none are."""
-        return generation.read(model_settings.get(self.settings_key(model)))
+        return generation.read(self.tuning_store.get(self.settings_key(model)))
 
     # ── the profile ──────────────────────────────────────────────────────────
     def profile(self, model: str) -> ModelProfile:
@@ -287,6 +301,7 @@ class SourceProvider(LLMProvider):
         if failed is not None and time.monotonic() - failed < _FAILED_DESCRIBE_SECONDS:
             return fallback_profile(self.name, model, local=True)
         try:
+            self._check_guard()
             info = self.adapter.model_info(model)
         except Exception as e:  # noqa: BLE001
             log.warning("Could not describe '%s' on %s: %s", model, self.source.base_url, e)
@@ -462,6 +477,7 @@ class SourceProvider(LLMProvider):
         )
         started = time.perf_counter()
         try:
+            self._check_guard()
             result = self.adapter.chat(request)
         except ProviderError as e:
             if e.unreachable:
@@ -609,6 +625,7 @@ class SourceProvider(LLMProvider):
     # ── embeddings ───────────────────────────────────────────────────────────
     def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
         try:
+            self._check_guard()
             return self.adapter.embed(model, inputs)
         except ProviderError as e:
             if e.unreachable:
@@ -619,4 +636,8 @@ class SourceProvider(LLMProvider):
             raise clean from None
 
     def cancel(self, request_id: str) -> bool:
+        try:
+            self._check_guard()
+        except ProviderError:
+            return False
         return self.adapter.cancel(request_id)

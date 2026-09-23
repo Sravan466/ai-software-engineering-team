@@ -24,5 +24,8 @@ google-generativeai==0.8.3   # Gemini
 chromadb==0.5.23
 pypdf==5.1.0
 
+# ── Accounts ──
+argon2-cffi==23.1.0      # Argon2id password hashing
+
 # ── Utilities ──
 tenacity==9.0.0          # retry/backoff for provider calls

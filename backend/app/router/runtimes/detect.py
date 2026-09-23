@@ -63,6 +63,45 @@ def is_loopback(base_url: str) -> bool:
     )
 
 
+def reaches_server_network(base_url: str) -> bool:
+    """Whether an address lands on this server or the private network around it.
+
+    Loopback, private, link-local, unspecified or reserved — as a literal, or as a
+    name that resolves to one now. Used to keep an account that doesn't own the
+    install from pointing the server at its own internal services. A name that
+    doesn't resolve counts as reaching it: it can't be checked, so it isn't trusted.
+    """
+    if is_loopback(base_url):
+        return True
+    try:
+        host = (urlparse(base_url).hostname or "").strip("[]").rstrip(".").lower()
+    except ValueError:
+        return True
+    if not host:
+        return True
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return True
+        addresses = []
+        for info in infos:
+            try:
+                addresses.append(ipaddress.ip_address(info[4][0].split("%", 1)[0]))
+            except ValueError:
+                return True
+    for address in addresses:
+        mapped = getattr(address, "ipv4_mapped", None)
+        for a in (address, mapped):
+            if a is not None and (
+                a.is_loopback or a.is_private or a.is_link_local or a.is_unspecified or a.is_reserved
+            ):
+                return True
+    return False
+
+
 def url_for(host: str, port: int) -> str:
     return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 

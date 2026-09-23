@@ -121,8 +121,29 @@ def _address_id(url: str) -> str:
     return f"{_slug(parsed.hostname or 'source')}-{port}"
 
 
+def _refuse_server_network(url: str) -> None:
+    from app.router.base import ProviderError
+
+    if detect.reaches_server_network(url):
+        raise ProviderError(
+            f"{redact(url)} now points at the server's own network, so it can't be used from "
+            "this account.",
+            retryable=False,
+        )
+
+
 class SourceRegistry:
-    def __init__(self) -> None:
+    def __init__(self, store=None, tuning=None, *, may_add_local: bool = True) -> None:
+        #: Where sources added in Settings are saved: one account's file, or the
+        #: pre-accounts global one (`secrets_store`'s own functions) when not given.
+        self._store = store if store is not None else secrets_store
+        #: Handed to every provider, so its per-model settings are this account's.
+        self._tuning = tuning
+        #: Whether this account may add a source on this server or its private
+        #: network. Such an address is the server's, not the person's; in a hosted
+        #: backend, letting any account point it there is letting any account knock
+        #: on the server's internal services.
+        self._may_add_local = may_add_local
         self._providers: dict[str, SourceProvider] = {}
         self._unknown: list[dict] = []
         self._tried: list[str] = []
@@ -206,13 +227,15 @@ class SourceRegistry:
         A source's runtime is decided by what answers, in the first probe that
         follows; loading only records what someone said.
         """
-        for entry in settings.configured_sources:
+        # `.env` is the owner's configuration, keys and all: only the owner's
+        # router loads it.
+        for entry in settings.configured_sources if self._may_add_local else ():
             try:
                 self._load_configured(entry)
             except Exception as e:  # noqa: BLE001 - one bad entry must not stop the rest
                 log.warning("Ignoring the configured source at %s: %s", redact(entry.get("base_url")), e)
         renamed = False
-        for entry in secrets_store.get_sources():
+        for entry in self._store.get_sources():
             try:
                 if not isinstance(entry["base_url"], str):
                     raise SourceError("its address isn't text")
@@ -279,7 +302,13 @@ class SourceRegistry:
     def _register(self, source: Source) -> SourceProvider:
         self._unique_label(source)
         adapter = table.adapter_for(source.runtime)(source.base_url, source.api_key)
-        provider = SourceProvider(source, adapter)
+        provider = SourceProvider(source, adapter, self._tuning)
+        # Checked on every request rather than once at load: a name can point
+        # somewhere else later, and a DNS blip at load must not drop a source for
+        # good. A runtime on this server shared on purpose needs no guard.
+        shared_here = settings.share_local_runtimes and detect.is_loopback(source.base_url)
+        if not self._may_add_local and source.origin == ORIGIN_ADDED and not shared_here:
+            provider.guard = lambda url=source.base_url: _refuse_server_network(url)
         self._providers[source.id] = provider
         return provider
 
@@ -317,7 +346,13 @@ class SourceRegistry:
                     return
             self._detect_lock.acquire()
         try:
-            found = detect.detect()
+            # The server's own runtimes are the owner's — and, when the install says
+            # so, every account's. Nobody else's router looks for them.
+            found = (
+                detect.detect()
+                if self._may_add_local or settings.share_local_runtimes
+                else detect.Detection()
+            )
             # A source someone named that nobody has identified yet — its runtime
             # was still starting, say — is asked again, wherever it is.
             with self._lock:
@@ -420,6 +455,12 @@ class SourceRegistry:
         """
         url = normalise_url(base_url)
         key = clean_key(api_key)
+        if not self._may_add_local and detect.reaches_server_network(url):
+            raise SourceError(
+                f"{url} is on the machine this backend runs on or the private network "
+                "around it, and only the account that owns this install can add a source "
+                "there. Add a source at a public address instead."
+            )
         if not detect.is_loopback(url) and not confirm_remote:
             raise SourceError(
                 f"{url} is on another computer. Every prompt a build sends it leaves "
@@ -503,7 +544,7 @@ class SourceRegistry:
             return provider
 
     def _save(self) -> None:
-        secrets_store.save_sources(
+        self._store.save_sources(
             [
                 {
                     "id": p.source.id,

@@ -17,7 +17,9 @@ from typing import Optional
 
 import pytest
 
-from app.core import model_roles
+from tests.conftest import sign_in
+
+from app.core import model_roles, model_settings, secrets_store
 from app.core.constants import RoutingMode
 from app.router.base import ProviderError
 from app.router.runtimes import detect, table
@@ -280,10 +282,24 @@ def router_with(monkeypatch):
         monkeypatch.setattr(model_router.sources, "_detected_at", time.monotonic() + 3600)
         monkeypatch.setattr(model_router.sources, "_tried", ["http://127.0.0.1:11434", "http://127.0.0.1:1234"])
         monkeypatch.setattr(model_router, "_chosen_local", chosen)
-        monkeypatch.setattr(model_roles, "get", lambda role: None)
+        monkeypatch.setattr(model_router, "_roles", _NoRoles())
+        # Per-model settings in the module's own file, which tests point at tmp_path.
+        monkeypatch.setattr(model_router, "tuning", model_settings)
+        # Sources saved through the module's own functions, which tests replace.
+        monkeypatch.setattr(model_router.sources, "_store", secrets_store)
         return model_router
 
     return _install
+
+
+class _NoRoles:
+    """No role pointed anywhere: every role on the default."""
+
+    def get(self, role):
+        return None
+
+    def set_role(self, role, spec):
+        model_roles.set_role(role, spec)
 
 
 class FakeAdapter(RuntimeAdapter):
@@ -528,6 +544,7 @@ def test_downloads_are_offered_only_where_the_runtime_has_an_api(router_with):
 
     router_with(_source("llamacpp", [CHAT]))
     with TestClient(app) as client:
+        sign_in(client)
         refused = client.post("/api/settings/sources/llamacpp/pull", json={"model": "x"})
         assert refused.status_code == 400 and "doesn't download" in refused.json()["detail"]
         assert client.post("/api/settings/sources/llamacpp/pull", json={"model": "../etc"}).status_code == 400
@@ -579,7 +596,7 @@ def test_a_local_default_saved_the_old_way_is_read_with_its_source(tmp_path, mon
     from app.core import secrets_store
 
     monkeypatch.setattr(secrets_store, "_PATH", tmp_path / "providers.local.json")
-    secrets_store._write({"ollama": {"default_model": "qwen2.5:7b"}, "anthropic": {"api_key": "k"}})
+    secrets_store.default_store._write({"ollama": {"default_model": "qwen2.5:7b"}, "anthropic": {"api_key": "k"}})
     cloud = ("anthropic", "openai", "gemini")
     assert secrets_store.get_local_default(cloud) == "ollama:qwen2.5:7b"
 
@@ -845,6 +862,7 @@ def test_a_remote_source_is_refused_from_an_untrusted_host(router_with):
 
     router_with()
     with TestClient(app) as client:
+        sign_in(client)
         refused = client.post(
             "/api/settings/sources",
             json={"base_url": "http://10.0.0.5:8000", "confirm_remote": True},

@@ -1,4 +1,5 @@
-"""ORM models: projects, phase results, debates, analytics, knowledge docs."""
+"""ORM models: accounts and sessions, projects, phase results, debates, analytics,
+knowledge docs."""
 from __future__ import annotations
 
 import uuid
@@ -32,10 +33,53 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+class User(Base):
+    """One account. Everything a person makes or configures belongs to one of these.
+
+    `password_hash` is null only on the account the accounts migration creates to
+    hold what existed before accounts did: nobody can sign in to it until the first
+    person to set up this install claims it with an email and password.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    #: Lower-cased and trimmed when written, so one address is one account.
+    email: Mapped[Optional[str]] = mapped_column(String(320), unique=True, nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    #: The account that owns this install: the first one. It alone starts from the
+    #: keys in `.env`, reaches runtimes on the server's own network, and edits the
+    #: shared skill library.
+    is_owner: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    @property
+    def claimed(self) -> bool:
+        return bool(self.password_hash)
+
+
+class AuthSession(Base):
+    """A signed-in browser. The cookie holds a random token; only its hash is here,
+    so a copy of the database signs nobody in."""
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    #: The account this build belongs to. Nullable only because the column is added
+    #: to a populated table; the accounts migration fills every existing row, and
+    #: every route reads projects through their owner, so a null one is unreachable.
+    owner_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     idea: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 
@@ -285,6 +329,9 @@ class UsageEvent(Base):
     __tablename__ = "usage_events"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    #: Whose call this was — the dashboard shows each account only its own. Some
+    #: calls belong to no project, so the project cannot answer this.
+    owner_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     project_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     phase: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
     provider: Mapped[str] = mapped_column(String(32))
@@ -361,6 +408,9 @@ class KnowledgeDoc(Base):
     __tablename__ = "knowledge_docs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    #: The account that uploaded it. Its chunks are only ever searched for that
+    #: account's builds.
+    owner_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(512))
     content_type: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     chunks: Mapped[int] = mapped_column(Integer, default=0)

@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { api, SIGNED_OUT_EVENT, type Account } from "@/lib/api";
 import Sidebar from "./Sidebar";
 import { Icon } from "./icons";
 import { ShellChromeProvider, useChromeValue } from "./ShellChrome";
@@ -15,7 +16,7 @@ const DRAWER_BREAKPOINT = 900;
 // before the browser paints, so a desktop load never flashes a closed rail.
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
-function ShellBody({ children }: { children: ReactNode }) {
+function ShellBody({ children, account }: { children: ReactNode; account: Account }) {
   // Ships collapsed so the first paint on a phone is never a navigation drawer
   // covering the composer; resolved from the real viewport below.
   const [collapsed, setCollapsed] = useState(true);
@@ -60,7 +61,7 @@ function ShellBody({ children }: { children: ReactNode }) {
 
   return (
     <div className={"shell" + (collapsed ? " collapsed" : "") + (ready ? " ready" : "")}>
-      <Sidebar onClose={close} />
+      <Sidebar onClose={close} account={account} />
       <div className="ws-scrim" onClick={close} aria-hidden="true" />
       <div className="workspace">
         <header className="ws-top">
@@ -90,13 +91,62 @@ function ShellBody({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * Every page in the workspace is signed in. The account is asked for once, before
+ * anything that would ask the backend for someone's builds is drawn — so a signed-
+ * out visit goes straight to the door instead of flashing a rail of errors — and
+ * whenever the backend later says the session ended, the same thing happens,
+ * with the page the person was on kept to come back to.
+ */
 export default function AppShell({ children }: { children: ReactNode }) {
+  const router = useRouter();
+  const [account, setAccount] = useState<Account | null>(null);
+
+  const toDoor = useCallback(() => {
+    const here = window.location.pathname + window.location.search;
+    router.replace(here && here !== "/" ? `/signin?next=${encodeURIComponent(here)}` : "/signin");
+  }, [router]);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .authStatus()
+      .then((s) => {
+        if (!live) return;
+        if (s.user) setAccount(s.user);
+        else toDoor();
+      })
+      // Unreachable: the door says so, and offers to try again.
+      .catch(() => live && toDoor());
+    return () => {
+      live = false;
+    };
+  }, [toDoor]);
+
+  useEffect(() => {
+    const onSignedOut = () => {
+      setAccount(null);
+      toDoor();
+    };
+    window.addEventListener(SIGNED_OUT_EVENT, onSignedOut);
+    return () => window.removeEventListener(SIGNED_OUT_EVENT, onSignedOut);
+  }, [toDoor]);
+
+  if (!account) {
+    return (
+      <div className="shell-gate" role="status" aria-live="polite">
+        <span className="btn-spinner" aria-hidden="true" />
+        <span className="sr-only">Checking you&apos;re signed in…</span>
+      </div>
+    );
+  }
+
   return (
     <ShellChromeProvider>
       <a className="skip-link" href="#main">
         Skip to content
       </a>
-      <ShellBody>{children}</ShellBody>
+      <ShellBody account={account}>{children}</ShellBody>
     </ShellChromeProvider>
   );
 }
