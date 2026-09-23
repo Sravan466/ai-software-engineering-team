@@ -121,6 +121,17 @@ def _address_id(url: str) -> str:
     return f"{_slug(parsed.hostname or 'source')}-{port}"
 
 
+def _refuse_server_network(url: str) -> None:
+    from app.router.base import ProviderError
+
+    if detect.reaches_server_network(url):
+        raise ProviderError(
+            f"{redact(url)} now points at the server's own network, so it can't be used from "
+            "this account.",
+            retryable=False,
+        )
+
+
 class SourceRegistry:
     def __init__(self, store=None, tuning=None, *, may_add_local: bool = True) -> None:
         #: Where sources added in Settings are saved: one account's file, or the
@@ -216,7 +227,9 @@ class SourceRegistry:
         A source's runtime is decided by what answers, in the first probe that
         follows; loading only records what someone said.
         """
-        for entry in settings.configured_sources:
+        # `.env` is the owner's configuration, keys and all: only the owner's
+        # router loads it.
+        for entry in settings.configured_sources if self._may_add_local else ():
             try:
                 self._load_configured(entry)
             except Exception as e:  # noqa: BLE001 - one bad entry must not stop the rest
@@ -228,6 +241,10 @@ class SourceRegistry:
                     raise SourceError("its address isn't text")
                 url = normalise_url(entry["base_url"])
                 key = clean_key(entry.get("api_key") if isinstance(entry.get("api_key"), str) else None)
+                if not self._may_add_local and detect.reaches_server_network(url):
+                    # Checked again on every load: a name can point somewhere else
+                    # now than it did when it was added.
+                    raise SourceError("it now points at the server's own network")
             except Exception as e:  # noqa: BLE001 - kept as saved, never dropped
                 log.warning("The saved source at %s can't be used: %s", redact(entry.get("base_url")), e)
                 self._unloaded.append(entry)
@@ -290,6 +307,8 @@ class SourceRegistry:
         self._unique_label(source)
         adapter = table.adapter_for(source.runtime)(source.base_url, source.api_key)
         provider = SourceProvider(source, adapter, self._tuning)
+        if not self._may_add_local and source.origin == ORIGIN_ADDED:
+            provider.guard = lambda url=source.base_url: _refuse_server_network(url)
         self._providers[source.id] = provider
         return provider
 
@@ -327,7 +346,13 @@ class SourceRegistry:
                     return
             self._detect_lock.acquire()
         try:
-            found = detect.detect()
+            # The server's own runtimes are the owner's — and, when the install says
+            # so, every account's. Nobody else's router looks for them.
+            found = (
+                detect.detect()
+                if self._may_add_local or settings.share_local_runtimes
+                else detect.Detection()
+            )
             # A source someone named that nobody has identified yet — its runtime
             # was still starting, say — is asked again, wherever it is.
             with self._lock:

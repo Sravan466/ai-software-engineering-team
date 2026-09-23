@@ -456,6 +456,18 @@ class ModelRouter:
     ) -> SourceProvider:
         return self.sources.add(base_url, label=label, api_key=api_key, confirm_remote=confirm_remote)
 
+    def is_shared(self, prov: SourceProvider) -> bool:
+        """Whether `prov` is the server's runtime and this account doesn't own the install.
+
+        Judged by address as well as origin: setting a key on a detected source makes
+        it "added" for that account, and it is still the server's runtime afterwards.
+        """
+        if self.owner:
+            return False
+        from app.router.runtimes.detect import reaches_server_network
+
+        return prov.source.origin != "added" or reaches_server_network(prov.source.base_url)
+
     def remove_source(self, source_id: str) -> None:
         self.sources.remove(source_id)
 
@@ -473,7 +485,7 @@ class ModelRouter:
         prov = self.sources.get(source_id)
         if prov is None:
             raise SourceError(f"No model source is called '{source_id}'.")
-        if not self.owner and prov.source.origin != "added":
+        if self.is_shared(prov):
             raise SourceError(
                 f"{prov.source.label} runs on the machine this backend is on, and only the "
                 "account that owns this install can download models onto it."
@@ -901,6 +913,14 @@ class ModelRouter:
 
         prov, model = self._source_model(spec, saved_ok=not values)
         cleaned = generation.validate(values or {})
+        if cleaned.get("machine") and self.is_shared(prov):
+            # GPU layers, threads and keep-alive decide how the server's own machine
+            # is used, for everyone on it. Sampling stays each account's own.
+            raise ValueError(
+                f"Machine settings for {prov.source.label} decide how the server's own hardware is "
+                "used, so only the account that owns this install can set them. Sampling and "
+                "limits are yours to change."
+            )
         self.tuning.put(prov.settings_key(model), cleaned or None)
         # Window, reply and reasoning ceilings live in the profile; sampling is read
         # per call. Dropping the profile is what makes the first kind apply too.

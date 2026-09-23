@@ -37,9 +37,12 @@ async def lifespan(app: FastAPI):
     from app.db.models import User
     from app.router.router import routers
 
+    from app.api.routes.auth import announce_setup_token
+
     db = SessionLocal()
     try:
         owner = db.execute(select(User).where(User.is_owner.is_(True)).order_by(User.created_at)).scalars().first()
+        announce_setup_token(db)
     finally:
         db.close()
     if owner is not None:

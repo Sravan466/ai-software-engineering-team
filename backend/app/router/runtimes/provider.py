@@ -18,7 +18,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from app.core import model_settings
 from app.core.config import settings
@@ -134,6 +134,11 @@ class SourceProvider(LLMProvider):
         #: Where this account's per-model settings are kept — `model_settings`'s own
         #: functions (the pre-accounts file) when no store is given.
         self.tuning_store = tuning if tuning is not None else model_settings
+        #: Asked before every request this source sends, when set: raises if the
+        #: request must not go. Set on a source an account that doesn't own the
+        #: install added — its name is resolved again each time, so a name that
+        #: later points at the server's own network is refused, not followed.
+        self.guard: Optional[Callable[[], None]] = None
         self._profiles = ProfileCache()
         self._state: Optional[SourceState] = None
         self._state_lock = threading.Lock()
@@ -168,6 +173,7 @@ class SourceProvider(LLMProvider):
                 return current
             generation = self._generation
             try:
+                self._check_guard()
                 models = self.adapter.list_models()
                 current = SourceState(reachable=True, models=models, checked_at=time.monotonic())
             except ProviderError as e:
@@ -177,6 +183,10 @@ class SourceProvider(LLMProvider):
             if generation == self._generation:
                 self._state = current
             return current
+
+    def _check_guard(self) -> None:
+        if self.guard is not None:
+            self.guard()
 
     def invalidate(self) -> None:
         self._generation += 1
@@ -290,6 +300,7 @@ class SourceProvider(LLMProvider):
         if failed is not None and time.monotonic() - failed < _FAILED_DESCRIBE_SECONDS:
             return fallback_profile(self.name, model, local=True)
         try:
+            self._check_guard()
             info = self.adapter.model_info(model)
         except Exception as e:  # noqa: BLE001
             log.warning("Could not describe '%s' on %s: %s", model, self.source.base_url, e)
@@ -465,6 +476,7 @@ class SourceProvider(LLMProvider):
         )
         started = time.perf_counter()
         try:
+            self._check_guard()
             result = self.adapter.chat(request)
         except ProviderError as e:
             if e.unreachable:
@@ -612,6 +624,7 @@ class SourceProvider(LLMProvider):
     # ── embeddings ───────────────────────────────────────────────────────────
     def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
         try:
+            self._check_guard()
             return self.adapter.embed(model, inputs)
         except ProviderError as e:
             if e.unreachable:

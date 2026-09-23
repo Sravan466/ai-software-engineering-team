@@ -34,6 +34,29 @@ _client: Any = None
 _failed_until = 0.0
 
 
+_owners: dict[str, bool] = {}
+
+
+def name_for(base: str, account_id: str) -> str:
+    """The collection `account_id`'s vectors live in.
+
+    One per account: a collection's vector size is fixed by its first insert, and
+    each account chooses its own embedding model. The install's owner keeps the
+    collection that existed before accounts, so nothing already indexed is lost.
+    """
+    if account_id not in _owners:
+        from app.db.base import SessionLocal
+        from app.db.models import User
+
+        db = SessionLocal()
+        try:
+            user = db.get(User, account_id)
+            _owners[account_id] = bool(user is not None and user.is_owner)
+        finally:
+            db.close()
+    return base if _owners[account_id] else f"{base}_{account_id}"
+
+
 def collection(name: str, embedding_function: Any, owner: str) -> Optional[Any]:
     """The named collection on the shared client, or None if Chroma will not open.
 

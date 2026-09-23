@@ -400,7 +400,9 @@ def test_the_vector_stores_share_one_client_opened_once(monkeypatch, tmp_path):
     monkeypatch.setattr(chroma, "_failed_until", 0.0)
 
     stores = [KnowledgeBase(), MemoryStore()]
-    callers = [threading.Thread(target=stores[i % 2]._get_collection) for i in range(8)]
+    from tests.conftest import TEST_USER_ID
+
+    callers = [threading.Thread(target=stores[i % 2]._get_collection, args=(TEST_USER_ID,)) for i in range(8)]
     for t in callers:
         t.start()
     for t in callers:
@@ -408,7 +410,7 @@ def test_the_vector_stores_share_one_client_opened_once(monkeypatch, tmp_path):
 
     assert seen["peak"] == 1, "two Chroma clients were opened on one directory at once"
     assert seen["made"] == 1, "the two stores did not share one client"
-    assert all(s._collection is not None for s in stores)
+    assert all(s._collections for s in stores)
 
 
 def test_a_chroma_directory_that_will_not_open_is_not_retried_on_every_call(monkeypatch):

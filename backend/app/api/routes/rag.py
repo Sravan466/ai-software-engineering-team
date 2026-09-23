@@ -38,7 +38,7 @@ async def upload_document(
     chunks = chunk_text(text)
     # Embedding calls a model runtime over the network. Off the event loop, so one
     # upload does not stall every other request while the runtime works.
-    stored = await run_in_threadpool(knowledge_base.add_chunks, doc.id, chunks, doc.filename)
+    stored = await run_in_threadpool(knowledge_base.add_chunks, doc.id, chunks, doc.filename, user.id)
     doc.chunks = stored
     db.commit()
 
@@ -69,7 +69,7 @@ def delete_document(doc_id: str, user: User = Depends(current_user), db: Session
     doc = db.get(KnowledgeDoc, doc_id)
     if doc is None or doc.owner_id != user.id:
         raise HTTPException(404, "Document not found")
-    knowledge_base.delete_doc(doc_id)
+    knowledge_base.delete_doc(doc_id, user.id)
     db.delete(doc)
     db.commit()
 

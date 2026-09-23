@@ -182,7 +182,9 @@ def push(
 ) -> dict:
     s = _session(request)
     if not s:
-        raise HTTPException(401, "Connect your GitHub account first.")
+        # 409, not 401: a 401 means "sign in to this app", and the page would take
+        # the person to the sign-in screen instead of saying what's missing.
+        raise HTTPException(409, "Connect your GitHub account first.")
     try:
         return gh.push_project(
             s["token"],

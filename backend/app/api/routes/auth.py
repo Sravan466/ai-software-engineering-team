@@ -5,13 +5,15 @@ the backend already held projects from before accounts existed, that account was
 made by the migration without a password, and setting up claims it — every existing
 build included. After that, new accounts can only be made when `ALLOW_SIGNUP` is on.
 
-Setting up is taken only from this machine, or with `SETUP_TOKEN`: on a fresh
+Setting up is taken only from this machine, or with a setup token — `SETUP_TOKEN`,
+or the one-time token the backend prints in its log at startup — because on a fresh
 backend reachable from a network, whoever arrives first would otherwise own it.
 """
 from __future__ import annotations
 
 import hmac
 import ipaddress
+import secrets
 import threading
 from typing import Optional
 
@@ -23,8 +25,11 @@ from sqlalchemy.orm import Session
 from app.core import auth
 from app.core.auth import AuthError
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.base import get_db
 from app.db.models import User
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -64,7 +69,48 @@ def _client(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+#: Made at startup when the install still needs setting up and no SETUP_TOKEN is
+#: configured, and printed in the backend's log — so an install whose browser isn't
+#: on loopback (Docker's bridge, another computer) can still be set up, by whoever
+#: can read the server's output.
+_GENERATED_SETUP_TOKEN: Optional[str] = None
+
+
+def announce_setup_token(db: Session) -> Optional[str]:
+    """Make and log a one-time setup token, when setting up is still to be done."""
+    global _GENERATED_SETUP_TOKEN
+    if settings.setup_token or not _needs_setup(db):
+        _GENERATED_SETUP_TOKEN = None
+        return None
+    if _GENERATED_SETUP_TOKEN is None:
+        _GENERATED_SETUP_TOKEN = secrets.token_urlsafe(18)
+    log.warning(
+        "This install has no account yet. Set it up at %s/signin. From anywhere but this "
+        "machine, enter this one-time setup token: %s",
+        settings.frontend_base_url.rstrip("/"),
+        _GENERATED_SETUP_TOKEN,
+    )
+    return _GENERATED_SETUP_TOKEN
+
+
+def _setup_token_ok(given: Optional[str]) -> bool:
+    given = (given or "").strip()
+    if not given:
+        return False
+    for expected in (settings.setup_token, _GENERATED_SETUP_TOKEN):
+        if expected and hmac.compare_digest(given.encode(), expected.encode()):
+            return True
+    return False
+
+
+#: Headers a reverse proxy adds. A request carrying one came from somewhere else,
+#: whatever address it reached this process from.
+_PROXIED = ("x-forwarded-for", "x-real-ip", "forwarded")
+
+
 def _from_this_machine(request: Request) -> bool:
+    if any(request.headers.get(h) for h in _PROXIED):
+        return False
     host = _client(request)
     if host == "localhost":
         return True
@@ -135,7 +181,10 @@ def signin(body: SignIn, request: Request, response: Response, db: Session = Dep
         email = auth.normalise_email(body.email)
     except AuthError:
         raise HTTPException(status_code=401, detail="That email and password don't match an account.")
-    email_key = f"email:{email}"
+    # Failures are counted per email *from one address*: counted per email alone,
+    # anyone could lock the owner out by guessing wrong eight times. The limit per
+    # address still caps how fast any one place can guess.
+    email_key = f"email:{email}|{_client(request)}"
     _limited(email_key, settings.signin_failures_per_email)
     user = db.execute(select(User).where(User.email == email)).scalars().first()
     if not auth.verify_or_waste(body.password, user):
@@ -158,31 +207,32 @@ def signup(body: SignUp, request: Request, response: Response, db: Session = Dep
     name = (body.display_name or "").strip()[:120] or None
 
     with _SETUP_LOCK:
-        if db.execute(select(User).where(User.email == email)).scalars().first() is not None:
-            raise HTTPException(status_code=409, detail="An account with that email already exists. Sign in instead.")
-        if _needs_setup(db):
-            if not _from_this_machine(request):
-                expected = settings.setup_token or ""
-                given = body.setup_token or ""
-                if not expected or not hmac.compare_digest(given.encode(), expected.encode()):
-                    raise HTTPException(
-                        status_code=403,
-                        detail=(
-                            "Set this install up from the machine it runs on, or with the "
-                            "SETUP_TOKEN from its configuration."
-                        ),
-                    )
-            user = _claim_or_create_owner(db, email, name, auth.hash_password(body.password))
-        elif settings.allow_signup:
-            user = User(email=email, display_name=name, password_hash=auth.hash_password(body.password))
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-        else:
+        setting_up = _needs_setup(db)
+        # Closed first, then taken: "that email has an account" is only ever said to
+        # someone who could have made one.
+        if not setting_up and not settings.allow_signup:
             raise HTTPException(
                 status_code=403,
                 detail="This install isn't taking new accounts. Ask its owner to turn on sign-ups.",
             )
+        if setting_up and not _from_this_machine(request) and not _setup_token_ok(body.setup_token):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Set this install up from the machine it runs on, or with the setup token — "
+                    "SETUP_TOKEN in its configuration, or the one-time token the backend printed "
+                    "in its log when it started."
+                ),
+            )
+        if db.execute(select(User).where(User.email == email)).scalars().first() is not None:
+            raise HTTPException(status_code=409, detail="An account with that email already exists. Sign in instead.")
+        if setting_up:
+            user = _claim_or_create_owner(db, email, name, auth.hash_password(body.password))
+        else:
+            user = User(email=email, display_name=name, password_hash=auth.hash_password(body.password))
+            db.add(user)
+            db.commit()
+            db.refresh(user)
     response.status_code = 201
     return _sign_in(response, request, db, user)
 

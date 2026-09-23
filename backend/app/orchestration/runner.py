@@ -1182,7 +1182,7 @@ class PipelineRunner:
             f"Monthly cost (USD): {cost.get('total_monthly_low_usd')}–{cost.get('total_monthly_high_usd')}"
         )
         try:
-            memory_store.remember(project.id, project.idea, summary)
+            memory_store.remember(project.id, project.idea, summary, owner_id=project.owner_id)
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to write long-term memory: %s", e)
 

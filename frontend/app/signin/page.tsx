@@ -13,10 +13,22 @@ type Mode = "signin" | "setup" | "signup";
 
 const MIN_PASSWORD = 10;
 
-/** Only ever go back to a page of this app — never an address someone put in the link. */
+/**
+ * Only ever go back to a page of this app — never an address someone put in the link.
+ * Resolved the way the browser will resolve it, and kept only if it stays here:
+ * `/\evil.com` looks like a path and is another site.
+ */
 function safeNext(raw: string | null): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/signin")) return "/";
-  return raw;
+  if (typeof window === "undefined") return "/";
+  if (!raw || !raw.startsWith("/") || /[\\\u0000-\u001f]/.test(raw)) return "/";
+  try {
+    const here = window.location.origin;
+    const url = new URL(raw, here);
+    if (url.origin !== here || url.pathname.startsWith("/signin")) return "/";
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return "/";
+  }
 }
 
 /**
@@ -288,8 +300,9 @@ function SignIn() {
                   onChange={(e) => setToken(e.target.value)}
                 />
                 <span className="field-hint">
-                  You&apos;re not on the machine this backend runs on, so setting it up needs the
-                  SETUP_TOKEN from its configuration.
+                  You&apos;re not on the machine this backend runs on, so setting it up needs a
+                  setup token: SETUP_TOKEN from its configuration, or the one-time token the
+                  backend printed in its log when it started.
                 </span>
               </div>
             )}

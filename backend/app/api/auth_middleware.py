@@ -15,11 +15,11 @@ signed in.
 from __future__ import annotations
 
 import json
-from http.cookies import SimpleCookie
 from typing import Optional
 from urllib.parse import urlparse
 
 import anyio
+from starlette.requests import cookie_parser
 
 from app.core import auth, identity
 from app.core.config import settings
@@ -67,13 +67,11 @@ def _cookie(scope) -> Optional[str]:
     raw = _header(scope, b"cookie")
     if not raw:
         return None
-    jar = SimpleCookie()
-    try:
-        jar.load(raw)
-    except Exception:  # noqa: BLE001 - a malformed cookie header signs nobody in
-        return None
-    morsel = jar.get(auth.COOKIE)
-    return morsel.value if morsel else None
+    # Starlette's parser, the one `request.cookies` uses: lenient on purpose. Every
+    # app on localhost shares this browser's cookies for the name, and the strict
+    # stdlib parser stops at the first one it can't read — so another dev server's
+    # cookie would silently sign everyone out of this one.
+    return cookie_parser(raw).get(auth.COOKIE)
 
 
 def _lookup(token: Optional[str]) -> Optional[str]:

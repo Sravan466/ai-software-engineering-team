@@ -24,19 +24,24 @@ _COLLECTION = "project_memory"
 
 class MemoryStore:
     def __init__(self) -> None:
-        self._collection = None
+        self._collections: dict[str, object] = {}
 
-    def _get_collection(self):
-        if self._collection is None:
+    def _get_collection(self, owner_id: str):
+        name = chroma.name_for(_COLLECTION, owner_id)
+        if name not in self._collections:
             # The shared client lives in `app.rag.chroma`, which opens it once,
             # behind the lock both stores take — see there for why.
-            self._collection = chroma.collection(
-                _COLLECTION, SourceEmbeddingFunction(), owner="Memory store"
-            )
-        return self._collection
+            col = chroma.collection(name, SourceEmbeddingFunction(), owner="Memory store")
+            if col is None:
+                return None
+            self._collections[name] = col
+        return self._collections[name]
 
-    def remember(self, project_id: str, idea: str, summary: str) -> None:
-        col = self._get_collection()
+    def remember(self, project_id: str, idea: str, summary: str, owner_id: Optional[str] = None) -> None:
+        owner_id = owner_id or identity.current_user_id()
+        if not owner_id:
+            return
+        col = self._get_collection(owner_id)
         if col is None:
             return
         try:
@@ -73,7 +78,7 @@ class MemoryStore:
         project_ids = self._project_ids(owner_id, exclude_project_id)
         if not project_ids:
             return ""
-        col = self._get_collection()
+        col = self._get_collection(owner_id)
         if col is None:
             return ""
         try:

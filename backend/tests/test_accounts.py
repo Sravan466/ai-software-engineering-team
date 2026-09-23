@@ -163,7 +163,8 @@ def test_searches_only_read_your_own_documents_and_memory(monkeypatch):
             return {"documents": [["chunk"]], "metadatas": [[{"filename": "a.md"}]]}
 
     kb, memory = KnowledgeBase(), MemoryStore()
-    kb._collection = memory._collection = _Collection()
+    shared = _Collection()
+    kb._get_collection = memory._get_collection = lambda owner_id: shared  # type: ignore[method-assign]
     assert kb.query("anything", owner_id=b_user.id) == "", "B searched A's documents"
     assert memory.recall("anything", owner_id=b_user.id) == "", "B recalled A's builds"
     assert asked == [], "nothing of B's to search, so nothing should have been asked"
@@ -519,4 +520,139 @@ def test_setting_up_from_another_machine_needs_the_setup_token(monkeypatch):
     with SessionLocal() as db:
         made = db.execute(select(User).where(User.email == body["email"])).scalars().one()
         db.delete(made)
+        db.commit()
+
+
+def test_a_key_on_the_servers_runtime_does_not_make_it_yours_to_download_onto(monkeypatch):
+    """Setting a key turns a detected source into an added one; it's still the server's."""
+    from app.router.runtimes.sources import SourceError
+    from tests.test_runtimes import FakeAdapter, _source
+
+    router = ModelRouter(_account().id, owner=False)
+    prov = _source("ollama", [])
+    prov.source.base_url = "http://127.0.0.1:11434"
+    prov.adapter = FakeAdapter([])
+    prov.adapter.can_download = True
+    router.sources._providers = {"ollama": prov}
+    router.sources._loaded = True
+    prov.source.origin = "added"  # what `set_key` leaves behind
+    assert router.is_shared(prov)
+    with pytest.raises(SourceError, match="owns this install"):
+        list(router.pull("ollama", "some-model"))
+    assert not ModelRouter(_account(owner=True).id, owner=True).is_shared(prov)
+
+
+def test_machine_settings_on_the_servers_runtime_are_the_owners(monkeypatch):
+    from app.router.runtimes.types import ModelEntry
+    from tests.test_runtimes import _source
+
+    router = ModelRouter(_account().id, owner=False)
+    prov = _source("lmstudio", [ModelEntry(name="a", kind="chat")])
+    router.sources._providers = {"lmstudio": prov}
+    router.sources._loaded = True
+    with pytest.raises(ValueError, match="server's own hardware"):
+        router.set_model_generation("lmstudio:a", {"machine": {"keep_alive": "24h"}})
+    # Sampling is still each account's own.
+    router.set_model_generation("lmstudio:a", {"sampling": {"temperature": 0.3}})
+    assert router.tuning.get(prov.settings_key("a")) == {"sampling": {"temperature": 0.3}}
+
+
+# ── what the review of #45 found ──────────────────────────────────────────────
+def test_the_owners_env_sources_and_the_servers_runtimes_are_not_other_accounts(monkeypatch):
+    from app.router.runtimes import detect as detect_module
+    from app.router.runtimes.types import Hello
+
+    monkeypatch.setattr(
+        settings, "local_sources", '[{"base_url": "https://paid.example.com", "api_key": "sk-owner-secret"}]'
+    )
+    monkeypatch.setattr(settings, "ollama_base_url", "")
+    probed: list = []
+
+    def fake_detect():
+        probed.append(1)
+        return detect_module.Detection(found=[Hello(runtime="ollama", base_url="http://127.0.0.1:11434")])
+
+    monkeypatch.setattr(detect_module, "detect", fake_detect)
+    monkeypatch.setattr(detect_module, "answers_http", lambda url, **_: False)
+
+    other = ModelRouter(_account().id, owner=False)
+    other.sources.ensure(wait=True)
+    assert other.sources.ids() == set(), "another account got the owner's .env source or the server's runtime"
+    assert not probed, "another account's router probed the server's loopback"
+
+    owner = ModelRouter(_account(owner=True).id, owner=True)
+    owner.sources.ensure(wait=True)
+    assert any(p.source.api_key == "sk-owner-secret" for p in owner.sources.providers())
+
+    monkeypatch.setattr(settings, "share_local_runtimes", True)
+    shared = ModelRouter(_account().id, owner=False)
+    shared.sources.ensure(wait=True)
+    assert all(p.source.api_key != "sk-owner-secret" for p in shared.sources.providers())
+    assert any(p.source.origin == "detected" for p in shared.sources.providers()), "opted in, but not shared"
+
+
+def test_a_name_that_later_points_at_the_server_is_refused_on_every_request(monkeypatch):
+    from app.router.base import ProviderError
+    from app.router.runtimes import detect as detect_module
+    from app.router.runtimes.types import Hello
+
+    router = ModelRouter(_account().id, owner=False)
+    router.sources._loaded = True
+    router.sources._detected_at = 10**9
+    points_home = {"now": False}
+    monkeypatch.setattr(detect_module, "reaches_server_network", lambda url: points_home["now"])
+    monkeypatch.setattr(detect_module, "identify", lambda url, key=None, **_: Hello(runtime="vllm", base_url=url))
+    monkeypatch.setattr(router.sources, "_save", lambda: None)
+    prov = router.add_source("http://rebind.example.com:8000", confirm_remote=True)
+    assert prov.guard is not None
+    points_home["now"] = True  # DNS flipped to 127.0.0.1 after the source was added
+    with pytest.raises(ProviderError, match="server's own network"):
+        prov.embed("m", ["x"])
+    assert prov.state(max_age=0).reachable is False
+
+
+def test_a_cookie_another_app_set_does_not_sign_anyone_out(client):
+    token = client.cookies.get(auth.COOKIE)
+    with TestClient(app) as c:
+        r = c.get("/api/projects", headers={"cookie": f'x={{"k":1}}; a=b c; {auth.COOKIE}={token}'})
+    assert r.status_code == 200, "a stray cookie from another localhost app locked the session out"
+
+
+def test_pushing_without_github_is_not_mistaken_for_signing_out(client):
+    pid = client.post("/api/projects", json={"idea": "A shared grocery list"}).json()["id"]
+    r = client.post(f"/api/github/push/{pid}", json={})
+    assert r.status_code == 409
+
+
+def test_while_sign_ups_are_closed_nobody_learns_which_emails_have_accounts(monkeypatch):
+    auth.attempts.reset()
+    user = _account()
+    with TestClient(app) as c:
+        taken = c.post("/api/auth/signup", json={"email": user.email, "password": PASSWORD})
+        free = c.post("/api/auth/signup", json={"email": "free@example.com", "password": PASSWORD})
+    assert taken.status_code == free.status_code == 403
+    assert taken.json() == free.json()
+
+
+def test_a_proxied_request_is_never_from_this_machine_and_the_logged_token_sets_up(monkeypatch):
+    from app.api.routes import auth as auth_routes
+
+    auth.attempts.reset()
+    monkeypatch.setattr(auth_routes, "_needs_setup", lambda db: True)
+    # Reached this process from loopback, as it would behind a proxy on this host.
+    monkeypatch.setattr(auth_routes, "_client", lambda request: "127.0.0.1")
+    monkeypatch.setattr(settings, "setup_token", None)
+    with SessionLocal() as db:
+        token = auth_routes.announce_setup_token(db)
+    assert token
+    body = {"email": f"{uuid.uuid4().hex[:8]}@example.com", "password": PASSWORD}
+    with TestClient(app) as c:
+        proxied = c.get("/api/auth/status", headers={"x-forwarded-for": "203.0.113.9"})
+        assert proxied.json()["setup_needs_token"] is True, "a proxy made the whole internet look local"
+        assert c.post("/api/auth/signup", json=body, headers={"x-forwarded-for": "203.0.113.9"}).status_code == 403
+        r = c.post("/api/auth/signup", json={**body, "setup_token": token}, headers={"x-forwarded-for": "203.0.113.9"})
+        assert r.status_code == 201
+    monkeypatch.setattr(auth_routes, "_GENERATED_SETUP_TOKEN", None)
+    with SessionLocal() as db:
+        db.delete(db.execute(select(User).where(User.email == body["email"])).scalars().one())
         db.commit()

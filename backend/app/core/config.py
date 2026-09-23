@@ -274,6 +274,9 @@ class Settings(BaseSettings):
     #: install has an owner. Off by default: on a self-hosted backend, an account is
     #: a way to spend the owner's machine. Turn it on for a hosted, multi-user one.
     allow_signup: bool = False
+    #: Let every account use the runtimes found running on this server (never the
+    #: sources in `.env`, which carry the owner's keys). Off: they are the owner's.
+    share_local_runtimes: bool = False
     #: Required to set up the install's first account from anywhere but this machine.
     #: Without it, the first account can only be created from loopback — otherwise
     #: whoever reaches a fresh install first would own it and every build on it.

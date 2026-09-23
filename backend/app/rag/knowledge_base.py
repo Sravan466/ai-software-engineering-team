@@ -28,20 +28,25 @@ _COLLECTION = "knowledge_base"
 
 class KnowledgeBase:
     def __init__(self) -> None:
-        self._collection = None
+        self._collections: dict[str, object] = {}
 
-    def _get_collection(self):
-        if self._collection is None:
+    def _get_collection(self, owner_id: str):
+        name = chroma.name_for(_COLLECTION, owner_id)
+        if name not in self._collections:
             # The shared client lives in `app.rag.chroma`, which opens it once,
             # behind the lock both stores take — see there for why.
-            self._collection = chroma.collection(
-                _COLLECTION, SourceEmbeddingFunction(), owner="Knowledge base"
-            )
-        return self._collection
+            col = chroma.collection(name, SourceEmbeddingFunction(), owner="Knowledge base")
+            if col is None:
+                return None
+            self._collections[name] = col
+        return self._collections[name]
 
-    def add_chunks(self, doc_id: str, chunks: list[str], filename: str) -> int:
-        col = self._get_collection()
-        if col is None or not chunks:
+    def add_chunks(self, doc_id: str, chunks: list[str], filename: str, owner_id: Optional[str] = None) -> int:
+        owner_id = owner_id or identity.current_user_id()
+        if not owner_id or not chunks:
+            return 0
+        col = self._get_collection(owner_id)
+        if col is None:
             return 0
         ids = [f"{doc_id}-{i}" for i in range(len(chunks))]
         metadatas = [{"doc_id": doc_id, "filename": filename, "chunk": i} for i in range(len(chunks))]
@@ -75,7 +80,7 @@ class KnowledgeBase:
         doc_ids = self._doc_ids(owner_id)
         if not doc_ids:
             return ""
-        col = self._get_collection()
+        col = self._get_collection(owner_id)
         if col is None:
             return ""
         try:
@@ -95,8 +100,11 @@ class KnowledgeBase:
             log.warning("Knowledge base query failed: %s", e)
             return ""
 
-    def delete_doc(self, doc_id: str) -> None:
-        col = self._get_collection()
+    def delete_doc(self, doc_id: str, owner_id: Optional[str] = None) -> None:
+        owner_id = owner_id or identity.current_user_id()
+        if not owner_id:
+            return
+        col = self._get_collection(owner_id)
         if col is None:
             return
         try:

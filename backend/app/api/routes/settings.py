@@ -282,7 +282,7 @@ def pull_model(source_id: str, body: PullRequest):
     source = model_router.source(source_id)
     if source is None:
         raise HTTPException(status_code=404, detail=f"No model source is called '{source_id}'.")
-    if not model_router.owner and source.source.origin != "added":
+    if model_router.is_shared(source):
         raise HTTPException(
             status_code=403,
             detail=(
