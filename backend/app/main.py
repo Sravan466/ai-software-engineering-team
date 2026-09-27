@@ -79,6 +79,8 @@ app.add_middleware(
 from app.api.routes import (  # noqa: E402
     analytics,
     auth as auth_routes,
+    connector as connector_routes,
+    devices,
     github,
     models,
     preview,
@@ -97,6 +99,8 @@ app.include_router(skills.router)
 app.include_router(analytics.router)
 app.include_router(settings_routes.router)
 app.include_router(github.router)
+app.include_router(devices.router)
+app.include_router(connector_routes.router)
 
 
 @app.get("/health", tags=["health"])

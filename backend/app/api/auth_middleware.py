@@ -34,6 +34,10 @@ PUBLIC = frozenset(
         "/api/auth/signin",
         "/api/auth/signup",
         "/api/auth/signout",
+        # The connector has no browser session: it pairs with a code only a signed-in
+        # account can make, and its socket is authenticated by a device signature.
+        "/api/connector/pair/lookup",
+        "/api/connector/pair/claim",
     }
 )
 

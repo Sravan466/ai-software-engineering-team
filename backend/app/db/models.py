@@ -1,4 +1,4 @@
-"""ORM models: accounts and sessions, projects, phase results, debates, analytics,
+"""ORM models: accounts and sessions, paired computers, projects, phase results, debates, analytics,
 knowledge docs."""
 from __future__ import annotations
 
@@ -415,3 +415,65 @@ class KnowledgeDoc(Base):
     content_type: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     chunks: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Device(Base):
+    """A computer paired to an account through the connector.
+
+    The server holds only the device's **public** key: the connector made the
+    keypair itself, and the private half never leaves that computer. Every
+    connection proves it still holds it by signing a fresh challenge.
+
+    A device is `pending` from the moment its connector claims a pairing code until
+    the account approves it on the website, and nothing is sent to it before that.
+    Forgetting a device deletes this row, which is the revocation: there is no
+    other credential to revoke.
+    """
+
+    __tablename__ = "devices"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    #: What the account calls it. Starts as the computer's own name.
+    name: Mapped[str] = mapped_column(String(120))
+    #: Raw Ed25519 public key, base64url without padding.
+    public_key: Mapped[str] = mapped_column(String(64), unique=True)
+    #: pending | approved — see `app.connector.protocol`.
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    os: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    connector_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: The network address the pairing came from, shown when approving it. An
+    #: approximate location, and the only one this server can honestly give.
+    paired_from: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    #: The last `hello` the connector sent: runtimes, models, RAM. Validated
+    #: against its schema before it is stored.
+    hello: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: The account's choices on this computer, as `source:model`.
+    chat_model: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    embed_model: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PairingCode(Base):
+    """One "Connect my computer" code (RFC 8628's user code, typed the other way).
+
+    Made only for a signed-in account, single-use, short-lived. Only a hash is
+    stored, and each code allows a handful of attempts before it is burned.
+    """
+
+    __tablename__ = "pairing_codes"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    #: Set when a connector claims it; a claimed code never works again.
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: The device the claim created. Nulled if that device is forgotten.
+    device_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
