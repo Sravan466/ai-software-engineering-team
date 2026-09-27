@@ -15,6 +15,7 @@ runtime that is. What lives here is everything that is the same for every runtim
 """
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -24,7 +25,8 @@ from app.core import model_settings
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.router import compat, generation
-from app.router.base import LLMProvider, ProviderError
+from app.router import inflight
+from app.router.base import LLMProvider, ProviderError, RequestCancelled
 from app.router.model_profile import (
     ModelProfile,
     ProfileCache,
@@ -253,6 +255,18 @@ class SourceProvider(LLMProvider):
     def is_same_machine(self) -> bool:
         return self.source.same_machine
 
+    def ram_bytes(self) -> Optional[int]:
+        """The memory of the computer the runtime runs on, or None when unknown.
+
+        This machine's, when the runtime shares it. A source on another host can't
+        say, and a clamp built on this machine's RAM would be about the wrong one.
+        """
+        return total_ram_bytes() if self.source.same_machine else None
+
+    def remote_host(self) -> bool:
+        """Whether the model runs on a computer whose memory this backend can't see."""
+        return not self.source.same_machine
+
     def forget(self, model: Optional[str] = None) -> None:
         """Drop cached profiles — after a download, or when the default changes.
 
@@ -315,7 +329,7 @@ class SourceProvider(LLMProvider):
         # this machine's RAM says nothing about what fits there, and a clamp built on
         # it would be a number about the wrong computer. `None` reaches
         # `build_profile` as "unknown, so do not clamp".
-        ram = total_ram_bytes() if self.source.same_machine else None
+        ram = self.ram_bytes()
         return self._profiles.put(
             key,
             build_profile(
@@ -328,7 +342,7 @@ class SourceProvider(LLMProvider):
         info = self._infos.get(model)
         if info is None:
             return self.profile(model)
-        ram = total_ram_bytes() if self.source.same_machine else None
+        ram = self.ram_bytes()
         return build_profile(provider=self.name, model=model, info=info, ram_bytes=ram, tuning=None)
 
     def forget_profile(self, model: str) -> None:
@@ -348,8 +362,8 @@ class SourceProvider(LLMProvider):
         return compat.assess(
             f"{self.source.id}:{model}",
             profile,
-            ram_bytes=total_ram_bytes() if self.source.same_machine else None,
-            remote=not self.source.same_machine,
+            ram_bytes=self.ram_bytes(),
+            remote=self.remote_host(),
             probed=profile.described or profile.kind is not None,
             window_hint=meta.window_hint,
             kv_hint=meta.kv_hint,
@@ -475,10 +489,21 @@ class SourceProvider(LLMProvider):
             json_mode=options.json_mode,
             structured_output=profile.structured_output,
         )
+        request.request_id = secrets.token_hex(8)
         started = time.perf_counter()
         try:
             self._check_guard()
-            result = self.adapter.chat(request)
+            # Registered with the build it is for, so Stop can cut it short: the
+            # adapter closes the connection and the runtime stops generating.
+            with inflight.track(request.request_id, lambda rid=request.request_id: self.adapter.cancel(rid)):
+                try:
+                    result = self.adapter.chat(request)
+                except ProviderError as e:
+                    if inflight.was_cancelled(request.request_id) and not isinstance(e, RequestCancelled):
+                        raise RequestCancelled() from None
+                    raise
+        except RequestCancelled:
+            raise
         except ProviderError as e:
             if e.unreachable:
                 self._mark_down(str(e))

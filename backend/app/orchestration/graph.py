@@ -33,6 +33,7 @@ from app.orchestration import debate as debate_step
 from app.orchestration.charter import binding_on, freeze
 from app.orchestration.debate import conduct_debate, decision_summary
 from app.orchestration.state import PipelineState
+from app.router.base import ComputerDisconnected, RequestCancelled
 from app.rag.knowledge_base import knowledge_base
 from app.skills import selection as skills
 
@@ -159,6 +160,8 @@ def run_debate(state: PipelineState) -> tuple[Optional[dict], str]:
             mode=RoutingMode(state.get("routing_mode", "local_only")),
             preferred_model=state.get("preferred_model"),
         )
+    except (ComputerDisconnected, RequestCancelled):
+        raise  # not the debate failing: a computer to wait for, or a Stop
     except Exception as e:  # noqa: BLE001 - debate is best-effort
         log.warning("Debate step failed (continuing without it): %s", e)
         return None, ""

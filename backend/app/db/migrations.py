@@ -52,6 +52,8 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # Nullable: a run started before skills existed was told nothing about them,
         # and writing an empty override set into it would claim a choice nobody made.
         "skill_overrides",
+        # Nullable: only a build paused for a user's computer names one.
+        "paused_device_id",
     ),
     "phase_results": (
         "started_at",

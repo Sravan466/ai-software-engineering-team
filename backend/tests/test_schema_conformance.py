@@ -244,9 +244,10 @@ def test_a_failure_that_was_never_about_the_schema_keeps_its_advice():
             raise httpx.HTTPStatusError("404", request=None, response=self)
 
     provider = _ollama()
+    # Chat goes through a client of its own, so Stop can close it mid-generation.
     with patch.object(OllamaAdapter, "_show", return_value=None), patch(
         "httpx.post", return_value=_NotFound()
-    ):
+    ), patch("httpx.Client.post", return_value=_NotFound()):
         with pytest.raises(ProviderError) as caught:
             provider.generate(
                 [],

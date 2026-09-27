@@ -11,8 +11,14 @@ the connector answers:
                        `request` {id, op, args}: one of `OPS`, and nothing else
                        `reauth`  {nonce}: sign this to keep the connection
                        `bye`     {reason, code}: the server is closing, and why
-  connector → server   `response` {id, ok, result | error}
+  connector → server   `response` {id, ok, result | error, code?}
                        `reauth`   {sig}
+
+`chat`, `embed` and `cancel` carry a model call. Their arguments and answers have a
+schema each (`ChatArgs` / `ChatReport`, `EmbedArgs` / `EmbedReport`, `CancelArgs`),
+checked by the connector before it acts and by the server before it believes the
+answer. `ChatArgs` has no field for a machine-resource setting — GPU layers,
+threads, keep-alive — so one the server sends is a protocol error, never applied.
 
 Every model is `extra="forbid"`: a field either side doesn't know is a protocol
 error, and the connection closes (RFC 6455 §10.7) rather than guessing.
@@ -34,9 +40,10 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 PROTOCOL = "aiteam-connect/1"
 PACKAGE = "aiteam-connect"
 #: The version this server shows in its pinned install command.
-CONNECTOR_VERSION = "0.1.0"
+CONNECTOR_VERSION = "0.2.0"
 #: A connector older than this is told it is out of date and sent nothing else.
-MIN_CONNECTOR_VERSION = "0.1.0"
+#: 0.2.0 is the first that runs model calls: an older one would refuse every build.
+MIN_CONNECTOR_VERSION = "0.2.0"
 
 WS_PATH = "/api/connector/ws"
 AUTH_SCHEME = "AiteamDevice"
@@ -49,9 +56,10 @@ CODE_TTL_SECONDS = 600
 #: Lookups and claims one code allows before it is burned.
 CODE_MAX_ATTEMPTS = 5
 
-#: Both directions. Python `websockets` defaults to 1 MiB and uvicorn to 16 MiB; a
-#: model list is a few kilobytes, so anything near this is not a model list.
-MAX_MESSAGE_BYTES = 256 * 1024
+#: Both directions. Python `websockets` defaults to 1 MiB and uvicorn to 16 MiB. A
+#: model list is a few kilobytes; a prompt for a 128k-token window, JSON-escaped, is
+#: a few hundred — so this fits the largest prompt a build sends, and nothing more.
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 #: A signed handshake is good for this long either side of the server's clock.
 HANDSHAKE_SKEW_SECONDS = 60
 REAUTH_EVERY_SECONDS = 600
@@ -76,7 +84,19 @@ CLOSE_TOO_BIG = 1009
 
 #: The only operations a connector performs. Each maps to one typed adapter
 #: operation; there is no way to name a URL, path, header or method.
-OPS = ("hello", "list_models", "model_info", "ping")
+OPS = ("hello", "list_models", "model_info", "ping", "chat", "embed", "cancel")
+#: The operations that run a model, and so count against the connector's limits.
+MODEL_OPS = ("chat", "embed")
+
+#: Why a connector refused, when it wasn't the runtime's own error. The server acts
+#: on these: `paused` and `busy` pause a build, `limit` stops it with the message.
+ERR_LIMIT = "limit"  # over one of this computer's limits
+ERR_PAUSED = "paused"  # paused on this computer (`aiteam-connect pause`)
+ERR_CANCELLED = "cancelled"  # stopped by a `cancel`
+ERR_REFUSED = "refused"  # not something this connector does
+ERR_RUNTIME = "runtime"  # the runtime answered with an error
+ERR_UNREACHABLE = "unreachable"  # the runtime isn't answering on this computer
+ERROR_CODES = (ERR_LIMIT, ERR_PAUSED, ERR_CANCELLED, ERR_REFUSED, ERR_RUNTIME, ERR_UNREACHABLE)
 
 #: What the server may never ask for, whatever it sends. The connector refuses every
 #: op not in `OPS` anyway; these are named so a refusal can say what was attempted,
@@ -215,6 +235,8 @@ class ResponseMessage(_Strict):
     ok: bool
     result: Optional[Any] = None
     error: Optional[str] = Field(default=None, max_length=2000)
+    #: One of `ERROR_CODES` when `ok` is false.
+    code: Optional[str] = Field(default=None, max_length=16)
 
 
 class ConnectorReauth(_Strict):
@@ -270,17 +292,122 @@ class HelloReport(_Strict):
     tried: list[str] = Field(default_factory=list, max_length=64)
     #: Which operations this connector answers. Always a subset of `OPS`.
     capabilities: list[str] = Field(default_factory=list, max_length=16)
+    #: The limits this computer enforces, so the website can say what they are.
+    limits: Optional["LimitsReport"] = None
+    #: True while model calls are paused on this computer.
+    paused: bool = False
 
 
 class ModelInfoReport(_Strict):
-    """The parts of `ModelInfo` the website shows, and nothing it doesn't."""
+    """What a build needs to know about one model to size its prompts: the window,
+    the size, what it can be asked for. Flat numbers and short labels only."""
 
     name: str = Field(max_length=300)
     context_window: Optional[int] = Field(default=None, ge=0)
+    context_source: Optional[str] = Field(default=None, max_length=16)
+    parameters_total: Optional[int] = Field(default=None, ge=0)
+    parameters_active: Optional[int] = Field(default=None, ge=0)
     parameter_label: Optional[str] = Field(default=None, max_length=32)
     quantization: Optional[str] = Field(default=None, max_length=32)
     kind: Optional[str] = Field(default=None, max_length=32)
+    capabilities: Optional[list[str]] = Field(default=None, max_length=32)
     structured_output: Optional[str] = Field(default=None, max_length=16)
     thinking: Optional[str] = Field(default=None, max_length=16)
     is_local: bool = True
+    architecture: Optional[str] = Field(default=None, max_length=64)
+    kv_bytes_per_token: Optional[int] = Field(default=None, ge=0)
+    kv_bytes_per_token_windowed: int = Field(default=0, ge=0)
+    sliding_window: Optional[int] = Field(default=None, ge=0)
+    experts_total: Optional[int] = Field(default=None, ge=0)
+    experts_active: Optional[int] = Field(default=None, ge=0)
     weights_bytes: Optional[int] = Field(default=None, ge=0)
+    #: Sampling defaults the runtime declares, in `SAMPLING_KEYS` names.
+    defaults: dict[str, Union[float, int, str, list[str], None]] = Field(default_factory=dict, max_length=16)
+    runtime_version: Optional[str] = Field(default=None, max_length=64)
+
+
+# ── model calls ──────────────────────────────────────────────────────────────
+_SOURCE_ID = r"^[a-z0-9][a-z0-9-]{0,47}$"
+_REQUEST_ID = r"^[0-9a-f]{8,32}$"
+#: Most messages one chat may carry, and the longest `stop` list.
+MAX_CHAT_MESSAGES = 400
+MAX_EMBED_INPUTS = 256
+
+
+class LimitsReport(_Strict):
+    """The limits a connector enforces on this computer. Set there, never here."""
+
+    concurrency: int = Field(ge=1, le=64)
+    requests_per_minute: int = Field(ge=1, le=10_000)
+    max_prompt_chars: int = Field(ge=1_000)
+    max_output_tokens: int = Field(ge=16)
+    timeout_seconds: int = Field(ge=5, le=24 * 3600)
+
+
+class ChatTurn(_Strict):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class ChatArgs(_Strict):
+    """One completion, as the server may ask for it.
+
+    Only sampling settings travel: GPU layers, threads, keep-alive and the KV cache
+    type are this computer's to set, in its own config, and a request that names one
+    doesn't match this schema — so it is refused, not half-applied.
+    """
+
+    source: str = Field(pattern=_SOURCE_ID)
+    model: str = Field(pattern=_SAFE_ID)
+    messages: list[ChatTurn] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES)
+    max_tokens: int = Field(ge=1, le=1_000_000)
+    context_window: int = Field(ge=1, le=10_000_000)
+    temperature: Optional[float] = Field(default=None, ge=0, le=5)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
+    top_k: Optional[int] = Field(default=None, ge=0, le=100_000)
+    min_p: Optional[float] = Field(default=None, ge=0, le=1)
+    repeat_penalty: Optional[float] = Field(default=None, ge=0, le=10)
+    presence_penalty: Optional[float] = Field(default=None, ge=-10, le=10)
+    frequency_penalty: Optional[float] = Field(default=None, ge=-10, le=10)
+    seed: Optional[int] = None
+    stop: Optional[list[str]] = Field(default=None, max_length=16)
+    thinking: Optional[Literal["off", "on", "low", "medium", "high"]] = None
+    json_schema: Optional[dict] = None
+    json_mode: bool = False
+    structured_output: Literal["schema", "grammar", "json", "none"] = "none"
+    #: What the terminal says it is doing: "Backend Engineer for build 'Todo app'". A label, never
+    #: a prompt.
+    purpose: Optional[str] = Field(default=None, max_length=160)
+
+
+class ChatReport(_Strict):
+    """A completion's answer. The reasoning is kept apart from the answer, so the
+    server never parses a thought as a deliverable."""
+
+    text: str
+    reasoning: Optional[str] = None
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    finish_reason: Optional[str] = Field(default=None, max_length=32)
+    structured_output: Literal["schema", "grammar", "json", "none"] = "none"
+    structured_output_rejected: bool = False
+    unsent: list[str] = Field(default_factory=list, max_length=16)
+
+
+class EmbedArgs(_Strict):
+    source: str = Field(pattern=_SOURCE_ID)
+    model: str = Field(pattern=_SAFE_ID)
+    inputs: list[str] = Field(min_length=1, max_length=MAX_EMBED_INPUTS)
+
+
+class EmbedReport(_Strict):
+    vectors: list[list[float]] = Field(max_length=MAX_EMBED_INPUTS)
+
+
+class CancelArgs(_Strict):
+    """Stop the request with this id, if it is still running."""
+
+    id: str = Field(pattern=_REQUEST_ID)
+
+
+HelloReport.model_rebuild()

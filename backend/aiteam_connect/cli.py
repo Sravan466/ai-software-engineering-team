@@ -4,6 +4,8 @@
     aiteam-connect add-source http://127.0.0.1:5000        use a runtime detection misses
     aiteam-connect remove-source http://127.0.0.1:5000
     aiteam-connect status
+    aiteam-connect pause | resume                         stop / start answering model calls
+    aiteam-connect limits [--concurrency 1 …]              what this computer allows
     aiteam-connect forget --server https://your-server    delete this computer's key
 
 The pairing code is read from a prompt, never from the command line: arguments are
@@ -17,6 +19,7 @@ import getpass
 import sys
 
 from app.router.runtimes import detect
+from aiteam_connect import limits as L
 from aiteam_connect import store
 from aiteam_connect.client import ConnectError, credential, forget, pair, run, server_for
 
@@ -95,6 +98,70 @@ def cmd_status(args) -> int:
         _say(f"Paired with {origin} as {entry.get('account')} (key in {entry.get('key_store')}).")
     for source in state.get("sources") or []:
         _say(f"Added source: {source.get('url')}{' (remote, confirmed)' if source.get('confirmed_remote') else ''}")
+    if state.get("paused"):
+        _say("Model calls are paused (aiteam-connect resume).")
+    _say(f"Activity log: {store.home() / 'activity.log'} (times, models and token counts — never contents).")
+    return 0
+
+
+def cmd_pause(args) -> int:
+    state = store.load_state()
+    state["paused"] = True
+    store.save_state(state)
+    _say("Paused. Model calls are refused, and a build using this computer waits. "
+         "`aiteam-connect resume` continues.")
+    return 0
+
+
+def cmd_resume(args) -> int:
+    state = store.load_state()
+    state.pop("paused", None)
+    store.save_state(state)
+    _say("Resumed. Press Resume on the build (or wait for the next call) to continue.")
+    return 0
+
+
+_LIMIT_FLAGS = ("concurrency", "requests_per_minute", "max_prompt_chars", "max_output_tokens", "timeout_seconds")
+
+
+def cmd_limits(args) -> int:
+    state = store.load_state()
+    saved = dict(state.get("limits") or {})
+    machine = dict(state.get("machine") or {})
+    changed = False
+    for key in _LIMIT_FLAGS:
+        value = getattr(args, key, None)
+        if value is not None:
+            if value < 1:
+                raise ConnectError(f"--{key.replace('_', '-')} must be at least 1.")
+            saved[key] = value
+            changed = True
+    for key in ("gpu_layers", "threads"):
+        value = getattr(args, key, None)
+        if value is not None:
+            if value < 0:
+                machine.pop(key, None)
+            else:
+                machine[key] = value
+            changed = True
+    if args.keep_alive is not None:
+        if args.keep_alive:
+            machine["keep_alive"] = args.keep_alive
+        else:
+            machine.pop("keep_alive", None)
+        changed = True
+    if changed:
+        state["limits"] = saved
+        state["machine"] = machine
+        try:
+            L.read(state)
+        except Exception as e:  # noqa: BLE001 - a value off the schema
+            raise ConnectError(f"Those limits aren't valid: {e}") from None
+        store.save_state(state)
+        _say("Saved. They apply to the next call; the website sees them the next time it refreshes.")
+    _say("This computer's limits:")
+    for line in L.describe(L.read(state), L.machine(state)):
+        _say(line)
     return 0
 
 
@@ -123,6 +190,14 @@ def main(argv: list[str] | None = None) -> int:
     rm = sub.add_parser("remove-source", help="stop using an address you added")
     rm.add_argument("url")
     sub.add_parser("status", help="what this computer is paired with")
+    sub.add_parser("pause", help="refuse model calls until you resume")
+    sub.add_parser("resume", help="answer model calls again")
+    lim = sub.add_parser("limits", help="show or set what this computer allows")
+    for key in _LIMIT_FLAGS:
+        lim.add_argument(f"--{key.replace('_', '-')}", type=int, dest=key)
+    lim.add_argument("--gpu-layers", type=int, dest="gpu_layers", help="-1 to leave it to the runtime")
+    lim.add_argument("--threads", type=int, help="-1 to leave it to the runtime")
+    lim.add_argument("--keep-alive", dest="keep_alive", help='e.g. "5m"; "" to leave it to the runtime')
     _server_arg(sub.add_parser("forget", help="delete this computer's key for a server"))
     args = parser.parse_args(argv)
     handler = {
@@ -131,6 +206,9 @@ def main(argv: list[str] | None = None) -> int:
         "add-source": cmd_add_source,
         "remove-source": cmd_remove_source,
         "status": cmd_status,
+        "pause": cmd_pause,
+        "resume": cmd_resume,
+        "limits": cmd_limits,
         "forget": cmd_forget,
     }[args.command]
     try:

@@ -67,7 +67,8 @@ from app.core.config import settings
 from app.core.constants import RoutingMode
 from app.core.logging import get_logger
 from app.router import compat
-from app.router.base import CLOUD_PROVIDERS, LLMProvider, ProviderError
+from app.connector.remote import ConnectorProvider, DeviceSources, looks_like_device_source
+from app.router.base import CLOUD_PROVIDERS, ComputerDisconnected, LLMProvider, ProviderError, RequestCancelled
 from app.router.model_profile import ModelProfile, fallback_profile
 from app.router.providers.anthropic_provider import AnthropicProvider
 from app.router.providers.gemini_provider import GeminiProvider
@@ -154,6 +155,9 @@ class ModelRouter:
             "gemini": settings.gemini_default_model,
         }
         self.sources = SourceRegistry(self._secrets, self.tuning, may_add_local=owner)
+        #: This account's paired computers: their runtimes are sources too.
+        self.devices = DeviceSources(user_id, self.tuning)
+        self.sources.devices = self.devices
         #: The local default the user chose in Settings, as `source:model`.
         self._chosen_local: Optional[str] = None
         #: The embedding model found automatically, kept once found. Re-resolving it
@@ -184,7 +188,7 @@ class ModelRouter:
 
     # ── model references ─────────────────────────────────────────────────────
     def _is_provider_id(self, name: str) -> bool:
-        if name in CLOUD_PROVIDERS or table.looks_like_source_id(name):
+        if name in CLOUD_PROVIDERS or table.looks_like_source_id(name) or looks_like_device_source(name):
             return True
         # Loading the configured and saved sources is free (no network), and without
         # it an id derived from an address (`local-8081`) reads as a bare model name
@@ -251,6 +255,11 @@ class ModelRouter:
         """
         if self._chosen_local:
             return self._saved_pair(self._chosen_local), DEFAULT_CHOSEN
+        # The model chosen on the account's own computer, on the Setup tab — what a
+        # hosted build with no model on the server runs on.
+        device = self.devices.chat_choice()
+        if device is not None:
+            return device, DEFAULT_CHOSEN
         self.sources.ensure()
         hint = (settings.local_default_model or "").strip()
         if hint:
@@ -776,6 +785,8 @@ class ModelRouter:
                     ),
                 )
             state = prov.state()
+            if not state.reachable and isinstance(prov, ConnectorProvider):
+                return Readiness(ok=False, unreachable=True, reason=prov.down_reason())
             if not state.reachable:
                 return Readiness(
                     ok=False,
@@ -1028,8 +1039,16 @@ class ModelRouter:
             )
 
         attempts: list[dict] = []
+        last_error: Optional[ProviderError] = None
         for idx, (pname, model) in enumerate(chain):
             prov = self.provider(pname)
+            if isinstance(prov, ConnectorProvider) and not prov.available():
+                # The user's own computer isn't connected. Nothing else was chosen to
+                # run this, so the build waits for it rather than falling through to
+                # a model nobody picked — or failing.
+                raise ComputerDisconnected(
+                    prov.down_reason(), device_id=prov.device_id, device_name=prov.device_name
+                )
             if prov is None or not prov.available():
                 attempts.append({"provider": pname, "model": model, "error": "unavailable"})
                 continue
@@ -1055,10 +1074,17 @@ class ModelRouter:
                         head[1],
                     )
                 return resp
+            except (RequestCancelled, ComputerDisconnected):
+                raise  # a Stop, or a computer to wait for: never the next link's job
             except ProviderError as e:
                 log.warning("Provider %s/%s failed: %s", pname, model, e)
                 attempts.append({"provider": pname, "model": model, "error": str(e)})
+                last_error = e
 
+        if len(chain) == 1 and last_error is not None:
+            # One model was ever in play: its own words are the whole story, and
+            # "all providers failed" would only bury them.
+            raise last_error
         raise ProviderError(
             "All providers in the routing chain failed. Attempts: "
             + "; ".join(f"{a['provider']}:{a['model']} -> {a['error']}" for a in attempts)
@@ -1093,6 +1119,9 @@ class ModelRouter:
                     "source. Choosing one automatically instead.",
                     spec,
                 )
+            device = self.devices.embed_choice()
+            if device is not None:
+                return device, DEFAULT_CHOSEN
         pinned = self._embedding_pin
         if pinned is not None and self._pin_still_holds(pinned):
             return pinned

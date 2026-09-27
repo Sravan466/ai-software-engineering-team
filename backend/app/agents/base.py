@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
+from app.router import inflight
 from app.build import contract as build_contract
 from app.build.check import BuildCheck, check_phase
 from app.core.config import settings
@@ -294,14 +295,16 @@ class BaseAgent:
     def _complete(
         self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions
     ) -> LLMResponse:
-        return router.complete(
-            messages,
-            mode=ctx.routing_mode,
-            preferred_model=ctx.preferred_model,
-            options=options,
-            complexity=self.complexity,
-            role=self.key,
-        )
+        # Named for the computer answering it: "Backend Engineer for build 'Todo app'".
+        with inflight.agent(self.title):
+            return router.complete(
+                messages,
+                mode=ctx.routing_mode,
+                preferred_model=ctx.preferred_model,
+                options=options,
+                complexity=self.complexity,
+                role=self.key,
+            )
 
     # ── prompt construction ─────────────────────────────────────────────────
     def system_prompt(self, charter: Optional[Charter] = None) -> str:

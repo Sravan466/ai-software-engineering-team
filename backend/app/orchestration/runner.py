@@ -54,7 +54,8 @@ from app.orchestration.graph import graph, gather_skills
 from app.orchestration.state import PipelineState
 from app.preview import service as mockup
 from app.preview.jobs import jobs as mockup_jobs
-from app.router.base import ProviderError
+from app.router import inflight
+from app.router.base import ComputerDisconnected, ProviderError, RequestCancelled
 from app.schemas.llm import LLMResponse, Usage
 
 log = get_logger(__name__)
@@ -188,7 +189,9 @@ def _as_owner(method):
 
     @functools.wraps(method)
     def bound(self, db: Session, project: Project, *args, **kwargs):
-        with identity.acting_as(project.owner_id):
+        # And names the build, so every model call it makes can be cancelled by
+        # Stop, and a user's computer can say what it's answering.
+        with identity.acting_as(project.owner_id), inflight.building(project.id, project.name):
             return method(self, db, project, *args, **kwargs)
 
     return bound
@@ -261,11 +264,18 @@ class PipelineRunner:
                 # ever asked about what a fix could not resolve.
                 if phase_key == Phase.SECURITY_ENGINEER.value and self._remediate(db, project):
                     return project
-        except CancelledRun:
+        except (CancelledRun, RequestCancelled):
             self._settle_cancelled(db, project)
             return project
+        except ComputerDisconnected as e:
+            self._pause(db, project, e)
+            return project
         except ProviderError as e:
-            self._fail(db, project, str(e))
+            if self._cancel_requested(db, project):
+                # Stop landed while the call was failing; the Stop is what happened.
+                self._settle_cancelled(db, project)
+            else:
+                self._fail(db, project, str(e))
             return project
 
     # ── acting on what the security review found ─────────────────────────────
@@ -499,7 +509,14 @@ class PipelineRunner:
                 self._abandon_row(
                     db, row, "The model provider failed while regenerating."
                 )
-            self._fail(db, project, str(e))
+            if isinstance(e, RequestCancelled) or self._cancel_requested(db, project):
+                self._settle_cancelled(db, project)
+            elif isinstance(e, ComputerDisconnected):
+                # The earlier attempt was put back above, so resuming parks on it
+                # again — and it can be sent back once the computer is here.
+                self._pause(db, project, e)
+            else:
+                self._fail(db, project, str(e))
             return project
 
         self._complete_row(db, project, row, last_result)
@@ -636,7 +653,13 @@ class PipelineRunner:
         project.cancel_requested = True
         project.status = PipelineStatus.CANCELLED.value
         project.last_error = reason
+        project.paused_device_id = None
         db.commit()
+        # Now interrupt whatever is generating, so the runtime stops too — not only
+        # the build's bookkeeping.
+        stopped = inflight.cancel(project.id)
+        if stopped:
+            log.info("Stop interrupted %d model call(s) in flight for %s.", stopped, project.id)
         return project
 
     def prepare_resume(self, db: Session, project: Project) -> None:
@@ -648,6 +671,7 @@ class PipelineRunner:
         """
         project.cancel_requested = False
         project.last_error = None
+        project.paused_device_id = None
         project.heartbeat_at = _now()
         db.commit()
 
@@ -665,6 +689,11 @@ class PipelineRunner:
                     state = graph.invoke(
                         None if started else _initial_state(project), _config(project.id)
                     )
+        except ComputerDisconnected:
+            # Dropped rather than kept as failed: the phase runs again, from the
+            # start, when the computer is back.
+            self._abandon_row(db, row, "Paused: the computer running this model disconnected.")
+            raise
         except ProviderError:
             self._abandon_row(db, row, "The model provider failed during this phase.")
             raise
@@ -1026,6 +1055,39 @@ class PipelineRunner:
             project.last_error = "Stopped by you. Resume picks up from the last approved phase."
         db.commit()
         log.info("Run cancelled: %s (at %s)", project.id, project.current_phase)
+
+    def _pause(self, db: Session, project: Project, error: ComputerDisconnected) -> None:
+        """Wait for the user's computer instead of failing: nothing the build did was
+        wrong, and it continues from the last finished phase when that computer is
+        back — by itself, when the connector reconnects."""
+        try:
+            db.refresh(project)
+        except Exception:  # noqa: BLE001 - deleted mid-run: nothing to pause
+            return
+        if project.status == PipelineStatus.CANCELLED.value:
+            return  # Stopped meanwhile; that decision stands.
+        phase = project.current_phase
+        try:
+            title = get_agent(phase).title if phase else "The build"
+        except Exception:  # noqa: BLE001
+            title = phase or "The build"
+        name = error.device_name or "Your computer"
+        if error.paused_there:
+            message = (
+                f"{name} is paused. {title} paused. Run `aiteam-connect resume` on it, "
+                "then press Resume."
+            )
+        else:
+            message = (
+                f"{name} disconnected. {title} paused. Start the connector to continue — "
+                "the build picks up from the last finished phase by itself."
+            )
+        project.status = PipelineStatus.PAUSED.value
+        project.paused_device_id = error.device_id
+        project.last_error = message
+        project.cancel_requested = False
+        db.commit()
+        log.info("Run paused for device %s: %s (at %s)", error.device_id, project.id, phase)
 
     def _fail(self, db: Session, project: Project, message: str) -> None:
         project.status = PipelineStatus.FAILED.value

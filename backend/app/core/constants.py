@@ -143,6 +143,9 @@ class PipelineStatus(str, Enum):
     FAILED = "failed"
     #: Stopped by the reviewer. Resumable from the last checkpoint.
     CANCELLED = "cancelled"
+    #: Waiting for the user's own computer, which runs its model, to reconnect.
+    #: Resumes by itself when it does, from the last finished phase.
+    PAUSED = "paused"
 
 
 class PhaseStatus(str, Enum):

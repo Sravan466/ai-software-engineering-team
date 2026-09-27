@@ -118,6 +118,7 @@ def _store_hello(device_id: str, report: P.HelloReport) -> Optional[dict]:
         device.connector_version = report.connector_version[:32]
         device.last_seen_at = datetime.now(timezone.utc)
         db.commit()
+    hub.touch()
     return data
 
 
@@ -143,6 +144,9 @@ async def _refresh_quietly(link: Link) -> None:
         await refresh_hello(link)
     except ConnectorError as e:
         log.info("Couldn't read what device %s has: %s", link.device_id, e)
+    if not link.closed:
+        # What it has is known now: builds waiting for it can use it.
+        hub.ready(link)
 
 
 async def _ping(link: Link) -> None:
