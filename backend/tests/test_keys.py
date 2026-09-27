@@ -453,3 +453,16 @@ def test_gemini_sdk_errors_carry_their_http_status():
     Err = type("PermissionDenied", (Exception,), {"__module__": "google.api_core.exceptions", "code": 403})
     assert _http_status(Err()) == 403
     assert _http_status(OSError(111, "refused")) is None
+
+
+def test_a_build_is_checked_against_the_model_it_chose(provider, router):
+    provider(OK_OPENAI)
+    router.set_default_model("openai", "gpt-test")
+    router.save_provider_key("openai", api_key="sk-chosen-00000000000")
+    calls = provider({("GET", "/models/gpt-other"): (404, {}), ("GET", "/models"): (200, {"data": [{"id": "gpt-test"}]})})
+    ready = router.readiness(RoutingMode.MANUAL, "openai:gpt-other", roles=[], recheck_keys=True)
+    assert not ready.ok and "gpt-other isn't available" in ready.reason
+    assert router._cloud["openai"].available()  # the default still works
+    n = len(calls)
+    router.readiness(RoutingMode.MANUAL, "openai:gpt-other", roles=[], recheck_keys=True)
+    assert len(calls) == n  # remembered, not asked again

@@ -166,6 +166,9 @@ class ModelRouter:
         #: Each cloud key's last check, and the providers whose saved key can't be
         #: decrypted (kept in the file, not used).
         self._checks: dict[str, KeyCheck] = {}
+        #: Checks of a key against a model other than its default — the one a role or a
+        #: Manual build chose. In memory: the saved standing is about the default.
+        self._model_checks: dict[tuple[str, str], KeyCheck] = {}
         self._locked: set[str] = set()
         self._check_lock = threading.Lock()
         #: The embedding model found automatically, kept once found. Re-resolving it
@@ -394,7 +397,34 @@ class ModelRouter:
             return found
         if found.status == keycheck.MODEL_UNAVAILABLE and found.model == model:
             return found
+        other = self._model_checks.get((provider, model))
+        if (
+            other is not None
+            and other.status == keycheck.MODEL_UNAVAILABLE
+            and other.key_id == keycheck.key_id(self._cloud[provider].secret() or "")
+        ):
+            return other
         return None
+
+    def _check_chosen_model(self, provider: str, model: str) -> None:
+        """Before a run: check the key against a model it leads with that isn't the
+        provider's default — the model actually chosen. Kept for the re-check interval."""
+        prov = self._cloud.get(provider)
+        standing = self.key_check(provider) if prov is not None else None
+        if prov is None or not prov.has_key or standing is None or standing.model == model:
+            return
+        kid = keycheck.key_id(prov.secret() or "")
+        known = self._model_checks.get((provider, model))
+        if known is not None and known.key_id == kid and known.age_seconds() <= settings.key_recheck_seconds:
+            return
+        found = keycheck.check(provider, prov.secret() or "", model)
+        self._model_checks[(provider, model)] = found
+        if found.status in keycheck.KEY_REJECTED:
+            # About the key, not the model: that is its standing everywhere.
+            try:
+                self._remember(provider, found, persist=True)
+            except Exception:  # noqa: BLE001 - the verdict still holds in memory
+                self._remember(provider, found)
 
     def key_check(self, provider: str) -> KeyCheck:
         """The standing of a provider's key — unchecked if it has never been checked."""
@@ -1006,14 +1036,19 @@ class ModelRouter:
                 if role:
                     users.setdefault(head, []).append(role)
         for (pname, model), role in cloud_heads.items():
+            if recheck_keys:
+                self._check_chosen_model(pname, model)
             found = self._refuses(pname, model)
             if found is not None:
                 who = "this build" if role == "the rest of the run" else f"the {role.replace('_', ' ')} agent"
                 return Readiness(
                     ok=False,
                     reason=(
-                        f"{pname}:{model} is set for {who}, but the {keycheck.LABEL.get(pname, pname)} key isn't working: "
-                        f"{found.message} Fix it in Settings → Cloud API keys, or choose another model."
+                        f"{pname}:{model} is set for {who}, but {found.message} Choose a model this key "
+                        "can use (Settings → Cloud API keys lists them)."
+                        if found.status == keycheck.MODEL_UNAVAILABLE
+                        else f"{pname}:{model} is set for {who}, but the {keycheck.LABEL.get(pname, pname)} key "
+                        f"isn't working: {found.message} Fix it in Settings → Cloud API keys, or choose another model."
                     ),
                 )
 
