@@ -63,8 +63,12 @@ class Link:
         task.add_done_callback(self._tasks.discard)
 
     def cancel_tasks(self) -> None:
+        # Never the task doing the cancelling: a background refresh that closes the
+        # link would otherwise cancel itself mid-close, before the bye is sent.
+        current = asyncio.current_task()
         for task in list(self._tasks):
-            task.cancel()
+            if task is not current:
+                task.cancel()
 
     # ── sending ──────────────────────────────────────────────────────────────
     async def send(self, message: dict) -> None:

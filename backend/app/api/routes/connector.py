@@ -163,12 +163,20 @@ async def _keep(link: Link) -> None:
             await link.close(*why)
             return
         now = time.monotonic()
-        if link.approved and now - last_ping >= P.PING_EVERY_SECONDS:
-            last_ping = now
-            link.spawn(_ping(link))
-        if now - last_reauth >= P.REAUTH_EVERY_SECONDS:
-            last_reauth = now
-            await link.reauth()
+        try:
+            if now - last_ping >= P.PING_EVERY_SECONDS:
+                last_ping = now
+                if link.approved:
+                    link.spawn(_ping(link))
+                else:
+                    # A pending computer is sent no requests, only its state again —
+                    # so its idle timer stays quiet and it doesn't reconnect.
+                    await link.send({"type": "state", "state": P.STATE_PENDING})
+            if now - last_reauth >= P.REAUTH_EVERY_SECONDS:
+                last_reauth = now
+                await link.reauth()
+        except ConnectorError:
+            return  # the socket is gone; the handler's `finally` cleans up
 
 
 @router.websocket("/ws")
@@ -212,7 +220,9 @@ async def connector_socket(ws: WebSocket) -> None:
         if status is None:
             await link.close(P.CLOSE_FORGOTTEN, "This computer was removed from the account.")
             return
-        link.approved = status == P.STATE_APPROVED
+        # Only ever upgrades: an approval that reached the hub while this read was
+        # in flight has already told the computer, and must not be taken back.
+        link.approved = link.approved or status == P.STATE_APPROVED
         await link.send(
             {
                 "type": "state",

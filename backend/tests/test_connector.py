@@ -406,3 +406,24 @@ def test_behind_a_proxy_the_network_is_not_vouched_for(client):
     assert plain["same_network"] is True  # the test client and the claim share an address
     proxied = client.get(f"/api/devices/pairing/{pairing_id}", headers={"x-forwarded-for": "203.0.113.9"})
     assert proxied.json()["device"]["same_network"] is None
+
+
+def test_a_background_task_that_closes_its_own_link_still_says_bye():
+    import asyncio
+
+    class Slow(_FakeSocket):
+        closed_with = None
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            await asyncio.sleep(0)
+            self.closed_with = code
+
+    async def go():
+        ws = Slow()
+        link = _link(ws, approved=True)
+        link.spawn(link.close(P.CLOSE_PROTOCOL, "bad hello"))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert any('"bye"' in m for m in ws.sent) and ws.closed_with == P.CLOSE_PROTOCOL
+
+    asyncio.run(go())

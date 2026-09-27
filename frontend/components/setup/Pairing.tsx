@@ -271,9 +271,7 @@ export default function Pairing({
           <span className="notice-body">
             <span className="notice-title">{done.name} is approved.</span>
             <span className="notice-text">
-              {done.online
-                ? "It's connected. Step 5 shows what it found."
-                : "It will connect as soon as the connector is running."}
+              Step 5 shows whether it’s connected and what it found — it updates on its own.
             </span>
             <span className="notice-actions">
               <button className="btn btn-sm" onClick={start}>

@@ -154,7 +154,7 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
         open_timeout=15,
         user_agent_header=f"{P.PACKAGE}/{P.CONNECTOR_VERSION}",
     ) as ws:
-        approved = False
+        approved = waiting = False
         try:
             while True:
                 # The server pings an approved computer every PING_EVERY_SECONDS, so
@@ -179,7 +179,8 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
                         approved = True
                         say(f"✅ Connected to {message.account or 'your account'} on {server.host}. "
                             "Leave this running; press Ctrl+C to stop.")
-                    elif message.state == P.STATE_PENDING:
+                    elif message.state == P.STATE_PENDING and not waiting:
+                        waiting = True
                         say("Waiting for you to approve this computer on the website…")
                 elif isinstance(message, P.ServerReauth):
                     _send(ws, {"type": "reauth", "sig": store.sign(key, P.reauth_message(device_id, message.nonce))})
@@ -231,7 +232,7 @@ def run(server: Server, say: Callable[[str], None]) -> int:
         except (OSError, TimeoutError, EOFError, InvalidHandshake) as e:
             # EOFError: the server (or a proxy in front of it) closed mid-handshake,
             # as during a restart. Not Ctrl-D — so retried, never treated as "stop".
-            say(f"Couldn't reach {server.host} ({e or type(e).__name__}). Retrying…")
+            say(f"Couldn't reach {server.host} ({str(e) or type(e).__name__}). Retrying…")
             code = 1006
         if code == P.CLOSE_FORGOTTEN:
             forget(server)
