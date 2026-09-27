@@ -488,9 +488,9 @@ def test_a_cancel_that_beats_the_send_is_still_honoured():
         async def send_text(self, text):
             pass
 
-    link = Link(_Sock(), device_id="0" * 32, owner_id="u", public_key="k", approved=True)
-
     async def scenario():
+        # Made inside the loop: on Python 3.9 its lock binds to the running one.
+        link = Link(_Sock(), device_id="0" * 32, owner_id="u", public_key="k", approved=True)
         assert await link.cancel_request("c" * 16) is True  # nothing in flight yet
         with pytest.raises(ConnectorError) as caught:
             await link.request("chat", {}, request_id="c" * 16)
