@@ -90,7 +90,7 @@ def test_a_model_the_key_cannot_use_lists_the_ones_it_can(provider):
         ("GET", "/models"): (200, {"data": [{"id": "gpt-b"}, {"id": "gpt-a"}]}),
     })
     found = keycheck.check("openai", "sk-fine-000000000000", "gpt-nope")
-    assert found.status == keycheck.MODEL_UNAVAILABLE and found.models == ["gpt-a", "gpt-b"]
+    assert found.status == keycheck.MODEL_UNAVAILABLE and found.models == ["gpt-b", "gpt-a"]
 
 
 def test_an_outage_is_unverified_not_invalid(provider):
@@ -466,3 +466,48 @@ def test_a_build_is_checked_against_the_model_it_chose(provider, router):
     n = len(calls)
     router.readiness(RoutingMode.MANUAL, "openai:gpt-other", roles=[], recheck_keys=True)
     assert len(calls) == n  # remembered, not asked again
+
+
+# ── regressions from the third review ────────────────────────────────────────
+def test_a_chosen_model_refusal_gives_way_to_a_newer_passing_check(provider, router):
+    provider(OK_OPENAI)
+    router.set_default_model("openai", "gpt-test")
+    router.save_provider_key("openai", api_key="sk-gains-access-0000")
+    provider({("GET", "/models/gpt-other"): (404, {}), ("GET", "/models"): (200, {"data": []})})
+    assert not router.readiness(RoutingMode.MANUAL, "openai:gpt-other", roles=[], recheck_keys=True).ok
+    provider({("GET", "/models/gpt-other"): (200, {}), ("POST", "/chat/completions"): (200, {})})
+    assert router.save_provider_key("openai", default_model="gpt-other")["applied"]
+    assert router._refuses("openai", "gpt-other") is None
+
+
+def test_run_start_checks_only_the_providers_the_run_can_reach(provider, router):
+    calls = provider(OK_OPENAI)
+    router.set_provider_key("openai", api_key="sk-untouched-0000000", default_model="gpt-test")
+    router.readiness(RoutingMode.MANUAL, None, roles=[], recheck_keys=True)
+    assert calls == []
+
+
+def test_an_unusable_key_file_is_reported_not_a_crash(monkeypatch, tmp_path):
+    from app.core.config import settings
+
+    blocked = tmp_path / "ro"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    monkeypatch.setattr(settings, "secrets_key_file", str(blocked / "sub" / "secrets.key"))
+    secretbox.reset()
+    try:
+        with pytest.raises(secretbox.SecretsLocked):
+            secretbox.encrypt("sk-x-000000000000")
+    finally:
+        blocked.chmod(0o700)
+        monkeypatch.undo()
+        secretbox.reset()
+
+
+def test_the_models_listed_are_chat_models_newest_first(provider):
+    provider({
+        ("GET", "/models/gpt-nope"): (404, {}),
+        ("GET", "/models"): (200, {"data": [{"id": i} for i in
+                                   ("gpt-4o", "text-embedding-3-large", "whisper-1", "gpt-5", "dall-e-3", "o3")]}),
+    })
+    assert keycheck.check("openai", "sk-list-0000000000000", "gpt-nope").models == ["o3", "gpt-5", "gpt-4o"]

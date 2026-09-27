@@ -65,6 +65,10 @@ _ANTHROPIC_VERSION = "2023-06-01"
 LABEL = {"openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Google"}
 #: How many of the models a key can use are kept, to show.
 _MAX_MODELS = 60
+_NOT_CHAT = re.compile(
+    r"embed|tts|whisper|dall-e|davinci|babbage|moderation|audio|transcribe|image|realtime|search|aqa|imagen|veo",
+    re.I,
+)
 
 #: Tests replace this with an `httpx.MockTransport`; nothing else should.
 transport: Optional[httpx.BaseTransport] = None
@@ -181,7 +185,10 @@ def _list_models(client: httpx.Client, provider: str) -> list[str]:
             names = [str(m.get("id", "")) for m in items]
     except (httpx.HTTPError, ValueError, AttributeError):
         return []
-    return sorted(n for n in names if n)[:_MAX_MODELS]
+    # Chat models only, newest first: a provider lists embeddings, speech and image
+    # models beside them, and alphabetical order puts its oldest names at the top.
+    chat = [n for n in names if n and not _NOT_CHAT.search(n)]
+    return sorted(chat, reverse=True)[:_MAX_MODELS]
 
 
 def _context_tokens(provider: str, body: object) -> Optional[int]:

@@ -44,9 +44,21 @@ def _key_file() -> Path:
 
 
 def _load_or_create_file() -> bytes:
+    path = _key_file()
+    try:
+        return _read_or_create(path)
+    except OSError as e:
+        # Owned by another user (run once as root, say), or a home that can't be
+        # written: a sentence in Settings, not a crash of every request.
+        raise SecretsLocked(
+            f"The key that encrypts saved API keys can't be read or created at {path} "
+            f"({type(e).__name__}). Fix its permissions, or set SECRETS_ENCRYPTION_KEY."
+        ) from e
+
+
+def _read_or_create(path: Path) -> bytes:
     from cryptography.fernet import Fernet
 
-    path = _key_file()
     try:
         return path.read_bytes().strip()
     except FileNotFoundError:

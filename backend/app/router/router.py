@@ -375,6 +375,14 @@ class ModelRouter:
             # About a key that has since been replaced — a re-check that finished after
             # a new key was saved. The new key's standing is not this one's.
             return
+        if found is None or found.key_id is None or found.status in keycheck.KEY_REJECTED:
+            # A new key, no key, or a verdict on the key itself: every per-model check
+            # of the old standing is moot.
+            for pair in [p for p in self._model_checks if p[0] == provider]:
+                self._model_checks.pop(pair, None)
+        elif found.model:
+            # The standing is now a fresh check of this model; an older one gives way.
+            self._model_checks.pop((provider, found.model), None)
         if found is None:
             self._checks.pop(provider, None)
             prov.usable = True
@@ -402,6 +410,7 @@ class ModelRouter:
             other is not None
             and other.status == keycheck.MODEL_UNAVAILABLE
             and other.key_id == keycheck.key_id(self._cloud[provider].secret() or "")
+            and other.age_seconds() <= settings.key_recheck_seconds
         ):
             return other
         return None
@@ -537,6 +546,22 @@ class ModelRouter:
         self._remember(provider, None)
         audit.info("key removed: provider=%s account=%s", provider, self.user_id)
 
+    def _cloud_reach(
+        self, mode: RoutingMode, preferred_model: Optional[str], roles: Optional[Iterable[str]]
+    ) -> list[str]:
+        """The cloud providers a run may call: those in its chains — and, in Auto, any
+        it holds a key for, since high-complexity phases go to whichever is up."""
+        reach: list[str] = []
+        if mode == RoutingMode.AUTO:
+            reach += [n for n in CLOUD_PROVIDERS if self._cloud[n].has_key]
+        for role in [*(roles or ()), None]:
+            try:
+                chain = self._resolve_chain(mode, preferred_model, "medium", role)
+            except UnresolvedModel:
+                continue
+            reach += [p for p, _ in chain if p in CLOUD_PROVIDERS]
+        return list(dict.fromkeys(reach))
+
     def recheck_stale(self, providers: Iterable[str]) -> None:
         """Before a build: check again any of these keys whose standing is old or
         unsettled, or that a build saw rejected. In parallel, each bounded."""
@@ -602,6 +627,9 @@ class ModelRouter:
         # key it refused to save live in memory.
         self._secrets.set_provider(provider, api_key, default_model)
         self._apply(provider, api_key, default_model)
+        if api_key is not None:
+            for pair in [p for p in self._model_checks if p[0] == provider]:
+                self._model_checks.pop(pair, None)
 
     def set_default_model(self, provider: str, model: str) -> None:
         """Point a cloud provider, or the local default, at a different model."""
@@ -1013,7 +1041,7 @@ class ModelRouter:
         if recheck_keys and mode != RoutingMode.LOCAL_ONLY:
             # Before the chains are resolved, so Auto's choice — made from `available()`
             # — already reflects what the re-check found.
-            self.recheck_stale([n for n in CLOUD_PROVIDERS if self._cloud[n].has_key])
+            self.recheck_stale(self._cloud_reach(mode, preferred_model, roles))
         # (source, model) -> the role that wants it, so one missing model is
         # reported once however many phases point at it.
         wanted: dict[tuple[str, str], str] = {}
