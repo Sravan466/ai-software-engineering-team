@@ -10,11 +10,12 @@ import Pairing from "@/components/setup/Pairing";
 import Detected from "@/components/setup/Detected";
 import Computers from "@/components/setup/Computers";
 import Troubleshooting from "@/components/setup/Troubleshooting";
+import TestIt from "@/components/setup/TestIt";
 
 type Tab = "setup" | "computers";
 
 /**
- * Setup: get a model running on your own computer and connect it, in five steps,
+ * Setup: get a model running on your own computer and connect it, in six steps,
  * and the list of computers already connected.
  *
  * Read-only toward the computer: nothing here can tell it where to connect or what
@@ -29,6 +30,8 @@ export default function SetupPage() {
   const [os, setOS] = useState<OS>("macos");
   const [runtimeId, setRuntimeId] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<number> | null>(null);
+  /** The last test prompt's outcome, this visit: what marks step 6 done. */
+  const [tested, setTested] = useState<{ ok: boolean; seconds: number } | null>(null);
 
   useEffect(() => {
     setOS(guessOS());
@@ -75,8 +78,9 @@ export default function SetupPage() {
     3: reportedSources.length > 0,
     4: approved.length > 0,
     5: approved.some((d) => d.online && d.chat_model),
+    6: tested?.ok === true,
   } as Record<number, boolean>;
-  const current = [1, 2, 3, 4, 5].find((n) => !done[n]) ?? 5;
+  const current = [1, 2, 3, 4, 5, 6].find((n) => !done[n]) ?? 6;
 
   // Open the first step that still needs doing, once the facts are in.
   useEffect(() => {
@@ -259,6 +263,17 @@ export default function SetupPage() {
 
               <Step n={5} title="See what was detected" state={state(5)} open={isOpen(5)} onToggle={() => toggle(5)}>
                 <Detected devices={devices ?? []} onChanged={replace} />
+              </Step>
+
+              <Step
+                n={6}
+                title="Test it"
+                summary={tested?.ok ? `${tested.seconds.toFixed(tested.seconds < 10 ? 2 : 1)} s round trip` : undefined}
+                state={state(6)}
+                open={isOpen(6)}
+                onToggle={() => toggle(6)}
+              >
+                <TestIt devices={devices ?? []} onResult={(ok, seconds) => setTested({ ok, seconds })} />
               </Step>
             </ol>
           ) : null}

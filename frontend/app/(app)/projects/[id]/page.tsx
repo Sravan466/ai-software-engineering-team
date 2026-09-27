@@ -32,12 +32,13 @@ const STATUS_LABEL: Record<string, string> = {
   completed: "Completed",
   failed: "Failed",
   cancelled: "Stopped",
+  paused: "Paused",
   stalled: "Stalled",
 };
 
 function badgeClass(status: string): string {
   if (status === "completed") return "badge-ok";
-  if (status === "awaiting_approval") return "badge-warn";
+  if (status === "awaiting_approval" || status === "paused") return "badge-warn";
   if (status === "running") return "badge-run";
   if (status === "failed" || status === "stalled") return "badge-bad";
   return "";
@@ -55,6 +56,8 @@ function StatusBadge({ status }: { status: string }) {
       ? "dot-ok"
       : status === "awaiting_approval"
         ? "dot-warn dot-pulse"
+        : status === "paused"
+          ? "dot-warn"
         : status === "running"
           ? "dot-run dot-pulse"
           : status === "failed" || status === "stalled"
@@ -257,7 +260,11 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
       ? 2500
       : project.status === "running" || project.status === "awaiting_approval"
         ? 10000
-        : 0;
+        : // Paused for the user's computer: it resumes by itself when the connector
+          // is back, so keep watching — slowly — to show that happening.
+          project.status === "paused"
+          ? 5000
+          : 0;
 
   useEffect(() => {
     if (pollMs > 0) {
@@ -521,6 +528,14 @@ function RunInterrupted({
         "from the last checkpoint; everything already approved is kept.",
       action: "Resume from checkpoint",
     },
+    paused: {
+      title: "Waiting for your computer",
+      text:
+        "The model this build runs on is on your computer, and it isn't connected. Nothing is " +
+        "lost: when the connector is back, the build carries on from the last finished phase " +
+        "by itself.",
+      action: "Resume now",
+    },
     cancelled: {
       title: "You stopped this build",
       text:
@@ -539,7 +554,10 @@ function RunInterrupted({
   const { title, text, action } = copy[state] ?? copy.failed;
 
   return (
-    <div className={"notice " + (state === "cancelled" ? "notice-warn" : "notice-bad")}>
+    <div
+      className={"notice " + (state === "cancelled" || state === "paused" ? "notice-warn" : "notice-bad")}
+      role={state === "paused" ? "status" : undefined}
+    >
       {Icon.alert}
       <div className="notice-body">
         <span className="notice-title">{title}</span>
@@ -556,6 +574,11 @@ function RunInterrupted({
             {busy && <span className="btn-spinner" aria-hidden="true" />}
             {Icon.play} {action}
           </button>
+          {state === "paused" && (
+            <a className="btn btn-sm" href="/setup#computers">
+              My computers
+            </a>
+          )}
           {state === "failed" && (
             <a className="btn btn-sm" href="/settings">
               Check runtime
@@ -709,7 +732,7 @@ function BuildTab({
   const pct = localPct(project);
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
   const state = effectiveStatus(project);
-  const interrupted = state === "failed" || state === "cancelled" || state === "stalled";
+  const interrupted = state === "failed" || state === "cancelled" || state === "stalled" || state === "paused";
 
   if (state === "created") {
     return (

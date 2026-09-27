@@ -66,7 +66,8 @@ export default function ReviewPolicy({
   const settled =
     project.status === "completed" ||
     project.status === "failed" ||
-    project.status === "cancelled";
+    project.status === "cancelled" ||
+    project.status === "paused";
 
   async function save(body: Parameters<typeof api.updateProject>[1]) {
     setBusy(true);
