@@ -8,6 +8,7 @@ computer over (OWASP LLM10, unbounded consumption):
   max_prompt_chars     the longest prompt accepted; longer is refused
   max_output_tokens    the most one answer may generate; asked for more, it is clamped
   timeout_seconds      how long one call may run before it is stopped
+  max_context_tokens   the largest context window a call may use (its memory cost)
 
 Machine settings — GPU layers, threads, keep-alive — are here too, and only here.
 The server has no way to send one: its `chat` request has no field for them.
@@ -29,6 +30,9 @@ DEFAULTS = {
     "max_prompt_chars": 600_000,
     "max_output_tokens": 16_384,
     "timeout_seconds": 900,
+    #: The largest context window a call may run at. The window sizes the runtime's
+    #: KV cache — this computer's memory — so the server never decides it alone.
+    "max_context_tokens": 32_768,
 }
 #: How many calls may wait for a free slot, per slot, before more are refused.
 QUEUE_PER_SLOT = 8
@@ -135,6 +139,7 @@ def describe(limits: dict, machine_settings: Optional[dict] = None) -> list[str]
         f"  max prompt chars     {limits['max_prompt_chars']:,}",
         f"  max output tokens    {limits['max_output_tokens']:,}",
         f"  timeout              {limits['timeout_seconds']} s",
+        f"  max context tokens   {limits['max_context_tokens']:,}",
     ]
     for key, value in (machine_settings or {}).items():
         lines.append(f"  {key.replace('_', ' '):<20} {value}")

@@ -121,7 +121,10 @@ def cmd_resume(args) -> int:
     return 0
 
 
-_LIMIT_FLAGS = ("concurrency", "requests_per_minute", "max_prompt_chars", "max_output_tokens", "timeout_seconds")
+_LIMIT_FLAGS = (
+    "concurrency", "requests_per_minute", "max_prompt_chars", "max_output_tokens", "timeout_seconds",
+    "max_context_tokens",
+)
 
 
 def cmd_limits(args) -> int:

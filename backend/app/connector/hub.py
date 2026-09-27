@@ -61,6 +61,9 @@ class Link:
         self.closed = False
         self._pending: dict[str, asyncio.Future] = {}
         self._send_lock = asyncio.Lock()
+        #: Request ids cancelled before they were sent: a `request` naming one is
+        #: refused, so a Stop that wins the race with the send still stops it.
+        self._cancelled: set[str] = set()
         self._reauth_nonce: Optional[str] = None
         self._reauth_deadline = 0.0
         #: Background work for this link (pings, a hello refresh). Held so it isn't
@@ -113,6 +116,9 @@ class Link:
         if self.closed:
             raise ConnectorError("This computer isn't connected.")
         request_id = request_id or secrets.token_hex(8)
+        if request_id in self._cancelled:
+            self._cancelled.discard(request_id)
+            raise ConnectorError("Stopped.", code=P.ERR_CANCELLED)
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
@@ -123,6 +129,12 @@ class Link:
                 # Don't leave the computer generating an answer nobody will read.
                 self.spawn(self._send_cancel(request_id))
             raise ConnectorError(f"Your computer didn't answer '{op}' within {int(timeout)} seconds.") from e
+        except asyncio.CancelledError:
+            # Whoever was waiting went away — a backstop timeout, a closed browser
+            # tab. The computer is told too, or it generates for nobody.
+            if op in P.MODEL_OPS and not self.closed:
+                self.spawn(self._send_cancel(request_id))
+            raise
         finally:
             self._pending.pop(request_id, None)
 
@@ -135,7 +147,11 @@ class Link:
         """
         future = self._pending.get(request_id)
         if future is None:
-            return False
+            # Not sent yet: refuse it when it is. Bounded, since a cancel for a
+            # request that never comes would otherwise be kept for ever.
+            if len(self._cancelled) < 1024:
+                self._cancelled.add(request_id)
+            return True
         if not future.done():
             future.set_exception(ConnectorError("Stopped.", code=P.ERR_CANCELLED))
         await self._send_cancel(request_id)
@@ -270,11 +286,14 @@ class Hub:
     def ready(self, link: Link) -> None:
         """An approved computer can take requests: wake waiters, resume its builds."""
         self._changed_now()
+        self.notify_ready(link.owner_id, link.device_id)
+
+    def notify_ready(self, owner_id: str, device_id: str) -> None:
         for callback in list(self.on_ready):
             try:
-                callback(link.owner_id, link.device_id)
+                callback(owner_id, device_id)
             except Exception as e:  # noqa: BLE001 - one listener must not stop the rest
-                log.warning("A connect listener failed for device %s: %s", link.device_id, e)
+                log.warning("A connect listener failed for device %s: %s", device_id, e)
 
     def call(self, coro, timeout: float) -> Any:
         """Run `coro` on the links' loop from a worker thread, and wait for it."""

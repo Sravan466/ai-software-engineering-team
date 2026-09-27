@@ -61,7 +61,7 @@ class FakeRuntime(RuntimeAdapter):
         return ChatResult(text='{"ok": true}', reasoning="let me think", prompt_tokens=7,
                           completion_tokens=3, finish_reason="stop", structured_output="json")
 
-    def embed(self, model, inputs):
+    def embed(self, model, inputs, *, request_id=None):
         return [[float(len(t)), 1.0] for t in inputs]
 
     def cancel(self, request_id):
@@ -424,3 +424,104 @@ def test_the_migration_adds_the_paused_column_to_an_existing_database(tmp_path):
     assert run_migrations(engine) == []  # idempotent
     with engine.begin() as conn:
         assert conn.execute(text("SELECT status FROM projects")).scalar() == "failed"
+
+
+# ── regressions from review ──────────────────────────────────────────────────
+def test_a_terminal_that_cannot_print_never_leaks_the_only_slot():
+    runtime = FakeRuntime()
+    agent = _agent(runtime)
+
+    def broken(_text):
+        raise UnicodeEncodeError("cp1252", "…", 0, 1, "can't encode")
+
+    agent._say = broken
+    for rid in ("a" * 16, "b" * 16):  # the second would wait for ever on a leaked slot
+        agent.handle("chat", _chat_args(), rid)
+    assert agent.gate.running == 0 and agent._running == {}
+
+
+def test_the_context_window_is_held_to_this_computers_limit_and_the_model():
+    from app.router.runtimes.types import ModelInfo
+
+    runtime = FakeRuntime()
+    runtime.model_info = lambda model: ModelInfo(name=model, context_window=16_384)
+    _set_state(limits={"max_context_tokens": 8192})
+    _agent(runtime).handle("chat", _chat_args(context_window=9_000_000), "a" * 16)
+    assert runtime.requests[-1].context_window == 8192
+    _set_state(limits={"max_context_tokens": 65_536})
+    _agent(runtime).handle("chat", _chat_args(context_window=9_000_000), "b" * 16)
+    assert runtime.requests[-1].context_window == 16_384
+
+
+def test_a_cancel_for_a_queued_call_stops_it_before_the_runtime_is_asked():
+    runtime = FakeRuntime()
+    runtime.block = True
+    agent = _agent(runtime)
+    outcomes: dict = {}
+
+    def call(rid):
+        try:
+            agent.handle("chat", _chat_args(), rid)
+        except Exception as e:  # noqa: BLE001
+            outcomes[rid] = e
+
+    first = threading.Thread(target=call, args=("a" * 16,))
+    first.start()
+    assert runtime.started.wait(5)
+    second = threading.Thread(target=call, args=("b" * 16,))
+    second.start()  # waits for the one slot
+    time.sleep(0.2)
+    agent.handle("cancel", {"id": "b" * 16})
+    second.join(5)
+    assert isinstance(outcomes.get("b" * 16), Cancelled)
+    assert len(runtime.requests) == 1  # the queued one never reached the runtime
+    agent.handle("cancel", {"id": "a" * 16})
+    first.join(5)
+
+
+def test_a_cancel_that_beats_the_send_is_still_honoured():
+    import asyncio
+
+    from app.connector.hub import ConnectorError, Link
+
+    class _Sock:
+        async def send_text(self, text):
+            pass
+
+    link = Link(_Sock(), device_id="0" * 32, owner_id="u", public_key="k", approved=True)
+
+    async def scenario():
+        assert await link.cancel_request("c" * 16) is True  # nothing in flight yet
+        with pytest.raises(ConnectorError) as caught:
+            await link.request("chat", {}, request_id="c" * 16)
+        return caught.value.code
+
+    assert asyncio.run(scenario()) == P.ERR_CANCELLED
+
+
+def test_a_connected_computer_whose_runtime_is_down_is_an_error_not_a_pause(monkeypatch):
+    from app.connector.remote import ConnectorProvider, DeviceView
+
+    device = DeviceView(id="d" * 32, name="laptop", hello={}, chat_model=None, embed_model=None)
+    prov = ConnectorProvider(device, {"id": "ollama", "runtime": "ollama", "reachable": False,
+                                      "error": "connection refused", "models": []})
+    monkeypatch.setattr(ConnectorProvider, "connected", lambda self: True)
+    err = prov.unavailable_error()
+    assert not isinstance(err, ComputerDisconnected) and "isn't answering" in str(err)
+    monkeypatch.setattr(ConnectorProvider, "connected", lambda self: False)
+    monkeypatch.setattr(ConnectorProvider, "in_grace", lambda self: False)
+    assert isinstance(prov.unavailable_error(), ComputerDisconnected)
+
+
+def test_memory_and_search_never_swallow_a_pause():
+    from unittest.mock import patch
+
+    from app.rag.embeddings import SourceEmbeddingFunction
+    from app.router.router import ModelRouter
+
+    def gone(self, inputs):
+        raise ComputerDisconnected("laptop disconnected.", device_id="d" * 32)
+
+    with patch.object(ModelRouter, "embed", gone), identity.acting_as(TEST_USER_ID):
+        with pytest.raises(ComputerDisconnected):
+            SourceEmbeddingFunction()(["x"])

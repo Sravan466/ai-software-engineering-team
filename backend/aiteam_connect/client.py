@@ -30,7 +30,7 @@ from aiteam_connect.local import Agent, Refused, computer_name, os_name
 #: through while a model call is still generating.
 _INLINE = ("ping", "cancel")
 #: Threads for everything else. The limits decide how many model calls actually run.
-_WORKERS = 8
+_WORKERS = 16
 
 #: Close codes that mean "stop", not "reconnect".
 STOP = {P.CLOSE_DISCONNECTED, P.CLOSE_FORGOTTEN, P.CLOSE_OUTDATED, P.CLOSE_LIMIT}
@@ -184,7 +184,10 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
         user_agent_header=f"{P.PACKAGE}/{P.CONNECTOR_VERSION}",
     ) as ws:
         approved = waiting = False
-        pool = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="aiteam-connect")
+        # Two pools, so model calls waiting for a slot never hold up `hello` or
+        # `model_info` behind them.
+        pool = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="aiteam-connect-model")
+        info_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="aiteam-connect-info")
         try:
             while True:
                 # The server pings an approved computer every PING_EVERY_SECONDS, so
@@ -223,8 +226,10 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
                         continue
                     if message.op in _INLINE:
                         _answer(ws, agent, message)
-                    else:
+                    elif message.op in P.MODEL_OPS:
                         pool.submit(_answer, ws, agent, message)
+                    else:
+                        info_pool.submit(_answer, ws, agent, message)
         except ConnectionClosed as closed:
             # The code the server closed with — 4000 and 4401 mean "stop".
             return closed.rcvd.code if closed.rcvd is not None else 1006
@@ -232,7 +237,10 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
             # Nobody is left to read these answers: stop the runtime generating them.
             if agent.cancel_all():
                 say("Connection lost — stopped what this computer was generating.")
-            pool.shutdown(wait=False)
+            # Queued work goes too: its answer has no connection to go back on,
+            # and the server sends it again once reconnected.
+            pool.shutdown(wait=False, cancel_futures=True)
+            info_pool.shutdown(wait=False, cancel_futures=True)
     return 1006
 
 

@@ -22,6 +22,7 @@ import platform
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
@@ -123,6 +124,8 @@ class Agent:
         #: request id -> (the adapter running it, set when it's been stopped)
         self._running: dict[str, tuple[RuntimeAdapter, threading.Event]] = {}
         self._running_lock = threading.Lock()
+        #: (source, model) -> (the window the model reports, when asked), for the clamp.
+        self._windows: dict[tuple[str, str], tuple[Optional[int], float]] = {}
         _log_refusals()
 
     # ── finding the sources ─────────────────────────────────────────────────
@@ -279,22 +282,54 @@ class Agent:
         if store.load_state().get("paused"):
             raise Paused("Model calls are paused on this computer. Run `aiteam-connect resume` there.")
 
-    def _run(self, request_id: str, adapter: RuntimeAdapter, timeout: int, fn):
-        """Run one model call, stoppable by `cancel` and by the local timeout."""
+    def _say_safely(self, text: str) -> None:
+        """Tell the terminal — but a console that can't print this must never stop a call."""
+        try:
+            self._say(text)
+        except Exception:  # noqa: BLE001 - an encoding error, a closed stdout
+            pass
+
+    @contextmanager
+    def _slot(self, request_id: str, adapter: RuntimeAdapter, limits: dict, size: int):
+        """Register the call so `cancel` can reach it, then wait for a free slot.
+
+        Registered *before* waiting, so a cancel that arrives while it is queued —
+        or before the runtime has been asked anything — is kept, not lost. The slot
+        is released on every way out, and only if it was taken.
+        """
         stopped = threading.Event()
-        timed_out = threading.Event()
         with self._running_lock:
             self._running[request_id] = (adapter, stopped)
+        try:
+            try:
+                self.gate.admit(limits, size, stopped)
+            except L.LimitRefused:
+                if stopped.is_set():
+                    raise Cancelled("Stopped.") from None
+                raise
+            try:
+                yield stopped
+            finally:
+                self.gate.release()
+        finally:
+            with self._running_lock:
+                self._running.pop(request_id, None)
+
+    def _run(self, request_id: str, adapter: RuntimeAdapter, stopped: threading.Event, timeout: int, fn):
+        """Run one model call, stoppable by `cancel` and by the local timeout."""
+        timed_out = threading.Event()
 
         def expire() -> None:
             timed_out.set()
             adapter.cancel(request_id)
 
+        if stopped.is_set():
+            raise Cancelled("Stopped.")
         timer = threading.Timer(timeout, expire)
         timer.daemon = True
         timer.start()
         try:
-            return fn()
+            result = fn()
         except ProviderError as e:
             if stopped.is_set():
                 raise Cancelled("Stopped.") from None
@@ -308,8 +343,31 @@ class Agent:
             raise RuntimeFailed(str(e)[:500]) from None
         finally:
             timer.cancel()
-            with self._running_lock:
-                self._running.pop(request_id, None)
+        if stopped.is_set():
+            # Cancelled just as it finished: whoever asked has stopped listening.
+            raise Cancelled("Stopped.")
+        return result
+
+    def _context_for(self, source: Source, model: str, wanted: int, limits: dict) -> int:
+        """The window this call runs at: what the server asked, held to what this
+        computer allows and to what the model itself reports.
+
+        The window sizes the runtime's KV cache — memory on this computer — so it
+        is a machine setting in effect, and the server never has the last word.
+        """
+        window = min(int(wanted), limits["max_context_tokens"])
+        key = (source.id, model)
+        known = self._windows.get(key)
+        if known is None or time.monotonic() - known[1] > 300:
+            try:
+                info = source.adapter.model_info(model)
+            except Exception:  # noqa: BLE001 - a model that can't be described keeps the local cap
+                info = None
+            known = ((info.context_window if info is not None else None) or None, time.monotonic())
+            self._windows[key] = known
+        if known[0]:
+            window = min(window, int(known[0]))
+        return max(window, 256)
 
     def chat(self, args: dict, request_id: str) -> dict:
         try:
@@ -327,59 +385,46 @@ class Agent:
         state = store.load_state()
         limits = L.read(state)
         prompt_chars = sum(len(m.content) for m in wanted.messages)
-        stopped = threading.Event()
-        with self._running_lock:
-            self._running[request_id] = (source.adapter, stopped)
-        try:
-            self.gate.admit(limits, prompt_chars, stopped)
-        except L.LimitRefused:
-            with self._running_lock:
-                self._running.pop(request_id, None)
-            if stopped.is_set():
-                raise Cancelled("Stopped.") from None
-            raise
         started = time.monotonic()
-        doing = wanted.purpose or "a build"
-        self._say(f"Answering {doing} with {wanted.model}…")
         try:
-            request = ChatRequest(
-                model=wanted.model,
-                messages=[m.model_dump() for m in wanted.messages],
-                max_tokens=L.clamp_tokens(wanted.max_tokens, limits),
-                context_window=wanted.context_window,
-                temperature=wanted.temperature,
-                top_p=wanted.top_p,
-                top_k=wanted.top_k,
-                min_p=wanted.min_p,
-                repeat_penalty=wanted.repeat_penalty,
-                presence_penalty=wanted.presence_penalty,
-                frequency_penalty=wanted.frequency_penalty,
-                seed=wanted.seed,
-                stop=wanted.stop,
-                thinking=wanted.thinking,
-                json_schema=wanted.json_schema,
-                json_mode=wanted.json_mode,
-                structured_output=wanted.structured_output,
-                request_id=request_id,
-                # This computer's own machine settings — never the server's.
-                **(L.machine(state) if not source.remote else {}),
-            )
-            with self._running_lock:
-                self._running[request_id] = (source.adapter, stopped)
-            result = self._run(request_id, source.adapter, limits["timeout_seconds"],
-                               lambda: source.adapter.chat(request))
+            with self._slot(request_id, source.adapter, limits, prompt_chars) as stopped:
+                self._say_safely(f"Answering {wanted.purpose or 'a build'} with {wanted.model}...")
+                request = ChatRequest(
+                    model=wanted.model,
+                    messages=[m.model_dump() for m in wanted.messages],
+                    max_tokens=L.clamp_tokens(wanted.max_tokens, limits),
+                    context_window=self._context_for(source, wanted.model, wanted.context_window, limits),
+                    temperature=wanted.temperature,
+                    top_p=wanted.top_p,
+                    top_k=wanted.top_k,
+                    min_p=wanted.min_p,
+                    repeat_penalty=wanted.repeat_penalty,
+                    presence_penalty=wanted.presence_penalty,
+                    frequency_penalty=wanted.frequency_penalty,
+                    seed=wanted.seed,
+                    stop=wanted.stop,
+                    thinking=wanted.thinking,
+                    json_schema=wanted.json_schema,
+                    json_mode=wanted.json_mode,
+                    structured_output=wanted.structured_output,
+                    request_id=request_id,
+                    # This computer's own machine settings — never the server's.
+                    **(L.machine(state) if not source.remote else {}),
+                )
+                result = self._run(request_id, source.adapter, stopped, limits["timeout_seconds"],
+                                   lambda: source.adapter.chat(request))
         except (Refused, L.LimitRefused) as e:
             activity.info("chat model=%s outcome=%s", wanted.model, e.code)
-            self._say(f"  stopped ({e.code}).")
+            self._say_safely(f"  stopped ({e.code}).")
             raise
-        finally:
-            self.gate.release()
         seconds = time.monotonic() - started
         activity.info(
             "chat model=%s prompt_tokens=%d completion_tokens=%d seconds=%.1f finish=%s",
             wanted.model, result.prompt_tokens, result.completion_tokens, seconds, result.finish_reason,
         )
-        self._say(f"  done in {seconds:.1f} s · {result.prompt_tokens:,} in / {result.completion_tokens:,} out.")
+        self._say_safely(
+            f"  done in {seconds:.1f} s - {result.prompt_tokens:,} in / {result.completion_tokens:,} out."
+        )
         return P.ChatReport(
             text=result.text,
             reasoning=result.reasoning,
@@ -401,14 +446,16 @@ class Agent:
         self._check_paused()
         source = self._source_for(wanted.source, wanted.model)
         limits = L.read(store.load_state())
-        stopped = threading.Event()
-        self.gate.admit(limits, sum(len(t) for t in wanted.inputs), stopped)
         started = time.monotonic()
         try:
-            vectors = self._run(request_id, source.adapter, limits["timeout_seconds"],
-                                lambda: source.adapter.embed(wanted.model, list(wanted.inputs)))
-        finally:
-            self.gate.release()
+            with self._slot(request_id, source.adapter, limits, sum(len(t) for t in wanted.inputs)) as stopped:
+                vectors = self._run(
+                    request_id, source.adapter, stopped, limits["timeout_seconds"],
+                    lambda: source.adapter.embed(wanted.model, list(wanted.inputs), request_id=request_id),
+                )
+        except (Refused, L.LimitRefused) as e:
+            activity.info("embed model=%s outcome=%s", wanted.model, e.code)
+            raise
         activity.info("embed model=%s inputs=%d seconds=%.1f", wanted.model, len(wanted.inputs),
                       time.monotonic() - started)
         return P.EmbedReport(vectors=vectors).model_dump()

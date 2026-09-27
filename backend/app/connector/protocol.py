@@ -342,6 +342,7 @@ class LimitsReport(_Strict):
     max_prompt_chars: int = Field(ge=1_000)
     max_output_tokens: int = Field(ge=16)
     timeout_seconds: int = Field(ge=5, le=24 * 3600)
+    max_context_tokens: int = Field(default=32_768, ge=256)
 
 
 class ChatTurn(_Strict):

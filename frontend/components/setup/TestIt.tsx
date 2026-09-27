@@ -92,10 +92,12 @@ export default function TestIt({
   const modelName = spec.slice(spec.indexOf(":") + 1);
   const runtime = device.hello?.sources.find((s) => s.id === sourceId)?.label ?? sourceId;
   const limits = device.hello?.limits ?? null;
-  const pausedThere = device.hello?.paused === true;
 
   async function send() {
     if (!device) return;
+    // Held to this computer for the whole round trip, so a poll that brings
+    // another one online can't put this answer under its name.
+    setPick(device.id);
     setSending(true);
     setResult(null);
     setError("");
@@ -163,9 +165,6 @@ export default function TestIt({
           <span id="su-test-offline" className="su-fine">
             {device.name} isn’t connected. Start the connector on it first.
           </span>
-        )}
-        {device.online && pausedThere && !sending && (
-          <span className="su-fine su-warn-text">Model calls are paused on {device.name}.</span>
         )}
       </div>
 

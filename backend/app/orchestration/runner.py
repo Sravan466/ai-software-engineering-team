@@ -1088,6 +1088,13 @@ class PipelineRunner:
         project.cancel_requested = False
         db.commit()
         log.info("Run paused for device %s: %s (at %s)", error.device_id, project.id, phase)
+        # The computer may have come back while this was being written — after the
+        # reconnect looked for paused builds and found none. Look again now.
+        from app.connector.hub import hub
+
+        link = hub.live(error.device_id)
+        if link is not None and link.approved and not error.paused_there:
+            hub.notify_ready(project.owner_id, error.device_id)
 
     def _fail(self, db: Session, project: Project, message: str) -> None:
         project.status = PipelineStatus.FAILED.value

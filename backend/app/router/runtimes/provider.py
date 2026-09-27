@@ -15,6 +15,7 @@ runtime that is. What lives here is everything that is the same for every runtim
 """
 from __future__ import annotations
 
+import inspect
 import secrets
 import threading
 import time
@@ -26,7 +27,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.router import compat, generation
 from app.router import inflight
-from app.router.base import LLMProvider, ProviderError, RequestCancelled
+from app.router.base import ComputerDisconnected, LLMProvider, ProviderError, RequestCancelled
 from app.router.model_profile import (
     ModelProfile,
     ProfileCache,
@@ -124,6 +125,14 @@ class SourceState:
     models: list[ModelEntry] = field(default_factory=list)
     error: Optional[str] = None
     checked_at: float = 0.0
+
+
+def _takes_request_id(fn) -> bool:
+    """Whether an adapter's `embed` can be named for `cancel` — older ones can't."""
+    try:
+        return "request_id" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class SourceProvider(LLMProvider):
@@ -502,6 +511,8 @@ class SourceProvider(LLMProvider):
                     if inflight.was_cancelled(request.request_id) and not isinstance(e, RequestCancelled):
                         raise RequestCancelled() from None
                     raise
+                if inflight.was_cancelled(request.request_id):
+                    raise RequestCancelled()  # finished just as Stop landed; Stop wins
         except RequestCancelled:
             raise
         except ProviderError as e:
@@ -649,9 +660,20 @@ class SourceProvider(LLMProvider):
 
     # ── embeddings ───────────────────────────────────────────────────────────
     def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
+        request_id = secrets.token_hex(8)
         try:
             self._check_guard()
-            return self.adapter.embed(model, inputs)
+            with inflight.track(request_id, lambda: self.adapter.cancel(request_id)):
+                try:
+                    if _takes_request_id(self.adapter.embed):
+                        return self.adapter.embed(model, inputs, request_id=request_id)
+                    return self.adapter.embed(model, inputs)
+                except ProviderError as e:
+                    if inflight.was_cancelled(request_id) and not isinstance(e, RequestCancelled):
+                        raise RequestCancelled() from None
+                    raise
+        except (RequestCancelled, ComputerDisconnected):
+            raise
         except ProviderError as e:
             if e.unreachable:
                 self._mark_down(str(e))

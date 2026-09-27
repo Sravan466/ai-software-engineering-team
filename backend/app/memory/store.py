@@ -12,6 +12,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from app.router.base import ComputerDisconnected, RequestCancelled
 from app.core import identity
 from app.core.logging import get_logger
 from app.rag import chroma
@@ -105,6 +106,8 @@ class MemoryStore:
                 if len(blocks) >= k:
                     break
             return "\n\n---\n\n".join(blocks)
+        except (ComputerDisconnected, RequestCancelled):
+            raise  # the build pauses or stops on these; never "no results"
         except Exception as e:  # noqa: BLE001
             log.warning("Memory recall failed: %s", e)
             return ""

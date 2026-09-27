@@ -847,11 +847,13 @@ class OllamaAdapter(RuntimeAdapter):
         return r.json()
 
     # ── embed ────────────────────────────────────────────────────────────────
-    def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
+    def embed(self, model: str, inputs: list[str], *, request_id: Optional[str] = None) -> list[list[float]]:
         if not inputs:
             return []
         try:
-            r = self._post("/api/embed", {"model": model, "input": inputs}, timeout=EMBED_TIMEOUT)
+            r = self._post_cancellable(
+                "/api/embed", {"model": model, "input": inputs}, timeout=EMBED_TIMEOUT, request_id=request_id
+            )
             r.raise_for_status()
             return r.json().get("embeddings", []) or []
         except Exception as e:  # noqa: BLE001

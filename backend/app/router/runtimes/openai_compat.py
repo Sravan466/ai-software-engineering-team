@@ -340,12 +340,15 @@ class OpenAICompatAdapter(RuntimeAdapter):
         )
 
     # ── embed ────────────────────────────────────────────────────────────────
-    def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
+    def embed(self, model: str, inputs: list[str], *, request_id: Optional[str] = None) -> list[list[float]]:
         if not inputs:
             return []
         try:
-            r = self._post(
-                "/v1/embeddings", {"model": model, "input": inputs}, timeout=EMBED_TIMEOUT
+            r = self._post_cancellable(
+                "/v1/embeddings",
+                {"model": model, "input": inputs},
+                timeout=EMBED_TIMEOUT,
+                request_id=request_id,
             )
             r.raise_for_status()
             rows = r.json().get("data", []) or []

@@ -1043,12 +1043,10 @@ class ModelRouter:
         for idx, (pname, model) in enumerate(chain):
             prov = self.provider(pname)
             if isinstance(prov, ConnectorProvider) and not prov.available():
-                # The user's own computer isn't connected. Nothing else was chosen to
-                # run this, so the build waits for it rather than falling through to
-                # a model nobody picked — or failing.
-                raise ComputerDisconnected(
-                    prov.down_reason(), device_id=prov.device_id, device_name=prov.device_name
-                )
+                # The user's own computer: gone, the build waits for it (pauses)
+                # rather than falling through to a model nobody picked. Connected
+                # but its runtime down, that is an error to fix there, not a pause.
+                raise prov.unavailable_error()
             if prov is None or not prov.available():
                 attempts.append({"provider": pname, "model": model, "error": "unavailable"})
                 continue
@@ -1182,6 +1180,8 @@ class ModelRouter:
                 retryable=False,
             )
         prov = self.sources.get(target[0])
+        if isinstance(prov, ConnectorProvider) and not prov.available():
+            raise prov.unavailable_error()
         if prov is None or not prov.available():
             raise ProviderError(
                 f"The embedding model '{target[1]}' is on '{target[0]}', which isn't answering.",

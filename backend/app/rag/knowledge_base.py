@@ -16,6 +16,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from app.router.base import ComputerDisconnected, RequestCancelled
 from app.core import identity
 from app.core.logging import get_logger
 from app.rag import chroma
@@ -96,6 +97,8 @@ class KnowledgeBase:
                 src = meta.get("filename", "doc") if isinstance(meta, dict) else "doc"
                 blocks.append(f"[source: {src}]\n{doc}")
             return "\n\n".join(blocks)
+        except (ComputerDisconnected, RequestCancelled):
+            raise  # the build pauses or stops on these; never "no results"
         except Exception as e:  # noqa: BLE001
             log.warning("Knowledge base query failed: %s", e)
             return ""

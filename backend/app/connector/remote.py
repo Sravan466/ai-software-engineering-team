@@ -238,6 +238,12 @@ class ConnectorAdapter(RuntimeAdapter):
             if request_id:
                 with self._links_lock:
                     self._links[request_id] = link
+                # Registered first, then checked: a Stop from here on reaches the
+                # link, and one that came while this waited for it is seen now.
+                if inflight.was_cancelled(request_id):
+                    with self._links_lock:
+                        self._links.pop(request_id, None)
+                    raise RequestCancelled()
             try:
                 return hub.call(link.request(op, args, timeout=timeout, request_id=request_id), timeout + 10)
             except ConnectorError as e:
@@ -292,12 +298,12 @@ class ConnectorAdapter(RuntimeAdapter):
             unsent=tuple(report.unsent),
         )
 
-    def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
+    def embed(self, model: str, inputs: list[str], *, request_id: Optional[str] = None) -> list[list[float]]:
         vectors: list[list[float]] = []
         for start in range(0, len(inputs), P.MAX_EMBED_INPUTS):
             batch = inputs[start : start + P.MAX_EMBED_INPUTS]
             args = P.EmbedArgs(source=self.remote_source, model=model, inputs=batch).model_dump()
-            result = self._ask("embed", args, timeout=_EMBED_TIMEOUT)
+            result = self._ask("embed", args, timeout=_EMBED_TIMEOUT, request_id=request_id)
             try:
                 report = P.EmbedReport.model_validate(result)
             except ValidationError:
@@ -395,6 +401,17 @@ class ConnectorProvider(SourceProvider):
 
     def down_reason(self) -> str:
         return self.state().error or f"{self.device_name} isn't connected."
+
+    def gone(self) -> bool:
+        """Not connected, and past the grace a dropped connection gets — what pauses a
+        build. A computer that is connected but whose runtime is down is not gone:
+        no reconnect is coming to resume a build paused for that."""
+        return not self.connected() and not self.in_grace()
+
+    def unavailable_error(self) -> ProviderError:
+        if self.gone():
+            return ComputerDisconnected(self.down_reason(), device_id=self.device_id, device_name=self.device_name)
+        return ProviderError(self.down_reason(), retryable=False)
 
     def ram_bytes(self) -> Optional[int]:
         return self._ram

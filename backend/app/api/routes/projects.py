@@ -307,9 +307,10 @@ def _resume_paused(owner_id: str, device_id: str) -> None:
             .all()
         )
         for project in paused:
-            runner.prepare_resume(db, project)
+            # Claimed first: a Stop that landed a moment ago keeps its own message.
             if not _claim(db, project, {PipelineStatus.PAUSED.value}):
                 continue  # resumed by hand, or stopped, a moment ago
+            runner.prepare_resume(db, project)
             log.info("Device %s reconnected; resuming build %s.", device_id, project.id)
             threading.Thread(target=_drive, args=(project.id,), name=f"resume-{project.id[:8]}", daemon=True).start()
     except Exception:  # noqa: BLE001 - the builds stay paused and resumable by hand

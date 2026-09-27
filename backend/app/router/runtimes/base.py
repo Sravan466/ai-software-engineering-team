@@ -129,8 +129,10 @@ class RuntimeAdapter(abc.ABC):
     def chat(self, request: ChatRequest) -> ChatResult:
         """One completion. Raises `ProviderError` on failure."""
 
-    def embed(self, model: str, inputs: list[str]) -> list[list[float]]:
-        """One vector per input. Raises `ProviderError` on failure."""
+    def embed(self, model: str, inputs: list[str], *, request_id: Optional[str] = None) -> list[list[float]]:
+        """One vector per input. Raises `ProviderError` on failure.
+
+        `request_id` names the call for `cancel`, as a chat's does."""
         raise ProviderError(
             f"This runtime does not serve embeddings through its API ({self.base_url}).",
             retryable=False,
