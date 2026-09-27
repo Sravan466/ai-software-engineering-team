@@ -18,6 +18,7 @@ import { canRunABuild, runtimeSays } from "@/lib/capabilities";
 import { hostOf, modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
+import RuntimeWarnings from "@/components/models/RuntimeWarnings";
 import { SkeletonLines } from "@/components/ui/Skeleton";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
@@ -535,6 +536,7 @@ function SourceBlock({
         {source.base_url}
         {source.version ? <span className="dim"> · {source.version}</span> : null}
       </p>
+      <RuntimeWarnings warnings={source.warnings} label={source.label} />
 
       {!source.reachable ? (
         <p className="field-hint source-note">

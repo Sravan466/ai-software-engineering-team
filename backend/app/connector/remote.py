@@ -354,6 +354,11 @@ class ConnectorProvider(SourceProvider):
         self._ram = device.ram_bytes
         self._reported_reachable = bool(report.get("reachable", True))
         self._reported_error = report.get("error")
+        # What hygiene is judged on: the version the runtime told that computer, and
+        # whether it answers on that computer's network address as well as loopback.
+        self.source.version = report.get("version")
+        exposed = report.get("exposed_on")
+        self.source.exposed = [str(a) for a in exposed] if isinstance(exposed, list) else None
         entries = []
         for m in report.get("models") or []:
             caps = m.get("capabilities")

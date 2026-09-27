@@ -98,6 +98,16 @@ class OpenAICompatAdapter(RuntimeAdapter):
     #: which is how servers that render the template themselves take "off".
     thinking_via_template = False
     fills_sampling_defaults = True
+    #: Where the dialect lives on this server: "" for `/v1/...` at the root. Docker
+    #: Model Runner serves it under `/engines`.
+    api_prefix = ""
+    #: The strongest structured mode this runtime is known to take. A request never
+    #: asks for more, so a runtime documented without schemas isn't made to refuse
+    #: one first on every model.
+    structured_ceiling = STRUCTURED_SCHEMA
+    #: Whether `/v1/embeddings` is served at all. Where it isn't, `embed` says so at
+    #: once instead of sending a request that can only 404.
+    serves_embeddings = True
 
     def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         super().__init__(api_root(base_url), api_key)
@@ -130,7 +140,7 @@ class OpenAICompatAdapter(RuntimeAdapter):
     # ── list_models ──────────────────────────────────────────────────────────
     def _models_payload(self) -> list[dict]:
         try:
-            r = self._get("/v1/models", timeout=LIST_TIMEOUT)
+            r = self._get(f"{self.api_prefix}/v1/models", timeout=LIST_TIMEOUT)
             r.raise_for_status()
             data = r.json().get("data", []) or []
         except Exception as e:  # noqa: BLE001
@@ -170,8 +180,9 @@ class OpenAICompatAdapter(RuntimeAdapter):
     def structured_mode(self, model: str) -> str:
         """The strongest mode this model has not refused — what a schema call asks for."""
         refused = self._refused.get(model, set())
+        allowed = _LADDER[_LADDER.index(self.structured_ceiling):] if self.structured_ceiling in _LADDER else _LADDER
         for mode in (STRUCTURED_SCHEMA, STRUCTURED_JSON):
-            if mode not in refused:
+            if mode not in refused and mode in allowed:
                 return mode
         return STRUCTURED_NONE
 
@@ -182,7 +193,8 @@ class OpenAICompatAdapter(RuntimeAdapter):
         if not wants_json:
             modes = [STRUCTURED_NONE]
         else:
-            modes = [m for m in _LADDER if m == STRUCTURED_NONE or m not in refused]
+            ceiling = _LADDER.index(self.structured_ceiling) if self.structured_ceiling in _LADDER else 0
+            modes = [m for m in _LADDER[ceiling:] if m == STRUCTURED_NONE or m not in refused]
             if not request.json_schema:
                 modes = [m for m in modes if m != STRUCTURED_SCHEMA]
             # Never stronger than the caller believes this model takes.
@@ -204,7 +216,7 @@ class OpenAICompatAdapter(RuntimeAdapter):
             body = self._body(request, mode, thinking=send_thinking)
             try:
                 r = self._post_cancellable(
-                    "/v1/chat/completions",
+                    f"{self.api_prefix}/v1/chat/completions",
                     body,
                     timeout=CHAT_TIMEOUT,
                     request_id=request.request_id,
@@ -343,9 +355,11 @@ class OpenAICompatAdapter(RuntimeAdapter):
     def embed(self, model: str, inputs: list[str], *, request_id: Optional[str] = None) -> list[list[float]]:
         if not inputs:
             return []
+        if not self.serves_embeddings:
+            return RuntimeAdapter.embed(self, model, inputs, request_id=request_id)
         try:
             r = self._post_cancellable(
-                "/v1/embeddings",
+                f"{self.api_prefix}/v1/embeddings",
                 {"model": model, "input": inputs},
                 timeout=EMBED_TIMEOUT,
                 request_id=request_id,

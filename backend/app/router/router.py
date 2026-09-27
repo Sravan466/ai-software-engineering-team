@@ -73,7 +73,7 @@ from app.router.model_profile import ModelProfile, fallback_profile
 from app.router.providers.anthropic_provider import AnthropicProvider
 from app.router.providers.gemini_provider import GeminiProvider
 from app.router.providers.openai_provider import OpenAIProvider
-from app.router.runtimes import table
+from app.router.runtimes import hygiene, table
 from app.router.runtimes.provider import STATE_TTL_SECONDS, SourceProvider
 from app.router.runtimes.sources import SourceError, SourceRegistry
 from app.router.runtimes.types import KIND_EMBEDDING, ModelEntry, writes
@@ -590,6 +590,7 @@ class ModelRouter:
                     "reachable": state.reachable,
                     "error": None if state.reachable else state.error,
                     "version": prov.source.version,
+                    "warnings": hygiene.warnings(prov.source.runtime, prov.source.version, prov.source.exposed),
                     "models": rows,
                     "can_download": prov.adapter.can_download,
                     "add_model": meta.add_model,

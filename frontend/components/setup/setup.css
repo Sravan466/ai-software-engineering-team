@@ -284,3 +284,7 @@
   /* Still says "in flight", without the motion. */
   .su-route[data-trip="live"] li:not(:last-child)::after { animation: none; background: var(--run); }
 }
+
+/* Runtime hygiene under the checklist: what to update or close, never a block. */
+.su-hygiene { display: grid; gap: 8px; margin-top: 12px; }
+.su-hygiene .rt-warnings { margin-top: 0; }

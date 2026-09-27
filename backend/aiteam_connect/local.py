@@ -30,7 +30,7 @@ from pydantic import ValidationError
 
 from app.connector import protocol as P
 from app.router.model_profile import total_ram_bytes
-from app.router.runtimes import detect, table
+from app.router.runtimes import detect, hygiene, table
 from app.router.base import ProviderError
 from app.router.runtimes.base import RuntimeAdapter
 from app.router.runtimes.types import ChatRequest
@@ -126,6 +126,8 @@ class Agent:
         self._running_lock = threading.Lock()
         #: (source, model) -> (the window the model reports, when asked), for the clamp.
         self._windows: dict[tuple[str, str], tuple[Optional[int], float]] = {}
+        #: Hygiene warnings already printed, so each is said once a session, not per scan.
+        self._warned: set[tuple[str, str, str]] = set()
         _log_refusals()
 
     # ── finding the sources ─────────────────────────────────────────────────
@@ -157,8 +159,11 @@ class Agent:
             if any(detect.same_address(url, h.base_url) for h in hellos):
                 continue
             api_key = store.get_secret(store.source_key_name(url))
-            hello = detect.identify(url, api_key, prefer=entry.get("runtime"))
-            runtime = hello.runtime if hello else table.GENERIC
+            declared = entry.get("runtime")
+            hello = detect.identify(url, api_key, prefer=declared)
+            # A runtime with no answer of its own to tell it apart (Jan, say) is what
+            # the person who added it said it is — they are on this computer.
+            runtime = hello.runtime if hello else (declared if declared in table.BY_ID else table.GENERIC)
             adapter = table.adapter_for(runtime)(url, api_key)
             source = Source(self._id_for(runtime, url), runtime, url, adapter,
                             remote=not detect.is_loopback(url), version=hello.version if hello else None)
@@ -170,6 +175,7 @@ class Agent:
             self._sources[source.id] = source
 
         reports = []
+        addresses = hygiene.own_addresses()
         for source in self._sources.values():
             report: dict[str, Any] = {
                 "id": source.id,
@@ -181,7 +187,9 @@ class Agent:
                 "reachable": True,
                 "error": None,
                 "models": [],
+                "exposed_on": None if source.remote else (hygiene.exposed_on(source.base_url, addresses) or [])[:8],
             }
+            self._warn(source, report["exposed_on"])
             try:
                 entries = source.adapter.list_models()
                 source.models = [e.name for e in entries]
@@ -201,6 +209,17 @@ class Agent:
                 report["error"] = str(e)[:500]
             reports.append(report)
         return reports, found.unknown[:32], found.tried[:64]
+
+    def _warn(self, source: Source, exposed: Optional[list[str]]) -> None:
+        """Say in this terminal what the website's Setup tab says: an outdated runtime,
+        or one anyone on the network can reach. Once per session for each."""
+        found = hygiene.warnings(source.runtime, source.version, exposed)
+        fresh = [w for w in found if (source.id, source.base_url, w["kind"]) not in self._warned]
+        if not fresh:
+            return
+        self._warned.update((source.id, source.base_url, w["kind"]) for w in fresh)
+        for line in hygiene.terminal_lines(table.spec_for(source.runtime).label, source.base_url, fresh):
+            self._say_safely(line)
 
     # ── the operations ──────────────────────────────────────────────────────
     def hello(self) -> dict:

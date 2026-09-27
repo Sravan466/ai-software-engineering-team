@@ -13,11 +13,15 @@ from typing import Optional
 
 from app.router.runtimes.base import FINGERPRINT_TIMEOUT, LIST_TIMEOUT, get_json, http_error
 from app.router.runtimes.openai_compat import OpenAICompatAdapter, _positive, api_root
+import httpx
+
+from app.router.runtimes.llamacpp import LlamaCppAdapter
 from app.router.runtimes.types import (
     CONTEXT_REPORTED,
     KIND_CHAT,
     KIND_EMBEDDING,
     KIND_VISION,
+    STRUCTURED_JSON,
     STRUCTURED_NONE,
     THINKING_SETTINGS,
     Hello,
@@ -194,7 +198,14 @@ class SGLangAdapter(OpenAICompatAdapter):
         cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
     ) -> Optional[Hello]:
         base = api_root(base_url)
-        return Hello(runtime=cls.runtime, base_url=base) if _owned_by(base, "sglang", api_key, timeout) else None
+        if not _owned_by(base, "sglang", api_key, timeout):
+            return None
+        # `/server_info` (older builds: `/get_server_info`) carries the version.
+        info = get_json(base, "/server_info", api_key, timeout=timeout) or get_json(
+            base, "/get_server_info", api_key, timeout=timeout
+        )
+        version = info.get("version") if isinstance(info, dict) else None
+        return Hello(runtime=cls.runtime, base_url=base, version=str(version) if version else None)
 
     def model_info(self, model: str) -> Optional[ModelInfo]:
         info = super().model_info(model)
@@ -235,10 +246,13 @@ class KoboldCppAdapter(OpenAICompatAdapter):
 
 # ── LocalAI ──────────────────────────────────────────────────────────────────
 class LocalAIAdapter(OpenAICompatAdapter):
-    """LocalAI: `/system` lists its backends (unverified against a running server).
+    """LocalAI: `/.well-known/localai.json`, or `/system` listing its backends.
 
     It shares llama.cpp's default port, so only this answer tells them apart — never
-    the port, and never `/v1/models`, which LocalAI serves in the plain dialect.
+    the port, and never `/v1/models`, which LocalAI serves in the plain dialect. It
+    also answers Ollama's routes (and says it is Ollama 0.9.0 there), which is why
+    the Ollama fingerprint reads the root banner, not `/api/version`.
+    Source: github.com/mudler/LocalAI core/http/routes/localai.go.
     """
 
     runtime = "localai"
@@ -248,9 +262,11 @@ class LocalAIAdapter(OpenAICompatAdapter):
         cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
     ) -> Optional[Hello]:
         base = api_root(base_url)
-        system = get_json(base, "/system", api_key, timeout=timeout)
-        if not (isinstance(system, dict) and "backends" in system):
-            return None
+        known = get_json(base, "/.well-known/localai.json", api_key, timeout=timeout)
+        if not isinstance(known, dict):
+            system = get_json(base, "/system", api_key, timeout=timeout)
+            if not (isinstance(system, dict) and "backends" in system):
+                return None
         version = get_json(base, "/version", api_key, timeout=timeout)
         return Hello(
             runtime=cls.runtime,
@@ -258,3 +274,272 @@ class LocalAIAdapter(OpenAICompatAdapter):
             version=str(version.get("version")) if isinstance(version, dict) else None,
         )
 
+
+
+# ── Jan ──────────────────────────────────────────────────────────────────────
+#: Jan's local API server names the engine behind each model in `owned_by` — and
+#: `remote` for a hosted model it proxies. llama-server itself says `llamacpp`.
+_JAN_OWNERS = {"llama.cpp", "mlx", "remote"}
+
+
+class JanAdapter(OpenAICompatAdapter):
+    """Jan's API server (127.0.0.1:1337): `owned_by` of `llama.cpp`, `mlx` or `remote`.
+
+    Source: github.com/janhq/jan src-tauri/src/core/server/proxy.rs. No version
+    endpoint and no window are reported. A model owned by `remote` runs on a hosted
+    service, so it is listed as not local. Requests pass through to llama.cpp or
+    MLX, so structured output and thinking are theirs; a refusal steps down.
+    """
+
+    runtime = "jan"
+    thinking_supported = THINKING_SETTINGS
+    thinking_via_template = True
+
+    @classmethod
+    def fingerprint(
+        cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
+    ) -> Optional[Hello]:
+        base = api_root(base_url)
+        data = get_json(base, "/v1/models", api_key, timeout=timeout)
+        entries = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(entries, list) or not entries:
+            return None
+        if not all(isinstance(e, dict) and e.get("owned_by") in _JAN_OWNERS for e in entries):
+            return None
+        return Hello(runtime=cls.runtime, base_url=base)
+
+    def list_models(self) -> list[ModelEntry]:
+        return [
+            ModelEntry(name=d["id"], is_local=d.get("owned_by") != "remote") for d in self._models_payload()
+        ]
+
+    def model_info(self, model: str) -> Optional[ModelInfo]:
+        info = super().model_info(model)
+        if info is not None and self.raw_entry(model).get("owned_by") == "remote":
+            return replace(info, is_local=False)
+        return info
+
+
+# ── llamafile ────────────────────────────────────────────────────────────────
+class LlamafileAdapter(LlamaCppAdapter):
+    """llamafile: a llama.cpp server in one file — the same API, plus `/tools`.
+
+    Everything llama-server reports it reports too (`/props` window and build, the
+    embeddings probe), so it is the llama.cpp adapter under its own name. Asked
+    before llama.cpp; a llamafile that doesn't answer `/tools` (unverified against
+    every release) is still read correctly, as llama.cpp.
+    Source: docs.mozilla.ai/llamafile/using-llamafile/api.
+    """
+
+    runtime = "llamafile"
+
+    @classmethod
+    def fingerprint(
+        cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
+    ) -> Optional[Hello]:
+        hello = LlamaCppAdapter.fingerprint(base_url, api_key, timeout=timeout)
+        if hello is None:
+            return None
+        if get_json(hello.base_url, "/tools", api_key, timeout=timeout) is None:
+            return None
+        return Hello(runtime=cls.runtime, base_url=hello.base_url, version=hello.version)
+
+
+# ── text-generation-webui ────────────────────────────────────────────────────
+class TextGenWebUIAdapter(OpenAICompatAdapter):
+    """text-generation-webui's API (port 5000): `/v1/internal/model/info`.
+
+    Source: github.com/oobabooga/text-generation-webui modules/api/script.py and
+    typing.py. It takes a GBNF `grammar_string` but no `response_format` on chat,
+    so no structured mode is asked for — the shape lives in the prompt, and
+    validation with a repair round holds the answer to it. No window is reported.
+    """
+
+    runtime = "tgw"
+    structured_ceiling = STRUCTURED_NONE
+    sampling_supported = frozenset(
+        {*OpenAICompatAdapter.sampling_supported, "top_k", "min_p", "repeat_penalty"}
+    )
+    extra_sampling = {"top_k": "top_k", "min_p": "min_p", "repeat_penalty": "repetition_penalty"}
+
+    @classmethod
+    def fingerprint(
+        cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
+    ) -> Optional[Hello]:
+        base = api_root(base_url)
+        info = get_json(base, "/v1/internal/model/info", api_key, timeout=timeout)
+        if not (isinstance(info, dict) and "model_name" in info and "loader" in info):
+            return None
+        return Hello(runtime=cls.runtime, base_url=base)
+
+    def _thinking_fields(self, request) -> dict:
+        # Its chat endpoint takes these at the top level (modules/api/typing.py).
+        level = request.thinking
+        if level is None:
+            return {}
+        out: dict = {"enable_thinking": level != "off"}
+        if level in ("low", "medium", "high"):
+            out["reasoning_effort"] = level
+        return out
+
+    thinking_supported = THINKING_SETTINGS
+
+
+# ── GPT4All ──────────────────────────────────────────────────────────────────
+class GPT4AllAdapter(OpenAICompatAdapter):
+    """GPT4All's API server (127.0.0.1:4891): every model `owned_by: "humanity"`.
+
+    Source: github.com/nomic-ai/gpt4all gpt4all-chat/src/server.cpp. No window, no
+    structured output, no thinking switch and no `/v1/embeddings` are documented,
+    so none is asked for.
+    """
+
+    runtime = "gpt4all"
+    structured_ceiling = STRUCTURED_NONE
+    thinking_supported = ()
+    serves_embeddings = False
+
+    @classmethod
+    def fingerprint(
+        cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
+    ) -> Optional[Hello]:
+        base = api_root(base_url)
+        return Hello(runtime=cls.runtime, base_url=base) if _owned_by(base, "humanity", api_key, timeout) else None
+
+    def _thinking_fields(self, request) -> dict:
+        return {}
+
+    def list_models(self) -> list[ModelEntry]:
+        return [ModelEntry(name=d["id"], kind=KIND_CHAT) for d in self._models_payload()]
+
+
+# ── MLX-LM ───────────────────────────────────────────────────────────────────
+class MLXAdapter(OpenAICompatAdapter):
+    """`mlx_lm.server` (127.0.0.1:8080): model entries with no `owned_by`, a
+    `/health` of `{"status": "ok"}`, and no llama.cpp `/props`.
+
+    Source: github.com/ml-explore/mlx-lm mlx_lm/server.py. It reports no window and
+    takes no `response_format`. Thinking goes through `chat_template_kwargs`. It has
+    no embeddings endpoint.
+
+    **It loads whatever a request names** — any Hugging Face repo or local path,
+    downloading it first. So a request here only ever names a model the server
+    already listed; the connector refuses anything else.
+    """
+
+    runtime = "mlx"
+    structured_ceiling = STRUCTURED_NONE
+    thinking_supported = THINKING_SETTINGS
+    thinking_via_template = True
+    serves_embeddings = False
+    sampling_supported = frozenset({*OpenAICompatAdapter.sampling_supported, "top_k", "min_p", "repeat_penalty"})
+    extra_sampling = {"top_k": "top_k", "min_p": "min_p", "repeat_penalty": "repetition_penalty"}
+
+    @classmethod
+    def fingerprint(
+        cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
+    ) -> Optional[Hello]:
+        base = api_root(base_url)
+        data = get_json(base, "/v1/models", api_key, timeout=timeout)
+        entries = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(entries, list) or not entries:
+            return None
+        if any(not isinstance(e, dict) or "owned_by" in e for e in entries):
+            return None
+        health = get_json(base, "/health", api_key, timeout=timeout)
+        if not (isinstance(health, dict) and health.get("status") == "ok"):
+            return None
+        if get_json(base, "/props", api_key, timeout=timeout) is not None:
+            return None  # llama.cpp answers this; mlx_lm.server doesn't
+        return Hello(runtime=cls.runtime, base_url=base)
+
+    def _thinking_fields(self, request) -> dict:
+        # Only the template switch: it has no `reasoning_effort` of its own.
+        if request.thinking is None:
+            return {}
+        return {"chat_template_kwargs": {"enable_thinking": request.thinking != "off"}}
+
+    def list_models(self) -> list[ModelEntry]:
+        return [ModelEntry(name=d["id"], kind=KIND_CHAT) for d in self._models_payload()]
+
+
+# ── Docker Model Runner ──────────────────────────────────────────────────────
+_DMR_BANNER = "Docker Model Runner is running"
+
+
+class DockerModelRunnerAdapter(OpenAICompatAdapter):
+    """Docker Model Runner (TCP 12434): the OpenAI dialect under `/engines`.
+
+    Sources: docs.docker.com/ai/model-runner/api-reference and github.com/docker/
+    model-runner pkg/inference/models/api.go. Recognised by its root banner or by
+    `owned_by: "docker"` under `/engines/v1/models`; its window is
+    `dmr.context_window` on each entry; it documents `json_object`, not schemas.
+    """
+
+    runtime = "dmr"
+    api_prefix = "/engines"
+    structured_ceiling = STRUCTURED_JSON
+
+    @classmethod
+    def fingerprint(
+        cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
+    ) -> Optional[Hello]:
+        base = api_root(base_url)
+        banner = False
+        try:
+            r = httpx.get(f"{base}/", timeout=timeout)
+            banner = r.status_code == 200 and _DMR_BANNER in (r.text or "")
+        except Exception:  # noqa: BLE001
+            pass
+        if not banner:
+            data = get_json(base, "/engines/v1/models", api_key, timeout=timeout)
+            entries = data.get("data") if isinstance(data, dict) else None
+            if not (
+                isinstance(entries, list)
+                and entries
+                and all(isinstance(e, dict) and e.get("owned_by") == "docker" for e in entries)
+            ):
+                return None
+        version = get_json(base, "/version", api_key, timeout=timeout)
+        return Hello(
+            runtime=cls.runtime,
+            base_url=base,
+            version=str(version.get("version")) if isinstance(version, dict) and version.get("version") else None,
+        )
+
+    def model_info(self, model: str) -> Optional[ModelInfo]:
+        info = super().model_info(model)
+        dmr = self.raw_entry(model).get("dmr")
+        window = _positive(dmr.get("context_window")) if isinstance(dmr, dict) else None
+        if info is None or not window:
+            return info
+        return replace(info, context_window=window, context_source=CONTEXT_REPORTED)
+
+
+# ── Foundry Local ────────────────────────────────────────────────────────────
+class FoundryLocalAdapter(OpenAICompatAdapter):
+    """Microsoft Foundry Local: `/openai/status` answers `{Endpoints, ModelDirPath, …}`.
+
+    Source: learn.microsoft.com/azure/foundry-local/reference/reference-rest. Its
+    port is chosen at start, so it is never probed — it is added by its address
+    (`foundry service status` prints it). No window is reported; structured output
+    and thinking aren't documented, so JSON mode is tried and stepped down from on
+    a refusal. Embeddings since 1.1.
+    """
+
+    runtime = "foundry"
+    structured_ceiling = STRUCTURED_JSON
+    thinking_supported = ()
+
+    @classmethod
+    def fingerprint(
+        cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
+    ) -> Optional[Hello]:
+        base = api_root(base_url)
+        status = get_json(base, "/openai/status", api_key, timeout=timeout)
+        if not (isinstance(status, dict) and "Endpoints" in status):
+            return None
+        return Hello(runtime=cls.runtime, base_url=base)
+
+    def _thinking_fields(self, request) -> dict:
+        return {}

@@ -83,6 +83,9 @@ class Source:
     #: Identified only as "speaks the OpenAI API" — used, but asked again, because
     #: that is also how a runtime answers while it is still starting.
     provisional: bool = False
+    #: This machine's network addresses the runtime also answers on, as of the last
+    #: probe; None until checked, or for a source that isn't on this machine.
+    exposed: Optional[list[str]] = None
 
     @property
     def remote(self) -> bool:

@@ -30,7 +30,7 @@ from app.core import secrets_store
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.router.base import CLOUD_PROVIDERS
-from app.router.runtimes import detect, table
+from app.router.runtimes import detect, hygiene, table
 from app.router.runtimes.openai_compat import api_root
 from app.router.runtimes.provider import Source, SourceProvider
 
@@ -402,8 +402,23 @@ class SourceRegistry:
                 ]
                 self._tried = found.tried
                 self._detected_at = time.monotonic()
+                local = [p for p in self._providers.values() if detect.is_loopback(p.source.base_url)]
+            self._check_exposure(local)
         finally:
             self._detect_lock.release()
+
+    @staticmethod
+    def _check_exposure(providers: list[SourceProvider]) -> None:
+        """Whether each runtime on this machine also answers on its network address.
+
+        One connection per source to this machine's own address — refused at once by
+        a runtime bound to loopback — so it rides along with every probe.
+        """
+        if not providers:
+            return
+        addresses = hygiene.own_addresses()
+        for provider in providers:
+            provider.source.exposed = hygiene.exposed_on(provider.source.base_url, addresses)
 
     def _adopt(self, hello) -> None:
         for provider in self._providers.values():

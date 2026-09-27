@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     #: Look for model runtimes on this machine — loopback only, on the default ports
     #: in the runtime adapter table. Nothing beyond loopback is ever probed.
     local_detect: bool = True
+    #: A replacement for the runtime minimum-version table
+    #: (`app/router/runtimes/advisories.json`), for an install that tracks security
+    #: advisories faster than it updates. Same shape as that file.
+    runtime_advisories_file: Optional[str] = None
     #: Deprecated: a runtime address from before model sources existed. Set, it is
     #: one more configured source; unset, the runtime is found on loopback anyway.
     ollama_base_url: Optional[str] = None

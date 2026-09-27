@@ -26,7 +26,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
 from app.db.models import Device, PairingCode, User, _aware
-from app.router.runtimes import table
+from app.router.runtimes import hygiene, table
 
 log = get_logger(__name__)
 
@@ -95,7 +95,25 @@ def _device(d: Device, request_ip: Optional[str] = None) -> dict:
         "chat_model": d.chat_model,
         "embed_model": d.embed_model,
         "advice": pairing.size_advice(hello.get("ram_bytes")),
+        "warnings": _warnings(hello),
     }
+
+
+def _warnings(hello: dict) -> dict:
+    """`{source id: [warning, …]}` for the runtimes this computer reported — only
+    the ones with something to say. Judged here, from the version and addresses the
+    connector reported, so a newer advisory table applies to an older connector too."""
+    out = {}
+    for source in hello.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        exposed = source.get("exposed_on")
+        found = hygiene.warnings(
+            source.get("runtime"), source.get("version"), exposed if isinstance(exposed, list) else None
+        )
+        if found:
+            out[str(source.get("id"))] = found
+    return out
 
 
 def _mine(db: Session, user: User, device_id: str) -> Device:

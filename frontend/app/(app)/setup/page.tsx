@@ -14,6 +14,13 @@ import TestIt from "@/components/setup/TestIt";
 
 type Tab = "setup" | "computers";
 
+const STRUCTURED_LABEL: Record<string, string> = {
+  schema: "Held to a JSON schema",
+  grammar: "Held to a grammar",
+  json: "Valid JSON — checked and repaired",
+  none: "Free text — checked and repaired",
+};
+
 /**
  * Setup: get a model running on your own computer and connect it, in six steps,
  * and the list of computers already connected.
@@ -149,7 +156,8 @@ export default function SetupPage() {
           ) : guide && runtime ? (
             <ol className="su-steps">
               <Step n={1} title="Pick a runtime" summary={runtime.label} state={state(1)} open={isOpen(1)} onToggle={() => toggle(1)}>
-                <p className="su-p">The program that runs the model. Any of these works; Ollama is the easiest start.</p>
+                <p className="su-p">The program that runs the model. Every one of these works the same way here — pick the one you
+                  already use, or the one that suits your computer.</p>
                 <div className="su-runtimes" role="radiogroup" aria-label="Runtime">
                   {guide.runtimes.map((card) => (
                     <button
@@ -160,7 +168,7 @@ export default function SetupPage() {
                       onClick={() => setRuntimeId(card.id)}
                     >
                       <span className="su-runtime-name">{card.label}</span>
-                      <span className="su-runtime-meta mono">{card.port ? `:${card.port}` : "any port"}</span>
+                      <span className="su-runtime-meta mono">{card.port ? `:${card.port}` : card.generic ? "any port" : "port varies"}</span>
                     </button>
                   ))}
                 </div>
@@ -183,6 +191,32 @@ export default function SetupPage() {
                       </>
                     )}
                   </p>
+                  {runtime.facts && (
+                    <dl className="su-caps su-facts" aria-label={`What ${runtime.label} reports and takes`}>
+                      <div>
+                        <dt>Context window</dt>
+                        <dd>{runtime.facts.context === "not reported" ? "Not reported — you set it" : "Reported"}</dd>
+                      </div>
+                      <div>
+                        <dt>Structured output</dt>
+                        <dd>{STRUCTURED_LABEL[runtime.facts.structured]}</dd>
+                      </div>
+                      <div>
+                        <dt>Embeddings</dt>
+                        <dd>{runtime.facts.embeddings ? "Yes" : "No — use a second runtime"}</dd>
+                      </div>
+                      <div>
+                        <dt>Listens on</dt>
+                        <dd>
+                          {runtime.facts.listens_everywhere ? (
+                            <span className="su-warn-text">Every interface, unless told not to</span>
+                          ) : (
+                            "This computer only"
+                          )}
+                        </dd>
+                      </div>
+                    </dl>
+                  )}
                 </div>
               </Step>
 

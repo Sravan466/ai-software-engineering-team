@@ -1,17 +1,32 @@
-# Local stack: a model runtime (Ollama here) + backend + frontend. Any other local
-# runtime works the same way — name it in LOCAL_SOURCES below, or add it in Settings.
+# Local stack: backend + frontend, and whichever model runtime you choose.
+#
+# The backend doesn't depend on any one runtime. Point it at yours with LOCAL_SOURCES
+# in .env — a runtime on this computer is reached from inside the container as
+# host.docker.internal:
+#
+#   LOCAL_SOURCES=LM Studio=http://host.docker.internal:1234
+#   LOCAL_SOURCES=llama.cpp=http://host.docker.internal:8080
+#
+# and `docker compose up`. Or run Ollama in a container next to it — an optional
+# profile, used by default when LOCAL_SOURCES is blank:
+#
+#   docker compose --profile ollama up
+#   docker compose exec ollama ollama pull <model>
+#
+# Keep a runtime on the host listening on 127.0.0.1 only: never 0.0.0.0, and never
+# OLLAMA_ORIGINS=* — Docker Desktop reaches 127.0.0.1 through host.docker.internal.
+# (On Linux, host.docker.internal needs the host to listen on the docker bridge.)
 # Postgres is included but optional — SQLite is the default; uncomment DATABASE_URL to use it.
 services:
   ollama:
     image: ollama/ollama:latest
+    profiles:
+      - ollama
+    # Published on this computer's loopback only, not on every interface.
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama:/root/.ollama
-    # After first start, pull the model you want to run — any Ollama model works,
-    # and Settings can pull and select one for you without touching this file:
-    #   docker compose exec ollama ollama pull <model>
-    #   docker compose exec ollama ollama pull nomic-embed-text
 
   backend:
     build: ./backend
@@ -21,21 +36,24 @@ services:
       - .env
     environment:
       # Inside this container, loopback is the container itself, so the runtime is
-      # named rather than found: reached by its compose hostname, with a label that
-      # keeps its source id stable across restarts. `same_machine`: a sibling
-      # container, not another computer — it shares this host's RAM, so the context
-      # window must still be clamped by it. The hostname cannot say so.
-      LOCAL_SOURCES: '[{"label": "Ollama", "base_url": "http://ollama:11434", "runtime": "ollama", "same_machine": true}]'
+      # named rather than found: LOCAL_SOURCES from .env, or the optional Ollama
+      # container by its compose hostname when that is blank. The label keeps the
+      # source id stable across restarts.
+      LOCAL_SOURCES: ${LOCAL_SOURCES:-Ollama=http://ollama:11434}
+      # A sibling container or this computer's host, not another computer: it shares
+      # this host's RAM, so the context window must still be clamped by it. The
+      # hostname cannot say so.
+      LOCAL_SAME_MACHINE: ${LOCAL_SAME_MACHINE:-true}
       LOCAL_DETECT: "false"
       # Blank the deprecated address an older .env may carry: inside this container
       # `localhost` is not the runtime, and it would only be listed as unreachable.
       OLLAMA_BASE_URL: ""
       CORS_ORIGINS: http://localhost:3000
       # DATABASE_URL: postgresql+psycopg://aiteam:aiteam@postgres:5432/aiteam
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - backend_data:/app/data
-    depends_on:
-      - ollama
 
   frontend:
     build: ./frontend

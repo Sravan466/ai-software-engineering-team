@@ -704,6 +704,17 @@ export type SourceModel = {
   can_build: boolean;
 };
 
+/** Runtime hygiene: judged by the server from the version and listen addresses. */
+export type RuntimeWarning = {
+  kind: "outdated" | "exposed";
+  title: string;
+  detail: string;
+  /** The advisory, for an outdated runtime. */
+  url?: string;
+  ids?: string[];
+  fixed?: string;
+};
+
 /** Somewhere local models come from: a runtime found, configured, or added. */
 export type LocalSource = {
   id: string;
@@ -719,6 +730,8 @@ export type LocalSource = {
   reachable: boolean;
   error: string | null;
   version: string | null;
+  /** Older than a known security fix, or reachable from the network. Never blocks. */
+  warnings: RuntimeWarning[];
   models: SourceModel[];
   /** Whether this runtime downloads models through its API. */
   can_download: boolean;
@@ -1069,6 +1082,17 @@ export type RuntimeCard = {
   serve: string;
   check: string;
   exposure: string | null;
+  facts: RuntimeFacts | null;
+};
+
+/** What a runtime reports and takes — the adapter table's columns. */
+export type RuntimeFacts = {
+  context: string;
+  structured: "schema" | "grammar" | "json" | "none";
+  thinking: string;
+  embeddings: boolean;
+  listens_everywhere: boolean;
+  source: string;
 };
 
 export type ConnectorInfo = {
@@ -1104,6 +1128,8 @@ export type ReportedSource = {
   reachable: boolean;
   error: string | null;
   models: ReportedModel[];
+  /** Network addresses it also answers on, from connector 0.3.0; null when not checked. */
+  exposed_on?: string[] | null;
 };
 
 export type DeviceHello = {
@@ -1171,6 +1197,8 @@ export type Device = {
   chat_model: string | null;
   embed_model: string | null;
   advice: { ram_gib: number; size: string; quantization: string; note: string } | null;
+  /** Source id → what's wrong with that runtime. Only sources with something to say. */
+  warnings?: Record<string, RuntimeWarning[]>;
 };
 
 export type Pairing = {
