@@ -34,6 +34,16 @@ DEFAULTS = {
     #: KV cache — this computer's memory — so the server never decides it alone.
     "max_context_tokens": 32_768,
 }
+#: What each limit may be set to — the same bounds `LimitsReport` checks, so a value
+#: the CLI accepts is one the connector can run with.
+BOUNDS = {
+    "concurrency": (1, 64),
+    "requests_per_minute": (1, 10_000),
+    "max_prompt_chars": (1_000, 50_000_000),
+    "max_output_tokens": (16, 1_000_000),
+    "timeout_seconds": (5, 24 * 3600),
+    "max_context_tokens": (256, 10_000_000),
+}
 #: How many calls may wait for a free slot, per slot, before more are refused.
 QUEUE_PER_SLOT = 8
 MACHINE_KEYS = ("gpu_layers", "threads", "keep_alive")
@@ -49,8 +59,11 @@ def read(state: dict) -> dict:
     out = dict(DEFAULTS)
     for key, default in DEFAULTS.items():
         value = saved.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            out[key] = value
+        if isinstance(value, int) and not isinstance(value, bool):
+            # A value out of range — state.json edited by hand, say — is held to
+            # the nearest bound rather than stopping every call.
+            low, high = BOUNDS[key]
+            out[key] = min(max(value, low), high)
     # Checked against the same schema the website reads them with.
     return P.LimitsReport(**out).model_dump()
 

@@ -235,13 +235,17 @@ class Agent:
         info = source.adapter.model_info(wanted.model)
         if info is None:
             return P.ModelInfoReport(name=wanted.model).model_dump()
+        # Reported as the window this computer will actually run it at, so the
+        # server budgets its prompts to fit — not to a window it would truncate.
+        cap = L.read(store.load_state())["max_context_tokens"]
+        window = min(info.context_window, cap) if info.context_window else None
         defaults = {
             k: v for k, v in (info.defaults or {}).items()
             if isinstance(k, str) and isinstance(v, (int, float, str, list, type(None)))
         }
         return P.ModelInfoReport(
             name=info.name[:300],
-            context_window=info.context_window,
+            context_window=window,
             context_source=(info.context_source or None) and info.context_source[:16],
             parameters_total=info.parameters_total,
             parameters_active=info.parameters_active,

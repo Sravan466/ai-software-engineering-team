@@ -525,3 +525,18 @@ def test_memory_and_search_never_swallow_a_pause():
     with patch.object(ModelRouter, "embed", gone), identity.acting_as(TEST_USER_ID):
         with pytest.raises(ComputerDisconnected):
             SourceEmbeddingFunction()(["x"])
+
+
+def test_an_out_of_range_saved_limit_is_held_to_its_bound_not_fatal():
+    limits = L.read({"limits": {"max_context_tokens": 100, "timeout_seconds": 10**9}})
+    assert limits["max_context_tokens"] == 256 and limits["timeout_seconds"] == 24 * 3600
+
+
+def test_model_info_reports_the_window_this_computer_will_run():
+    from app.router.runtimes.types import ModelInfo
+
+    runtime = FakeRuntime()
+    runtime.model_info = lambda model: ModelInfo(name=model, context_window=131_072)
+    _set_state(limits={"max_context_tokens": 32_768})
+    report = _agent(runtime).handle("model_info", {"source": "ollama", "model": "m"})
+    assert report["context_window"] == 32_768

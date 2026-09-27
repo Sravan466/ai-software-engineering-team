@@ -51,6 +51,11 @@ class MemoryStore:
                 documents=[f"Idea: {idea}\n\nLessons & decisions:\n{summary}"],
                 metadatas=[{"project_id": project_id, "idea": idea[:300]}],
             )
+        except ComputerDisconnected:
+            # Memory is written after a build finishes; that is no reason to pause
+            # a finished build. Said plainly, so the missing memory isn't a mystery.
+            log.warning("Project memory for %s wasn't saved: the computer that makes embeddings "
+                        "isn't connected.", project_id)
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to write project memory: %s", e)
 

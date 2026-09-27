@@ -157,6 +157,10 @@ class Link:
         await self._send_cancel(request_id)
         return True
 
+    def forget_cancel(self, request_id: str) -> None:
+        """A request that will never be sent: stop remembering its cancel."""
+        self._cancelled.discard(request_id)
+
     async def _send_cancel(self, request_id: str) -> None:
         if self.closed:
             return

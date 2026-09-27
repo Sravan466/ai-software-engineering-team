@@ -243,6 +243,7 @@ class ConnectorAdapter(RuntimeAdapter):
                 if inflight.was_cancelled(request_id):
                     with self._links_lock:
                         self._links.pop(request_id, None)
+                    link.forget_cancel(request_id)
                     raise RequestCancelled()
             try:
                 return hub.call(link.request(op, args, timeout=timeout, request_id=request_id), timeout + 10)

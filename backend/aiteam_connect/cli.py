@@ -135,8 +135,9 @@ def cmd_limits(args) -> int:
     for key in _LIMIT_FLAGS:
         value = getattr(args, key, None)
         if value is not None:
-            if value < 1:
-                raise ConnectError(f"--{key.replace('_', '-')} must be at least 1.")
+            low, high = L.BOUNDS[key]
+            if not low <= value <= high:
+                raise ConnectError(f"--{key.replace('_', '-')} must be between {low:,} and {high:,}.")
             saved[key] = value
             changed = True
     for key in ("gpu_layers", "threads"):
