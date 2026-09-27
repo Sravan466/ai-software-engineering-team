@@ -1630,6 +1630,28 @@ function keyAdvice(p: (typeof PROVIDERS)[number], status: KeyStatus): { href: st
   return null;
 }
 
+/** The models a key can use, as choices: picking one fills Default model. */
+function KeyModels({ models, picked, onPick }: { models: string[]; picked: string; onPick: (m: string) => void }) {
+  return (
+    <div className="key-models">
+      <span className="field-hint">This key can use — pick one, then Save:</span>
+      <div className="model-list">
+        {models.map((m) => (
+          <button
+            key={m}
+            type="button"
+            className={`badge badge-mono key-model${picked === m ? " is-picked" : ""}`}
+            aria-pressed={picked === m}
+            onClick={() => onPick(m)}
+          >
+            {m}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ApiKeysCard() {
   const [providers, setProviders] = useState<Record<string, ProviderSetting> | null>(null);
   const [storeError, setStoreError] = useState<string | null>(null);
@@ -1638,7 +1660,10 @@ function ApiKeysCard() {
   const [busy, setBusy] = useState<{ provider: string; action: "save" | "check" | "remove" } | null>(null);
   /** The outcome of the last action per provider, shown under it until the next. */
   const [outcome, setOutcome] = useState<
-    Record<string, { tone: "ok" | "warn" | "bad"; text: string; revoke?: boolean } | undefined>
+    Record<
+      string,
+      { tone: "ok" | "warn" | "bad"; text: string; revoke?: boolean; models?: string[] } | undefined
+    >
   >({});
   const [error, setError] = useState("");
   const now = useNow(30_000);
@@ -1672,6 +1697,10 @@ function ApiKeysCard() {
     refresh();
   }, [refresh]);
 
+  function pick(provider: string, model: string) {
+    setDrafts((d) => ({ ...d, [provider]: { ...d[provider], model } }));
+  }
+
   function say(provider: string, value: (typeof outcome)[string]) {
     setOutcome((o) => ({ ...o, [provider]: value }));
   }
@@ -1699,6 +1728,9 @@ function ApiKeysCard() {
         say(provider, {
           tone: check.status === "invalid" ? "bad" : "warn",
           text: key ? `Not saved — ${check.message}${kept}` : `Model not changed — ${check.message}`,
+          // A refused change leaves the row as it was, so the models this key can use
+          // travel with the outcome instead.
+          models: check.models,
         });
         if (!key) setDrafts((d) => ({ ...d, [provider]: { ...d[provider], model: res.provider.default_model ?? "" } }));
       } else if (check) {
@@ -1860,22 +1892,7 @@ function ApiKeysCard() {
                       </a>
                     )}
                     {info.models.length > 0 && (
-                      <div className="key-models">
-                        <span className="field-hint">This key can use — pick one, then Save:</span>
-                        <div className="model-list">
-                          {info.models.map((m) => (
-                            <button
-                              key={m}
-                              type="button"
-                              className={`badge badge-mono key-model${draft.model === m ? " is-picked" : ""}`}
-                              aria-pressed={draft.model === m}
-                              onClick={() => setDrafts((d) => ({ ...d, [p.key]: { ...d[p.key], model: m } }))}
-                            >
-                              {m}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
+                      <KeyModels models={info.models} picked={draft.model} onPick={(m) => pick(p.key, m)} />
                     )}
                   </div>
                 </div>
@@ -1926,10 +1943,13 @@ function ApiKeysCard() {
                 </button>
               </div>
 
-              <p className="field-hint" style={{ marginTop: 8 }} aria-live="polite">
+              <div className="field-hint" style={{ marginTop: 8 }} aria-live="polite">
                 {said ? (
                   <span className={`key-outcome key-outcome-${said.tone}`}>
                     {said.text}
+                    {said.models && said.models.length > 0 && (
+                      <KeyModels models={said.models} picked={draft.model} onPick={(m) => pick(p.key, m)} />
+                    )}
                     {said.revoke && (
                       <>
                         {" "}If you think it leaked, also{" "}
@@ -1950,7 +1970,7 @@ function ApiKeysCard() {
                     .
                   </>
                 )}
-              </p>
+              </div>
             </div>
           );
         })
