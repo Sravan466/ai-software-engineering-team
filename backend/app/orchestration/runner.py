@@ -191,7 +191,10 @@ def _as_owner(method):
     def bound(self, db: Session, project: Project, *args, **kwargs):
         # And names the build, so every model call it makes can be cancelled by
         # Stop, and a user's computer can say what it's answering.
-        with identity.acting_as(project.owner_id), inflight.building(project.id, project.name):
+        # A new build has no name yet; its idea says which one it is.
+        first_line = ((project.idea or "").strip().splitlines() or [""])[0]
+        label = project.name or first_line[:60] or None
+        with identity.acting_as(project.owner_id), inflight.building(project.id, label):
             return method(self, db, project, *args, **kwargs)
 
     return bound

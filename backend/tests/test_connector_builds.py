@@ -540,3 +540,35 @@ def test_model_info_reports_the_window_this_computer_will_run():
     _set_state(limits={"max_context_tokens": 32_768})
     report = _agent(runtime).handle("model_info", {"source": "ollama", "model": "m"})
     assert report["context_window"] == 32_768
+
+
+def test_a_cancelled_request_returns_at_once_even_if_the_socket_never_answers():
+    """Closing the client stops the runtime, but doesn't wake a thread blocked on the
+    socket (macOS): the caller must leave on the cancel, not on the read timeout."""
+    import httpx
+
+    from app.router.runtimes.openai_compat import OpenAICompatAdapter
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    held: list = []
+    threading.Thread(target=lambda: held.append(listener.accept()), daemon=True).start()
+    adapter = OpenAICompatAdapter(f"http://127.0.0.1:{listener.getsockname()[1]}")
+    outcome: dict = {}
+
+    def call():
+        try:
+            adapter._post_cancellable("/v1/chat/completions", {}, timeout=60, request_id="r" * 16)
+        except httpx.HTTPError as e:
+            outcome["error"] = e
+
+    worker = threading.Thread(target=call)
+    worker.start()
+    time.sleep(0.5)
+    started = time.monotonic()
+    assert adapter.cancel("r" * 16) is True
+    worker.join(5)
+    assert not worker.is_alive() and "cancelled" in str(outcome.get("error"))
+    assert time.monotonic() - started < 2
+    listener.close()

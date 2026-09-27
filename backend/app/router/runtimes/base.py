@@ -102,6 +102,8 @@ class RuntimeAdapter(abc.ABC):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or None
         self._inflight: dict[str, httpx.Client] = {}
+        #: Set when a request is cancelled, so the caller stops waiting at once.
+        self._stops: dict[str, threading.Event] = {}
         self._inflight_lock = threading.Lock()
 
     # ── identification ───────────────────────────────────────────────────────
@@ -146,8 +148,11 @@ class RuntimeAdapter(abc.ABC):
         """
         with self._inflight_lock:
             client = self._inflight.pop(request_id, None)
+            stop = self._stops.pop(request_id, None)
         if client is None:
             return False
+        if stop is not None:
+            stop.set()
         client.close()
         return True
 
@@ -195,13 +200,38 @@ class RuntimeAdapter(abc.ABC):
         if not request_id:
             return self._post(path, body, timeout=timeout)
         client = httpx.Client(headers=self.headers(), timeout=timeout)
+        stop = threading.Event()
         with self._inflight_lock:
             self._inflight[request_id] = client
+            self._stops[request_id] = stop
+        # The POST runs on a helper thread and this one waits for it *or* a cancel.
+        # Closing the client makes the runtime stop generating, but it does not wake
+        # a thread blocked reading the socket — on macOS it sat there until the read
+        # timeout, ten minutes, holding its slot. So the caller leaves at once; the
+        # helper is released when the half-closed socket errors or times out.
+        done = threading.Event()
+        box: dict = {}
+
+        def post() -> None:
+            try:
+                box["response"] = client.post(f"{self.base_url}{path}", json=body)
+            except BaseException as e:  # noqa: BLE001 - handed to the waiting caller
+                box["error"] = e
+            finally:
+                done.set()
+
+        threading.Thread(target=post, name=f"post-{request_id[:8]}", daemon=True).start()
         try:
-            return client.post(f"{self.base_url}{path}", json=body)
+            while not done.wait(0.2):
+                if stop.is_set():
+                    raise httpx.ReadError("The request was cancelled.")
+            if "error" in box:
+                raise box["error"]
+            return box["response"]
         finally:
             with self._inflight_lock:
                 self._inflight.pop(request_id, None)
+                self._stops.pop(request_id, None)
             client.close()
 
 
