@@ -8,7 +8,7 @@ import json
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import AliasChoices, BeforeValidator, Field
+from pydantic import AliasChoices, BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Annotated
 
@@ -246,17 +246,38 @@ class Settings(BaseSettings):
     build_check_timeout_seconds: BlankTolerantInt(90) = 90
 
     # ── Cloud providers ──
-    anthropic_api_key: Optional[str] = None
+    #: Keys are `SecretStr`, so a repr, a debug dump or an error report of these
+    #: settings prints `**********` rather than the key.
+    anthropic_api_key: Optional[SecretStr] = None
     anthropic_default_model: str = "claude-opus-4-8"
     #: Published context windows. Cloud providers expose no probe, so these are
     #: configuration rather than a guess — override them when a model differs.
     anthropic_context_tokens: BlankTolerantInt(200_000) = 200_000
-    openai_api_key: Optional[str] = None
+    openai_api_key: Optional[SecretStr] = None
     openai_default_model: str = "gpt-4o"
     openai_context_tokens: BlankTolerantInt(128_000) = 128_000
-    gemini_api_key: Optional[str] = None
+    gemini_api_key: Optional[SecretStr] = None
     gemini_default_model: str = "gemini-1.5-pro"
     gemini_context_tokens: BlankTolerantInt(1_000_000) = 1_000_000
+    #: Seconds a key check may take, per request. The SDKs' own default is ten minutes
+    #: with two retries; a Save button waiting on that would look broken.
+    key_check_timeout_seconds: BlankTolerantInt(12) = 12
+    #: A key last checked longer ago than this is checked again before a build that
+    #: may use it. A key a build saw rejected is checked again whatever its age.
+    key_recheck_seconds: BlankTolerantInt(21600) = 21600
+    #: Key checks (Save and Re-check both) allowed per account in the window. A check
+    #: route with no limit is a free way to try stolen keys.
+    key_checks_per_window: BlankTolerantInt(12) = 12
+    key_check_window_seconds: BlankTolerantInt(600) = 600
+
+    # ── Encrypting saved keys ──
+    #: The key the settings files' API keys are encrypted with (Fernet, urlsafe
+    #: base64). Several, comma-separated, rotates: the first encrypts, every one
+    #: decrypts. Unset, one is generated into `secrets_key_file` on first use.
+    secrets_encryption_key: Optional[SecretStr] = None
+    #: Where the generated key lives. Deliberately *not* under `data/`: a copy of
+    #: that folder, or a backup of it, should not carry what unlocks it.
+    secrets_key_file: str = "~/.config/aiteam/secrets.key"
 
     # ── GitHub publishing (OAuth "Connect" flow) ──
     # Register a free OAuth App at https://github.com/settings/developers and set
@@ -373,14 +394,11 @@ class Settings(BaseSettings):
 
     def configured_cloud_providers(self) -> list[str]:
         """Cloud providers that have an API key set (eligible for Auto mode)."""
-        out: list[str] = []
-        if self.anthropic_api_key:
-            out.append("anthropic")
-        if self.openai_api_key:
-            out.append("openai")
-        if self.gemini_api_key:
-            out.append("gemini")
-        return out
+        return [
+            name
+            for name in ("anthropic", "openai", "gemini")
+            if (getattr(self, f"{name}_api_key") or SecretStr("")).get_secret_value().strip()
+        ]
 
 
 @lru_cache

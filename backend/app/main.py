@@ -19,6 +19,11 @@ async def lifespan(app: FastAPI):
     log.info("Starting AI Software Engineering Team (env=%s)", settings.app_env)
     init_db()
     log.info("Database initialised. Default routing mode: %s", settings.default_routing_mode)
+    # Keys saved in plain text before they were encrypted are encrypted in place —
+    # after init_db, whose accounts migration may have just moved a file.
+    from app.core import secrets_store
+
+    secrets_store.migrate_all()
     # The compile gate reads JavaScript with TypeScript's parser; fetch it now rather
     # than inside the first Frontend phase that needs it.
     from app.build import toolchain

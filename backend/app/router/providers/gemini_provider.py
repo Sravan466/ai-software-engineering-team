@@ -7,7 +7,8 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError, status_is_retryable
+from app.router.base import LLMProvider, ProviderError, status_is_retryable, status_of
+from app.router.providers.cloud_key import CloudKey
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
 log = get_logger(__name__)
@@ -17,18 +18,24 @@ log = get_logger(__name__)
 _CONFIGURE_LOCK = threading.Lock()
 
 
-class GeminiProvider(LLMProvider):
+def _http_status(error: Exception):
+    """Google's API errors carry their HTTP status as `code` — only theirs; elsewhere
+    `code` may be an errno or a gRPC status (see `status_is_retryable`)."""
+    status = status_of(error)
+    if status is None and type(error).__module__.startswith("google.api_core"):
+        code = getattr(error, "code", None)
+        status = code if isinstance(code, int) and 100 <= code < 600 else None
+    return status
+
+
+class GeminiProvider(CloudKey, LLMProvider):
     name = "gemini"
     is_local = False
     #: Published rather than probed — there is no capability endpoint to ask.
     context_tokens = settings.gemini_context_tokens
 
     def __init__(self, api_key: Optional[str] = None) -> None:
-        self.api_key = api_key or settings.gemini_api_key
-
-    def set_api_key(self, key: Optional[str]) -> None:
-        """Update the key at runtime (Settings UI)."""
-        self.api_key = key or None
+        self._init_key(api_key or settings.gemini_api_key)
 
     def _model(self, **kwargs):
         """A `GenerativeModel` bound to this provider's key, and nobody else's.
@@ -42,7 +49,7 @@ class GeminiProvider(LLMProvider):
         """
         import google.generativeai as genai
 
-        genai.configure(api_key=self.api_key)
+        genai.configure(api_key=self.secret())
         gmodel = genai.GenerativeModel(**kwargs)
         try:
             from google.generativeai import client as genai_client
@@ -51,9 +58,6 @@ class GeminiProvider(LLMProvider):
             return gmodel, True
         except Exception:  # noqa: BLE001 - an SDK that moved this: fall back to the lock
             return gmodel, False
-
-    def available(self) -> bool:
-        return bool(self.api_key)
 
     def generate(
         self,
@@ -101,7 +105,7 @@ class GeminiProvider(LLMProvider):
                 resp = gmodel.generate_content(contents)
         except Exception as e:  # noqa: BLE001
             raise ProviderError(
-                f"Gemini call failed: {e}", retryable=status_is_retryable(e)
+                f"Gemini call failed: {e}", retryable=status_is_retryable(e), status=_http_status(e)
             ) from e
 
         latency = int((time.perf_counter() - started) * 1000)
