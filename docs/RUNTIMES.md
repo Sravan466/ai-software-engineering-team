@@ -74,7 +74,7 @@ Settings, the Setup tab and the connector's terminal warn — never block — wh
 | vLLM | [CVE-2025-32444](https://nvd.nist.gov/vuln/detail/cve-2025-32444) | 0.8.5 |
 | SGLang | [CVE-2026-3059](https://osv.dev/vulnerability/GHSA-rgq9-fqf5-fv58) | 0.5.10 |
 
-Not in the table (as of 2026-09-27): Ollama CVE-2024-39719 (sources disagree on the fix); Ollama CVE-2025-63389 (no patch — missing authentication on the model API; keep Ollama on loopback); LocalAI CVE-2024-6983 (fixed version disputed); SGLang CVE-2026-3060 (no fixed version published); text-generation-webui CVE-2026-35484, CVE-2026-35483, CVE-2026-35487 (fixed in 4.3) and CVE-2026-35050 (fixed in 4.1.1): its API reports no version, so they can't be checked — update it to 4.3 or later.
+Not in the table (as of 2026-09-27): Ollama CVE-2024-39719 (sources disagree on the fix); Ollama CVE-2025-63389 (no patch — missing authentication on the model API; keep Ollama on loopback); LocalAI CVE-2024-6983 (fixed version disputed); SGLang CVE-2026-3060 (no fixed version published); text-generation-webui CVE-2026-35484, CVE-2026-35483, CVE-2026-35487 (fixed in 4.3) and CVE-2026-35050 (fixed in 4.1.1): its API reports no version, so they can't be checked — update it to 4.3 or later; llamafile: the build it reports isn't confirmed to be llama.cpp's build number, so llama.cpp's advisories aren't applied to it — use a current release.
 
 Never bind a runtime to `0.0.0.0` and never set `OLLAMA_ORIGINS=*` ([CVE-2024-28224, DNS rebinding](https://www.nccgroup.com/research-blog/technical-advisory-ollama-dns-rebinding-attack-cve-2024-28224/)). The connector reaches the runtime on its own computer and dials out itself, so it never needs either.
 

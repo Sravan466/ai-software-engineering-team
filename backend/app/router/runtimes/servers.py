@@ -30,14 +30,21 @@ from app.router.runtimes.types import (
 )
 
 
-def _owned_by(base_url: str, owner: str, api_key: Optional[str], timeout: float) -> bool:
-    data = get_json(base_url, "/v1/models", api_key, timeout=timeout)
+def _model_entries(
+    base_url: str, api_key: Optional[str], timeout: float, path: str = "/v1/models"
+) -> Optional[list[dict]]:
+    """The entries of an OpenAI-shaped model list — None unless it is one, non-empty,
+    of objects. What every `owned_by` fingerprint reads first."""
+    data = get_json(base_url, path, api_key, timeout=timeout)
     entries = data.get("data") if isinstance(data, dict) else None
-    return (
-        isinstance(entries, list)
-        and bool(entries)
-        and all(isinstance(e, dict) and e.get("owned_by") == owner for e in entries)
-    )
+    if not isinstance(entries, list) or not entries or not all(isinstance(e, dict) for e in entries):
+        return None
+    return entries
+
+
+def _owned_by(base_url: str, owner: str, api_key: Optional[str], timeout: float, path: str = "/v1/models") -> bool:
+    entries = _model_entries(base_url, api_key, timeout, path)
+    return entries is not None and all(e.get("owned_by") == owner for e in entries)
 
 
 # ── LM Studio ────────────────────────────────────────────────────────────────
@@ -300,11 +307,8 @@ class JanAdapter(OpenAICompatAdapter):
         cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
     ) -> Optional[Hello]:
         base = api_root(base_url)
-        data = get_json(base, "/v1/models", api_key, timeout=timeout)
-        entries = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(entries, list) or not entries:
-            return None
-        if not all(isinstance(e, dict) and e.get("owned_by") in _JAN_OWNERS for e in entries):
+        entries = _model_entries(base, api_key, timeout)
+        if entries is None or not all(e.get("owned_by") in _JAN_OWNERS for e in entries):
             return None
         return Hello(runtime=cls.runtime, base_url=base)
 
@@ -326,8 +330,8 @@ class LlamafileAdapter(LlamaCppAdapter):
 
     Nothing it answers tells it apart from llama-server reliably (checked against
     docs.mozilla.ai/llamafile/using-llamafile/api), so detection reads it as
-    llama.cpp — which is exactly the dialect it speaks, and whose advisories its
-    embedded server shares. It is this runtime only when someone says so
+    llama.cpp — which is exactly the dialect it speaks. It is this runtime only
+    when someone says so
     (`aiteam-connect add-source … --runtime llamafile`, or `runtime` in
     LOCAL_SOURCES); it then still has to answer as a llama.cpp server.
     """
@@ -439,11 +443,8 @@ class MLXAdapter(OpenAICompatAdapter):
         cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
     ) -> Optional[Hello]:
         base = api_root(base_url)
-        data = get_json(base, "/v1/models", api_key, timeout=timeout)
-        entries = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(entries, list) or not entries:
-            return None
-        if any(not isinstance(e, dict) or "owned_by" in e for e in entries):
+        entries = _model_entries(base, api_key, timeout)
+        if entries is None or any("owned_by" in e for e in entries):
             return None
         health = get_json(base, "/health", api_key, timeout=timeout)
         if not (isinstance(health, dict) and health.get("status") == "ok"):
@@ -503,15 +504,8 @@ class DockerModelRunnerAdapter(OpenAICompatAdapter):
             banner = r.status_code == 200 and _DMR_BANNER in (r.text or "")
         except Exception:  # noqa: BLE001
             pass
-        if not banner:
-            data = get_json(base, "/engines/v1/models", api_key, timeout=timeout)
-            entries = data.get("data") if isinstance(data, dict) else None
-            if not (
-                isinstance(entries, list)
-                and entries
-                and all(isinstance(e, dict) and e.get("owned_by") == "docker" for e in entries)
-            ):
-                return None
+        if not banner and not _owned_by(base, "docker", api_key, timeout, "/engines/v1/models"):
+            return None
         version = get_json(base, "/version", api_key, timeout=timeout)
         return Hello(
             runtime=cls.runtime,

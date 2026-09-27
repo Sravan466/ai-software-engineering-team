@@ -22,6 +22,7 @@ import platform
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
@@ -156,7 +157,15 @@ class Agent:
         hellos = list(found.found)
         for entry in self._configured():
             url = entry["url"].rstrip("/")
-            if any(detect.same_address(url, h.base_url) for h in hellos):
+            found_here = next((h for h in hellos if detect.same_address(url, h.base_url)), None)
+            if found_here is not None:
+                declared = entry.get("runtime")
+                if declared and declared != found_here.runtime and declared in table.BY_ID:
+                    # Someone said what this is (llamafile answers as llama.cpp): it
+                    # is that, if it answers as one.
+                    said = detect.identify(found_here.base_url, prefer=declared)
+                    if said is not None and said.runtime == declared:
+                        hellos[hellos.index(found_here)] = said
                 continue
             api_key = store.get_secret(store.source_key_name(url))
             declared = entry.get("runtime")
@@ -176,6 +185,14 @@ class Agent:
 
         reports = []
         addresses = hygiene.own_addresses()
+        # One connection per source and address, all at once: a slow refusal on one
+        # doesn't hold up the answer to the server.
+        local = [s for s in self._sources.values() if not s.remote]
+        with ThreadPoolExecutor(max_workers=max(len(local), 1), thread_name_prefix="exposure") as pool:
+            exposure = dict(zip(
+                [s.id for s in local],
+                pool.map(lambda s: (hygiene.exposed_on(s.base_url, addresses) or [])[:8], local),
+            ))
         for source in self._sources.values():
             report: dict[str, Any] = {
                 "id": source.id,
@@ -187,7 +204,7 @@ class Agent:
                 "reachable": True,
                 "error": None,
                 "models": [],
-                "exposed_on": None if source.remote else (hygiene.exposed_on(source.base_url, addresses) or [])[:8],
+                "exposed_on": exposure.get(source.id),
             }
             self._warn(source, report["exposed_on"])
             try:

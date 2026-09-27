@@ -158,14 +158,15 @@ The backend and frontend don't depend on any one runtime. Point `LOCAL_SOURCES` 
 
 ```bash
 cp .env.example .env
-echo 'LOCAL_SOURCES=LM Studio=http://host.docker.internal:1234' >> .env
+echo 'LOCAL_SOURCES=[{"label": "LM Studio", "base_url": "http://host.docker.internal:1234", "same_machine": true}]' >> .env
 docker compose up --build
 ```
 
 Or run Ollama in a container next to it — an optional profile:
 
 ```bash
-printf 'COMPOSE_PROFILES=ollama\nLOCAL_SOURCES=Ollama=http://ollama:11434\n' >> .env
+echo 'COMPOSE_PROFILES=ollama' >> .env
+echo 'LOCAL_SOURCES=[{"label": "Ollama", "base_url": "http://ollama:11434", "runtime": "ollama", "same_machine": true}]' >> .env
 docker compose up --build
 docker compose exec ollama ollama pull <model>
 ```

@@ -23,6 +23,7 @@ import httpx
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.router.runtimes import table
+from app.router.runtimes.base import one_look
 from app.router.runtimes.openai_compat import speaks_openai
 from app.router.runtimes.types import Hello
 
@@ -163,14 +164,15 @@ def identify(
         specs.insert(0, declared)
     if prefer:
         specs.sort(key=lambda spec: spec.id != prefer)
-    for spec in specs:
-        assert spec.adapter is not None
-        try:
-            hello = spec.adapter.fingerprint(base_url, api_key)
-        except Exception:  # noqa: BLE001 - one odd answer must not stop the next adapter
-            hello = None
-        if hello is not None:
-            return hello
+    with one_look():
+        for spec in specs:
+            assert spec.adapter is not None
+            try:
+                hello = spec.adapter.fingerprint(base_url, api_key)
+            except Exception:  # noqa: BLE001 - one odd answer must not stop the next adapter
+                hello = None
+            if hello is not None:
+                return hello
     return None
 
 

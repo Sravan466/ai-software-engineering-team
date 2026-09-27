@@ -177,10 +177,16 @@ class OpenAICompatAdapter(RuntimeAdapter):
             listen_address=self.base_url,
         )
 
+    def _allowed_modes(self) -> tuple[str, ...]:
+        """The ladder from this runtime's ceiling down. An unknown ceiling is no ceiling."""
+        if self.structured_ceiling not in _LADDER:
+            return _LADDER
+        return _LADDER[_LADDER.index(self.structured_ceiling) :]
+
     def structured_mode(self, model: str) -> str:
         """The strongest mode this model has not refused — what a schema call asks for."""
         refused = self._refused.get(model, set())
-        allowed = _LADDER[_LADDER.index(self.structured_ceiling):] if self.structured_ceiling in _LADDER else _LADDER
+        allowed = self._allowed_modes()
         for mode in (STRUCTURED_SCHEMA, STRUCTURED_JSON):
             if mode not in refused and mode in allowed:
                 return mode
@@ -193,8 +199,7 @@ class OpenAICompatAdapter(RuntimeAdapter):
         if not wants_json:
             modes = [STRUCTURED_NONE]
         else:
-            ceiling = _LADDER.index(self.structured_ceiling) if self.structured_ceiling in _LADDER else 0
-            modes = [m for m in _LADDER[ceiling:] if m == STRUCTURED_NONE or m not in refused]
+            modes = [m for m in self._allowed_modes() if m == STRUCTURED_NONE or m not in refused]
             if not request.json_schema:
                 modes = [m for m in modes if m != STRUCTURED_SCHEMA]
             # Never stronger than the caller believes this model takes.

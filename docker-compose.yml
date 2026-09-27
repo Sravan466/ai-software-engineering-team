@@ -4,14 +4,16 @@
 # in .env — a runtime on this computer is reached from inside the container as
 # host.docker.internal:
 #
-#   LOCAL_SOURCES=LM Studio=http://host.docker.internal:1234
-#   LOCAL_SOURCES=llama.cpp=http://host.docker.internal:8080
+#   LOCAL_SOURCES=[{"label": "LM Studio", "base_url": "http://host.docker.internal:1234", "same_machine": true}]
+#
+# (`same_machine`: this computer, not another one — so it isn't shown as remote, and
+# its window is clamped by this machine's memory. The address alone can't say so.)
 #
 # and `docker compose up`. Or run Ollama in a container next to it — an optional
 # profile. Put both lines in .env, so a plain `docker compose up` keeps using it:
 #
 #   COMPOSE_PROFILES=ollama
-#   LOCAL_SOURCES=Ollama=http://ollama:11434
+#   LOCAL_SOURCES=[{"label": "Ollama", "base_url": "http://ollama:11434", "runtime": "ollama", "same_machine": true}]
 #
 #   docker compose exec ollama ollama pull <model>
 #
@@ -42,10 +44,6 @@ services:
       # Nothing is assumed — a source for a container that isn't running would only
       # be listed as unreachable. A label keeps the source id stable across restarts.
       LOCAL_SOURCES: ${LOCAL_SOURCES:-}
-      # A sibling container or this computer's host, not another computer: it shares
-      # this host's RAM, so the context window must still be clamped by it. The
-      # hostname cannot say so.
-      LOCAL_SAME_MACHINE: ${LOCAL_SAME_MACHINE:-true}
       LOCAL_DETECT: "false"
       # Blank the deprecated address an older .env may carry: inside this container
       # `localhost` is not the runtime, and it would only be listed as unreachable.

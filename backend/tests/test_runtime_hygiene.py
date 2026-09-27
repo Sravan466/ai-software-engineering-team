@@ -376,3 +376,47 @@ def test_the_connector_prints_a_warning_its_console_cant_encode(monkeypatch):
     agent._warn(source, ["192.168.1.20"])
     assert any("older than a known security fix" in line for line in said)
     assert any("reachable from your network" in line for line in said)
+
+
+@pytest.mark.parametrize("version", ["0.11.1-b29c606", "0.11.1+a3f9c2", "0.11.1"])
+def test_a_hash_or_build_suffix_on_the_fixed_version_is_not_a_pre_release(version):
+    assert not hygiene.is_prerelease(version)
+    assert hygiene.advisories("vllm", version) == []
+
+
+def test_identifying_an_unknown_port_asks_each_path_once(monkeypatch):
+    import httpx
+
+    seen: list = []
+    _serve(monkeypatch, {"/v1/models": _Resp(200, {"data": [{"id": "x", "object": "model", "owned_by": "someone"}]})})
+    real = httpx.get
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: (seen.append(url), real(url, **kw))[1])
+    assert detect.identify("http://127.0.0.1:9999") is None
+    models = [u for u in seen if u == "http://127.0.0.1:9999/v1/models"]
+    assert len(models) == 1, seen
+
+
+def test_a_declared_llamafile_on_the_llama_cpp_port_is_a_llamafile(monkeypatch, tmp_path):
+    from aiteam_connect import store
+    from aiteam_connect.local import Agent
+    from app.router.runtimes.llamacpp import LlamaCppAdapter
+
+    _serve(monkeypatch, {"/v1/models": _Resp(200, LLAMACPP_MODELS), "/props": _Resp(200, PROPS)})
+    state = store.load_state()
+    state["sources"] = [{"url": URL, "runtime": "llamafile"}]
+    store.save_state(state)
+    monkeypatch.setattr(detect, "detect", lambda skip_ports=None: detect.Detection(
+        found=[Hello("llamacpp", URL, "b5000-abc123")]))
+    monkeypatch.setattr(hygiene, "own_addresses", lambda: [])
+    monkeypatch.setattr(LlamaCppAdapter, "list_models", lambda self: [])
+    sources, _, _ = Agent("0" * 32).scan()
+    assert [(s["runtime"], s["version"]) for s in sources] == [("llamafile", "b5000-abc123")]
+
+
+def test_the_docs_never_follow_a_local_advisory_override(tmp_path, monkeypatch):
+    from scripts import runtime_docs
+
+    private = tmp_path / "mine.json"
+    private.write_text(json.dumps({"runtimes": {"lmstudio": [{"id": "PRIVATE-1", "fixed": "9.9", "url": "https://x.y"}]}}))
+    monkeypatch.setenv(hygiene.ADVISORIES_ENV, str(private))
+    assert "PRIVATE-1" not in runtime_docs.render()

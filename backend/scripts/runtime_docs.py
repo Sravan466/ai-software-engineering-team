@@ -10,6 +10,7 @@ are the sources; this only lays them out. A test fails when the file is stale.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -45,6 +46,8 @@ NOT_LISTED = (
     "SGLang CVE-2026-3060 (no fixed version published)",
     "text-generation-webui CVE-2026-35484, CVE-2026-35483, CVE-2026-35487 (fixed in 4.3) and CVE-2026-35050 "
     "(fixed in 4.1.1): its API reports no version, so they can't be checked — update it to 4.3 or later",
+    "llamafile: the build it reports isn't confirmed to be llama.cpp's build number, so llama.cpp's advisories "
+    "aren't applied to it — use a current release",
 )
 
 
@@ -130,7 +133,9 @@ def render() -> str:
         "| Runtime | Advisory | First fixed |",
         "|---|---|---|",
     ]
-    for runtime, entries in hygiene.table().items():
+    # The committed table, never a local RUNTIME_ADVISORIES_FILE override.
+    committed = json.loads(hygiene.ADVISORIES_FILE.read_text(encoding="utf-8"))["runtimes"]
+    for runtime, entries in committed.items():
         for entry in entries:
             lines.append(f"| {table.spec_for(runtime).label} | [{entry['id']}]({entry['url']}) | {entry['fixed']} |")
     lines += [

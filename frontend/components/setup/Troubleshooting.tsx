@@ -34,7 +34,7 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
         <summary>The runtime is older than a known security fix</summary>
         <p className="su-p">
           The runtime’s version is below the first release that fixes a published vulnerability — step 5 names it
-          and links the advisory. Update the runtime the way you installed it (step 3), restart it, and press{" "}
+          and links the advisory. Update the runtime the way you installed it (step 1 links the official download), restart it, and press{" "}
           <strong>Check again</strong>. Builds keep working meanwhile; the warning is there so it isn’t a surprise.
         </p>
       </details>

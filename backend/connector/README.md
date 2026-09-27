@@ -82,3 +82,12 @@ pipx run pypi-attestations verify pypi \
   --repository https://github.com/Sravan466/ai-software-engineering-team \
   pypi:aiteam_connect-0.3.0-py3-none-any.whl
 ```
+
+## Compatibility
+
+0.3.0 reports, for each runtime, the network addresses it also answers on — so the
+website can warn about a runtime anyone on your network can use. A server needs this
+repository's Phase 6 change (#33) to read that report: **update the server before
+publishing or pinning 0.3.0.** A server still on an older version refuses a 0.3.0
+connector's description of the computer. Servers pin the version they expect in the
+Setup tab's command, so a connector run from that command always matches.

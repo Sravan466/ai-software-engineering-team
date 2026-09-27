@@ -29,6 +29,7 @@ import re
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -56,7 +57,9 @@ _cache: dict = {"key": None, "table": {}}
 _VERSION = re.compile(r"^([vb]?)(\d+(?:\.\d+)*)(.*)$")
 #: What follows the numbers of a version that comes *before* its release:
 #: `0.11.1rc1`, `0.17.1-rc0`, `0.11.1.dev45+g…`, `1.2.0-beta.2`.
-_PRERELEASE = re.compile(r"^[-.+_]?(rc|dev|alpha|beta|a|b|pre|preview)(\d|[-.+_]|$)")
+#: The whole tail has to read that way: `-b29c606` (a commit hash) and `+a3f9c2`
+#: (build metadata, never a pre-release) do not.
+_PRERELEASE = re.compile(r"^[-._]?(rc|dev|alpha|beta|a|b|pre|preview)[-.]?\d*([.+-].*)?$")
 
 
 def parse_version(text: Optional[str]) -> Optional[tuple[int, ...]]:
@@ -206,7 +209,11 @@ def exposed_on(base_url: str, addresses: Optional[Iterable[str]] = None) -> Opti
     if port < 0:
         return None
     candidates = list(addresses) if addresses is not None else own_addresses()
-    return [host for host in candidates if detect.accepts(host, port)]
+    if len(candidates) <= 1:
+        return [host for host in candidates if detect.accepts(host, port)]
+    with ThreadPoolExecutor(max_workers=len(candidates), thread_name_prefix="exposed") as pool:
+        answers = list(pool.map(lambda host: detect.accepts(host, port), candidates))
+    return [host for host, ok in zip(candidates, answers) if ok]
 
 
 # ── what a person is told ────────────────────────────────────────────────────

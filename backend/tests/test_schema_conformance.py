@@ -1480,10 +1480,15 @@ def test_the_docker_compose_backend_declares_its_runtime_on_the_same_host():
     # From .env, with nothing assumed: a default naming the Ollama container would be
     # an unreachable source whenever the optional profile isn't running.
     assert "LOCAL_SOURCES: ${LOCAL_SOURCES:-}" in compose
-    # How to use the Ollama container is written down, labelled so its id is stable.
-    assert "LOCAL_SOURCES=Ollama=http://ollama:11434" in compose
+    # How to use the Ollama container is written down: labelled so its id is stable,
+    # and marked as sharing this host, so it's neither shown as remote nor unclamped.
+    import json
+
+    raw = re.search(r"#   LOCAL_SOURCES=(\[.*ollama:11434.*\])", compose)
+    assert raw, "the compose file doesn't say how to use its Ollama container"
+    (source,) = json.loads(raw.group(1))
+    assert source["base_url"] == "http://ollama:11434" and source["same_machine"] is True and source["label"]
     assert "COMPOSE_PROFILES=ollama" in compose
-    assert re.search(r"LOCAL_SAME_MACHINE: \$\{LOCAL_SAME_MACHINE:-true\}", compose)
     backend = compose[compose.index("  backend:"): compose.index("  frontend:")]
     assert "depends_on" not in backend
     ollama = compose[compose.index("  ollama:"): compose.index("  backend:")]

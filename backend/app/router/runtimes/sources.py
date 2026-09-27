@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -422,8 +423,10 @@ class SourceRegistry:
         if not providers:
             return
         addresses = hygiene.own_addresses()
-        for provider in providers:
-            provider.source.exposed = hygiene.exposed_on(provider.source.base_url, addresses)
+        with ThreadPoolExecutor(max_workers=min(len(providers), 8), thread_name_prefix="exposure") as pool:
+            found = list(pool.map(lambda p: hygiene.exposed_on(p.source.base_url, addresses), providers))
+        for provider, exposed in zip(providers, found):
+            provider.source.exposed = exposed
 
     def _adopt(self, hello) -> None:
         for provider in self._providers.values():
@@ -434,7 +437,11 @@ class SourceRegistry:
                 source.version = hello.version or source.version
                 return
             if source.origin != ORIGIN_DETECTED and source.runtime is not None and not source.provisional:
-                return  # someone said what this is; an answer does not overrule them
+                # Someone said what this is; an answer does not overrule them. One
+                # that answers as another runtime (llamafile as llama.cpp) still
+                # says which version it is.
+                source.version = hello.version or source.version
+                return
             if source.origin != ORIGIN_DETECTED:
                 # A configured source nobody could identify at start now answers.
                 self._identified(provider, hello)
