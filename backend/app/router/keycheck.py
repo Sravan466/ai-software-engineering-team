@@ -216,10 +216,13 @@ def _verdict(provider: str, status: int, text: str, model: str) -> KeyCheck:
     def made(state: str, reason: str, message: str) -> KeyCheck:
         return KeyCheck(status=state, reason=reason, message=message, model=model)
 
-    billing = _says(
-        text, "credit balance", "insufficient_quota", "billing", "spend limit", "exceeded your current quota",
-        "payment",
-    )
+    # Only words that say the money ran out. Gemini's ordinary rate limit says
+    # "exceeded your current quota … check your plan and billing details", and a
+    # rate limit must not disable a key; OpenAI's no-credit answer carries the
+    # `insufficient_quota` code, which is what tells the two apart.
+    billing = status == 402 or _says(
+        text, "credit balance", "insufficient_quota", "spend limit", "billing_hard_limit", "payment required",
+    ) or (status in (400, 403) and _says(text, "billing"))
     if billing and status in (400, 402, 403, 429):
         return made(BILLING, "no_credit", f"The key works, but the {who} account has no credit or has reached its spend limit.")
     if status == 401 or (provider == "gemini" and _says(text, "api_key_invalid", "api key not valid", "api key expired")):
@@ -301,7 +304,9 @@ def _check(provider: str, key: str, model: str, *, spend: bool) -> KeyCheck:
                 found = _verdict(provider, r.status_code, _error_text(r), model)
                 if found.status == MODEL_UNAVAILABLE:
                     found.models = _list_models(client, provider)
-                if found.status != VALID:
+                # A key restricted to making requests may not be allowed to *read*
+                # models — the safer kind of key. The one-token request decides.
+                if found.status != VALID and found.reason != "restricted":
                     return found
             try:
                 context = _context_tokens(provider, r.json()) if r.status_code == 200 else None

@@ -25,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.core import secrets_store
+from app.core import secretbox, secrets_store
 from app.core.config import settings
 from app.router import keycheck
 from app.router.runtimes.detect import is_loopback
@@ -134,13 +134,14 @@ def set_provider(provider: str, body: ProviderKeyUpdate, request: Request) -> di
     rejects is not saved, and never replaces one that works), what the check found,
     and the provider's row as Settings shows it now.
     """
-    # Removing ("") makes no call to the provider, so it isn't counted as a check.
-    _guard_key_route(request, provider, checks=body.api_key != "")
+    # Removing ("") makes no call to the provider, and a blank key is refused before
+    # one — neither is counted as a check.
+    _guard_key_route(request, provider, checks=body.api_key is None or bool(body.api_key.strip()))
     try:
         result = model_router.save_provider_key(
             provider, api_key=body.api_key, default_model=body.default_model
         )
-    except secrets_store.StoreUnreadable as e:
+    except (secrets_store.StoreUnreadable, secretbox.SecretsLocked) as e:
         raise _unreadable(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -153,7 +154,7 @@ def check_provider(provider: str, request: Request) -> dict:
     _guard_key_route(request, provider, checks=True)
     try:
         found = model_router.recheck_provider_key(provider)
-    except secrets_store.StoreUnreadable as e:
+    except (secrets_store.StoreUnreadable, secretbox.SecretsLocked) as e:
         raise _unreadable(e)
     return {"check": found.to_dict(), "provider": model_router.provider_settings()[provider]}
 
@@ -164,7 +165,7 @@ def remove_provider(provider: str, request: Request) -> dict:
     _guard_key_route(request, provider, checks=False)
     try:
         model_router.remove_provider_key(provider)
-    except secrets_store.StoreUnreadable as e:
+    except (secrets_store.StoreUnreadable, secretbox.SecretsLocked) as e:
         raise _unreadable(e)
     return {"provider": model_router.provider_settings()[provider]}
 

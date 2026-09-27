@@ -250,7 +250,8 @@ def test_router_state_and_caches_are_per_account():
     assert ra._cloud["anthropic"] is not rb._cloud["anthropic"]
     ra.set_provider_key("openai", api_key="sk-a-only")
     assert ra._cloud["openai"].available() and not rb._cloud["openai"].available()
-    assert settings.openai_api_key != "sk-a-only", "a key leaked into the shared settings"
+    shared = settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
+    assert shared != "sk-a-only", "a key leaked into the shared settings"
 
 
 def test_only_the_owner_starts_from_the_keys_in_env(monkeypatch):

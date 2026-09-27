@@ -185,7 +185,7 @@ def test_a_key_revoked_since_it_was_saved_is_caught_before_the_build(provider, r
     found = router._checks["openai"]
     found.checked_at = "2000-01-01T00:00:00+00:00"  # long ago
     provider({("GET", "/models/gpt-test"): (401, {"error": {"code": "invalid_api_key"}})})
-    ready = router.readiness(RoutingMode.MANUAL, "openai:gpt-test", roles=[])
+    ready = router.readiness(RoutingMode.MANUAL, "openai:gpt-test", roles=[], recheck_keys=True)
     assert not ready.ok and "OpenAI key isn't working" in ready.reason
     assert router.provider_settings()["openai"]["status"] == keycheck.INVALID
 
@@ -328,3 +328,65 @@ def test_the_api_returns_at_most_the_last_four_characters(client, provider):
         assert "APIMARKER" not in body and "…9876" in body
     finally:
         client.delete("/api/settings/providers/openai", headers=LOCAL)
+
+
+# ── regressions from review ──────────────────────────────────────────────────
+def test_uvicorn_access_log_still_formats():
+    """The scrubber once emptied record.args; uvicorn's access formatter unpacks them."""
+    from uvicorn.logging import AccessFormatter
+
+    record = logging.getLogger("uvicorn.access").makeRecord(
+        "uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1", "GET", "/health", "1.1", 200), None,
+    )
+    record = logging.getLogRecordFactory()(
+        record.name, record.levelno, record.pathname, record.lineno, record.msg, record.args, None
+    )
+    assert "GET /health" in AccessFormatter("%(message)s").format(record)
+    ok = logging.getLogRecordFactory()("x", logging.INFO, __file__, 1, "API key: %s", ("sk-TEMPLATE-000000",), None)
+    assert ok.getMessage().startswith("API key: ") and "TEMPLATE" not in ok.getMessage()
+
+
+def test_a_key_that_may_request_but_not_read_models_is_accepted(provider):
+    provider({
+        ("GET", "/models/gpt-test"): (403, {"error": {"message": "You have insufficient permissions for this "
+                                                      "operation. Missing scopes: api.model.read"}}),
+        ("POST", "/chat/completions"): (200, {}),
+    })
+    assert keycheck.check("openai", "sk-restricted-0000000", "gpt-test").status == keycheck.VALID
+
+
+def test_a_gemini_rate_limit_is_not_no_credit(provider):
+    provider({
+        ("GET", "/models/gemini-x"): (200, {}),
+        ("POST", ":generateContent"): (429, {"error": {"status": "RESOURCE_EXHAUSTED", "message":
+            "You exceeded your current quota, please check your plan and billing details."}}),
+    })
+    assert keycheck.check("gemini", "AIzaSyLIMITEDLIMITED1", "gemini-x").status == keycheck.RATE_LIMITED
+
+
+def test_a_blank_key_is_refused_not_a_removal(provider, router):
+    provider(OK_OPENAI)
+    router.set_default_model("openai", "gpt-test")
+    router.save_provider_key("openai", api_key="sk-works-0000000000")
+    with pytest.raises(ValueError):
+        router.save_provider_key("openai", api_key="   ")
+    assert router._cloud["openai"].has_key
+
+
+def test_a_failed_write_leaves_the_key_in_memory_unchanged(router):
+    router.set_provider_key("openai", api_key="sk-before-000000000")
+    userdata.path(router.user_id, "providers.local.json").write_text("{broken")
+    with pytest.raises(secrets_store.StoreUnreadable):
+        router.set_provider_key("openai", api_key="sk-after-0000000000")
+    assert router._cloud["openai"].secret() == "sk-before-000000000"
+    assert router.store_error()
+
+
+def test_the_preflight_reads_the_verdict_without_spending_a_call(provider, router):
+    calls = provider(OK_OPENAI)
+    router.set_provider_key("openai", api_key="sk-env-like-0000000", default_model="gpt-test")  # unchecked
+    router.readiness(RoutingMode.AUTO, None, roles=[])
+    assert calls == []
+    router.readiness(RoutingMode.AUTO, None, roles=[], recheck_keys=True)
+    assert calls and router.provider_settings()["openai"]["status"] == keycheck.VALID

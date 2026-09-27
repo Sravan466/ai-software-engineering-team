@@ -39,6 +39,7 @@ class CloudKey:
 
     def set_api_key(self, key: Union[str, SecretStr, None]) -> None:
         """Replace the key (Settings), and drop anything built on the old one."""
+        scrub.forget(self.secret())
         self._key = _clean(key)
         self.usable = True
         if hasattr(self, "_client"):

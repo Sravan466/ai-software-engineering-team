@@ -425,9 +425,11 @@ class ModelRouter:
         prov = self._cloud[provider]
         key = (api_key or "").strip() or None
         model = (default_model or "").strip() or None
-        if api_key is not None and key is None:
+        if api_key == "":
             self.remove_provider_key(provider)
             return {"applied": True, "check": None}
+        if api_key is not None and key is None:
+            raise ValueError("That key is blank. Paste the whole key, or use Remove to delete the saved one.")
         if key is not None:
             from app.router.runtimes.sources import SourceError, clean_key
 
@@ -547,8 +549,10 @@ class ModelRouter:
                 f"{', '.join(CLOUD_PROVIDERS)}; a local source's model is chosen as the "
                 "local default."
             )
-        self._apply(provider, api_key, default_model)
+        # Written first: a write that fails (an unreadable file) must not leave the
+        # key it refused to save live in memory.
         self._secrets.set_provider(provider, api_key, default_model)
+        self._apply(provider, api_key, default_model)
 
     def set_default_model(self, provider: str, model: str) -> None:
         """Point a cloud provider, or the local default, at a different model."""
@@ -720,7 +724,9 @@ class ModelRouter:
         return out
 
     def store_error(self) -> Optional[str]:
-        return getattr(self._secrets, "error", None)
+        """Whether the settings file can be read — asked of the file now, not remembered."""
+        self._secrets._read()
+        return self._secrets.error
 
     def _local_view(self, *, refresh: bool = False) -> dict:
         """Every source and model, with each model's verdict decided once, here.
@@ -939,12 +945,16 @@ class ModelRouter:
         mode: RoutingMode = RoutingMode.LOCAL_ONLY,
         preferred_model: Optional[str] = None,
         roles: Optional[Iterable[str]] = None,
+        *,
+        recheck_keys: bool = False,
     ) -> Readiness:
         """Check the models this run will reach for are actually there, before it starts.
 
         A local source lists what it serves. A cloud key is checked again here when its
         last check is old, unsettled, or a build saw it rejected — so a key revoked at
-        the provider is caught before the first phase, not inside it.
+        the provider is caught before the first phase, not inside it. Only when a run
+        is actually starting (`recheck_keys`): the composer's preflight asks this on
+        every change, and reads the verdict it has rather than spending a call.
         """
         self.sources.ensure()
         # (source, model) -> the role that wants it, so one missing model is
@@ -973,7 +983,7 @@ class ModelRouter:
         if mode == RoutingMode.AUTO:
             # Auto sends high-complexity phases to any cloud key it holds.
             cloud_used += [n for n in CLOUD_PROVIDERS if self._cloud[n].has_key]
-        if cloud_used:
+        if cloud_used and recheck_keys:
             self.recheck_stale(cloud_used)
         for (pname, model), role in cloud_heads.items():
             found = self.key_check(pname)

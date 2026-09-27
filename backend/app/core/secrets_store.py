@@ -314,13 +314,15 @@ def set_provider(
 def migrate_all() -> int:
     """Encrypt the plaintext keys in every settings file under the data directory.
 
-    The per-account files, the global file from before accounts, and the copies the
-    accounts migration set aside — those hold the same keys. Run at startup, after the
+    The per-account files, the global file from before accounts, and the copies and
+    backups beside it — those hold the same keys. Run at startup, after the
     accounts migration; a second run finds nothing to do.
     """
     from app.core import userdata
 
-    paths: list[Path] = [_PATH, *sorted(_PATH.parent.glob(f"{_PATH.name}.moved-to-account-*"))]
+    # `providers.local.json.*`: the copies set aside by migrations and the `.bak-*`
+    # backups taken before them — the same keys, just as readable.
+    paths: list[Path] = [_PATH, *sorted(_PATH.parent.glob(f"{_PATH.name}.*"))]
     if userdata.ROOT.is_dir():
         paths += sorted(userdata.ROOT.glob("*/providers.local.json"))
     total = 0

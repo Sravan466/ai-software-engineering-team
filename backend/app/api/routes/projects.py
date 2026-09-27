@@ -395,12 +395,12 @@ def _require_models(project: Project) -> None:
     404 from the runtime for a message, having already moved the project into a state the
     user had to work out how to get back out of.
     """
-    ready = _readiness(RoutingMode(project.routing_mode), project.preferred_model)
+    ready = _readiness(RoutingMode(project.routing_mode), project.preferred_model, recheck_keys=True)
     if not ready.ok:
         raise HTTPException(status_code=409, detail=ready.reason)
 
 
-def _readiness(mode: RoutingMode, preferred_model: Optional[str]):
+def _readiness(mode: RoutingMode, preferred_model: Optional[str], *, recheck_keys: bool = False):
     """The one readiness question, shared by every route that starts a run and by
     the preflight the composer asks before it creates one."""
     return model_router.readiness(
@@ -410,6 +410,9 @@ def _readiness(mode: RoutingMode, preferred_model: Optional[str]):
         # resolving that role here would check the wrong model entirely. RAG and
         # memory degrade to no-ops when their model is missing; a build does not.
         roles=[r["role"] for r in model_roles.catalogue() if r["role"] != "embeddings"],
+        # A run is starting: cloud keys whose standing is old or unsettled are checked
+        # again now. The preflight only reads what is known.
+        recheck_keys=recheck_keys,
     )
 
 
