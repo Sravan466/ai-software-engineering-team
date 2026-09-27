@@ -1,0 +1,53 @@
+# The `aiteam-connect` package: the connector a user runs on their own computer.
+#
+# It ships the server's own runtime adapters (`app/router/runtimes` and the few
+# modules they import) rather than a copy, so what the connector detects and how it
+# talks to a runtime is exactly what the server would do.
+#
+# Published only by .github/workflows/publish-connector.yml through PyPI Trusted
+# Publishing, with attestations. No publish token exists; no install scripts run.
+[build-system]
+requires = ["hatchling==1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aiteam-connect"
+version = "0.1.0"
+description = "Connect the models on your computer to the AI Software Engineering Team website, without opening a port."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+# Pinned exactly: a connector holds a device key, so a dependency it runs is
+# chosen, not resolved.
+dependencies = [
+    "httpx==0.28.1",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.7.1",
+    "websockets==13.1",
+    "cryptography==44.0.0",
+]
+
+[project.optional-dependencies]
+# The OS keychain. Without it the device key is kept in a 0600 file, with a warning.
+keychain = ["keyring==25.5.0"]
+
+[project.scripts]
+aiteam-connect = "aiteam_connect.cli:main"
+
+[tool.hatch.build.targets.wheel]
+only-include = []
+
+[tool.hatch.build.targets.wheel.force-include]
+"../aiteam_connect" = "aiteam_connect"
+"../app/__init__.py" = "app/__init__.py"
+"../app/connector/__init__.py" = "app/connector/__init__.py"
+"../app/connector/protocol.py" = "app/connector/protocol.py"
+"../app/core/__init__.py" = "app/core/__init__.py"
+"../app/core/config.py" = "app/core/config.py"
+"../app/core/logging.py" = "app/core/logging.py"
+"../app/router/__init__.py" = "app/router/__init__.py"
+"../app/router/base.py" = "app/router/base.py"
+"../app/router/model_profile.py" = "app/router/model_profile.py"
+"../app/router/runtimes" = "app/router/runtimes"
+"../app/schemas/__init__.py" = "app/schemas/__init__.py"
+"../app/schemas/llm.py" = "app/schemas/llm.py"

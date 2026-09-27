@@ -293,6 +293,24 @@ async function req<T>(
 }
 
 export const api = {
+  // ── Your computers (the connector) ──
+  setupGuide: () => req<SetupGuide>("/api/devices/setup"),
+  listDevices: () => req<{ devices: Device[] }>("/api/devices"),
+  startPairing: () => req<Pairing>("/api/devices/pairing", { method: "POST" }),
+  pairingState: (id: string) => req<PairingState>(`/api/devices/pairing/${id}`),
+  cancelPairing: (id: string) => req<{ ok: boolean }>(`/api/devices/pairing/${id}`, { method: "DELETE" }),
+  approveDevice: (id: string) =>
+    req<Device>(`/api/devices/${id}/approve`, { method: "POST" }, LLM_TIMEOUT_MS),
+  refreshDevice: (id: string) =>
+    req<Device>(`/api/devices/${id}/refresh`, { method: "POST" }, LLM_TIMEOUT_MS),
+  updateDevice: (id: string, body: { name?: string; chat_model?: string; embed_model?: string }) =>
+    req<Device>(`/api/devices/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deviceModel: (id: string, spec: string) =>
+    req<DeviceModelInfo>(`/api/devices/${id}/model?spec=${encodeURIComponent(spec)}`, {}, LLM_TIMEOUT_MS),
+  disconnectDevice: (id: string) =>
+    req<{ ok: boolean; was_connected: boolean }>(`/api/devices/${id}/disconnect`, { method: "POST" }),
+  forgetDevice: (id: string) => req<{ ok: boolean }>(`/api/devices/${id}`, { method: "DELETE" }),
+
   // ── Accounts ──
   authStatus: () => req<AuthStatus>("/api/auth/status"),
   signIn: (body: { email: string; password: string }) =>
@@ -1024,4 +1042,121 @@ export type Artifacts = {
     phases: Record<string, string | null>;
     problems: BuildProblem[];
   };
+};
+
+// ── Your computers ────────────────────────────────────────────────────────────
+export type OS = "macos" | "windows" | "linux";
+
+/** One runtime card on the Setup tab — straight from the backend's adapter table. */
+export type RuntimeCard = {
+  id: string;
+  label: string;
+  home: string | null;
+  library: string | null;
+  port: number | null;
+  generic: boolean;
+  /** Missing key: not supported on that OS. */
+  install: Partial<Record<OS, string>>;
+  download: string;
+  embeddings: string;
+  serve: string;
+  check: string;
+  exposure: string | null;
+};
+
+export type ConnectorInfo = {
+  package: string;
+  version: string;
+  min_version: string;
+  server: string;
+  commands: Record<OS, string>;
+  source_command: string;
+  verify: string;
+  ops: string[];
+  refused: Record<string, string[]>;
+};
+
+export type SetupGuide = { runtimes: RuntimeCard[]; connector: ConnectorInfo };
+
+export type ReportedModel = {
+  name: string;
+  kind: string | null;
+  capabilities: string[] | null;
+  is_local: boolean;
+  size_bytes: number | null;
+  loaded: boolean | null;
+};
+
+export type ReportedSource = {
+  id: string;
+  runtime: string;
+  label: string;
+  base_url: string;
+  remote: boolean;
+  version: string | null;
+  reachable: boolean;
+  error: string | null;
+  models: ReportedModel[];
+};
+
+export type DeviceHello = {
+  device_id: string;
+  connector_version: string;
+  os: string;
+  os_version: string | null;
+  arch: string | null;
+  ram_bytes: number | null;
+  hostname: string | null;
+  sources: ReportedSource[];
+  unknown: { base_url: string; openai: boolean; note: string }[];
+  tried: string[];
+  capabilities: string[];
+};
+
+export type Device = {
+  id: string;
+  name: string;
+  status: "pending" | "approved";
+  os: string | null;
+  connector_version: string | null;
+  outdated: boolean;
+  paired_from: string | null;
+  same_network: boolean;
+  created_at: string | null;
+  approved_at: string | null;
+  last_seen_at: string | null;
+  online: boolean;
+  connected_since: string | null;
+  hello: DeviceHello | null;
+  chat_model: string | null;
+  embed_model: string | null;
+  advice: { ram_gib: number; size: string; quantization: string; note: string } | null;
+};
+
+export type Pairing = {
+  id: string;
+  code: string;
+  expires_at: string;
+  ttl_seconds: number;
+  account: string;
+  connector: ConnectorInfo;
+};
+
+export type PairingState = {
+  id: string;
+  state: "waiting" | "claimed" | "used" | "expired";
+  expires_at: string;
+  device: Device | null;
+};
+
+export type DeviceModelInfo = {
+  name: string;
+  context_window: number | null;
+  parameter_label: string | null;
+  quantization: string | null;
+  kind: string | null;
+  structured_output: string | null;
+  thinking: string | null;
+  is_local: boolean;
+  weights_bytes: number | null;
 };

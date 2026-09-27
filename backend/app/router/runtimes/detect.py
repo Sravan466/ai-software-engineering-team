@@ -15,7 +15,7 @@ import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -193,18 +193,21 @@ def _describe_unknown(base_url: str, *, http: bool = True) -> dict:
     return {"base_url": base_url, "openai": openai, "note": note}
 
 
-def detect() -> Detection:
-    """Probe loopback on every default port in the adapter table."""
+def detect(skip_ports: Optional[Iterable[int]] = None) -> Detection:
+    """Probe loopback on every default port in the adapter table.
+
+    `skip_ports` are left alone: by default this backend's own port, which answers
+    HTTP too and is not a model runtime. The connector passes its server's port.
+    """
     result = Detection()
     if not settings.local_detect:
         return result
-    own = settings.api_port
+    skip = {settings.api_port} if skip_ports is None else set(skip_ports)
     targets = [
         (host, port)
         for port in table.probe_ports()
         for host in LOOPBACK_HOSTS
-        # This backend's own port answers HTTP too, and it is not a model runtime.
-        if port != own
+        if port not in skip
     ]
     result.tried = [url_for(h, p) for h, p in targets if h == LOOPBACK_HOSTS[0]]
     with ThreadPoolExecutor(max_workers=min(len(targets), 16) or 1, thread_name_prefix="detect") as pool:

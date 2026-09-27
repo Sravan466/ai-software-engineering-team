@@ -33,6 +33,30 @@ from app.router.runtimes.servers import (
 
 
 @dataclass(frozen=True)
+class SetupGuide:
+    """How a person gets this runtime going on their own computer — the Setup tab's
+    card for it. Text, with `code` in backticks; each OS links the official source.
+
+    Advice about *which* model to download is not here: that depends on the memory
+    of the computer, which only the connector knows, and it is given as a size and
+    a quantization, never a model name.
+    """
+
+    #: `{macos, windows, linux}` → how to install it there. Missing means unsupported.
+    install: dict
+    #: How to get a model onto it.
+    download: str
+    #: Which kind of model serves embeddings on it, and how to get one.
+    embeddings: str
+    #: What "running" means for it — the server the connector talks to.
+    serve: str
+    #: A command that proves it is running, run on the same computer.
+    check: str
+    #: Its own way of listening on more than this computer, when it has one.
+    exposure: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class RuntimeSpec:
     id: str
     label: str
@@ -51,6 +75,8 @@ class RuntimeSpec:
     window_hint: str = "Start the server with a larger context window."
     #: Where its KV cache type is set, and what it does when it cannot use one.
     kv_hint: str = "Set it where the server is started."
+    #: Its card on the Setup tab. None for runtimes the Setup tab doesn't offer.
+    setup: Optional[SetupGuide] = None
 
 
 GENERIC = "openai-compatible"
@@ -69,6 +95,21 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             "Ollama sets it with OLLAMA_KV_CACHE_TYPE, and falls back to f16 without saying "
             "so on architectures that can't use a quantized cache."
         ),
+        setup=SetupGuide(
+            install={
+                "macos": "Download the app from ollama.com/download and open it, or `brew install ollama`.",
+                "windows": "Download and run OllamaSetup.exe from ollama.com/download.",
+                "linux": "Run the install script from ollama.com/download: `curl -fsSL https://ollama.com/install.sh | sh`.",
+            },
+            download="Browse ollama.com/library and run `ollama pull <name>` in a terminal.",
+            embeddings=(
+                "Pull a second, small model tagged Embedding in the library. Without one, builds still "
+                "run, but your uploaded documents and the crew's memory aren't searched."
+            ),
+            serve="The Ollama app runs the server while it is open. Without the app, run `ollama serve`.",
+            check="curl http://127.0.0.1:11434  →  Ollama is running",
+            exposure="Leave `OLLAMA_HOST` unset (it listens on 127.0.0.1), and never set `OLLAMA_ORIGINS=*`.",
+        ),
     ),
     RuntimeSpec(
         id="lmstudio",
@@ -79,6 +120,21 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         home="https://lmstudio.ai",
         window_hint="Load it in LM Studio with a larger context length.",
         kv_hint="LM Studio sets it in the model's load settings.",
+        setup=SetupGuide(
+            install={
+                "macos": "Download LM Studio from lmstudio.ai and move it to Applications.",
+                "windows": "Download and run the installer from lmstudio.ai.",
+                "linux": "Download the AppImage from lmstudio.ai and make it executable.",
+            },
+            download="Search the Discover tab, download a GGUF (or MLX on Apple silicon) build, then load it.",
+            embeddings=(
+                "Download a model marked Embedding in Discover and load it next to the chat model. "
+                "Without one, uploaded documents and the crew's memory aren't searched."
+            ),
+            serve="Open the Developer tab and switch the server on, or run `lms server start`.",
+            check="curl http://127.0.0.1:1234/v1/models",
+            exposure="Keep \"Serve on Local Network\" off in the server settings.",
+        ),
     ),
     RuntimeSpec(
         id="llamacpp",
@@ -92,6 +148,21 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         home="https://github.com/ggml-org/llama.cpp",
         window_hint="Restart llama-server with a larger `-c`.",
         kv_hint="llama-server sets it with `--cache-type-k` and `--cache-type-v`.",
+        setup=SetupGuide(
+            install={
+                "macos": "`brew install llama.cpp`, or a prebuilt release from github.com/ggml-org/llama.cpp/releases.",
+                "windows": "`winget install llama.cpp`, or a prebuilt release from github.com/ggml-org/llama.cpp/releases.",
+                "linux": "`brew install llama.cpp`, or a prebuilt release from github.com/ggml-org/llama.cpp/releases.",
+            },
+            download="Download a `.gguf` file from Hugging Face; llama-server serves the one file you start it with.",
+            embeddings=(
+                "Start a second `llama-server --embeddings -m <embedding model>.gguf --port 8081`. "
+                "Without one, uploaded documents and the crew's memory aren't searched."
+            ),
+            serve="`llama-server -m <model>.gguf --port 8080 -c 16384` — it runs as long as that terminal does.",
+            check="curl http://127.0.0.1:8080/health",
+            exposure="It listens on 127.0.0.1 by default. Never start it with `--host 0.0.0.0`.",
+        ),
     ),
     RuntimeSpec(
         id="vllm",
@@ -102,6 +173,17 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         home="https://docs.vllm.ai",
         window_hint="Restart vLLM with a larger `--max-model-len`.",
         kv_hint="vLLM sets it with `--kv-cache-dtype`.",
+        setup=SetupGuide(
+            install={
+                "linux": "`pip install vllm` in a virtual environment (needs a supported GPU). See docs.vllm.ai.",
+                "windows": "Not native: install it inside WSL 2 following the Linux steps at docs.vllm.ai.",
+            },
+            download="vLLM downloads the Hugging Face model you name when it starts.",
+            embeddings="vLLM serves one model per server; start a second one with an embedding model on another port.",
+            serve="`vllm serve <model> --host 127.0.0.1 --port 8000`",
+            check="curl http://127.0.0.1:8000/v1/models",
+            exposure="vLLM listens on every interface unless you pass `--host 127.0.0.1`. Always pass it.",
+        ),
     ),
     RuntimeSpec(
         id="sglang",
@@ -112,6 +194,16 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         home="https://docs.sglang.ai",
         window_hint="Relaunch SGLang with a larger `--context-length`.",
         kv_hint="SGLang sets it with `--kv-cache-dtype`.",
+        setup=SetupGuide(
+            install={
+                "linux": "`pip install \"sglang[all]\"` in a virtual environment (needs a supported GPU). See docs.sglang.ai.",
+            },
+            download="SGLang downloads the Hugging Face model you name with `--model-path`.",
+            embeddings="Launch a second server with an embedding model and `--is-embedding` on another port.",
+            serve="`python -m sglang.launch_server --model-path <model> --host 127.0.0.1 --port 30000`",
+            check="curl http://127.0.0.1:30000/v1/models",
+            exposure="Pass `--host 127.0.0.1` so it isn't reachable from your network.",
+        ),
     ),
     RuntimeSpec(
         id="koboldcpp",
@@ -121,6 +213,18 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         add_model="KoboldCpp serves the model it was launched with.",
         home="https://github.com/LostRuins/koboldcpp",
         window_hint="Relaunch KoboldCpp with a larger `--contextsize`.",
+        setup=SetupGuide(
+            install={
+                "macos": "Download the macOS binary from github.com/LostRuins/koboldcpp/releases.",
+                "windows": "Download koboldcpp.exe from github.com/LostRuins/koboldcpp/releases.",
+                "linux": "Download the Linux binary from github.com/LostRuins/koboldcpp/releases.",
+            },
+            download="Download a `.gguf` file from Hugging Face and choose it when KoboldCpp starts.",
+            embeddings="KoboldCpp can load an embeddings model with `--embeddingsmodel <file>.gguf`.",
+            serve="Launch KoboldCpp with your model; it serves while its window is open.",
+            check="curl http://127.0.0.1:5001/api/v1/model",
+            exposure="Pass `--host 127.0.0.1`; KoboldCpp otherwise listens on every interface.",
+        ),
     ),
     RuntimeSpec(
         id="localai",
@@ -130,6 +234,17 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         add_model="Install models from LocalAI's model gallery.",
         home="https://localai.io",
         window_hint="Raise `context_size` in the model's LocalAI config.",
+        setup=SetupGuide(
+            install={
+                "macos": "Download the macOS app or binary from localai.io.",
+                "linux": "Run the install script from localai.io: `curl https://localai.io/install.sh | sh`.",
+            },
+            download="Install a model from the gallery at localai.io, or `local-ai run <model>`.",
+            embeddings="Install an embedding model from the gallery next to the chat model.",
+            serve="`local-ai run --address 127.0.0.1:8080`",
+            check="curl http://127.0.0.1:8080/v1/models",
+            exposure="LocalAI listens on every interface by default; pass `--address 127.0.0.1:8080`.",
+        ),
     ),
     # No adapter of their own yet: they answer as the generic dialect, so detection
     # shows them as unknown until someone confirms what they are.
@@ -151,6 +266,21 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         (),
         OpenAICompatAdapter,
         "Add models the way this server's own documentation describes.",
+        setup=SetupGuide(
+            install={
+                "macos": "Follow the server's own install steps.",
+                "windows": "Follow the server's own install steps.",
+                "linux": "Follow the server's own install steps.",
+            },
+            download="Add models the way the server's documentation describes.",
+            embeddings="If it serves `/v1/embeddings`, load an embedding model on it too.",
+            serve=(
+                "Start it on this computer, then tell the connector where it is — on that computer, "
+                "never from this website: `aiteam-connect add-source http://127.0.0.1:<port>`."
+            ),
+            check="curl http://127.0.0.1:<port>/v1/models",
+            exposure="Make it listen on 127.0.0.1 only.",
+        ),
     ),
 )
 
@@ -201,3 +331,29 @@ def looks_like_source_id(value: str) -> bool:
             return False
         base = head
     return bool(base)
+
+
+def setup_cards() -> list[dict]:
+    """The Setup tab's runtime cards, in table order: data, not component text."""
+    cards = []
+    for spec in RUNTIMES:
+        if spec.setup is None:
+            continue
+        guide = spec.setup
+        cards.append(
+            {
+                "id": spec.id,
+                "label": spec.label,
+                "home": spec.home,
+                "library": spec.library,
+                "port": spec.ports[0] if spec.ports else None,
+                "generic": spec.id == GENERIC,
+                "install": dict(guide.install),
+                "download": guide.download,
+                "embeddings": guide.embeddings,
+                "serve": guide.serve,
+                "check": guide.check,
+                "exposure": guide.exposure,
+            }
+        )
+    return cards

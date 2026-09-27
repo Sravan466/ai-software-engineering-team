@@ -70,7 +70,10 @@ def _routes():
 
 
 # ── every route is signed in ──────────────────────────────────────────────────
-OPEN = {"/health", "/", "/api/auth/status", "/api/auth/signin", "/api/auth/signup", "/api/auth/signout"}
+OPEN = {"/health", "/", "/api/auth/status", "/api/auth/signin", "/api/auth/signup", "/api/auth/signout",
+        # The connector pairs before it has any session: guarded by a code only a
+        # signed-in account can make (tests/test_connector.py).
+        "/api/connector/pair/lookup", "/api/connector/pair/claim"}
 
 
 @pytest.mark.parametrize("method,path", sorted(set(_routes())))

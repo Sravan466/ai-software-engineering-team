@@ -261,7 +261,7 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
             link to the fix rather than a caption about the problem. */}
         <Link
           className={"sb-runtime" + (ready ? "" : " down")}
-          href="/settings"
+          href={ready ? "/settings" : "/setup"}
           title={runtimeTitle}
         >
           <span className={"dot " + (ready ? "dot-ok" : "dot-warn")} />
@@ -277,6 +277,13 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
           {Icon.sparkle} The crew
           {/* One rail below a list of real builds, so it says which it is. */}
           <span className="sb-link-tag">demo</span>
+        </Link>
+        <Link
+          className="sb-link"
+          href="/setup"
+          aria-current={pathname === "/setup" ? "page" : undefined}
+        >
+          {Icon.laptop} Your computers
         </Link>
         <Link
           className="sb-link"

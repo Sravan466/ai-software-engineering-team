@@ -27,5 +27,9 @@ pypdf==5.1.0
 # ── Accounts ──
 argon2-cffi==23.1.0      # Argon2id password hashing
 
+# ── Connector ──
+websockets==13.1         # the connector's socket (uvicorn's WebSocket support too)
+cryptography==44.0.0     # Ed25519 device keys
+
 # ── Utilities ──
 tenacity==9.0.0          # retry/backoff for provider calls

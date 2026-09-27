@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
 import {
   api,
   LocalSource,
@@ -223,6 +224,13 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
       <p className="muted" style={{ margin: "0 0 14px", fontSize: "var(--t-base)", lineHeight: 1.6 }}>
         Runtimes on this machine are found by themselves — on loopback only, never beyond this
         computer. Every model each one serves is listed; choose the one every agent falls back to.
+      </p>
+      <p className="field-hint" style={{ margin: "-6px 0 14px" }}>
+        New to local models, or want to use the one on your own computer?{" "}
+        <Link className="link" href="/setup">
+          Setup walks you through it
+        </Link>
+        .
       </p>
 
       {loading && !status ? (

@@ -1,0 +1,46 @@
+# Publishes the connector to PyPI through Trusted Publishing, with attestations.
+# No token is stored anywhere: PyPI trusts this workflow, on this repository, for
+# the `pypi` environment (which should require a reviewer). Runs on a
+# `connector-v*` tag only.
+name: Publish connector
+
+on:
+  push:
+    tags: ["connector-v*"]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        working-directory: backend/connector
+        run: python -m pip install build==1.2.2 && python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: backend/connector/dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true

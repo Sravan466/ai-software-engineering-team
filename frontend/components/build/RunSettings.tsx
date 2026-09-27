@@ -170,10 +170,10 @@ function localBlocker(local: LocalStatus | null): RuntimeBlocker | null {
       title: "No local runtime reachable",
       text:
         (tried ? `Nothing answered at ${tried}, ` : "Nothing is answering, ") +
-        "so there's no model to hand this idea to. Start a local runtime, add its address " +
-        "in Settings, or add a cloud API key — and this build can go.",
-      action: "Set up a runtime",
-      href: "/settings",
+        "so there's no model to hand this idea to. Setup walks through starting a runtime and " +
+        "connecting your computer; a cloud API key in Settings works too.",
+      action: "Set up your computer",
+      href: "/setup",
     };
   }
   const home = sourceFor(local, local.default_model);
