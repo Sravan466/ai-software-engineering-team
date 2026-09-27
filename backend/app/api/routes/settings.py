@@ -246,6 +246,8 @@ def get_local(refresh: bool = False) -> dict:
 def set_local_default(body: LocalDefaultUpdate) -> dict:
     try:
         model_router.set_local_default(body.model)
+    except (secrets_store.StoreUnreadable, secretbox.SecretsLocked) as e:
+        raise _unreadable(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return model_router.local_status()

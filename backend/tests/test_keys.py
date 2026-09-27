@@ -390,3 +390,66 @@ def test_the_preflight_reads_the_verdict_without_spending_a_call(provider, route
     assert calls == []
     router.readiness(RoutingMode.AUTO, None, roles=[], recheck_keys=True)
     assert calls and router.provider_settings()["openai"]["status"] == keycheck.VALID
+
+
+# ── regressions from the second review ───────────────────────────────────────
+def test_a_model_the_key_cannot_use_does_not_switch_off_the_others(provider, router):
+    provider({("GET", "/models/gpt-big"): (404, {}), ("GET", "/models"): (200, {"data": [{"id": "gpt-small"}]})})
+    router.set_default_model("openai", "gpt-big")
+    router.save_provider_key("openai", api_key="sk-partial-00000000")
+    assert router._cloud["openai"].available()
+    assert router._refuses("openai", "gpt-big") and not router._refuses("openai", "gpt-small")
+    assert router._auto_pick("high") != ("openai", "gpt-big")
+
+
+def test_auto_resolves_after_the_recheck(provider, router):
+    provider({("GET", "/models/claude-x"): (200, {}), ("POST", "/messages"): (400, {"error": {
+        "type": "invalid_request_error", "message": "Your credit balance is too low"}})})
+    router.set_provider_key("anthropic", api_key="sk-ant-unchecked-000", default_model="claude-x")
+    ready = router.readiness(RoutingMode.AUTO, None, roles=[], recheck_keys=True)
+    assert router.provider_settings()["anthropic"]["status"] == keycheck.BILLING
+    assert "Anthropic key isn't working" not in (ready.reason or "")
+
+
+def test_gemini_location_refusal_is_not_working(provider):
+    provider({("GET", "/models/gemini-x"): (400, {"error": {
+        "status": "FAILED_PRECONDITION", "message": "User location is not supported for the API use."}})})
+    found = keycheck.check("gemini", "AIzaSyREGIONREGION123", "gemini-x")
+    assert found.status == keycheck.INVALID and found.reason == "region_not_supported"
+
+
+def test_a_verdict_about_a_replaced_key_is_ignored(provider, router):
+    provider(OK_OPENAI)
+    router.set_default_model("openai", "gpt-test")
+    router.save_provider_key("openai", api_key="sk-new-key-000000000")
+    stale = keycheck.KeyCheck(status=keycheck.INVALID, reason="rejected", message="x",
+                              key_id=keycheck.key_id("sk-old-key-000000000"))
+    router._remember("openai", stale, persist=True)
+    assert router.provider_settings()["openai"]["status"] == keycheck.VALID
+
+
+def test_a_failed_verdict_save_never_breaks_the_fallback_chain(provider, router, monkeypatch):
+    provider(OK_OPENAI)
+    router.set_default_model("openai", "gpt-test")
+    router.save_provider_key("openai", api_key="sk-diskfull-0000000")
+    monkeypatch.setattr(router._secrets, "set_check", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    router._note_failure("openai", "gpt-test", ProviderError("401", status=401))
+    assert router.provider_settings()["openai"]["status"] == keycheck.INVALID
+
+
+def test_a_source_the_file_refused_is_not_added(router):
+    from app.router.runtimes.sources import SourceError
+
+    userdata.path(router.user_id, "providers.local.json").write_text("{broken")
+    before = set(router.sources._providers)
+    with pytest.raises(SourceError):
+        router.sources._save_or(lambda: None)
+    assert set(router.sources._providers) == before
+
+
+def test_gemini_sdk_errors_carry_their_http_status():
+    from app.router.providers.gemini_provider import _http_status
+
+    Err = type("PermissionDenied", (Exception,), {"__module__": "google.api_core.exceptions", "code": 403})
+    assert _http_status(Err()) == 403
+    assert _http_status(OSError(111, "refused")) is None

@@ -47,6 +47,9 @@ LOCKED = "locked"  # saved under another encryption key; can't be read
 #: A key in one of these is not used: routing skips it and a build that names it
 #: is refused before it starts.
 REJECTED = frozenset({INVALID, MODEL_UNAVAILABLE, BILLING, LOCKED})
+#: Of those, the ones about the key itself. MODEL_UNAVAILABLE is about one model —
+#: the others the key can use still work.
+KEY_REJECTED = frozenset({INVALID, BILLING, LOCKED})
 #: Worth checking again before a build, whatever the time since the last check.
 UNSETTLED = frozenset({UNVERIFIED, UNCHECKED})
 
@@ -59,7 +62,7 @@ _BASE = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta",
 }
 _ANTHROPIC_VERSION = "2023-06-01"
-_LABEL = {"openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Google"}
+LABEL = {"openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Google"}
 #: How many of the models a key can use are kept, to show.
 _MAX_MODELS = 60
 
@@ -211,7 +214,7 @@ def _says(text: str, *words: str) -> bool:
 
 def _verdict(provider: str, status: int, text: str, model: str) -> KeyCheck:
     """What an error answer means for this key. `text` is only read here."""
-    who = _LABEL.get(provider, provider)
+    who = LABEL.get(provider, provider)
 
     def made(state: str, reason: str, message: str) -> KeyCheck:
         return KeyCheck(status=state, reason=reason, message=message, model=model)
@@ -225,17 +228,18 @@ def _verdict(provider: str, status: int, text: str, model: str) -> KeyCheck:
     ) or (status in (400, 403) and _says(text, "billing"))
     if billing and status in (400, 402, 403, 429):
         return made(BILLING, "no_credit", f"The key works, but the {who} account has no credit or has reached its spend limit.")
+    if status in (400, 403) and _says(
+        text, "country", "region", "territory", "unsupported_country", "location is not supported",
+    ):
+        # Gemini says this as a 400 FAILED_PRECONDITION, OpenAI as a 403.
+        return made(INVALID, "region_not_supported", f"{who} doesn't serve requests from the country or region this server is in.")
+    if status in (401, 403) and _says(text, "scope", "insufficient permissions", "model.request"):
+        return made(INVALID, "restricted", "This key can't make requests — it is restricted. Give it permission to use models, or create a key that can.")
     if status == 401 or (provider == "gemini" and _says(text, "api_key_invalid", "api key not valid", "api key expired")):
         if re.search(r"\bip\b", text) and "invalid_api_key" not in text:
             return made(INVALID, "network_not_allowed", f"{who} refused this key from this network (its IP allowlist doesn't include this server).")
-        if _says(text, "scope", "insufficient permissions", "model.request"):
-            return made(INVALID, "restricted", "This key can't make requests — it is restricted. Give it permission to use models, or create a key that can.")
         return made(INVALID, "rejected", f"{who} rejected this key. Check it was copied completely, or create a new one.")
     if status == 403:
-        if _says(text, "country", "region", "territory", "unsupported_country"):
-            return made(INVALID, "region_not_supported", f"{who} doesn't serve requests from the country or region this server is in.")
-        if _says(text, "scope", "insufficient permissions", "model.request"):
-            return made(INVALID, "restricted", "This key can't make requests — it is restricted. Give it permission to use models, or create a key that can.")
         if _says(text, "model"):
             return made(MODEL_UNAVAILABLE, "model_not_permitted", f"This key isn't allowed to use {model}.")
         return made(INVALID, "not_permitted", f"{who} says this key isn't allowed to do that. Check the key's permissions.")
@@ -262,17 +266,17 @@ def verdict_from_error(provider: str, status: Optional[int], text: str, model: s
     if found.status in (INVALID, BILLING):
         found.reason = REJECTED_DURING_BUILD if found.status == INVALID else found.reason
         if found.status == INVALID:
-            found.message = f"{_LABEL.get(provider, provider)} rejected this key during a build."
+            found.message = f"{LABEL.get(provider, provider)} rejected this key during a build."
         found.checked_at = _now()
         return found
     return None
 
 
 # ── the check ────────────────────────────────────────────────────────────────
-def check(provider: str, key: str, model: str, *, spend: bool = True) -> KeyCheck:
+def check(provider: str, key: str, model: str) -> KeyCheck:
     """Check `key` against `model`. Never raises; never waits past the timeout per step."""
     started = time.perf_counter()
-    result = _check(provider, key, model, spend=spend)
+    result = _check(provider, key, model)
     result.checked_at = _now()
     result.model = model
     result.key_id = key_id(key)
@@ -283,8 +287,8 @@ def check(provider: str, key: str, model: str, *, spend: bool = True) -> KeyChec
     return result
 
 
-def _check(provider: str, key: str, model: str, *, spend: bool) -> KeyCheck:
-    who = _LABEL.get(provider, provider)
+def _check(provider: str, key: str, model: str) -> KeyCheck:
+    who = LABEL.get(provider, provider)
     if provider not in _BASE:
         return KeyCheck(status=INVALID, reason="unknown_provider", message=f"'{provider}' isn't a cloud provider.")
     if not model:
@@ -312,9 +316,6 @@ def _check(provider: str, key: str, model: str, *, spend: bool) -> KeyCheck:
                 context = _context_tokens(provider, r.json()) if r.status_code == 200 else None
             except ValueError:
                 context = None
-            if not spend:
-                return KeyCheck(status=VALID, reason="authenticated", message="The key authenticates.", context_tokens=context)
-
             # 2 — one token: can it actually make a request, on an account that pays?
             path, body = _one_token(provider, model)
             r = client.post(path, json=body)

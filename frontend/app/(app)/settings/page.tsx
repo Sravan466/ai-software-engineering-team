@@ -1838,34 +1838,40 @@ function ApiKeysCard() {
                 <KeyBadge status={status} />
               </div>
 
-              {info?.configured && (
+              {(info?.configured || status === "locked") && (
                 <div className="key-meta">
-                  <span className="mono">{info.key_hint}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>
-                    {info.checked_at ? (
-                      <>
-                        checked {ago(info.checked_at, now)}
-                        {info.checked_model && (
-                          <>
-                            {" "}with <span className="mono">{info.checked_model}</span>
-                          </>
-                        )}
-                      </>
-                    ) : (
-                      "not checked yet"
-                    )}
-                  </span>
+                  {info.configured && (
+                    <>
+                    <span className="mono">{info.key_hint}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {info.checked_at ? (
+                        <>
+                          checked {ago(info.checked_at, now)}
+                          {info.checked_model && (
+                            <>
+                              {" "}with <span className="mono">{info.checked_model}</span>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        "not checked yet"
+                      )}
+                    </span>
+                    </>
+                  )}
                   <span className="key-actions">
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => onRecheck(p.key)}
-                      disabled={locked}
-                      aria-describedby={statusId}
-                    >
-                      {mine === "check" ? <span className="btn-spinner" aria-hidden="true" /> : Icon.refresh}
-                      {mine === "check" ? "Checking…" : "Re-check"}
-                    </button>
+                    {info.configured && (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => onRecheck(p.key)}
+                        disabled={locked}
+                        aria-describedby={statusId}
+                      >
+                        {mine === "check" ? <span className="btn-spinner" aria-hidden="true" /> : Icon.refresh}
+                        {mine === "check" ? "Checking…" : "Re-check"}
+                      </button>
+                    )}
                     <button className="btn btn-danger btn-sm" onClick={() => onRemove(p.key)} disabled={locked}>
                       {mine === "remove" ? <span className="btn-spinner" aria-hidden="true" /> : Icon.trash}
                       Remove

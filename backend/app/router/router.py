@@ -85,8 +85,6 @@ log = get_logger(__name__)
 audit = get_logger("app.audit")
 
 
-_CLOUD_LABEL = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Gemini"}
-
 #: Longer than any model name a runtime lists; a spec past this is refused unread.
 _MAX_SPEC_CHARS = 512
 
@@ -370,16 +368,33 @@ class ModelRouter:
     def _remember(self, provider: str, found: Optional[KeyCheck], *, persist: bool = False) -> None:
         """Take `found` as this provider's key's standing — routing reads it from here."""
         prov = self._cloud[provider]
+        if found is not None and found.key_id and found.key_id != keycheck.key_id(prov.secret() or ""):
+            # About a key that has since been replaced — a re-check that finished after
+            # a new key was saved. The new key's standing is not this one's.
+            return
         if found is None:
             self._checks.pop(provider, None)
             prov.usable = True
         else:
             self._checks[provider] = found
-            prov.usable = not found.rejected
+            # Rejected, no credit, unreadable: the key. A model it can't use: that
+            # model only (`_refuses`), not every other one it can.
+            prov.usable = found.status not in keycheck.KEY_REJECTED
             if found.context_tokens and found.model:
                 prov.known_context[found.model] = found.context_tokens
         if persist:
             self._secrets.set_check(provider, found.to_dict() if found else None)
+
+    def _refuses(self, provider: str, model: str) -> Optional[KeyCheck]:
+        """The check that rules out `provider:model`, if one does."""
+        if provider not in self._cloud or not self._cloud[provider].has_key:
+            return None
+        found = self.key_check(provider)
+        if found.status in keycheck.KEY_REJECTED:
+            return found
+        if found.status == keycheck.MODEL_UNAVAILABLE and found.model == model:
+            return found
+        return None
 
     def key_check(self, provider: str) -> KeyCheck:
         """The standing of a provider's key — unchecked if it has never been checked."""
@@ -512,8 +527,11 @@ class ModelRouter:
             threads = [threading.Thread(target=self.recheck_provider_key, args=(n,), daemon=True) for n in due]
             for t in threads:
                 t.start()
+            # A check is up to three requests (model, one token, the model list), and
+            # the timeout bounds each stage of each; wait for all of that.
+            bound = max(settings.key_check_timeout_seconds, 1)
             for t in threads:
-                t.join(timeout=2 * max(settings.key_check_timeout_seconds, 1) + 5)
+                t.join(timeout=3 * 3 * bound + 5)
 
     def _note_failure(self, provider: str, model: str, error: ProviderError) -> None:
         """A build's own call to a cloud provider failed: if the answer condemns the
@@ -529,7 +547,8 @@ class ModelRouter:
         log.warning("%s's key was %s during a build; it won't be used until it passes a check.", provider, found.status)
         try:
             self._remember(provider, found, persist=True)
-        except secrets_store.StoreUnreadable:
+        except Exception as e:  # noqa: BLE001 - never at the expense of the fallback chain
+            log.warning("Couldn't save that verdict (%s); it holds until restart.", type(e).__name__)
             self._remember(provider, found)
 
     def set_provider_key(
@@ -588,8 +607,10 @@ class ModelRouter:
                 "so it can't be the local default — Local builds would refuse it. Pin it to "
                 "one agent instead."
             )
-        self._chosen_local = self._spec(pair)
-        self._secrets.set_local_default(self._chosen_local, CLOUD_PROVIDERS)
+        chosen = self._spec(pair)
+        # Written first, so a choice the file refused is not in use either.
+        self._secrets.set_local_default(chosen, CLOUD_PROVIDERS)
+        self._chosen_local = chosen
         # The window, the parameter count and whether decoding can be schema
         # constrained are all properties of the model, and the model just changed.
         prov.forget()
@@ -893,7 +914,9 @@ class ModelRouter:
             "cloud_models": [
                 f"{name}:{self._default_model[name]}"
                 for name in CLOUD_PROVIDERS
-                if self._cloud[name].available() and self._default_model.get(name)
+                if self._cloud[name].available()
+                and self._default_model.get(name)
+                and not self._refuses(name, self._default_model[name])
             ],
         }
 
@@ -957,14 +980,17 @@ class ModelRouter:
         every change, and reads the verdict it has rather than spending a call.
         """
         self.sources.ensure()
+        if recheck_keys and mode != RoutingMode.LOCAL_ONLY:
+            # Before the chains are resolved, so Auto's choice — made from `available()`
+            # — already reflects what the re-check found.
+            self.recheck_stale([n for n in CLOUD_PROVIDERS if self._cloud[n].has_key])
         # (source, model) -> the role that wants it, so one missing model is
         # reported once however many phases point at it.
         wanted: dict[tuple[str, str], str] = {}
         #: And every role that wants it, for the pre-Start check to name.
         users: dict[tuple[str, str], list[str]] = {}
-        #: Cloud models the run leads with, and every cloud provider it may reach.
+        #: Cloud models the run leads with.
         cloud_heads: dict[tuple[str, str], str] = {}
-        cloud_used: list[str] = []
         for role in [*(roles or ()), None]:
             try:
                 chain = self._resolve_chain(mode, preferred_model, "medium", role)
@@ -973,26 +999,20 @@ class ModelRouter:
             if not chain:
                 return self._nothing_local()
             head = chain[0]
-            cloud_used += [p for p, _ in chain if p in CLOUD_PROVIDERS]
             if head[0] in CLOUD_PROVIDERS:
                 cloud_heads.setdefault(head, role or "the rest of the run")
             else:
                 wanted.setdefault(head, role or "the rest of the run")
                 if role:
                     users.setdefault(head, []).append(role)
-        if mode == RoutingMode.AUTO:
-            # Auto sends high-complexity phases to any cloud key it holds.
-            cloud_used += [n for n in CLOUD_PROVIDERS if self._cloud[n].has_key]
-        if cloud_used and recheck_keys:
-            self.recheck_stale(cloud_used)
         for (pname, model), role in cloud_heads.items():
-            found = self.key_check(pname)
-            if found.rejected:
+            found = self._refuses(pname, model)
+            if found is not None:
                 who = "this build" if role == "the rest of the run" else f"the {role.replace('_', ' ')} agent"
                 return Readiness(
                     ok=False,
                     reason=(
-                        f"{pname}:{model} is set for {who}, but the {_CLOUD_LABEL.get(pname, pname)} key isn't working: "
+                        f"{pname}:{model} is set for {who}, but the {keycheck.LABEL.get(pname, pname)} key isn't working: "
                         f"{found.message} Fix it in Settings → Cloud API keys, or choose another model."
                     ),
                 )
@@ -1281,7 +1301,7 @@ class ModelRouter:
                 # rather than falling through to a model nobody picked. Connected
                 # but its runtime down, that is an error to fix there, not a pause.
                 raise prov.unavailable_error()
-            if prov is None or not prov.available():
+            if prov is None or not prov.available() or self._refuses(pname, model):
                 attempts.append({"provider": pname, "model": model, "error": "unavailable"})
                 continue
             try:
@@ -1571,7 +1591,11 @@ class ModelRouter:
         - High complexity + a cloud key available -> strongest configured cloud model.
         - Otherwise prefer the free local default when its source is answering.
         """
-        cloud = [name for name in CLOUD_PROVIDERS if self._cloud[name].available()]
+        cloud = [
+            name
+            for name in CLOUD_PROVIDERS
+            if self._cloud[name].available() and not self._refuses(name, self._default_model.get(name) or "")
+        ]
         local = self.local_default()
         local_source = self.sources.get(local[0]) if local else None
         local_up = bool(local_source is not None and local_source.available())

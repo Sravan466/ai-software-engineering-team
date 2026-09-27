@@ -18,6 +18,16 @@ log = get_logger(__name__)
 _CONFIGURE_LOCK = threading.Lock()
 
 
+def _http_status(error: Exception):
+    """Google's API errors carry their HTTP status as `code` — only theirs; elsewhere
+    `code` may be an errno or a gRPC status (see `status_is_retryable`)."""
+    status = status_of(error)
+    if status is None and type(error).__module__.startswith("google.api_core"):
+        code = getattr(error, "code", None)
+        status = code if isinstance(code, int) and 100 <= code < 600 else None
+    return status
+
+
 class GeminiProvider(CloudKey, LLMProvider):
     name = "gemini"
     is_local = False
@@ -95,7 +105,7 @@ class GeminiProvider(CloudKey, LLMProvider):
                 resp = gmodel.generate_content(contents)
         except Exception as e:  # noqa: BLE001
             raise ProviderError(
-                f"Gemini call failed: {e}", retryable=status_is_retryable(e), status=status_of(e)
+                f"Gemini call failed: {e}", retryable=status_is_retryable(e), status=_http_status(e)
             ) from e
 
         latency = int((time.perf_counter() - started) * 1000)

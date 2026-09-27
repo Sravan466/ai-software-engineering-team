@@ -282,7 +282,10 @@ class SourceRegistry:
                 )
             )
         if renamed:
-            self._save()
+            try:
+                self._save()
+            except Exception as e:  # noqa: BLE001 - loading must not fail over a rename
+                log.warning("Couldn't save a renamed source: %s", e)
 
     def _load_configured(self, entry: dict) -> None:
         url = normalise_url(str(entry.get("base_url")))
@@ -535,8 +538,8 @@ class SourceRegistry:
                 version=hello.version,
             )
             provider = self._register(source)
+            self._save_or(lambda: self._providers.pop(source.id, None))
             self._unknown = [u for u in self._unknown if not detect.same_address(u["base_url"], url)]
-            self._save()
         return provider
 
     def _refuse_duplicate(self, url: str) -> None:
@@ -561,7 +564,7 @@ class SourceRegistry:
                     "it there and it will show as not answering."
                 )
             self._providers.pop(source_id, None)
-            self._save()
+            self._save_or(lambda: self._providers.__setitem__(source_id, provider))
 
     def set_key(self, source_id: str, api_key: Optional[str]) -> SourceProvider:
         """Set ("…"), clear ("") or keep (None) a source's API key."""
@@ -574,14 +577,31 @@ class SourceRegistry:
                 raise SourceError("This source's key comes from the backend's configuration.")
             if api_key is None:
                 return provider
+            before = (provider.source.api_key, provider.source.origin)
+
+            def undo() -> None:
+                provider.source.api_key, provider.source.origin = before
+                provider.adapter.api_key = before[0]
+
             provider.source.api_key = key
             provider.adapter.api_key = key
             provider.invalidate()
             if provider.source.origin == ORIGIN_DETECTED:
                 # A key makes a detected source something the user configured.
                 provider.source.origin = ORIGIN_ADDED
-            self._save()
+            self._save_or(undo)
             return provider
+
+    def _save_or(self, undo) -> None:
+        """Save, or — when the settings file can't be written — put memory back as it
+        was and say why. A change that wasn't saved must not be in use either."""
+        from app.core.secretbox import SecretsLocked
+
+        try:
+            self._save()
+        except (secrets_store.StoreUnreadable, SecretsLocked) as e:
+            undo()
+            raise SourceError(str(e)) from e
 
     def _save(self) -> None:
         self._store.save_sources(
