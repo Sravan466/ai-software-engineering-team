@@ -322,13 +322,14 @@ class JanAdapter(OpenAICompatAdapter):
 
 # ── llamafile ────────────────────────────────────────────────────────────────
 class LlamafileAdapter(LlamaCppAdapter):
-    """llamafile: a llama.cpp server in one file — the same API, plus `/tools`.
+    """llamafile: a llama.cpp server in one file — the same API, answered the same way.
 
-    Everything llama-server reports it reports too (`/props` window and build, the
-    embeddings probe), so it is the llama.cpp adapter under its own name. Asked
-    before llama.cpp; a llamafile that doesn't answer `/tools` (unverified against
-    every release) is still read correctly, as llama.cpp.
-    Source: docs.mozilla.ai/llamafile/using-llamafile/api.
+    Nothing it answers tells it apart from llama-server reliably (checked against
+    docs.mozilla.ai/llamafile/using-llamafile/api), so detection reads it as
+    llama.cpp — which is exactly the dialect it speaks, and whose advisories its
+    embedded server shares. It is this runtime only when someone says so
+    (`aiteam-connect add-source … --runtime llamafile`, or `runtime` in
+    LOCAL_SOURCES); it then still has to answer as a llama.cpp server.
     """
 
     runtime = "llamafile"
@@ -339,8 +340,6 @@ class LlamafileAdapter(LlamaCppAdapter):
     ) -> Optional[Hello]:
         hello = LlamaCppAdapter.fingerprint(base_url, api_key, timeout=timeout)
         if hello is None:
-            return None
-        if get_json(hello.base_url, "/tools", api_key, timeout=timeout) is None:
             return None
         return Hello(runtime=cls.runtime, base_url=hello.base_url, version=hello.version)
 
@@ -467,6 +466,16 @@ class MLXAdapter(OpenAICompatAdapter):
 _DMR_BANNER = "Docker Model Runner is running"
 
 
+def _dmr_root(base_url: str) -> str:
+    """The server's root, however its address was written.
+
+    Docker documents the base as `…:12434/engines/v1`; `api_root` takes the `/v1`
+    off, and this the `/engines` — which the adapter adds back itself.
+    """
+    base = api_root(base_url)
+    return base[: -len("/engines")] if base.endswith("/engines") else base
+
+
 class DockerModelRunnerAdapter(OpenAICompatAdapter):
     """Docker Model Runner (TCP 12434): the OpenAI dialect under `/engines`.
 
@@ -480,11 +489,14 @@ class DockerModelRunnerAdapter(OpenAICompatAdapter):
     api_prefix = "/engines"
     structured_ceiling = STRUCTURED_JSON
 
+    def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
+        super().__init__(_dmr_root(base_url), api_key)
+
     @classmethod
     def fingerprint(
         cls, base_url: str, api_key: Optional[str] = None, *, timeout: float = FINGERPRINT_TIMEOUT
     ) -> Optional[Hello]:
-        base = api_root(base_url)
+        base = _dmr_root(base_url)
         banner = False
         try:
             r = httpx.get(f"{base}/", timeout=timeout)

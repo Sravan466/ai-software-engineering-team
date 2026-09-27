@@ -28,11 +28,12 @@ import os
 import re
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Iterable, Optional
-from urllib.parse import urlparse
 
 from app.core.logging import get_logger
+from app.router.runtimes import detect
 
 log = get_logger(__name__)
 
@@ -43,16 +44,19 @@ ADVISORIES_ENV = "RUNTIME_ADVISORIES_FILE"
 KIND_OUTDATED = "outdated"
 KIND_EXPOSED = "exposed"
 
-#: How long a connection to this machine's own address may take. It is never
-#: filtered, so a refusal is immediate; this only bounds something unusual.
-_CONNECT_TIMEOUT = 0.3
+#: How long this machine's network addresses are trusted. They change when it
+#: joins another network, which is rare next to how often sources are scanned.
+_ADDRESSES_TTL_SECONDS = 300.0
 
 _lock = threading.Lock()
 _cache: dict = {"key": None, "table": {}}
 
 
 # ── versions ─────────────────────────────────────────────────────────────────
-_VERSION = re.compile(r"^[vb]?(\d+(?:\.\d+)*)")
+_VERSION = re.compile(r"^([vb]?)(\d+(?:\.\d+)*)(.*)$")
+#: What follows the numbers of a version that comes *before* its release:
+#: `0.11.1rc1`, `0.17.1-rc0`, `0.11.1.dev45+g…`, `1.2.0-beta.2`.
+_PRERELEASE = re.compile(r"^[-.+_]?(rc|dev|alpha|beta|a|b|pre|preview)(\d|[-.+_]|$)")
 
 
 def parse_version(text: Optional[str]) -> Optional[tuple[int, ...]]:
@@ -66,12 +70,28 @@ def parse_version(text: Optional[str]) -> Optional[tuple[int, ...]]:
     match = _VERSION.match((text or "").strip().lower())
     if not match:
         return None
-    return tuple(int(part) for part in match.group(1).split("."))
+    return tuple(int(part) for part in match.group(2).split("."))
 
 
-def _older(version: tuple[int, ...], fixed: tuple[int, ...]) -> bool:
+def is_prerelease(text: Optional[str]) -> bool:
+    """Whether a version is a pre-release or development build of its numbers —
+    which comes before the release of the same numbers. A llama.cpp build number
+    (`b5662-b29c…`) is never one: what follows it is a commit hash."""
+    match = _VERSION.match((text or "").strip().lower())
+    if not match or match.group(1) == "b":
+        return False
+    return bool(_PRERELEASE.match(match.group(3)))
+
+
+def _pad(version: tuple[int, ...], width: int) -> tuple[int, ...]:
+    return version + (0,) * (width - len(version))
+
+
+def _older(version: tuple[int, ...], fixed: tuple[int, ...], *, prerelease: bool = False) -> bool:
     width = max(len(version), len(fixed))
-    return version + (0,) * (width - len(version)) < fixed + (0,) * (width - len(fixed))
+    mine, theirs = _pad(version, width), _pad(fixed, width)
+    # `0.11.1rc1` is older than `0.11.1`, the release that carries the fix.
+    return mine < theirs or (prerelease and mine == theirs)
 
 
 # ── the table ────────────────────────────────────────────────────────────────
@@ -128,17 +148,27 @@ def advisories(runtime: Optional[str], version: Optional[str]) -> list[dict]:
     parsed = parse_version(version)
     if not runtime or parsed is None:
         return []
-    hits = [e for e in table().get(runtime, []) if _older(parsed, parse_version(e["fixed"]) or ())]
+    early = is_prerelease(version)
+    hits = [e for e in table().get(runtime, []) if _older(parsed, parse_version(e["fixed"]) or (), prerelease=early)]
     return sorted(hits, key=lambda e: parse_version(e["fixed"]) or (), reverse=True)
 
 
 # ── who can reach it ─────────────────────────────────────────────────────────
+_addresses: dict = {"at": None, "found": []}
+
+
 def own_addresses() -> list[str]:
     """This machine's addresses on its networks — never loopback.
 
-    The address the OS would use to reach the internet (found by *connecting* a UDP
-    socket, which sends nothing), plus whatever the hostname resolves to locally.
+    The address the OS would use to reach the internet, IPv4 and IPv6, found by
+    *connecting* a UDP socket — which sends nothing and never waits on a name
+    lookup (resolving the hostname can stall for seconds on mDNS). Remembered for
+    a few minutes, since every scan asks.
     """
+    now = time.monotonic()
+    with _lock:
+        if _addresses["at"] is not None and now - _addresses["at"] < _ADDRESSES_TTL_SECONDS:
+            return list(_addresses["found"])
     found: list[str] = []
 
     def keep(text: str) -> None:
@@ -158,22 +188,10 @@ def own_addresses() -> list[str]:
                 keep(sock.getsockname()[0])
         except OSError:
             pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None):
-            keep(str(info[4][0]))
-    except OSError:
-        pass
-    return found[:4]
-
-
-def _accepts(host: str, port: int) -> bool:
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    try:
-        with socket.socket(family, socket.SOCK_STREAM) as sock:
-            sock.settimeout(_CONNECT_TIMEOUT)
-            return sock.connect_ex((host, port)) == 0
-    except OSError:
-        return False
+    found = found[:4]
+    with _lock:
+        _addresses.update(at=now, found=found)
+    return list(found)
 
 
 def exposed_on(base_url: str, addresses: Optional[Iterable[str]] = None) -> Optional[list[str]]:
@@ -182,17 +200,13 @@ def exposed_on(base_url: str, addresses: Optional[Iterable[str]] = None) -> Opti
     None when the question doesn't apply: an address that isn't loopback is another
     computer, and whether *it* listens widely can't be seen from here.
     """
-    from app.router.runtimes.detect import is_loopback
-
-    if not is_loopback(base_url):
+    if not detect.is_loopback(base_url):
         return None
-    try:
-        parsed = urlparse(base_url)
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    except ValueError:
+    port = detect.port_of(base_url)
+    if port < 0:
         return None
     candidates = list(addresses) if addresses is not None else own_addresses()
-    return [host for host in candidates if _accepts(host, port)]
+    return [host for host in candidates if detect.accepts(host, port)]
 
 
 # ── what a person is told ────────────────────────────────────────────────────
@@ -228,7 +242,8 @@ def warnings(
                 "detail": (
                     f"Update {label} to {newest['fixed']} or newer. "
                     + (f"{newest['summary']} " if newest.get("summary") else "")
-                    + ("Fixed there: " + ", ".join(ids) + "." if len(ids) > 1 else f"({ids[0]})")
+                    # One advisory is named by its link; several are listed here.
+                    + ("Fixed there: " + ", ".join(ids) + "." if len(ids) > 1 else "")
                 ).strip(),
                 "url": newest["url"],
                 "ids": ids,
@@ -253,7 +268,7 @@ def terminal_lines(label: str, base_url: str, found: list[dict]) -> list[str]:
     """The same warnings, as the connector prints them in its terminal."""
     lines = []
     for w in found:
-        lines.append(f"⚠ {label} at {base_url}: {w['title']}.")
+        lines.append(f"! {label} at {base_url}: {w['title']}.")
         lines.append(f"  {w['detail']}")
         if w.get("url"):
             lines.append(f"  {w['url']}")

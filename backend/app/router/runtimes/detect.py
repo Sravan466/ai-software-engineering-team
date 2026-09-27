@@ -106,7 +106,8 @@ def url_for(host: str, port: int) -> str:
     return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
-def _port(url: str) -> int:
+def port_of(url: str) -> int:
+    """The port a URL reaches, its scheme's default when unwritten; -1 when unreadable."""
     try:
         parsed = urlparse(url)
         return parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -116,7 +117,7 @@ def _port(url: str) -> int:
 
 def same_address(a: str, b: str) -> bool:
     """Whether two URLs name the same server, reading every loopback spelling as one."""
-    port_a, port_b = _port(a), _port(b)
+    port_a, port_b = port_of(a), port_of(b)
     if port_a < 0 or port_a != port_b:
         return False
     try:
@@ -135,7 +136,8 @@ def answers_http(base_url: str) -> bool:
         return False
 
 
-def _accepts(host: str, port: int) -> bool:
+def accepts(host: str, port: int) -> bool:
+    """Whether a TCP connection to `host:port` opens."""
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     try:
         with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -154,6 +156,11 @@ def identify(
     others a round trip — but it still has to answer as that runtime.
     """
     specs = list(table.FINGERPRINTED)
+    declared = table.BY_ID.get(prefer or "")
+    if declared is not None and declared.adapter is not None and declared not in specs and declared.id != table.GENERIC:
+        # Said to be a runtime detection never adopts on its own (llamafile): asked
+        # first, and it still has to answer as one.
+        specs.insert(0, declared)
     if prefer:
         specs.sort(key=lambda spec: spec.id != prefer)
     for spec in specs:
@@ -211,7 +218,7 @@ def detect(skip_ports: Optional[Iterable[int]] = None) -> Detection:
     ]
     result.tried = [url_for(h, p) for h, p in targets if h == LOOPBACK_HOSTS[0]]
     with ThreadPoolExecutor(max_workers=min(len(targets), 16) or 1, thread_name_prefix="detect") as pool:
-        open_ports = [t for t, ok in zip(targets, pool.map(lambda t: _accepts(*t), targets)) if ok]
+        open_ports = [t for t, ok in zip(targets, pool.map(lambda t: accepts(*t), targets)) if ok]
 
     # A dual-stack server answers on both hosts; ask once, preferring IPv4.
     seen: set[int] = set()

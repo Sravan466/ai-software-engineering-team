@@ -165,6 +165,11 @@ class SourceRegistry:
         #: listed after this machine's, and never saved, added or removed here.
         self.devices = None
 
+    @property
+    def may_add_local(self) -> bool:
+        """Whether this is the install owner's registry — the server's own machine is theirs."""
+        return self._may_add_local
+
     # ── what is known ────────────────────────────────────────────────────────
     def ensure_loaded(self) -> None:
         """The configured and saved sources, without probing anything."""

@@ -8,9 +8,11 @@
 #   LOCAL_SOURCES=llama.cpp=http://host.docker.internal:8080
 #
 # and `docker compose up`. Or run Ollama in a container next to it — an optional
-# profile, used by default when LOCAL_SOURCES is blank:
+# profile. Put both lines in .env, so a plain `docker compose up` keeps using it:
 #
-#   docker compose --profile ollama up
+#   COMPOSE_PROFILES=ollama
+#   LOCAL_SOURCES=Ollama=http://ollama:11434
+#
 #   docker compose exec ollama ollama pull <model>
 #
 # Keep a runtime on the host listening on 127.0.0.1 only: never 0.0.0.0, and never
@@ -36,10 +38,10 @@ services:
       - .env
     environment:
       # Inside this container, loopback is the container itself, so the runtime is
-      # named rather than found: LOCAL_SOURCES from .env, or the optional Ollama
-      # container by its compose hostname when that is blank. The label keeps the
-      # source id stable across restarts.
-      LOCAL_SOURCES: ${LOCAL_SOURCES:-Ollama=http://ollama:11434}
+      # named rather than found: LOCAL_SOURCES from .env (see the top of this file).
+      # Nothing is assumed — a source for a container that isn't running would only
+      # be listed as unreachable. A label keeps the source id stable across restarts.
+      LOCAL_SOURCES: ${LOCAL_SOURCES:-}
       # A sibling container or this computer's host, not another computer: it shares
       # this host's RAM, so the context window must still be clamped by it. The
       # hostname cannot say so.

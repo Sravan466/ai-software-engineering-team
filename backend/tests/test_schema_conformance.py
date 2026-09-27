@@ -1477,10 +1477,12 @@ def test_the_docker_compose_backend_declares_its_runtime_on_the_same_host():
     import re
 
     compose = (pathlib.Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
-    raw = re.search(r"LOCAL_SOURCES: \$\{LOCAL_SOURCES:-(.+)\}", compose)
-    assert raw, "the compose backend names no model source"
-    # Labelled, so its source id — and every model chosen from it — stays stable.
-    assert raw.group(1) == "Ollama=http://ollama:11434"
+    # From .env, with nothing assumed: a default naming the Ollama container would be
+    # an unreachable source whenever the optional profile isn't running.
+    assert "LOCAL_SOURCES: ${LOCAL_SOURCES:-}" in compose
+    # How to use the Ollama container is written down, labelled so its id is stable.
+    assert "LOCAL_SOURCES=Ollama=http://ollama:11434" in compose
+    assert "COMPOSE_PROFILES=ollama" in compose
     assert re.search(r"LOCAL_SAME_MACHINE: \$\{LOCAL_SAME_MACHINE:-true\}", compose)
     backend = compose[compose.index("  backend:"): compose.index("  frontend:")]
     assert "depends_on" not in backend

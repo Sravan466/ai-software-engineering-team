@@ -214,12 +214,22 @@ class Agent:
         """Say in this terminal what the website's Setup tab says: an outdated runtime,
         or one anyone on the network can reach. Once per session for each."""
         found = hygiene.warnings(source.runtime, source.version, exposed)
-        fresh = [w for w in found if (source.id, source.base_url, w["kind"]) not in self._warned]
-        if not fresh:
-            return
-        self._warned.update((source.id, source.base_url, w["kind"]) for w in fresh)
-        for line in hygiene.terminal_lines(table.spec_for(source.runtime).label, source.base_url, fresh):
-            self._say_safely(line)
+        label = table.spec_for(source.runtime).label
+        for w in found:
+            key = (source.id, source.base_url, w["kind"])
+            if key in self._warned:
+                continue
+            # Remembered only once it has been printed: a console that can't show
+            # a character gets the ASCII of it instead of losing the warning.
+            try:
+                for line in hygiene.terminal_lines(label, source.base_url, [w]):
+                    try:
+                        self._say(line)
+                    except UnicodeEncodeError:
+                        self._say(line.encode("ascii", "replace").decode("ascii"))
+            except Exception:  # noqa: BLE001 - a closed stdout; said again next scan
+                continue
+            self._warned.add(key)
 
     # ── the operations ──────────────────────────────────────────────────────
     def hello(self) -> dict:

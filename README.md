@@ -165,7 +165,8 @@ docker compose up --build
 Or run Ollama in a container next to it — an optional profile:
 
 ```bash
-docker compose --profile ollama up --build
+printf 'COMPOSE_PROFILES=ollama\nLOCAL_SOURCES=Ollama=http://ollama:11434\n' >> .env
+docker compose up --build
 docker compose exec ollama ollama pull <model>
 ```
 

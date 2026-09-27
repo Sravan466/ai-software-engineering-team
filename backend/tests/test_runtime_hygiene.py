@@ -42,6 +42,11 @@ def test_every_runtime_in_the_table_has_an_adapter_facts_and_a_source():
         assert spec.facts is not None, spec.id
         assert spec.facts.structured in ("schema", "grammar", "json", "none"), spec.id
         assert spec.facts.context, spec.id
+        # "not reported" in words and in the flag the Setup tab reads agree.
+        if spec.facts.context.startswith("not reported"):
+            assert spec.facts.context_reported is False, spec.id
+        else:
+            assert spec.facts.context_reported is not False, spec.id
         assert spec.facts.source.startswith("https://"), spec.id
 
 
@@ -97,11 +102,6 @@ def test_setup_advice_never_tells_anyone_to_open_a_runtime_up():
 def test_same_port_llama_server_llamafile_mlx_and_localai_are_each_identified(monkeypatch):
     cases = {
         "llamacpp": {"/v1/models": _Resp(200, LLAMACPP_MODELS), "/props": _Resp(200, PROPS)},
-        "llamafile": {
-            "/v1/models": _Resp(200, LLAMACPP_MODELS),
-            "/props": _Resp(200, PROPS),
-            "/tools": _Resp(200, {"tools": []}),
-        },
         "mlx": {"/v1/models": _Resp(200, MLX_MODELS), "/health": _Resp(200, {"status": "ok"})},
         "localai": {
             "/v1/models": _Resp(200, {"data": [{"id": "phi", "object": "model"}]}),
@@ -114,6 +114,24 @@ def test_same_port_llama_server_llamafile_mlx_and_localai_are_each_identified(mo
         _serve(monkeypatch, routes)
         hello = detect.identify(URL)
         assert hello is not None and hello.runtime == expected, (expected, hello)
+
+
+def test_llamafile_is_read_as_llama_cpp_unless_someone_says_otherwise(monkeypatch):
+    """It *is* a llama.cpp server: nothing it answers tells it apart, so detection
+    doesn't pretend to — and costs a llama.cpp port no extra round trips."""
+    seen: list = []
+    import httpx
+
+    _serve(monkeypatch, {"/v1/models": _Resp(200, LLAMACPP_MODELS), "/props": _Resp(200, PROPS)})
+    real_get = httpx.get
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: (seen.append(url), real_get(url, **kw))[1])
+    assert detect.identify(URL).runtime == "llamacpp"
+    assert not any(u.endswith("/tools") for u in seen)
+    declared = detect.identify(URL, prefer="llamafile")
+    assert declared.runtime == "llamafile" and declared.version == "b5000-abc123"
+    # Declared, it still has to answer as a llama.cpp server.
+    _serve(monkeypatch, {"/v1/models": _Resp(200, MLX_MODELS)})
+    assert detect.identify(URL, prefer="llamafile") is None
 
 
 def test_an_unknown_openai_server_on_a_default_port_is_not_mistaken_for_mlx(monkeypatch):
@@ -177,6 +195,11 @@ def test_docker_model_runner_speaks_under_engines_and_reports_its_window(monkeyp
     adapter.chat(ChatRequest(model="ai/smollm2", messages=[{"role": "user", "content": "hi"}],
                              max_tokens=10, context_window=4096))
     assert seen[0][0] == "/engines/v1/chat/completions"
+    # Docker's documented base URL is `…/engines/v1`: the same server, not `/engines/engines`.
+    documented = DockerModelRunnerAdapter("http://127.0.0.1:12434/engines/v1")
+    assert documented.base_url == "http://127.0.0.1:12434"
+    assert DockerModelRunnerAdapter.fingerprint("http://127.0.0.1:12434/engines/v1") == hello
+    assert [m.name for m in documented.list_models()] == ["ai/smollm2"]
 
 
 def test_foundry_local_is_never_probed_but_is_identified_by_its_address(monkeypatch):
@@ -205,6 +228,16 @@ def test_an_ollama_older_than_the_fix_is_warned_about_and_a_fixed_one_is_not():
     assert hygiene.warnings("ollama", "0.18") == []
     assert hygiene.warnings("ollama", "not a version") == []  # unreadable is never "old"
     assert hygiene.warnings("ollama", None) == []
+
+
+@pytest.mark.parametrize("version", ["0.17.1-rc0", "0.17.1rc1", "0.17.1.dev45+g1a2b3c", "0.17.1-beta.2"])
+def test_a_pre_release_of_the_fixed_version_is_older_than_it(version):
+    assert "CVE-2026-7482" in [a["id"] for a in hygiene.advisories("ollama", version)]
+
+
+def test_a_build_number_s_commit_hash_is_not_a_pre_release():
+    assert not hygiene.is_prerelease("b5721-b29c606e2")
+    assert not hygiene.advisories("llamacpp", "b5721-b29c606e2")
 
 
 def test_llama_cpp_is_compared_by_build_number():
@@ -279,7 +312,7 @@ def test_the_connector_prints_each_warning_once_and_reports_the_addresses(monkey
     monkeypatch.setattr(detect, "detect", lambda skip_ports=None: detect.Detection(
         found=[Hello("ollama", "http://127.0.0.1:11434", "0.16.0")]))
     monkeypatch.setattr(hygiene, "own_addresses", lambda: ["192.168.1.20"])
-    monkeypatch.setattr(hygiene, "_accepts", lambda host, port: True)
+    monkeypatch.setattr(detect, "accepts", lambda host, port: True)
     from app.router.runtimes.ollama import OllamaAdapter
 
     monkeypatch.setattr(OllamaAdapter, "list_models", lambda self: [])
@@ -319,12 +352,27 @@ def test_settings_lists_each_sources_warnings(router_with):
     assert rows["lmstudio"] == []
 
 
-def test_the_runtime_docs_list_every_runtime_and_advisory():
-    import pathlib
+def test_the_runtime_docs_are_written_from_the_table():
+    from scripts import runtime_docs
 
-    doc = (pathlib.Path(__file__).resolve().parents[2] / "docs" / "RUNTIMES.md").read_text(encoding="utf-8")
+    doc = runtime_docs.DOC.read_text(encoding="utf-8")
+    assert doc == runtime_docs.render(), "run `python -m scripts.runtime_docs`"
     for spec in table.RUNTIMES:
         assert f"| {spec.label} |" in doc, spec.id
-    for entries in hygiene.table().values():
-        for entry in entries:
-            assert entry["id"] in doc, entry["id"]
+
+
+def test_the_connector_prints_a_warning_its_console_cant_encode(monkeypatch):
+    """A cp1252 console: the warning is printed in ASCII, not lost for the session."""
+    from aiteam_connect.local import Agent, Source
+
+    said: list[str] = []
+
+    def say(line: str) -> None:
+        line.encode("ascii")  # a console narrower than cp1252: raises on anything else
+        said.append(line)
+
+    agent = Agent("0" * 32, say=say)
+    source = Source("vllm", "vllm", "http://127.0.0.1:8000", None, remote=False, version="0.8.0")
+    agent._warn(source, ["192.168.1.20"])
+    assert any("older than a known security fix" in line for line in said)
+    assert any("reachable from your network" in line for line in said)

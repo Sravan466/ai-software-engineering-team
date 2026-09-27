@@ -79,9 +79,12 @@ class Facts:
     runtime refuses what it was said to take.
     """
 
-    #: Where its context window comes from, or "not reported" — then the configured
-    #: fallback applies, and the Settings page asks the user to set it.
+    #: Where its context window comes from, in words.
     context: str
+    #: Whether it reports one at all — None when only some versions or servers do.
+    #: When it doesn't, the configured fallback applies, Settings says so on the
+    #: model, and the user sets the real one under Tune.
+    context_reported: Optional[bool]
     #: The strongest structured mode asked for: `schema` / `grammar` / `json` / `none`.
     structured: str
     #: How thinking is switched, or "none".
@@ -151,6 +154,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/api/show` model_info `<arch>.context_length`; sent per request as `num_ctx`",
+            context_reported=True,
             structured=STRUCTURED_SCHEMA,
             thinking="`think`: true/false, or low/medium/high for models that take levels",
             embeddings=True,
@@ -184,6 +188,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/api/v1/models` loaded_instances[].config.context_length (0.4+); else not reported",
+            context_reported=None,
             structured=STRUCTURED_SCHEMA,
             thinking="`reasoning_effort`",
             embeddings=True,
@@ -220,6 +225,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/v1/models` meta.n_ctx and `/props` default_generation_settings.n_ctx",
+            context_reported=True,
             structured=STRUCTURED_SCHEMA,
             thinking="`chat_template_kwargs.enable_thinking`, `reasoning_effort`",
             embeddings=True,
@@ -249,6 +255,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/v1/models` max_model_len",
+            context_reported=True,
             structured=STRUCTURED_SCHEMA,
             thinking="`chat_template_kwargs.enable_thinking`, `reasoning_effort`",
             embeddings=True,
@@ -277,6 +284,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/v1/models` max_model_len, or `/get_model_info` max_context_length",
+            context_reported=True,
             structured=STRUCTURED_SCHEMA,
             thinking="`chat_template_kwargs.enable_thinking`, `reasoning_effort`",
             embeddings=True,
@@ -306,6 +314,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/api/extra/true_max_context_length` value",
+            context_reported=True,
             structured=STRUCTURED_SCHEMA,
             thinking="`reasoning_effort` (sent as effort levels)",
             embeddings=True,
@@ -334,6 +343,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="not reported (set per model in its YAML)",
+            context_reported=False,
             structured=STRUCTURED_SCHEMA,
             thinking="`reasoning_effort`",
             embeddings=True,
@@ -364,6 +374,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/props` default_generation_settings.n_ctx (the llama.cpp server)",
+            context_reported=True,
             structured=STRUCTURED_SCHEMA,
             thinking="`chat_template_kwargs.enable_thinking` (the llama.cpp server)",
             embeddings=True,
@@ -389,6 +400,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="not reported",
+            context_reported=False,
             structured=STRUCTURED_NONE,
             thinking="`chat_template_kwargs.enable_thinking`",
             embeddings=False,
@@ -418,6 +430,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="not reported",
+            context_reported=False,
             structured=STRUCTURED_SCHEMA,
             thinking="passed through to its llama.cpp engine (`chat_template_kwargs`)",
             embeddings=True,
@@ -447,6 +460,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="not reported",
+            context_reported=False,
             structured=STRUCTURED_NONE,
             thinking="`enable_thinking`, `reasoning_effort`",
             embeddings=True,
@@ -476,6 +490,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="not reported",
+            context_reported=False,
             structured=STRUCTURED_NONE,
             thinking="none",
             embeddings=False,
@@ -506,6 +521,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="`/engines/v1/models` dmr.context_window",
+            context_reported=True,
             structured=STRUCTURED_JSON,
             thinking="none documented",
             embeddings=True,
@@ -538,6 +554,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="not reported",
+            context_reported=False,
             structured=STRUCTURED_JSON,
             thinking="none documented",
             embeddings=True,
@@ -568,6 +585,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
         ),
         facts=Facts(
             context="an extension field on `/v1/models` if it adds one, else not reported",
+            context_reported=None,
             structured=STRUCTURED_SCHEMA,
             thinking="`reasoning_effort`",
             embeddings=True,
@@ -581,14 +599,12 @@ BY_ID: dict[str, RuntimeSpec] = {spec.id: spec for spec in RUNTIMES}
 
 #: Runtimes detection can recognise by their answer, in the order they are asked.
 #: The ones whose fingerprint is most specific go first, the generic dialect never.
-#: llamafile *is* a llama.cpp server with more, so it is asked first; the rest in
-#: table order.
-_ASK_FIRST = ("llamafile",)
+#: Runtimes nothing in their answer tells apart from another one's — llamafile
+#: *is* a llama.cpp server. Never adopted by detection on their own; asked only
+#: when someone has said that is what an address runs (`identify(prefer=…)`).
+DECLARED_ONLY = ("llamafile",)
 FINGERPRINTED: tuple[RuntimeSpec, ...] = tuple(
-    sorted(
-        (spec for spec in RUNTIMES if spec.adapter is not None and spec.id != GENERIC),
-        key=lambda spec: spec.id not in _ASK_FIRST,
-    )
+    spec for spec in RUNTIMES if spec.adapter is not None and spec.id != GENERIC and spec.id not in DECLARED_ONLY
 )
 
 #: Before model sources existed, a model name with no source in front of it — in a
@@ -665,6 +681,7 @@ def _facts(spec: RuntimeSpec) -> Optional[dict]:
     f = spec.facts
     return {
         "context": f.context,
+        "context_reported": f.context_reported,
         "structured": f.structured,
         "thinking": f.thinking,
         "embeddings": f.embeddings,

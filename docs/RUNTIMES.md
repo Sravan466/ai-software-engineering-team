@@ -1,6 +1,6 @@
 # Local model runtimes
 
-Every runtime below works the same way in this app, in **direct mode** (the backend calls it) and through the **connector** (a paired computer calls it for the backend). None is preferred. This page mirrors the adapter table in [`backend/app/router/runtimes/table.py`](../backend/app/router/runtimes/table.py); each row links where it was checked (2026-09-27).
+Every runtime below works the same way in this app, in **direct mode** (the backend calls it) and through the **connector** (a paired computer calls it for the backend). None is preferred. This page is written from the adapter table in [`backend/app/router/runtimes/table.py`](../backend/app/router/runtimes/table.py) by `python -m scripts.runtime_docs`; each row links where it was checked (2026-09-27).
 
 ## What each reports and takes
 
@@ -13,7 +13,7 @@ Every runtime below works the same way in this app, in **direct mode** (the back
 | SGLang | 30000 | `owned_by: sglang` on `/v1/models`, `/server_info` | `/v1/models` max_model_len, or `/get_model_info` max_context_length | `schema` | `chat_template_kwargs.enable_thinking`, `reasoning_effort` | yes | no | [link](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py) |
 | KoboldCpp | 5001 | `/api/extra/version` → `result: KoboldCpp` | `/api/extra/true_max_context_length` value | `schema` | `reasoning_effort` (sent as effort levels) | yes | **yes** | [link](https://github.com/LostRuins/koboldcpp/blob/concedo/koboldcpp.py) |
 | LocalAI | 8080 | `/.well-known/localai.json`, or `/system` listing backends | not reported (set per model in its YAML) | `schema` | `reasoning_effort` | yes | **yes** | [link](https://github.com/mudler/LocalAI/blob/master/core/cli/run.go) |
-| llamafile | 8080 | llama.cpp's answers plus `/tools` | `/props` default_generation_settings.n_ctx (the llama.cpp server) | `schema` | `chat_template_kwargs.enable_thinking` (the llama.cpp server) | yes | no | [link](https://docs.mozilla.ai/llamafile/using-llamafile/api) |
+| llamafile | 8080 | nothing of its own — it *is* a llama.cpp server, so it's read as llama.cpp unless you say `--runtime llamafile` | `/props` default_generation_settings.n_ctx (the llama.cpp server) | `schema` | `chat_template_kwargs.enable_thinking` (the llama.cpp server) | yes | no | [link](https://docs.mozilla.ai/llamafile/using-llamafile/api) |
 | MLX-LM | 8080 | model entries without `owned_by`, `/health` ok, no `/props` | not reported | `none` | `chat_template_kwargs.enable_thinking` | no | no | [link](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/SERVER.md) |
 | Jan | 1337 | `owned_by` of `llama.cpp`, `mlx` or `remote` | not reported | `schema` | passed through to its llama.cpp engine (`chat_template_kwargs`) | yes | no | [link](https://github.com/janhq/jan/blob/main/src-tauri/src/core/server/proxy.rs) |
 | text-generation-webui | 5000 | `/v1/internal/model/info` with `model_name` and `loader` | not reported | `none` | `enable_thinking`, `reasoning_effort` | yes | no | [link](https://github.com/oobabooga/text-generation-webui/blob/main/modules/api/typing.py) |
@@ -32,7 +32,7 @@ Verified against running servers on this project's test machine: **Ollama** and 
 
 ## What the connector refuses
 
-The connector performs seven typed operations — `hello`, `list_models`, `model_info`, `ping`, `chat`, `embed`, `cancel` — and refuses everything else, writing each refusal to `~/.aiteam-connect/connector.log`. It never calls these, whatever the server asks (`app/connector/protocol.py`, `REFUSED`):
+The connector performs 7 typed operations — `hello`, `list_models`, `model_info`, `ping`, `chat`, `embed`, `cancel` — and refuses everything else, writing each refusal to `~/.aiteam-connect/connector.log`. It never calls these, whatever the server asks (`app/connector/protocol.py`, `REFUSED`):
 
 - **Ollama**: pull, push, create, copy, delete, blobs, `/api/me`, `/api/signout`, `/api/user/keys`, `/api/experimental/*`
 - **LM Studio**: model download, model load, model unload, `/api/v1/models/load`, `/api/v1/models/download`
@@ -55,7 +55,7 @@ The connector performs seven typed operations — `hello`, `list_models`, `model
 
 Settings, the Setup tab and the connector's terminal warn — never block — when a runtime:
 
-- **is older than a known security fix.** The minimum-version table is data: [`backend/app/router/runtimes/advisories.json`](../backend/app/router/runtimes/advisories.json), one entry per advisory with its first fixed version and a link. Add an entry there, or point `RUNTIME_ADVISORIES_FILE` at your own copy, to update it without a release. A version that can't be read is never taken for an old one.
+- **is older than a known security fix.** The minimum-version table is data: [`backend/app/router/runtimes/advisories.json`](../backend/app/router/runtimes/advisories.json), one entry per advisory with its first fixed version and a link. Add an entry there, or point `RUNTIME_ADVISORIES_FILE` at your own copy, to update it without a release. A version that can't be read is never taken for an old one; a pre-release of the fixed version (`0.17.1-rc0`) counts as older.
 - **is reachable from your network.** Checked by connecting to the runtime's port on the computer's own network address: a runtime bound to 127.0.0.1 refuses that, one bound to 0.0.0.0 accepts it. Nothing beyond the computer is contacted.
 
 | Runtime | Advisory | First fixed |
@@ -73,10 +73,8 @@ Settings, the Setup tab and the connector's terminal warn — never block — wh
 | vLLM | [CVE-2025-47277](https://github.com/advisories/GHSA-hjq4-87xh-g4fv) | 0.8.5 |
 | vLLM | [CVE-2025-32444](https://nvd.nist.gov/vuln/detail/cve-2025-32444) | 0.8.5 |
 | SGLang | [CVE-2026-3059](https://osv.dev/vulnerability/GHSA-rgq9-fqf5-fv58) | 0.5.10 |
-| text-generation-webui | [CVE-2026-35484](https://app.opencve.io/cve/CVE-2026-35484) | 4.3 |
-| text-generation-webui | [CVE-2026-35050](https://osv.dev/vulnerability/CVE-2026-35050) | 4.1.1 |
 
-Not in the table because no fixed version is confirmed (as of 2026-09-27): Ollama CVE-2024-39719 (sources disagree), CVE-2025-63389 (no patch — missing authentication on the model API; keep Ollama on loopback), LocalAI CVE-2024-6983 (fixed version disputed) and SGLang CVE-2026-3060.
+Not in the table (as of 2026-09-27): Ollama CVE-2024-39719 (sources disagree on the fix); Ollama CVE-2025-63389 (no patch — missing authentication on the model API; keep Ollama on loopback); LocalAI CVE-2024-6983 (fixed version disputed); SGLang CVE-2026-3060 (no fixed version published); text-generation-webui CVE-2026-35484, CVE-2026-35483, CVE-2026-35487 (fixed in 4.3) and CVE-2026-35050 (fixed in 4.1.1): its API reports no version, so they can't be checked — update it to 4.3 or later.
 
 Never bind a runtime to `0.0.0.0` and never set `OLLAMA_ORIGINS=*` ([CVE-2024-28224, DNS rebinding](https://www.nccgroup.com/research-blog/technical-advisory-ollama-dns-rebinding-attack-cve-2024-28224/)). The connector reaches the runtime on its own computer and dials out itself, so it never needs either.
 

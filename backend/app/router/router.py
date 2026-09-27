@@ -590,7 +590,13 @@ class ModelRouter:
                     "reachable": state.reachable,
                     "error": None if state.reachable else state.error,
                     "version": prov.source.version,
-                    "warnings": hygiene.warnings(prov.source.runtime, prov.source.version, prov.source.exposed),
+                    "warnings": hygiene.warnings(
+                        prov.source.runtime,
+                        prov.source.version,
+                        # Which addresses this server listens on is the owner's to see:
+                        # on a shared install, another account can't act on it anyway.
+                        prov.source.exposed if self.sources.may_add_local or prov.source.origin == "connector" else None,
+                    ),
                     "models": rows,
                     "can_download": prov.adapter.can_download,
                     "add_model": meta.add_model,

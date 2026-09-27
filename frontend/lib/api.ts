@@ -1088,6 +1088,8 @@ export type RuntimeCard = {
 /** What a runtime reports and takes — the adapter table's columns. */
 export type RuntimeFacts = {
   context: string;
+  /** null: only some versions or servers report it. */
+  context_reported: boolean | null;
   structured: "schema" | "grammar" | "json" | "none";
   thinking: string;
   embeddings: boolean;

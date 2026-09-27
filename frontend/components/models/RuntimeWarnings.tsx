@@ -1,5 +1,6 @@
 import type { RuntimeWarning } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
+import { Rich } from "@/components/setup/parts";
 
 /**
  * Runtime hygiene, where a runtime is listed: older than a known security fix, or
@@ -15,7 +16,9 @@ export default function RuntimeWarnings({ warnings, label }: { warnings?: Runtim
           {Icon.alert}
           <div className="notice-body">
             <p className="notice-title">{w.title}</p>
-            <p className="notice-text">{w.detail}</p>
+            <p className="notice-text">
+              <Rich text={w.detail} />
+            </p>
             {w.url && (
               <a className="link rt-warning-link" href={w.url} target="_blank" rel="noreferrer">
                 Read the advisory{w.ids && w.ids.length === 1 ? ` (${w.ids[0]})` : ""} {Icon.external}

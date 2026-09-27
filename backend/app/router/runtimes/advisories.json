@@ -1,5 +1,5 @@
 {
-  "about": "The minimum-version table: per runtime (its id in app/router/runtimes/table.py), each security advisory, the first version that fixes it, and the advisory. A running version below `fixed` is warned about in Settings, on the Setup tab and in the connector's terminal. Data, not code: add a line here, or point RUNTIME_ADVISORIES_FILE at a copy. Only advisories with a confirmed fixed version belong here. Versions are compared as numbers; llama.cpp's are build numbers (b5662). Checked 2026-09-27.",
+  "about": "The minimum-version table: per runtime (its id in app/router/runtimes/table.py), each security advisory, the first version that fixes it, and the advisory. A running version below `fixed` is warned about in Settings, on the Setup tab and in the connector's terminal. Data, not code: add a line here, or point RUNTIME_ADVISORIES_FILE at a copy. Only advisories with a confirmed fixed version belong here. Versions are compared as numbers; llama.cpp's are build numbers (b5662). Checked 2026-09-27. Not listed: runtimes that report no version (text-generation-webui, GPT4All, MLX-LM, Jan, Foundry Local) — an advisory for one could never be checked; docs/RUNTIMES.md names them.",
   "runtimes": {
     "ollama": [
       {
@@ -85,20 +85,6 @@
         "fixed": "0.5.10",
         "summary": "An unauthenticated message broker unpickles data from the network, which runs code.",
         "url": "https://osv.dev/vulnerability/GHSA-rgq9-fqf5-fv58"
-      }
-    ],
-    "tgw": [
-      {
-        "id": "CVE-2026-35484",
-        "fixed": "4.3",
-        "summary": "Path traversal in presets, templates and prompts reads files without signing in.",
-        "url": "https://app.opencve.io/cve/CVE-2026-35484"
-      },
-      {
-        "id": "CVE-2026-35050",
-        "fixed": "4.1.1",
-        "summary": "Path traversal in extension settings runs code.",
-        "url": "https://osv.dev/vulnerability/CVE-2026-35050"
       }
     ]
   }
