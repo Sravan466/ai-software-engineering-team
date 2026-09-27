@@ -5,7 +5,7 @@ import { api, type Device, type OS, type RuntimeCard, type SetupGuide } from "@/
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
-import { CopyLine, OSPicker, OS_LABEL, Rich, Step, guessOS } from "@/components/setup/parts";
+import { CopyLine, OSPicker, OS_LABEL, Rich, Step, bytes, guessOS } from "@/components/setup/parts";
 import Pairing from "@/components/setup/Pairing";
 import Detected from "@/components/setup/Detected";
 import Computers from "@/components/setup/Computers";
@@ -13,6 +13,13 @@ import Troubleshooting from "@/components/setup/Troubleshooting";
 import TestIt from "@/components/setup/TestIt";
 
 type Tab = "setup" | "computers";
+
+const STRUCTURED_LABEL: Record<string, string> = {
+  schema: "Held to a JSON schema",
+  grammar: "Held to a grammar",
+  json: "Valid JSON — checked and repaired",
+  none: "Free text — checked and repaired",
+};
 
 /**
  * Setup: get a model running on your own computer and connect it, in six steps,
@@ -101,8 +108,55 @@ export default function SetupPage() {
     history.replaceState(null, "", next === "computers" ? "#computers" : "#setup");
   }
 
+  // What the computer already has, so step 2 never asks for a download it doesn't need.
+  const ownModels = reportedSources.flatMap((src) =>
+    src.models
+      .filter((m) => m.kind !== "embedding" && m.is_local)
+      .map((m) => ({ ...m, spec: `${src.id}:${m.name}`, runtime: src.label })),
+  );
+  const haveModels = ownModels.length > 0;
+
   const installFor = runtime?.install[os];
   const supported = runtime ? (Object.keys(runtime.install) as OS[]) : undefined;
+
+  const download = runtime && (
+    <>
+      <p className="su-p">
+        <Rich text={runtime.download} />
+        {runtime.library && (
+          <>
+            {" "}
+            <a className="link" href={runtime.library} target="_blank" rel="noreferrer">
+              Browse models {Icon.external}
+            </a>
+          </>
+        )}
+      </p>
+      {reporting?.advice ? (
+        <dl className="su-caps su-advice">
+          <div>
+            <dt>This computer’s memory</dt>
+            <dd className="mono">{reporting.advice.ram_gib} GB</dd>
+          </div>
+          <div>
+            <dt>Model size that fits</dt>
+            <dd>{reporting.advice.size}</dd>
+          </div>
+          <div>
+            <dt>Quantization</dt>
+            <dd className="mono">{reporting.advice.quantization}</dd>
+          </div>
+        </dl>
+      ) : (
+        <p className="su-fine">Once your computer is connected (step 4), this says what size of model fits its memory.</p>
+      )}
+      {reporting?.advice && <p className="su-fine">{reporting.advice.note}</p>}
+      <h3 className="su-h3">Embeddings</h3>
+      <p className="su-p">
+        <Rich text={runtime.embeddings} />
+      </p>
+    </>
+  );
 
   return (
     <div className="settings-wrap su-wrap">
@@ -149,7 +203,8 @@ export default function SetupPage() {
           ) : guide && runtime ? (
             <ol className="su-steps">
               <Step n={1} title="Pick a runtime" summary={runtime.label} state={state(1)} open={isOpen(1)} onToggle={() => toggle(1)}>
-                <p className="su-p">The program that runs the model. Any of these works; Ollama is the easiest start.</p>
+                <p className="su-p">The program that runs the model. Every one of these works the same way here — pick the one you
+                  already use, or the one that suits your computer.</p>
                 <div className="su-runtimes" role="radiogroup" aria-label="Runtime">
                   {guide.runtimes.map((card) => (
                     <button
@@ -160,7 +215,7 @@ export default function SetupPage() {
                       onClick={() => setRuntimeId(card.id)}
                     >
                       <span className="su-runtime-name">{card.label}</span>
-                      <span className="su-runtime-meta mono">{card.port ? `:${card.port}` : "any port"}</span>
+                      <span className="su-runtime-meta mono">{card.port ? `:${card.port}` : card.generic ? "any port" : "port varies"}</span>
                     </button>
                   ))}
                 </div>
@@ -183,46 +238,93 @@ export default function SetupPage() {
                       </>
                     )}
                   </p>
+                  {runtime.facts && (
+                    <dl className="su-caps su-facts" aria-label={`What ${runtime.label} reports and takes`}>
+                      <div>
+                        <dt>Context window</dt>
+                        <dd>
+                          {runtime.facts.context_reported === true
+                            ? "Reported"
+                            : runtime.facts.context_reported === false
+                              ? "Not reported — you set it"
+                              : "On some versions — else you set it"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Structured output</dt>
+                        <dd>{STRUCTURED_LABEL[runtime.facts.structured]}</dd>
+                      </div>
+                      <div>
+                        <dt>Embeddings</dt>
+                        <dd>{runtime.facts.embeddings ? "Yes" : "No — use a second runtime"}</dd>
+                      </div>
+                      <div>
+                        <dt>Listens on</dt>
+                        <dd>
+                          {runtime.facts.listens_everywhere ? (
+                            <span className="su-warn-text">Every interface, unless told not to</span>
+                          ) : (
+                            "This computer only"
+                          )}
+                        </dd>
+                      </div>
+                    </dl>
+                  )}
                 </div>
               </Step>
 
-              <Step n={2} title="Download a model" state={state(2)} open={isOpen(2)} onToggle={() => toggle(2)}>
-                <p className="su-p">
-                  <Rich text={runtime.download} />
-                  {runtime.library && (
-                    <>
-                      {" "}
-                      <a className="link" href={runtime.library} target="_blank" rel="noreferrer">
-                        Browse models {Icon.external}
-                      </a>
-                    </>
-                  )}
-                </p>
-                {reporting?.advice ? (
-                  <dl className="su-caps su-advice">
-                    <div>
-                      <dt>This computer’s memory</dt>
-                      <dd className="mono">{reporting.advice.ram_gib} GB</dd>
-                    </div>
-                    <div>
-                      <dt>Model size that fits</dt>
-                      <dd>{reporting.advice.size}</dd>
-                    </div>
-                    <div>
-                      <dt>Quantization</dt>
-                      <dd className="mono">{reporting.advice.quantization}</dd>
-                    </div>
-                  </dl>
+              <Step
+                n={2}
+                title={haveModels ? "Your models" : "Get a model"}
+                summary={
+                  haveModels
+                    ? `${ownModels.length} ready on ${reporting?.name ?? "your computer"}`
+                    : undefined
+                }
+                state={state(2)}
+                open={isOpen(2)}
+                onToggle={() => toggle(2)}
+              >
+                {haveModels ? (
+                  <>
+                    <p className="su-p">
+                      {reporting?.name ?? "Your computer"} already has {ownModels.length === 1 ? "a model" : `${ownModels.length} models`} that
+                      can write the crew’s work — nothing to download. You choose which one to use in step 5.
+                    </p>
+                    <ul className="su-have" aria-label="Models already on your computer">
+                      {ownModels.slice(0, 6).map((m) => (
+                        <li key={m.spec}>
+                          <span className="su-have-mark" aria-hidden="true">
+                            {Icon.check}
+                          </span>
+                          <span className="mono su-have-name">{m.name}</span>
+                          <span className="su-have-meta">
+                            {m.runtime}
+                            {m.size_bytes ? ` · ${bytes(m.size_bytes)}` : ""}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    {ownModels.length > 6 && (
+                      <p className="su-fine">And {ownModels.length - 6} more — all of them are listed in step 5.</p>
+                    )}
+                  </>
                 ) : (
-                  <p className="su-fine">
-                    Once your computer is connected (step 4), this says what size of model fits its memory.
+                  <p className="su-p">
+                    {reporting
+                      ? `The connector didn’t find a model on ${reporting.name} that can write yet. `
+                      : "Already have a model? Skip this step — once your computer is connected, step 5 lists what it has. "}
+                    Otherwise, get one:
                   </p>
                 )}
-                {reporting?.advice && <p className="su-fine">{reporting.advice.note}</p>}
-                <h3 className="su-h3">Embeddings</h3>
-                <p className="su-p">
-                  <Rich text={runtime.embeddings} />
-                </p>
+                {haveModels ? (
+                  <details className="su-more su-another">
+                    <summary>Get another model in {runtime.label}</summary>
+                    {download}
+                  </details>
+                ) : (
+                  download
+                )}
               </Step>
 
               <Step n={3} title="Start the runtime’s server" state={state(3)} open={isOpen(3)} onToggle={() => toggle(3)}>

@@ -232,3 +232,11 @@ button.verdict[aria-expanded="true"] { background: var(--bg-raised); }
   .model-panel { animation: none; }
   .verdict-chev { transition: none; }
 }
+
+/* Runtime hygiene: an outdated or network-reachable runtime, where it's listed. */
+.rt-warnings { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.rt-warning { padding: 10px 12px; }
+.rt-warning .notice-title { font-size: var(--t-sm); }
+.rt-warning .notice-text { max-width: 72ch; overflow-wrap: anywhere; }
+.rt-warning-link { display: inline-flex; align-items: center; gap: 4px; font-size: var(--t-sm); width: fit-content; }
+.rt-warning-link > svg { width: 13px; height: 13px; }

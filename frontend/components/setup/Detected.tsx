@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type Device, type DeviceModelInfo } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
+import RuntimeWarnings from "@/components/models/RuntimeWarnings";
 import { ago, bytes, modelLine, useNow } from "./parts";
 
 const STRUCTURED: Record<string, string> = {
@@ -125,6 +126,8 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
   }
 
   const line = modelLine(device);
+  const warned = sources.filter((s) => (device.warnings?.[s.id] ?? []).length > 0);
+  const kinds = new Set(warned.flatMap((s) => (device.warnings?.[s.id] ?? []).map((w) => w.kind)));
   const allGood = checks.every((c) => c.ok);
 
   return (
@@ -175,6 +178,29 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
           </li>
         ))}
       </ol>
+
+      {warned.length > 0 && (
+        <div className="su-hygiene">
+          {warned.map((s) => (
+            <RuntimeWarnings key={s.id} warnings={device.warnings?.[s.id]} label={s.label} />
+          ))}
+          <p className="field-hint">
+            Builds still run. What to do:{" "}
+            {kinds.has("outdated") && (
+              <a className="link" href="#t-security">
+                update the runtime
+              </a>
+            )}
+            {kinds.size > 1 && " · "}
+            {kinds.has("exposed") && (
+              <a className="link" href="#t-exposed">
+                keep it on this computer
+              </a>
+            )}
+            . The connector warns in its terminal too.
+          </p>
+        </div>
+      )}
 
       <div className="su-row">
         <button className="btn btn-sm" onClick={refresh} disabled={!device.online || busy !== ""}>

@@ -10,8 +10,11 @@ Ports are candidates, never identities. `8080` is the default of several runtime
 here, and anything can run on any port — so detection probes these ports on
 loopback and then asks each adapter in turn whether the answer is its runtime.
 
-Checked against each runtime's documentation on 2026-09-17; a row with no adapter of
-its own is served by the generic OpenAI-compatible one once someone confirms it.
+Checked against each runtime's documentation on 2026-09-17, and against each one's
+source on 2026-09-27 (Phase 6): every row now has an adapter and its `Facts` — what
+the runtime reports and takes, with the link it was checked against. What the
+connector refuses for each is `app.connector.protocol.REFUSED`, and the versions
+older than a security fix are `advisories.json` beside this file.
 """
 from __future__ import annotations
 
@@ -24,11 +27,23 @@ from app.router.runtimes.llamacpp import LlamaCppAdapter
 from app.router.runtimes.ollama import OllamaAdapter
 from app.router.runtimes.openai_compat import OpenAICompatAdapter
 from app.router.runtimes.servers import (
+    DockerModelRunnerAdapter,
+    FoundryLocalAdapter,
+    GPT4AllAdapter,
+    JanAdapter,
     KoboldCppAdapter,
+    LlamafileAdapter,
     LMStudioAdapter,
     LocalAIAdapter,
+    MLXAdapter,
     SGLangAdapter,
+    TextGenWebUIAdapter,
     VLLMAdapter,
+)
+from app.router.runtimes.types import (
+    STRUCTURED_JSON,
+    STRUCTURED_NONE,
+    STRUCTURED_SCHEMA,
 )
 
 
@@ -57,6 +72,32 @@ class SetupGuide:
 
 
 @dataclass(frozen=True)
+class Facts:
+    """What a runtime reports and takes — the adapter table's columns, each checked.
+
+    Descriptive: the adapter is what acts on them, and it still steps down when a
+    runtime refuses what it was said to take.
+    """
+
+    #: Where its context window comes from, in words.
+    context: str
+    #: Whether it reports one at all — None when only some versions or servers do.
+    #: When it doesn't, the configured fallback applies, Settings says so on the
+    #: model, and the user sets the real one under Tune.
+    context_reported: Optional[bool]
+    #: The strongest structured mode asked for: `schema` / `grammar` / `json` / `none`.
+    structured: str
+    #: How thinking is switched, or "none".
+    thinking: str
+    #: Whether it serves `/v1/embeddings` (or its own equivalent).
+    embeddings: bool
+    #: Whether it listens on every interface unless told otherwise.
+    listens_everywhere: bool
+    #: Where these were checked.
+    source: str
+
+
+@dataclass(frozen=True)
 class RuntimeSpec:
     id: str
     label: str
@@ -77,6 +118,7 @@ class RuntimeSpec:
     kv_hint: str = "Set it where the server is started."
     #: Its card on the Setup tab. None for runtimes the Setup tab doesn't offer.
     setup: Optional[SetupGuide] = None
+    facts: Optional[Facts] = None
 
 
 GENERIC = "openai-compatible"
@@ -110,6 +152,15 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             check="curl http://127.0.0.1:11434  →  Ollama is running",
             exposure="Leave `OLLAMA_HOST` unset (it listens on 127.0.0.1), and never set `OLLAMA_ORIGINS=*`.",
         ),
+        facts=Facts(
+            context="`/api/show` model_info `<arch>.context_length`; sent per request as `num_ctx`",
+            context_reported=True,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`think`: true/false, or low/medium/high for models that take levels",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://github.com/ollama/ollama/blob/main/docs/api.md",
+        ),
     ),
     RuntimeSpec(
         id="lmstudio",
@@ -134,6 +185,15 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             serve="Open the Developer tab and switch the server on, or run `lms server start`.",
             check="curl http://127.0.0.1:1234/v1/models",
             exposure="Keep \"Serve on Local Network\" off in the server settings.",
+        ),
+        facts=Facts(
+            context="`/api/v1/models` loaded_instances[].config.context_length (0.4+); else not reported",
+            context_reported=None,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`reasoning_effort`",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://lmstudio.ai/docs/app/api/endpoints/rest",
         ),
     ),
     RuntimeSpec(
@@ -163,6 +223,15 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             check="curl http://127.0.0.1:8080/health",
             exposure="It listens on 127.0.0.1 by default. Never start it with `--host 0.0.0.0`.",
         ),
+        facts=Facts(
+            context="`/v1/models` meta.n_ctx and `/props` default_generation_settings.n_ctx",
+            context_reported=True,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`chat_template_kwargs.enable_thinking`, `reasoning_effort`",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md",
+        ),
     ),
     RuntimeSpec(
         id="vllm",
@@ -184,6 +253,15 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             check="curl http://127.0.0.1:8000/v1/models",
             exposure="vLLM listens on every interface unless you pass `--host 127.0.0.1`. Always pass it.",
         ),
+        facts=Facts(
+            context="`/v1/models` max_model_len",
+            context_reported=True,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`chat_template_kwargs.enable_thinking`, `reasoning_effort`",
+            embeddings=True,
+            listens_everywhere=True,
+            source="https://docs.vllm.ai/en/stable/usage/security/",
+        ),
     ),
     RuntimeSpec(
         id="sglang",
@@ -203,6 +281,15 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             serve="`python -m sglang.launch_server --model-path <model> --host 127.0.0.1 --port 30000`",
             check="curl http://127.0.0.1:30000/v1/models",
             exposure="Pass `--host 127.0.0.1` so it isn't reachable from your network.",
+        ),
+        facts=Facts(
+            context="`/v1/models` max_model_len, or `/get_model_info` max_context_length",
+            context_reported=True,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`chat_template_kwargs.enable_thinking`, `reasoning_effort`",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py",
         ),
     ),
     RuntimeSpec(
@@ -225,6 +312,15 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             check="curl http://127.0.0.1:5001/api/v1/model",
             exposure="Pass `--host 127.0.0.1`; KoboldCpp otherwise listens on every interface.",
         ),
+        facts=Facts(
+            context="`/api/extra/true_max_context_length` value",
+            context_reported=True,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`reasoning_effort` (sent as effort levels)",
+            embeddings=True,
+            listens_everywhere=True,
+            source="https://github.com/LostRuins/koboldcpp/blob/concedo/koboldcpp.py",
+        ),
     ),
     RuntimeSpec(
         id="localai",
@@ -245,21 +341,227 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             check="curl http://127.0.0.1:8080/v1/models",
             exposure="LocalAI listens on every interface by default; pass `--address 127.0.0.1:8080`.",
         ),
+        facts=Facts(
+            context="not reported (set per model in its YAML)",
+            context_reported=False,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`reasoning_effort`",
+            embeddings=True,
+            listens_everywhere=True,
+            source="https://github.com/mudler/LocalAI/blob/master/core/cli/run.go",
+        ),
     ),
-    # No adapter of their own yet: they answer as the generic dialect, so detection
-    # shows them as unknown until someone confirms what they are.
-    RuntimeSpec("jan", "Jan", (1337,), None, "Download models in Jan's Hub.", "https://jan.ai"),
-    RuntimeSpec("llamafile", "llamafile", (8080,), None, "A llamafile serves the model it was built with."),
     RuntimeSpec(
-        "tgw",
-        "text-generation-webui",
-        (5000,),
-        None,
-        "Load a model from text-generation-webui's Model tab.",
+        id="llamafile",
+        label="llamafile",
+        ports=(8080,),
+        adapter=LlamafileAdapter,
+        add_model="A llamafile serves the model it was built with; run another llamafile on another port.",
+        home="https://github.com/mozilla-ai/llamafile",
+        window_hint="Restart it with a larger `-c`.",
+        kv_hint="Set with `--cache-type-k` / `--cache-type-v`, as in llama.cpp.",
+        setup=SetupGuide(
+            install={
+                "macos": "Download a `.llamafile` from github.com/mozilla-ai/llamafile and `chmod +x` it.",
+                "windows": "Download a `.llamafile`, rename it to end in `.exe`, and run it.",
+                "linux": "Download a `.llamafile` from github.com/mozilla-ai/llamafile and `chmod +x` it.",
+            },
+            download="Each `.llamafile` carries its model. Or run the bare `llamafile -m <model>.gguf`.",
+            embeddings="Run a second llamafile with an embedding model and `--embedding` on another port.",
+            serve="`./<model>.llamafile --server --nobrowser --host 127.0.0.1 --port 8080`",
+            check="curl http://127.0.0.1:8080/health",
+            exposure="It listens on 127.0.0.1 by default. Never pass `--host 0.0.0.0`.",
+        ),
+        facts=Facts(
+            context="`/props` default_generation_settings.n_ctx (the llama.cpp server)",
+            context_reported=True,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`chat_template_kwargs.enable_thinking` (the llama.cpp server)",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://docs.mozilla.ai/llamafile/using-llamafile/api",
+        ),
     ),
-    RuntimeSpec("gpt4all", "GPT4All", (4891,), None, "Download models in GPT4All's Models view."),
-    RuntimeSpec("mlx", "MLX-LM", (8080,), None, "MLX-LM serves the model it was started with."),
-    RuntimeSpec("dmr", "Docker Model Runner", (12434,), None, "Run `docker model pull <name>`."),
+    RuntimeSpec(
+        id="mlx",
+        label="MLX-LM",
+        ports=(8080,),
+        adapter=MLXAdapter,
+        add_model="MLX-LM serves the model it was started with (`--model`).",
+        home="https://github.com/ml-explore/mlx-lm",
+        window_hint="MLX-LM doesn't report its window; set the fallback in Settings to what the model supports.",
+        setup=SetupGuide(
+            install={"macos": "`pip install mlx-lm` (Apple silicon only)."},
+            download="MLX-LM downloads the Hugging Face model you name with `--model` (an `mlx-community/…` build).",
+            embeddings="MLX-LM has no embeddings endpoint. Run a second runtime for embeddings, or go without.",
+            serve="`mlx_lm.server --model <model> --host 127.0.0.1 --port 8080`",
+            check="curl http://127.0.0.1:8080/v1/models",
+            exposure="It listens on 127.0.0.1 by default. Leave `--host` alone.",
+        ),
+        facts=Facts(
+            context="not reported",
+            context_reported=False,
+            structured=STRUCTURED_NONE,
+            thinking="`chat_template_kwargs.enable_thinking`",
+            embeddings=False,
+            listens_everywhere=False,
+            source="https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/SERVER.md",
+        ),
+    ),
+    RuntimeSpec(
+        id="jan",
+        label="Jan",
+        ports=(1337,),
+        adapter=JanAdapter,
+        add_model="Download models in Jan's Hub, then start its Local API Server.",
+        home="https://jan.ai",
+        window_hint="Raise the model's context size in Jan's model settings.",
+        setup=SetupGuide(
+            install={
+                "macos": "Download Jan from jan.ai.",
+                "windows": "Download and run the Jan installer from jan.ai.",
+                "linux": "Download the AppImage or .deb from jan.ai.",
+            },
+            download="Download a model from Jan's Hub.",
+            embeddings="Download an embedding model in the Hub next to the chat model.",
+            serve="Settings → Local API Server → Start Server (127.0.0.1:1337).",
+            check="curl http://127.0.0.1:1337/v1/models",
+            exposure="Keep the server host at 127.0.0.1 in its settings.",
+        ),
+        facts=Facts(
+            context="not reported",
+            context_reported=False,
+            structured=STRUCTURED_SCHEMA,
+            thinking="passed through to its llama.cpp engine (`chat_template_kwargs`)",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://github.com/janhq/jan/blob/main/src-tauri/src/core/server/proxy.rs",
+        ),
+    ),
+    RuntimeSpec(
+        id="tgw",
+        label="text-generation-webui",
+        ports=(5000,),
+        adapter=TextGenWebUIAdapter,
+        add_model="Load a model from text-generation-webui's Model tab.",
+        home="https://github.com/oobabooga/text-generation-webui",
+        window_hint="Load the model with a larger context length in its Model tab.",
+        setup=SetupGuide(
+            install={
+                "macos": "Clone github.com/oobabooga/text-generation-webui and run `./start_macos.sh`.",
+                "windows": "Clone it and run `start_windows.bat`.",
+                "linux": "Clone it and run `./start_linux.sh`.",
+            },
+            download="Download a model in its Model tab, then load it there.",
+            embeddings="Its `/v1/embeddings` uses a small sentence-transformers model it loads itself.",
+            serve="Start it with `--api`; the API listens on 127.0.0.1:5000.",
+            check="curl http://127.0.0.1:5000/v1/internal/model/info",
+            exposure="Never start it with `--listen` or `--public-api`.",
+        ),
+        facts=Facts(
+            context="not reported",
+            context_reported=False,
+            structured=STRUCTURED_NONE,
+            thinking="`enable_thinking`, `reasoning_effort`",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://github.com/oobabooga/text-generation-webui/blob/main/modules/api/typing.py",
+        ),
+    ),
+    RuntimeSpec(
+        id="gpt4all",
+        label="GPT4All",
+        ports=(4891,),
+        adapter=GPT4AllAdapter,
+        add_model="Download models in GPT4All's Models view.",
+        home="https://www.nomic.ai/gpt4all",
+        window_hint="Raise the context length in GPT4All's model settings.",
+        setup=SetupGuide(
+            install={
+                "macos": "Download the installer from nomic.ai/gpt4all.",
+                "windows": "Download the installer from nomic.ai/gpt4all.",
+                "linux": "Download the installer from nomic.ai/gpt4all.",
+            },
+            download="Download a model in the Models view.",
+            embeddings="GPT4All's API serves no embeddings. Run a second runtime for them, or go without.",
+            serve="Settings → Application → Enable Local API Server (port 4891).",
+            check="curl http://127.0.0.1:4891/v1/models",
+            exposure="It listens on 127.0.0.1 only.",
+        ),
+        facts=Facts(
+            context="not reported",
+            context_reported=False,
+            structured=STRUCTURED_NONE,
+            thinking="none",
+            embeddings=False,
+            listens_everywhere=False,
+            source="https://github.com/nomic-ai/gpt4all/blob/main/gpt4all-chat/src/server.cpp",
+        ),
+    ),
+    RuntimeSpec(
+        id="dmr",
+        label="Docker Model Runner",
+        ports=(12434,),
+        adapter=DockerModelRunnerAdapter,
+        add_model="Run `docker model pull <name>`.",
+        home="https://docs.docker.com/ai/model-runner/",
+        library="https://hub.docker.com/u/ai",
+        window_hint="Set the context size with `docker model configure --context-size`.",
+        setup=SetupGuide(
+            install={
+                "macos": "In Docker Desktop, turn on Docker Model Runner (Settings → AI).",
+                "windows": "In Docker Desktop, turn on Docker Model Runner (Settings → AI).",
+                "linux": "Install the `docker-model-plugin` package for Docker Engine.",
+            },
+            download="`docker model pull ai/<model>` — browse hub.docker.com/u/ai.",
+            embeddings="Pull an embedding model too, e.g. one tagged embedding on hub.docker.com/u/ai.",
+            serve="`docker desktop enable model-runner --tcp 12434` (Docker Engine serves it on 12434 already).",
+            check="curl http://127.0.0.1:12434/engines/v1/models",
+            exposure="Keep host-side TCP on 127.0.0.1.",
+        ),
+        facts=Facts(
+            context="`/engines/v1/models` dmr.context_window",
+            context_reported=True,
+            structured=STRUCTURED_JSON,
+            thinking="none documented",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://docs.docker.com/ai/model-runner/api-reference/",
+        ),
+    ),
+    RuntimeSpec(
+        id="foundry",
+        label="Foundry Local",
+        # Chosen at start: never probed, added by its address.
+        ports=(),
+        adapter=FoundryLocalAdapter,
+        add_model="Run `foundry model run <name>`.",
+        home="https://learn.microsoft.com/azure/foundry-local/",
+        window_hint="Foundry Local doesn't report its window; set the fallback in Settings.",
+        setup=SetupGuide(
+            install={
+                "macos": "`brew install microsoft/foundrylocal/foundrylocal`.",
+                "windows": "`winget install Microsoft.FoundryLocal`.",
+            },
+            download="`foundry model list`, then `foundry model download <name>`.",
+            embeddings="Foundry Local 1.1 and later serve embedding models too.",
+            serve=(
+                "`foundry service start`, then `foundry service status` prints its address — its port "
+                "changes each start, so add it: `aiteam-connect add-source http://127.0.0.1:<port>`."
+            ),
+            check="curl http://127.0.0.1:<port>/openai/status",
+            exposure="It listens on 127.0.0.1 only.",
+        ),
+        facts=Facts(
+            context="not reported",
+            context_reported=False,
+            structured=STRUCTURED_JSON,
+            thinking="none documented",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://learn.microsoft.com/en-us/azure/foundry-local/reference/reference-rest",
+        ),
+    ),
     RuntimeSpec(
         GENERIC,
         "OpenAI-compatible server",
@@ -281,6 +583,15 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             check="curl http://127.0.0.1:<port>/v1/models",
             exposure="Make it listen on 127.0.0.1 only.",
         ),
+        facts=Facts(
+            context="an extension field on `/v1/models` if it adds one, else not reported",
+            context_reported=None,
+            structured=STRUCTURED_SCHEMA,
+            thinking="`reasoning_effort`",
+            embeddings=True,
+            listens_everywhere=False,
+            source="https://platform.openai.com/docs/api-reference/chat",
+        ),
     ),
 )
 
@@ -288,8 +599,12 @@ BY_ID: dict[str, RuntimeSpec] = {spec.id: spec for spec in RUNTIMES}
 
 #: Runtimes detection can recognise by their answer, in the order they are asked.
 #: The ones whose fingerprint is most specific go first, the generic dialect never.
+#: Runtimes nothing in their answer tells apart from another one's — llamafile
+#: *is* a llama.cpp server. Never adopted by detection on their own; asked only
+#: when someone has said that is what an address runs (`identify(prefer=…)`).
+DECLARED_ONLY = ("llamafile",)
 FINGERPRINTED: tuple[RuntimeSpec, ...] = tuple(
-    spec for spec in RUNTIMES if spec.adapter is not None and spec.id != GENERIC
+    spec for spec in RUNTIMES if spec.adapter is not None and spec.id != GENERIC and spec.id not in DECLARED_ONLY
 )
 
 #: Before model sources existed, a model name with no source in front of it — in a
@@ -354,6 +669,22 @@ def setup_cards() -> list[dict]:
                 "serve": guide.serve,
                 "check": guide.check,
                 "exposure": guide.exposure,
+                "facts": _facts(spec),
             }
         )
     return cards
+
+
+def _facts(spec: RuntimeSpec) -> Optional[dict]:
+    if spec.facts is None:
+        return None
+    f = spec.facts
+    return {
+        "context": f.context,
+        "context_reported": f.context_reported,
+        "structured": f.structured,
+        "thinking": f.thinking,
+        "embeddings": f.embeddings,
+        "listens_everywhere": f.listens_everywhere,
+        "source": f.source,
+    }

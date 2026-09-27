@@ -35,12 +35,14 @@ import base64
 import re
 from typing import Any, Literal, Optional, Union
 
+from typing_extensions import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 PROTOCOL = "aiteam-connect/1"
 PACKAGE = "aiteam-connect"
 #: The version this server shows in its pinned install command.
-CONNECTOR_VERSION = "0.2.0"
+CONNECTOR_VERSION = "0.3.0"
 #: A connector older than this is told it is out of date and sent nothing else.
 #: 0.2.0 is the first that runs model calls: an older one would refuse every build.
 MIN_CONNECTOR_VERSION = "0.2.0"
@@ -98,15 +100,37 @@ ERR_RUNTIME = "runtime"  # the runtime answered with an error
 ERR_UNREACHABLE = "unreachable"  # the runtime isn't answering on this computer
 ERROR_CODES = (ERR_LIMIT, ERR_PAUSED, ERR_CANCELLED, ERR_REFUSED, ERR_RUNTIME, ERR_UNREACHABLE)
 
-#: What the server may never ask for, whatever it sends. The connector refuses every
-#: op not in `OPS` anyway; these are named so a refusal can say what was attempted,
-#: and so the list in the issue's threat model is written down in code.
+#: What the server may never ask for, whatever it sends — per runtime in the adapter
+#: table, from each one's own admin and model-management API. The connector refuses
+#: every op not in `OPS` anyway (and so every one of these); they are named so a
+#: refusal can say what was attempted, and so the threat model is written in code.
+#: Every runtime in `app.router.runtimes.table` has an entry (a test holds that).
 REFUSED = {
     "ollama": ("pull", "push", "create", "copy", "delete", "blobs", "/api/me", "/api/signout",
                "/api/user/keys", "/api/experimental/*"),
-    "llamacpp": ("model add", "model delete", "model load", "model unload"),
-    "tgw": ("model loading",),
-    "vllm": ("/pause", "/update_weights"),
+    "lmstudio": ("model download", "model load", "model unload", "/api/v1/models/load",
+                 "/api/v1/models/download"),
+    "llamacpp": ("model add", "model delete", "model load", "model unload", "/slots/*?action=save|restore",
+                 "POST /props"),
+    "llamafile": ("POST /props", "/slots/*?action=save|restore|erase", "POST /tools"),
+    "vllm": ("/pause", "/update_weights", "/v1/load_lora_adapter", "/v1/unload_lora_adapter", "/sleep",
+             "/wake_up", "/collective_rpc", "/reset_prefix_cache", "/start_profile"),
+    "sglang": ("/update_weights_from_disk", "/update_weights_from_tensor", "/load_lora_adapter",
+               "/unload_lora_adapter", "/release_memory_occupation", "/flush_cache", "/set_internal_state",
+               "/pause_generation", "/configure_logging", "/start_profile"),
+    "koboldcpp": ("/api/admin/reload_config", "/api/admin/load_state", "/api/admin/save_state",
+                  "/api/admin/clear_state", "/api/extra/shutdown", "/api/extra/abort"),
+    "localai": ("/models/apply", "/models/delete/*", "/models/import", "/models/edit/*", "/backends/apply",
+                "/backends/delete/*", "/backend/load", "/backend/shutdown", "/api/settings", "/stores/set"),
+    "mlx": ("a model the server didn't list (it would download and load it)",),
+    "jan": ("model download", "model start", "model stop"),
+    "tgw": ("model loading", "/v1/internal/model/load", "/v1/internal/model/unload", "/v1/internal/lora/load",
+            "/v1/internal/lora/unload", "/v1/internal/stop-generation"),
+    "gpt4all": ("model download",),
+    "dmr": ("/models/create", "DELETE /models/*", "/logs"),
+    "foundry": ("/openai/download", "/openai/load/*", "/openai/unload/*", "/openai/unloadall",
+                "/openai/setgpudevice/*"),
+    "openai-compatible": ("anything beyond /v1/models, /v1/chat/completions and /v1/embeddings",),
     "*": ("tools", "shell commands", "file writes", "model downloads", "raw URLs or paths"),
 }
 
@@ -270,6 +294,10 @@ class SourceReport(_Strict):
     reachable: bool = True
     error: Optional[str] = Field(default=None, max_length=500)
     models: list[ModelReport] = Field(default_factory=list, max_length=500)
+    #: This computer's network addresses the runtime also answers on — a runtime
+    #: anyone on that network can use. None when it wasn't checked (a remote source,
+    #: or a connector older than 0.3.0); [] when it answers on loopback only.
+    exposed_on: Optional[list[Annotated[str, Field(max_length=64)]]] = Field(default=None, max_length=8)
 
 
 class UnknownPort(_Strict):

@@ -22,6 +22,7 @@ import platform
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
@@ -30,7 +31,7 @@ from pydantic import ValidationError
 
 from app.connector import protocol as P
 from app.router.model_profile import total_ram_bytes
-from app.router.runtimes import detect, table
+from app.router.runtimes import detect, hygiene, table
 from app.router.base import ProviderError
 from app.router.runtimes.base import RuntimeAdapter
 from app.router.runtimes.types import ChatRequest
@@ -126,6 +127,8 @@ class Agent:
         self._running_lock = threading.Lock()
         #: (source, model) -> (the window the model reports, when asked), for the clamp.
         self._windows: dict[tuple[str, str], tuple[Optional[int], float]] = {}
+        #: Hygiene warnings already printed, so each is said once a session, not per scan.
+        self._warned: set[tuple[str, str, str]] = set()
         _log_refusals()
 
     # ── finding the sources ─────────────────────────────────────────────────
@@ -154,11 +157,22 @@ class Agent:
         hellos = list(found.found)
         for entry in self._configured():
             url = entry["url"].rstrip("/")
-            if any(detect.same_address(url, h.base_url) for h in hellos):
+            found_here = next((h for h in hellos if detect.same_address(url, h.base_url)), None)
+            if found_here is not None:
+                declared = entry.get("runtime")
+                if declared and declared != found_here.runtime and declared in table.BY_ID:
+                    # Someone said what this is (llamafile answers as llama.cpp): it
+                    # is that, if it answers as one.
+                    said = detect.identify(found_here.base_url, prefer=declared)
+                    if said is not None and said.runtime == declared:
+                        hellos[hellos.index(found_here)] = said
                 continue
             api_key = store.get_secret(store.source_key_name(url))
-            hello = detect.identify(url, api_key, prefer=entry.get("runtime"))
-            runtime = hello.runtime if hello else table.GENERIC
+            declared = entry.get("runtime")
+            hello = detect.identify(url, api_key, prefer=declared)
+            # A runtime with no answer of its own to tell it apart (Jan, say) is what
+            # the person who added it said it is — they are on this computer.
+            runtime = hello.runtime if hello else (declared if declared in table.BY_ID else table.GENERIC)
             adapter = table.adapter_for(runtime)(url, api_key)
             source = Source(self._id_for(runtime, url), runtime, url, adapter,
                             remote=not detect.is_loopback(url), version=hello.version if hello else None)
@@ -170,6 +184,15 @@ class Agent:
             self._sources[source.id] = source
 
         reports = []
+        addresses = hygiene.own_addresses()
+        # One connection per source and address, all at once: a slow refusal on one
+        # doesn't hold up the answer to the server.
+        local = [s for s in self._sources.values() if not s.remote]
+        with ThreadPoolExecutor(max_workers=max(len(local), 1), thread_name_prefix="exposure") as pool:
+            exposure = dict(zip(
+                [s.id for s in local],
+                pool.map(lambda s: (hygiene.exposed_on(s.base_url, addresses) or [])[:8], local),
+            ))
         for source in self._sources.values():
             report: dict[str, Any] = {
                 "id": source.id,
@@ -181,7 +204,9 @@ class Agent:
                 "reachable": True,
                 "error": None,
                 "models": [],
+                "exposed_on": exposure.get(source.id),
             }
+            self._warn(source, report["exposed_on"])
             try:
                 entries = source.adapter.list_models()
                 source.models = [e.name for e in entries]
@@ -201,6 +226,27 @@ class Agent:
                 report["error"] = str(e)[:500]
             reports.append(report)
         return reports, found.unknown[:32], found.tried[:64]
+
+    def _warn(self, source: Source, exposed: Optional[list[str]]) -> None:
+        """Say in this terminal what the website's Setup tab says: an outdated runtime,
+        or one anyone on the network can reach. Once per session for each."""
+        found = hygiene.warnings(source.runtime, source.version, exposed)
+        label = table.spec_for(source.runtime).label
+        for w in found:
+            key = (source.id, source.base_url, w["kind"])
+            if key in self._warned:
+                continue
+            # Remembered only once it has been printed: a console that can't show
+            # a character gets the ASCII of it instead of losing the warning.
+            try:
+                for line in hygiene.terminal_lines(label, source.base_url, [w]):
+                    try:
+                        self._say(line)
+                    except UnicodeEncodeError:
+                        self._say(line.encode("ascii", "replace").decode("ascii"))
+            except Exception:  # noqa: BLE001 - a closed stdout; said again next scan
+                continue
+            self._warned.add(key)
 
     # ── the operations ──────────────────────────────────────────────────────
     def hello(self) -> dict:

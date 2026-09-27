@@ -19,9 +19,14 @@
                                       └───────────┬───────────────────┬───────────────┘
                                                   │                   │
                                           ┌───────▼──────┐    ┌────────▼─────────┐
-                                          │   Ollama     │    │  Cloud LLM APIs  │
-                                          │ (local, free)│    │ Claude/GPT/Gemini│
+                                          │ Local runtime│    │  Cloud LLM APIs  │
+                                          │ (any, free)* │    │ Claude/GPT/Gemini│
                                           └──────────────┘    └──────────────────┘
+
+  * LM Studio, llama.cpp, MLX-LM, Ollama, vLLM, SGLang, KoboldCpp, LocalAI, llamafile,
+    Jan, GPT4All, text-generation-webui, Docker Model Runner, Foundry Local, or any
+    OpenAI-compatible server — reached directly, or through a paired computer's
+    connector. See RUNTIMES.md.
 ```
 
 ## The pipeline (LangGraph)
@@ -68,13 +73,26 @@ to **long-term memory** for future runs to recall.
 `router/router.py` resolves a `(provider, model)` **chain** for each request and tries each in
 order, so a failing backend never stalls a run:
 
-- **local_only** → only the local Ollama model.
+- **local_only** → only local models: the chosen one, from whichever source serves it.
 - **manual** → the caller's `provider:model`, then the configured fallback chain.
 - **auto** → a heuristic primary (strong cloud model for high-complexity work when a key is
   present; otherwise the free local model), then the fallback chain.
 
-The **local Ollama model is always appended last** as the safety net. Every call's tokens,
-cost, latency, and whether a fallback was used are recorded as a `UsageEvent`.
+The **local default model** — whichever runtime serves it — is appended last as the
+safety net, when one is reachable; no runtime is special. Every call's tokens, cost,
+latency, and whether a fallback was used are recorded as a `UsageEvent`.
+
+### Model sources and runtime adapters (`router/runtimes/`)
+
+A local model is `source:model`. A *source* is one runtime at one address — found on
+loopback (`detect.py`), configured in `LOCAL_SOURCES`, added in Settings, or reported by
+a paired computer's connector (`connector/remote.py`). Each is reached through an
+*adapter* (`table.py`) that turns five typed operations — `list_models`, `model_info`,
+`chat`, `embed`, `cancel` — into that runtime's dialect; the router never learns which
+product is on the other end. Adapters are chosen by what an address answers, never by
+its port. `hygiene.py` warns when a runtime is older than a known security fix (the
+data table `advisories.json`) or reachable from the network. [`RUNTIMES.md`](RUNTIMES.md)
+lists every runtime, what it reports, and what the connector refuses for it.
 
 ## The mockup: a build, not a document (`preview/`)
 
@@ -134,9 +152,10 @@ library existed cannot say it was offered skills and took none.
 
 ## Memory & RAG
 
-Both use ChromaDB with **local embeddings via Ollama** (`nomic-embed-text`). They degrade to
-no-ops if the vector store or embedding model is unavailable, so the pipeline never hard-fails
-on them.
+Both use ChromaDB with **local embeddings** from any source that serves an embedding model
+(Ollama, LM Studio, a `llama-server --embeddings`, …; `EMBEDDING_MODEL` names the one to
+look for). They degrade to no-ops if the vector store or embedding model is unavailable, so
+the pipeline never hard-fails on them.
 
 - **Memory** (`memory/store.py`) — a per-project summary written on completion, recalled into
   future agents' context.

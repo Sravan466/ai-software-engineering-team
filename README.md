@@ -7,7 +7,8 @@ This repository contains the implementation of the platform described in
 
 Multiple specialized AI agents (Product Manager, System Design, Backend, Frontend, QA,
 Security, DevOps, Cost) collaborate through a **LangGraph** pipeline with **human approval
-gates**. It runs on **local models via Ollama** (default, zero cost) or **cloud LLMs**
+gates**. It runs on **local models from any runtime** — LM Studio, llama.cpp, MLX-LM, Ollama, vLLM
+and more (default, zero cost) — or **cloud LLMs**
 (Claude, GPT, Gemini) through a hybrid router with automatic fallback.
 
 ---
@@ -30,7 +31,7 @@ flowchart LR
     end
 
     subgraph Models["🧠  LLM Providers"]
-        OLLAMA[["Ollama<br/>any model you pull<br/>(default · local · free)"]]
+        OLLAMA[["Your local runtime<br/>LM Studio · llama.cpp · MLX-LM · Ollama · vLLM · …<br/>(default · local · free)"]]
         CLOUD[["Claude · GPT · Gemini<br/>(optional · cloud)"]]
     end
 
@@ -48,7 +49,7 @@ flowchart LR
 frontend/   Next.js 14 + Tailwind + ShadCN-style UI
 backend/    FastAPI service
   app/
-    router/         Hybrid LLM routing & fallback (Ollama / Claude / GPT / Gemini)
+    router/         Hybrid LLM routing & fallback (any local runtime / Claude / GPT / Gemini)
     agents/         The 8 specialist agents
     orchestration/  LangGraph StateGraph + human-in-the-loop approvals
     memory/         Long-term project memory (ChromaDB)
@@ -68,13 +69,41 @@ Python packages live under `backend/app/` so they share one import root and one 
 
 ## Quick start (local, zero cost)
 
-### 1. Install Ollama and pull a model
+### 1. Choose a local model runtime
 
-```bash
-# https://ollama.com/download
-ollama pull qwen2.5:7b      # or any other model — Settings can pull and select one for you
-ollama serve                # usually already running as a service
-```
+Any of these works, and none is preferred — pick the one you already use, or the one
+that suits your computer. [`docs/RUNTIMES.md`](docs/RUNTIMES.md) says what each reports
+and takes.
+
+| Runtime | Start its server (on this computer only) | Default address |
+|---|---|---|
+| [LM Studio](https://lmstudio.ai) | Developer tab → start the server, or `lms server start` | `127.0.0.1:1234` |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | `llama-server -m <model>.gguf -c 16384` | `127.0.0.1:8080` |
+| [MLX-LM](https://github.com/ml-explore/mlx-lm) (Apple silicon) | `mlx_lm.server --model <model>` | `127.0.0.1:8080` |
+| [Ollama](https://ollama.com/download) | `ollama pull <model>`, then `ollama serve` (the app runs it) | `127.0.0.1:11434` |
+| [Jan](https://jan.ai), [GPT4All](https://www.nomic.ai/gpt4all), [llamafile](https://github.com/mozilla-ai/llamafile), [KoboldCpp](https://github.com/LostRuins/koboldcpp), [LocalAI](https://localai.io), [text-generation-webui](https://github.com/oobabooga/text-generation-webui), [Docker Model Runner](https://docs.docker.com/ai/model-runner/), [vLLM](https://docs.vllm.ai), [SGLang](https://docs.sglang.ai) | see [`docs/RUNTIMES.md`](docs/RUNTIMES.md) | their own port |
+| [Foundry Local](https://learn.microsoft.com/azure/foundry-local/), or any OpenAI-compatible server | add its address in Settings or `LOCAL_SOURCES` | any port |
+
+Download one model that writes (a 7–8B instruct model at Q4 fits 16 GB of RAM) and,
+optionally, one embedding model for document search and memory. The backend finds a
+runtime on this computer by itself — loopback only, on its default port — and lists it
+under **Settings → Local runtime**; a runtime on another port or computer is added there
+or in `LOCAL_SOURCES`.
+
+**Keep the runtime listening on `127.0.0.1`.** Never bind it to `0.0.0.0` and never set
+`OLLAMA_ORIGINS=*` — either one lets other devices, or any web page you open, drive it.
+vLLM, KoboldCpp and LocalAI listen on every interface unless told otherwise; Settings and
+the Setup tab warn when a runtime is reachable from your network, or older than a known
+security fix.
+
+#### Two ways to reach it
+
+- **Direct mode — self-hosting.** The backend runs on the same computer as the runtime
+  (or can reach it), and calls it itself. This is the quick start below.
+- **The connector — a hosted website.** When the backend runs somewhere else, the
+  **Setup** tab pairs your computer with it: you run `aiteam-connect` there, it dials out
+  to the server over `wss://`, and builds run on your own runtime without opening a port
+  on your computer. See [`backend/connector/README.md`](backend/connector/README.md).
 
 ### 2. Backend
 
@@ -90,7 +119,7 @@ uvicorn app.main:app --reload --port 8000
 
 Open http://localhost:8000/docs for the interactive API.
 
-Run the test suite (no Ollama needed — the LLM is stubbed):
+Run the test suite (no runtime needed — the LLM is stubbed):
 
 ```bash
 pip install pytest
@@ -113,21 +142,38 @@ npm run dev                   # http://localhost:3000
   React port of the Claude Design board, in `components/blueprint/` (state machine in `pipeline.ts`,
   styling in `blueprint.css`). The original Claude Design export is preserved under
   `design/claude-design-export/`.
-- **`/settings`** — manage models at runtime (self-host): check / **download** the local Ollama
-  model (live pull progress), and add your own **cloud API keys** (Claude / GPT / Gemini) without
+- **`/settings`** — manage models at runtime (self-host): every local runtime found or added,
+  its models (and a **download** field where the runtime has a download API, e.g. Ollama),
+  the model each agent runs on, and your own **cloud API keys** (Claude / GPT / Gemini) without
   editing `.env`. Keys are stored on the backend only, in the gitignored
   `backend/data/providers.local.json`, and applied to the router immediately.
 
+- **`/setup`** — pair a computer with the connector, and see what its runtimes report.
+
 ### Or with Docker
+
+The backend and frontend don't depend on any one runtime. Point `LOCAL_SOURCES` in
+`.env` at yours — from inside the container, a runtime on this computer is
+`host.docker.internal`:
 
 ```bash
 cp .env.example .env
+echo 'LOCAL_SOURCES=[{"label": "LM Studio", "base_url": "http://host.docker.internal:1234", "same_machine": true}]' >> .env
 docker compose up --build
+```
+
+Or run Ollama in a container next to it — an optional profile:
+
+```bash
+echo 'COMPOSE_PROFILES=ollama' >> .env
+echo 'LOCAL_SOURCES=[{"label": "Ollama", "base_url": "http://ollama:11434", "runtime": "ollama", "same_machine": true}]' >> .env
+docker compose up --build
+docker compose exec ollama ollama pull <model>
 ```
 
 ---
 
-## Using cloud models instead of / alongside Ollama
+## Using cloud models instead of / alongside a local runtime
 
 Set any of these in `.env` and the router will use them automatically in **Auto** mode,
 or you can pick them explicitly in **Manual** mode:
@@ -139,20 +185,22 @@ GEMINI_API_KEY=...
 ```
 
 If a cloud call fails (quota, network), the router falls back down a configurable chain,
-ending at the local Ollama model so the pipeline keeps running.
+ending at the local default model so the pipeline keeps running.
 
 ---
 
 ## How much room a model gets, and what it must return
 
-Pull whatever model you like — nothing about it is hardcoded. On first use the router
-asks the model itself (`POST /api/show`) how large a window it was trained for, works
-out how much of that the machine's RAM can actually hold as KV cache, and sends the
-smaller of the two as `num_ctx` on every call. Settings → **Local runtime** shows the
+Use whatever model you like — nothing about it is hardcoded. On first use the router
+asks the runtime how large a window the model runs at (Ollama's `/api/show`, llama.cpp's
+`/props`, vLLM's `max_model_len`, …; a runtime that doesn't say gets the configured
+fallback, which you can override per model in Settings → Tune), works out how much of that the machine's RAM
+can actually hold as KV cache, and sends the smaller of the two wherever the runtime
+takes a window per request (Ollama's `num_ctx`). Settings → **Local runtime** shows the
 resolved number, and so does the log:
 
 ```
-Resolved model profile: ollama:<your model> — context 32,768 tokens (model limit 32,768,
+Resolved model profile: <source>:<your model> — context 32,768 tokens (model limit 32,768,
 source probe), output ≤ 4,096, schema-constrained decoding on
 ```
 
@@ -167,7 +215,7 @@ repair round carrying the validation errors; if it still misses, the phase is fl
 rather than quietly stored — and the cost and security gates, which read specific keys off
 these outputs, stop the run instead of reading nothing and calling it fine.
 
-Every ceiling involved is yours to move: `OLLAMA_CONTEXT_CEILING`, `OLLAMA_RAM_FRACTION`,
+Every ceiling involved is yours to move: `LOCAL_CONTEXT_CEILING`, `LOCAL_RAM_FRACTION`,
 `MAX_OUTPUT_TOKENS`, `SCHEMA_REPAIR_ROUNDS`. See `.env.example`.
 
 ---
@@ -242,7 +290,7 @@ did nothing.
 A product idea flows through **8 specialist agents** in order. After each phase the graph
 **pauses for human approval** — you can approve to advance, or reject with feedback to
 regenerate that phase. Every agent call goes through the hybrid router, so a phase runs on
-local Ollama by default and falls back to a cloud model only if configured/needed.
+your local runtime by default and falls back to a cloud model only if configured/needed.
 
 ```mermaid
 flowchart TD
@@ -251,7 +299,7 @@ flowchart TD
     Run --> Agent["Run current phase agent"]
 
     Agent --> Router{{"Hybrid LLM Router"}}
-    Router -->|per-role choice| Ollama[("Ollama · the model you selected")]
+    Router -->|per-role choice| Ollama[("Local runtime · the model you selected")]
     Router -.->|fallback / manual| Cloud[("Claude · GPT · Gemini")]
     Ollama --> Output["Phase deliverable<br/>(stored + token/cost logged)"]
     Cloud --> Output
@@ -307,6 +355,6 @@ See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the full flow.
 
 ## Status
 
-This is an iterative build. The backbone (router + Ollama, all 8 agents, LangGraph
+This is an iterative build. The backbone (router + local runtimes, all 8 agents, LangGraph
 orchestration with approvals, FastAPI, SQLite, memory/RAG/analytics, minimal UI) is in
 place and runs end-to-end. See [docs/ROADMAP.md](./docs/ROADMAP.md) for what's next.

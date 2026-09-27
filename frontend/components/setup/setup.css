@@ -284,3 +284,23 @@
   /* Still says "in flight", without the motion. */
   .su-route[data-trip="live"] li:not(:last-child)::after { animation: none; background: var(--run); }
 }
+
+/* Runtime hygiene under the checklist: what to update or close, never a block. */
+.su-hygiene { display: grid; gap: 8px; margin-top: 12px; }
+.su-hygiene .rt-warnings { margin-top: 0; }
+
+/* Step 2 when the computer already has models: what's there, not a download. */
+.su-have { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 6px; }
+.su-have > li {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-panel);
+}
+.su-have-mark { color: var(--ok); display: inline-flex; }
+.su-have-mark > svg { width: 16px; height: 16px; }
+.su-have-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.su-have-meta { font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+.su-another { margin-top: 14px; }
+@media (max-width: 520px) {
+  .su-have > li { grid-template-columns: 18px minmax(0, 1fr); }
+  .su-have-meta { grid-column: 2; white-space: normal; }
+}

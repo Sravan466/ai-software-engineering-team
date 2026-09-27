@@ -1,7 +1,7 @@
 # aiteam-connect
 
 Lets the AI Software Engineering Team website use the models running on **your**
-computer — Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible server —
+computer — LM Studio, llama.cpp, MLX-LM, Ollama, vLLM, Jan, GPT4All and [the rest](https://github.com/Sravan466/ai-software-engineering-team/blob/main/docs/RUNTIMES.md), or any OpenAI-compatible server —
 without opening a port on it.
 
 ```
@@ -15,7 +15,7 @@ without opening a port on it.
 Copy the pinned command from the website's **Setup** tab. It looks like:
 
 ```
-pipx run --spec aiteam-connect==0.2.0 aiteam-connect --server https://your-server
+pipx run --spec aiteam-connect==0.3.0 aiteam-connect --server https://your-server
 ```
 
 It asks for the pairing code the website shows (never on the command line, where
@@ -68,7 +68,7 @@ laptop going to sleep — pauses the build, and it carries on from the last fini
 phase when the connector is back. It reconnects by itself after a Wi-Fi drop.
 
 Its private key stays on this computer — in the OS keychain with
-`pipx run --spec "aiteam-connect[keychain]==0.2.0" …`, otherwise in a file only you
+`pipx run --spec "aiteam-connect[keychain]==0.3.0" …`, otherwise in a file only you
 can read, with a warning each time it starts.
 
 ## Verify the package
@@ -77,8 +77,17 @@ Releases are published only from this repository's GitHub Actions, through PyPI
 Trusted Publishing, with attestations:
 
 ```
-pip download --no-deps aiteam-connect==0.2.0
+pip download --no-deps aiteam-connect==0.3.0
 pipx run pypi-attestations verify pypi \
   --repository https://github.com/Sravan466/ai-software-engineering-team \
-  pypi:aiteam_connect-0.2.0-py3-none-any.whl
+  pypi:aiteam_connect-0.3.0-py3-none-any.whl
 ```
+
+## Compatibility
+
+0.3.0 reports, for each runtime, the network addresses it also answers on — so the
+website can warn about a runtime anyone on your network can use. A server needs this
+repository's Phase 6 change (#33) to read that report: **update the server before
+publishing or pinning 0.3.0.** A server still on an older version refuses a 0.3.0
+connector's description of the computer. Servers pin the version they expect in the
+Setup tab's command, so a connector run from that command always matches.

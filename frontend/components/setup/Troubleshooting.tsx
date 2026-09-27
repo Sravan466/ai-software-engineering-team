@@ -30,6 +30,25 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
           load it in the Developer tab. A model that only makes embeddings can’t write the crew’s work.
         </p>
       </details>
+      <details id="t-security" className="su-more">
+        <summary>The runtime is older than a known security fix</summary>
+        <p className="su-p">
+          The runtime’s version is below the first release that fixes a published vulnerability — step 5 names it
+          and links the advisory. Update the runtime the way you installed it (step 1 links the official download), restart it, and press{" "}
+          <strong>Check again</strong>. Builds keep working meanwhile; the warning is there so it isn’t a surprise.
+        </p>
+      </details>
+      <details id="t-exposed" className="su-more">
+        <summary>The runtime is reachable from your network</summary>
+        <p className="su-p">
+          It answers on this computer’s network address as well as on 127.0.0.1, so anyone on the same Wi-Fi can use
+          it. vLLM, KoboldCpp and LocalAI listen that way unless told otherwise. Restart it listening on 127.0.0.1
+          only — each runtime’s card in step 3 says how. The connector never needs more: it reaches the runtime on
+          this computer and dials out itself. Never bind a runtime to <code className="su-code">0.0.0.0</code>, and
+          never set <code className="su-code">OLLAMA_ORIGINS=*</code>: either lets other devices, or any web page you
+          open, drive it.
+        </p>
+      </details>
       <details id="t-code" className="su-more">
         <summary>The pairing code expired</summary>
         <p className="su-p">

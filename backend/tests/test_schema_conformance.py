@@ -1466,23 +1466,35 @@ def test_a_runtime_in_a_sibling_container_is_still_clamped_by_this_hosts_ram(mon
 
 
 def test_the_docker_compose_backend_declares_its_runtime_on_the_same_host():
-    """The shipped deployment has to actually name its runtime and set the knob.
+    """The shipped deployment names its runtime, sets the knob, and needs no one runtime.
 
-    Inside the backend container, loopback is the container itself — so the compose
-    file's runtime is named as a source, and marked as sharing this host's RAM.
+    Inside the backend container, loopback is the container itself — so the runtime
+    is named as a source (LOCAL_SOURCES from .env, or the optional Ollama container
+    when that is blank), and marked as sharing this host's RAM. Ollama is a profile
+    the backend doesn't depend on (#33): `docker compose up` works with another one.
     """
-    import json
     import pathlib
     import re
 
     compose = (pathlib.Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
-    raw = re.search(r"LOCAL_SOURCES: '(.+)'", compose)
-    assert raw, "the compose backend names no model source"
+    # From .env, with nothing assumed: a default naming the Ollama container would be
+    # an unreachable source whenever the optional profile isn't running.
+    assert "LOCAL_SOURCES: ${LOCAL_SOURCES:-}" in compose
+    # How to use the Ollama container is written down: labelled so its id is stable,
+    # and marked as sharing this host, so it's neither shown as remote nor unclamped.
+    import json
+
+    raw = re.search(r"#   LOCAL_SOURCES=(\[.*ollama:11434.*\])", compose)
+    assert raw, "the compose file doesn't say how to use its Ollama container"
     (source,) = json.loads(raw.group(1))
-    assert source["base_url"] == "http://ollama:11434"
-    assert source["same_machine"] is True
-    # Labelled, so its source id — and every model chosen from it — stays stable.
-    assert source["label"]
+    assert source["base_url"] == "http://ollama:11434" and source["same_machine"] is True and source["label"]
+    assert "COMPOSE_PROFILES=ollama" in compose
+    backend = compose[compose.index("  backend:"): compose.index("  frontend:")]
+    assert "depends_on" not in backend
+    ollama = compose[compose.index("  ollama:"): compose.index("  backend:")]
+    assert "profiles:" in ollama and "- ollama" in ollama
+    # Published on loopback only, never on every interface.
+    assert '"127.0.0.1:11434:11434"' in ollama
 
 
 @pytest.mark.parametrize("mode", ["auto", "local_only"])

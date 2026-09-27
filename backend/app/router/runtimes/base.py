@@ -11,6 +11,7 @@ port is the default for several runtimes, and a runtime can be moved to any port
 from __future__ import annotations
 
 import abc
+import contextlib
 import threading
 from typing import Iterable, Iterator, Optional
 
@@ -235,10 +236,44 @@ class RuntimeAdapter(abc.ABC):
             client.close()
 
 
+_memo = threading.local()
+
+
+@contextlib.contextmanager
+def one_look():
+    """Within this block, each fingerprint GET is made once and its answer shared.
+
+    Identifying an address asks every adapter in turn, and several read the same
+    `/v1/models` — so an unknown port cost a dozen sequential requests. Inside
+    `one_look()` it costs one per distinct path. Per thread, and only for the block.
+    """
+    outer = getattr(_memo, "answers", None)
+    if outer is None:
+        _memo.answers = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _memo.answers = None
+
+
 def get_json(
     base_url: str, path: str, api_key: Optional[str], *, timeout: float
 ) -> Optional[object]:
     """GET one JSON document, or None for anything else — for fingerprinting only."""
+    answers = getattr(_memo, "answers", None)
+    key = (base_url.rstrip("/"), path, api_key)
+    if answers is not None and key in answers:
+        return answers[key]
+    found = _get_json(base_url, path, api_key, timeout=timeout)
+    if answers is not None:
+        answers[key] = found
+    return found
+
+
+def _get_json(
+    base_url: str, path: str, api_key: Optional[str], *, timeout: float
+) -> Optional[object]:
     try:
         r = httpx.get(
             f"{base_url.rstrip('/')}{path}",
