@@ -8,10 +8,10 @@ requests that reach one are the typed operations in `app.connector.protocol`.
 """
 from __future__ import annotations
 
-
 from datetime import datetime, timezone
 from typing import Optional
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
@@ -23,7 +23,7 @@ from app.connector import pairing, protocol as P
 from app.connector.hub import ConnectorError, hub
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.db.base import get_db
+from app.db.base import SessionLocal, get_db
 from app.db.models import Device, PairingCode, User, _aware
 from app.router.runtimes import table
 
@@ -82,7 +82,9 @@ def _device(d: Device, request_ip: Optional[str] = None) -> dict:
         # "Approximate location" is the network the pairing came from. Said plainly
         # as "the same network as this browser" when it is, which is what a person
         # approving it can actually judge.
-        "same_network": bool(request_ip and d.paired_from == request_ip),
+        # None when this server can't tell (behind a proxy): the card then says so
+        # rather than vouching for a network it never saw.
+        "same_network": (d.paired_from == request_ip) if request_ip else None,
         "created_at": _iso(d.created_at),
         "approved_at": _iso(d.approved_at),
         "last_seen_at": _iso(d.last_seen_at),
@@ -102,7 +104,15 @@ def _mine(db: Session, user: User, device_id: str) -> Device:
     return device
 
 
+#: Headers a reverse proxy adds. Behind one, `request.client` is the proxy, so every
+#: browser and every computer would look like "the same network".
+_PROXIED = ("x-forwarded-for", "x-real-ip", "forwarded")
+
+
 def _ip(request: Request) -> Optional[str]:
+    """The browser's address, or None when a proxy hides it."""
+    if any(request.headers.get(h) for h in _PROXIED):
+        return None
     return request.client.host if request.client else None
 
 
@@ -170,40 +180,63 @@ def cancel_pairing(pairing_id: str, user: User = Depends(current_user), db: Sess
 
 
 # ── one computer ────────────────────────────────────────────────────────────
-@router.post("/{device_id}/approve")
-async def approve(
-    device_id: str, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> dict:
-    device = _mine(db, user, device_id)
-    if device.status != P.STATE_APPROVED:
-        device.status = P.STATE_APPROVED
-        device.approved_at = datetime.now(timezone.utc)
+# The routes that talk to a live connection are async, so their database work runs
+# in a thread: a SQLite write lock held by a build would otherwise stall the event
+# loop, and every connector socket with it.
+def _approve_row(user_id: str, device_id: str) -> str:
+    """Mark the device approved; returns the account label for the connector."""
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        device = _mine(db, user, device_id)
+        if device.status != P.STATE_APPROVED:
+            device.status = P.STATE_APPROVED
+            device.approved_at = datetime.now(timezone.utc)
+            db.commit()
+            log.info("Device %s was approved by its account.", device.id)
+        return pairing.account_label(user)
+
+
+def _read(user_id: str, device_id: str, ip: Optional[str]) -> dict:
+    with SessionLocal() as db:
+        return _device(_mine(db, db.get(User, user_id), device_id), ip)
+
+
+def _check_mine(user_id: str, device_id: str) -> dict:
+    """404 unless it's this account's; returns what the route needs of it."""
+    with SessionLocal() as db:
+        device = _mine(db, db.get(User, user_id), device_id)
+        return {"id": device.id, "hello": device.hello}
+
+
+def _delete(user_id: str, device_id: str) -> None:
+    with SessionLocal() as db:
+        db.delete(_mine(db, db.get(User, user_id), device_id))
         db.commit()
-        log.info("Device %s was approved by its account.", device.id)
-    link = await hub.approve(device.id, pairing.account_label(user))
+
+
+@router.post("/{device_id}/approve")
+async def approve(device_id: str, request: Request, user: User = Depends(current_user)) -> dict:
+    account = await anyio.to_thread.run_sync(_approve_row, user.id, device_id)
+    link = await hub.approve(device_id, account)
     if link is not None:
         try:
             await refresh_hello(link)
         except ConnectorError as e:
-            log.info("Approved device %s, but it didn't describe itself yet: %s", device.id, e)
-        db.refresh(device)
-    return _device(device, _ip(request))
+            log.info("Approved device %s, but it didn't describe itself yet: %s", device_id, e)
+    return await anyio.to_thread.run_sync(_read, user.id, device_id, _ip(request))
 
 
 @router.post("/{device_id}/refresh")
-async def refresh(
-    device_id: str, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> dict:
-    device = _mine(db, user, device_id)
-    link = hub.live(device.id)
+async def refresh(device_id: str, request: Request, user: User = Depends(current_user)) -> dict:
+    await anyio.to_thread.run_sync(_check_mine, user.id, device_id)
+    link = hub.live(device_id)
     if link is None:
         raise HTTPException(status_code=409, detail="This computer isn't connected right now.")
     try:
         await refresh_hello(link)
     except ConnectorError as e:
         raise HTTPException(status_code=502, detail=str(e)) from None
-    db.refresh(device)
-    return _device(device, _ip(request))
+    return await anyio.to_thread.run_sync(_read, user.id, device_id, _ip(request))
 
 
 class DeviceUpdate(BaseModel):
@@ -215,10 +248,14 @@ class DeviceUpdate(BaseModel):
 
 def _reported(device: Device, spec: str) -> Optional[dict]:
     """The model `spec` names, if this computer reported it."""
+    return _reported_in(device.hello, spec)
+
+
+def _reported_in(hello: Optional[dict], spec: str) -> Optional[dict]:
     source_id, sep, name = spec.partition(":")
     if not sep:
         return None
-    for source in (device.hello or {}).get("sources") or []:
+    for source in (hello or {}).get("sources") or []:
         if source.get("id") == source_id:
             for model in source.get("models") or []:
                 if model.get("name") == name:
@@ -263,14 +300,12 @@ def update_device(
 
 
 @router.get("/{device_id}/model")
-async def model_details(
-    device_id: str, spec: str, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> dict:
+async def model_details(device_id: str, spec: str, user: User = Depends(current_user)) -> dict:
     """What the computer can say about one of its models: window, structured output."""
-    device = _mine(db, user, device_id)
-    if _reported(device, spec) is None:
+    row = await anyio.to_thread.run_sync(_check_mine, user.id, device_id)
+    if _reported_in(row["hello"], spec) is None:
         raise HTTPException(status_code=404, detail=f"This computer didn't report a model called {spec}.")
-    link = hub.live(device.id)
+    link = hub.live(device_id)
     if link is None or not link.approved:
         raise HTTPException(status_code=409, detail="This computer isn't connected right now.")
     source, _, model = spec.partition(":")
@@ -284,23 +319,19 @@ async def model_details(
 
 
 @router.post("/{device_id}/disconnect")
-async def disconnect(device_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+async def disconnect(device_id: str, user: User = Depends(current_user)) -> dict:
     """Stop the connector now. The pairing is kept: running it again reconnects."""
-    device = _mine(db, user, device_id)
+    await anyio.to_thread.run_sync(_check_mine, user.id, device_id)
     dropped = await hub.drop(
-        device.id, P.CLOSE_DISCONNECTED, "Disconnected from the website. Run the connector again to reconnect."
+        device_id, P.CLOSE_DISCONNECTED, "Disconnected from the website. Run the connector again to reconnect."
     )
     return {"ok": True, "was_connected": dropped}
 
 
 @router.delete("/{device_id}")
-async def forget(device_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+async def forget(device_id: str, user: User = Depends(current_user)) -> dict:
     """Revoke this computer: its key is deleted and any live connection closed now."""
-    device = _mine(db, user, device_id)
-    db.delete(device)
-    db.commit()
+    await anyio.to_thread.run_sync(_delete, user.id, device_id)
     await hub.drop(device_id, P.CLOSE_FORGOTTEN, "This computer was removed from the account.")
     log.info("Device %s was forgotten by its account.", device_id)
     return {"ok": True}
-
-

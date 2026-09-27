@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from pydantic import ValidationError
-from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import connect
 
 from app.connector import protocol as P
@@ -152,13 +152,20 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
         additional_headers=_headers(server, device_id, key),
         max_size=P.MAX_MESSAGE_BYTES,
         open_timeout=15,
-        ping_interval=20,
-        ping_timeout=20,
         user_agent_header=f"{P.PACKAGE}/{P.CONNECTOR_VERSION}",
     ) as ws:
         approved = False
         try:
-            for frame in ws:
+            while True:
+                # The server pings an approved computer every PING_EVERY_SECONDS, so
+                # silence this long means the line is dead: close, and reconnect.
+                # (A pending computer is sent nothing; it simply reconnects, which
+                # re-announces it as pending.)
+                try:
+                    frame = ws.recv(timeout=P.IDLE_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    ws.close(1001, "no frames from the server")
+                    return 1001
                 if not isinstance(frame, str):
                     ws.close(P.CLOSE_PROTOCOL, "text frames only")
                     return P.CLOSE_PROTOCOL
@@ -190,9 +197,10 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
                         _send(ws, {"type": "response", "id": message.id, "ok": False, "error": str(e)})
                     except Exception as e:  # noqa: BLE001 - a runtime error is an answer, not a crash
                         _send(ws, {"type": "response", "id": message.id, "ok": False, "error": str(e)[:500]})
-        except ConnectionClosed:
-            pass
-        return ws.close_code or 1006
+        except ConnectionClosed as closed:
+            # The code the server closed with — 4000 and 4401 mean "stop".
+            return closed.rcvd.code if closed.rcvd is not None else 1006
+    return 1006
 
 
 def run(server: Server, say: Callable[[str], None]) -> int:
@@ -220,8 +228,10 @@ def run(server: Server, say: Callable[[str], None]) -> int:
                     "and pair again."
                 ) from None
             code = 1006
-        except (OSError, TimeoutError) as e:
-            say(f"Couldn't reach {server.host} ({e}). Retrying…")
+        except (OSError, TimeoutError, EOFError, InvalidHandshake) as e:
+            # EOFError: the server (or a proxy in front of it) closed mid-handshake,
+            # as during a restart. Not Ctrl-D — so retried, never treated as "stop".
+            say(f"Couldn't reach {server.host} ({e or type(e).__name__}). Retrying…")
             code = 1006
         if code == P.CLOSE_FORGOTTEN:
             forget(server)

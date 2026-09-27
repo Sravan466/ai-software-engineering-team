@@ -118,8 +118,9 @@ export default function SetupPage() {
         </button>
       </div>
 
-      {tab === "computers" ? (
-        <div role="tabpanel" aria-label="My computers" className="su-panel">
+      {/* Both panels stay mounted, so switching tabs never throws away a pairing
+          code that is still counting down. */}
+      <div role="tabpanel" aria-label="My computers" className="su-panel" hidden={tab !== "computers"}>
           <Computers
             devices={devices}
             onChanged={replace}
@@ -129,9 +130,8 @@ export default function SetupPage() {
               setOpen(new Set([4]));
             }}
           />
-        </div>
-      ) : (
-        <div role="tabpanel" aria-label="Setup steps" className="su-panel">
+      </div>
+      <div role="tabpanel" aria-label="Setup steps" className="su-panel" hidden={tab !== "setup"}>
           {guideError && (
             <div className="notice notice-bad" role="alert">
               <span className="notice-body">
@@ -264,8 +264,7 @@ export default function SetupPage() {
           ) : null}
 
           <Troubleshooting connector={guide?.connector ?? null} />
-        </div>
-      )}
+      </div>
     </div>
   );
 }

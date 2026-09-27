@@ -61,10 +61,14 @@ PING_EVERY_SECONDS = 30
 IDLE_TIMEOUT_SECONDS = 90
 MAX_LIVE_PER_ACCOUNT = 5
 
-#: Close codes the connector acts on. A connector told 4000 or 4401 stops instead of
-#: reconnecting: someone decided it should, on the website.
+#: Close codes the connector acts on. A connector told 4000, 4401, 4426 or 4429 stops
+#: instead of reconnecting: someone decided it should, or reconnecting can't help.
 CLOSE_DISCONNECTED = 4000  # "Disconnect" on the website; the pairing is kept
-CLOSE_FORGOTTEN = 4401  # not paired (or no longer): the credential is dead
+CLOSE_FORGOTTEN = 4401  # forgotten on the website: the credential is dead, delete it
+#: Re-authentication failed or timed out. Not "forgotten": a connector busy scanning,
+#: or a laptop waking from sleep, misses the grace period — it reconnects, signing a
+#: fresh handshake, and keeps its key.
+CLOSE_REAUTH = 4408
 CLOSE_OUTDATED = 4426  # this connector is older than MIN_CONNECTOR_VERSION
 CLOSE_LIMIT = 4429  # too many computers connected on this account at once
 CLOSE_PROTOCOL = 1008  # a message that doesn't match its schema

@@ -53,6 +53,18 @@ class Link:
         self._send_lock = asyncio.Lock()
         self._reauth_nonce: Optional[str] = None
         self._reauth_deadline = 0.0
+        #: Background work for this link (pings, a hello refresh). Held so it isn't
+        #: garbage-collected mid-flight, and cancelled when the link closes.
+        self._tasks: set[asyncio.Task] = set()
+
+    def spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def cancel_tasks(self) -> None:
+        for task in list(self._tasks):
+            task.cancel()
 
     # ── sending ──────────────────────────────────────────────────────────────
     async def send(self, message: dict) -> None:
@@ -60,7 +72,13 @@ class Link:
         if len(text.encode("utf-8")) > P.MAX_MESSAGE_BYTES:
             raise ConnectorError("Refusing to send a message over the size limit.")
         async with self._send_lock:
-            await self.ws.send_text(text)
+            if self.closed and message.get("type") != "bye":
+                raise ConnectorError("This computer isn't connected.")
+            try:
+                await self.ws.send_text(text)
+            except Exception as e:  # noqa: BLE001 - a socket that died under us
+                self.closed = True
+                raise ConnectorError("The connection to your computer closed.") from e
 
     async def request(self, op: str, args: Optional[dict] = None, *, timeout: float = 20.0) -> Any:
         """Ask the connector for one typed operation, and wait for its answer."""
@@ -85,6 +103,7 @@ class Link:
         if self.closed:
             return
         self.closed = True
+        self.cancel_tasks()
         try:
             await self.send({"type": "bye", "reason": reason[:500], "code": code})
         except Exception:  # noqa: BLE001 - the socket may already be gone
@@ -116,7 +135,7 @@ class Link:
         if isinstance(message, P.ConnectorReauth):
             nonce, self._reauth_nonce = self._reauth_nonce, None
             if nonce is None or not verify(self.public_key, message.sig, P.reauth_message(self.device_id, nonce)):
-                raise ProtocolViolation(P.CLOSE_FORGOTTEN, "Re-authentication failed.")
+                raise ProtocolViolation(P.CLOSE_REAUTH, "Re-authentication failed.")
             return
         future = self._pending.get(message.id)
         if future is None or future.done():
@@ -136,7 +155,7 @@ class Link:
         """Why this link should be closed now, if it should."""
         now = time.monotonic()
         if self._reauth_nonce is not None and now > self._reauth_deadline:
-            return P.CLOSE_FORGOTTEN, "Re-authentication timed out."
+            return P.CLOSE_REAUTH, "Re-authentication timed out."
         # A pending computer is sent nothing, so it has nothing to answer: its
         # liveness is the WebSocket's own ping, which the server answers for it.
         if self.approved and now - self.last_frame > P.IDLE_TIMEOUT_SECONDS:
@@ -164,6 +183,7 @@ class Hub:
 
     def unregister(self, link: Link) -> None:
         link.closed = True
+        link.cancel_tasks()
         link._fail_pending("The connection closed.")
         if self._links.get(link.device_id) is link:
             del self._links[link.device_id]
@@ -177,10 +197,20 @@ class Hub:
         return True
 
     async def approve(self, device_id: str, account: str) -> Optional[Link]:
+        """Tell a waiting computer it was approved. None if it isn't connected."""
         link = self.live(device_id)
-        if link is not None:
-            link.approved = True
+        if link is None or link.approved:
+            return link
+        # A pending computer is sent nothing, so its idle clock has been running
+        # since it connected. Restart it, or one that waited a while would be closed
+        # as idle the moment it's approved.
+        link.last_frame = time.monotonic()
+        link.approved = True
+        try:
             await link.send({"type": "state", "state": P.STATE_APPROVED, "account": account})
+        except ConnectorError:
+            self.unregister(link)
+            return None
         return link
 
 

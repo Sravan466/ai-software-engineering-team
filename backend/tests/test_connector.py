@@ -263,3 +263,146 @@ def test_the_connector_only_dials_https_or_this_computer():
     assert server_for("http://localhost:8000").ws_url == "ws://localhost:8000/api/connector/ws"
     with pytest.raises(ConnectError):
         server_for("http://example.com")
+
+
+# ── the real client against a real server ─────────────────────────────────────
+def test_the_real_connector_pairs_waits_for_approval_and_stops_on_disconnect(monkeypatch):
+    """The whole path over a real socket: `pair`, `session`, approval, Disconnect.
+
+    Uses the connector's own client (websockets' sync client) against uvicorn, so a
+    mismatch with the library — an argument it doesn't take, a close code read from
+    the wrong place — fails here rather than on someone's computer.
+    """
+    import socket
+
+    import httpx
+    import uvicorn
+
+    from aiteam_connect import client as C
+    from tests.conftest import TEST_EMAIL, TEST_PASSWORD
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+
+    # The agent must not probe this machine's runtimes from a test.
+    monkeypatch.setattr(Agent, "hello", lambda self: _hello(self.device_id))
+    try:
+        web = httpx.Client(base_url=base)
+        assert web.post("/api/auth/signin", json={"email": TEST_EMAIL, "password": TEST_PASSWORD}).status_code == 200
+        code = web.post("/api/devices/pairing").json()["code"]
+
+        target = C.server_for(base)
+        answers = iter([code, "y"])
+        C.pair(target, lambda _prompt: next(answers), lambda _text: None)
+        device_id, key, _ = C.credential(target)
+
+        said: list[str] = []
+        result: dict = {}
+        agent = Agent(device_id, skip_ports=(port,))
+        runner = threading.Thread(
+            target=lambda: result.update(code=C.session(target, device_id, key, agent, said.append)), daemon=True
+        )
+        runner.start()
+        for _ in range(100):
+            if any("approve" in s for s in said):
+                break
+            time.sleep(0.05)
+        assert any("approve" in s for s in said), said
+
+        approved = web.post(f"/api/devices/{device_id}/approve").json()
+        assert approved["online"] and approved["hello"]["sources"][0]["id"] == "ollama"
+        assert any("Connected" in s for s in said)
+
+        assert web.post(f"/api/devices/{device_id}/disconnect").json()["was_connected"] is True
+        runner.join(10)
+        assert result["code"] == P.CLOSE_DISCONNECTED
+    finally:
+        server.should_exit = True
+        thread.join(10)
+
+
+# ── regressions from review ──────────────────────────────────────────────────
+class _FakeSocket:
+    def __init__(self, fail: bool = False) -> None:
+        self.sent: list[str] = []
+        self.fail = fail
+
+    async def send_text(self, text: str) -> None:
+        if self.fail:
+            raise RuntimeError("socket gone")
+        self.sent.append(text)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        pass
+
+
+def _link(ws, approved=False):
+    from app.connector.hub import Link
+
+    return Link(ws, device_id="0" * 32, owner_id="o", public_key=store.public_text(store.new_key()), approved=approved)
+
+
+def test_approving_a_computer_that_waited_a_long_time_does_not_close_it_as_idle():
+    import asyncio
+
+    from app.connector.hub import Hub
+
+    async def go():
+        hub = Hub()
+        link = _link(_FakeSocket())
+        link.last_frame -= P.IDLE_TIMEOUT_SECONDS * 5  # waited a long while, pending
+        await hub.register(link)
+        assert link.overdue() is None  # pending: no idle rule
+        await hub.approve(link.device_id, "me")
+        assert link.approved and link.overdue() is None
+
+    asyncio.run(go())
+
+
+def test_a_missed_reauth_reconnects_rather_than_reading_as_forgotten():
+    import asyncio
+
+    async def go():
+        link = _link(_FakeSocket(), approved=True)
+        await link.reauth()
+        link._reauth_deadline = 0.0
+        code, _ = link.overdue()
+        assert code == P.CLOSE_REAUTH != P.CLOSE_FORGOTTEN
+
+    asyncio.run(go())
+    from aiteam_connect.client import STOP
+
+    assert P.CLOSE_REAUTH not in STOP and P.CLOSE_FORGOTTEN in STOP
+
+
+def test_a_send_on_a_dead_socket_is_a_connector_error_not_a_crash():
+    import asyncio
+
+    from app.connector.hub import ConnectorError, Hub
+
+    async def go():
+        hub = Hub()
+        link = _link(_FakeSocket(fail=True))
+        await hub.register(link)
+        assert await hub.approve(link.device_id, "me") is None  # dropped, not raised
+        with pytest.raises(ConnectorError):
+            await _link(_FakeSocket(fail=True), approved=True).request("ping", timeout=1)
+
+    asyncio.run(go())
+
+
+def test_behind_a_proxy_the_network_is_not_vouched_for(client):
+    pairing_id, device_id, _ = _paired(client)
+    plain = client.get(f"/api/devices/pairing/{pairing_id}").json()["device"]
+    assert plain["same_network"] is True  # the test client and the claim share an address
+    proxied = client.get(f"/api/devices/pairing/{pairing_id}", headers={"x-forwarded-for": "203.0.113.9"})
+    assert proxied.json()["device"]["same_network"] is None

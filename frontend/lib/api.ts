@@ -1121,7 +1121,8 @@ export type Device = {
   connector_version: string | null;
   outdated: boolean;
   paired_from: string | null;
-  same_network: boolean;
+  /** null when the server sits behind a proxy and can't tell. */
+  same_network: boolean | null;
   created_at: string | null;
   approved_at: string | null;
   last_seen_at: string | null;

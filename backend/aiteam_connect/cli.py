@@ -12,6 +12,7 @@ visible to every other process on this computer (CWE-214).
 from __future__ import annotations
 
 import argparse
+import logging
 import getpass
 import sys
 
@@ -109,6 +110,8 @@ def cmd_forget(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Every probe is a request; a person's terminal should show what happened, not each GET.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(prog="aiteam-connect", description=__doc__.split("\n")[0])
     _server_arg(parser, top=True)
     sub = parser.add_subparsers(dest="command")

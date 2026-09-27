@@ -92,6 +92,13 @@ def _authenticate(header: Optional[str], host: str) -> Optional[dict]:
         }
 
 
+def _status(device_id: str) -> Optional[str]:
+    """The device's status now, or None if it has been forgotten."""
+    with SessionLocal() as db:
+        device = db.get(Device, device_id)
+        return device.status if device is not None else None
+
+
 def _touch(device_id: str) -> None:
     with SessionLocal() as db:
         device = db.get(Device, device_id)
@@ -158,7 +165,7 @@ async def _keep(link: Link) -> None:
         now = time.monotonic()
         if link.approved and now - last_ping >= P.PING_EVERY_SECONDS:
             last_ping = now
-            asyncio.create_task(_ping(link))
+            link.spawn(_ping(link))
         if now - last_reauth >= P.REAUTH_EVERY_SECONDS:
             last_reauth = now
             await link.reauth()
@@ -198,6 +205,14 @@ async def connector_socket(ws: WebSocket) -> None:
     await hub.register(link)
     keeper = asyncio.create_task(_keep(link))
     try:
+        # Read again now the link is findable: an approval or a Forget that landed
+        # between the handshake's read and `register` would otherwise be missed —
+        # the approval by the hub (no link yet), and the link by the approval.
+        status = await anyio.to_thread.run_sync(_status, link.device_id)
+        if status is None:
+            await link.close(P.CLOSE_FORGOTTEN, "This computer was removed from the account.")
+            return
+        link.approved = status == P.STATE_APPROVED
         await link.send(
             {
                 "type": "state",
@@ -206,7 +221,7 @@ async def connector_socket(ws: WebSocket) -> None:
             }
         )
         if link.approved:
-            asyncio.create_task(_refresh_quietly(link))
+            link.spawn(_refresh_quietly(link))
         while not link.closed:
             message = await ws.receive()
             if message["type"] == "websocket.disconnect":
@@ -218,7 +233,7 @@ async def connector_socket(ws: WebSocket) -> None:
                 log.warning("Closed device %s's connection: %s", link.device_id, v.reason)
                 await link.close(v.code, v.reason)
                 break
-    except (WebSocketDisconnect, RuntimeError):
+    except (WebSocketDisconnect, RuntimeError, ConnectorError):
         pass
     finally:
         keeper.cancel()

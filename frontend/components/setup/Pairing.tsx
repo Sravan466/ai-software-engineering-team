@@ -74,6 +74,10 @@ export default function Pairing({
   }, [pairing]);
 
   const device = state?.device ?? null;
+  // Approved somewhere else — the My computers tab, another browser — counts too.
+  const done = approved ?? (device && device.status === "approved" ? device : null);
+  // Claimed, then forgotten before it was approved: this code is spent.
+  const removed = state?.state === "used";
 
   async function approve() {
     if (!device) return;
@@ -126,7 +130,7 @@ export default function Pairing({
         </>
       )}
 
-      {pairing && !device && !approved && (
+      {pairing && !device && !done && !removed && (
         <div className="su-pair-grid">
           <div className="su-codebox" data-expired={expired || undefined}>
             <span className="label">Your pairing code</span>
@@ -204,7 +208,7 @@ export default function Pairing({
         </div>
       )}
 
-      {device && device.status === "pending" && !approved && (
+      {device && device.status === "pending" && !done && (
         <section className="su-approve" aria-labelledby="approve-title" aria-live="polite">
           <h3 id="approve-title">Approve this computer?</h3>
           <p className="su-p">Nothing is sent to it until you do. Only approve a computer you just set up yourself.</p>
@@ -221,9 +225,13 @@ export default function Pairing({
               <dt>Connected from</dt>
               <dd>
                 <span className="mono">{device.paired_from || "unknown"}</span>
-                <span className={device.same_network ? "su-ok-text" : "su-warn-text"}>
-                  {device.same_network ? " — the same network as this browser" : " — a different network from this browser"}
-                </span>
+                {device.same_network !== null && (
+                  <span className={device.same_network ? "su-ok-text" : "su-warn-text"}>
+                    {device.same_network
+                      ? " — the same network as this browser"
+                      : " — a different network from this browser"}
+                  </span>
+                )}
               </dd>
             </div>
             <div>
@@ -244,12 +252,26 @@ export default function Pairing({
         </section>
       )}
 
-      {approved && (
+      {removed && (
+        <div className="notice" role="status">
+          <span className="notice-body">
+            <span className="notice-title">That computer was removed before it was approved.</span>
+            <span className="notice-text">The code it used is spent. Make a new one to pair a computer.</span>
+            <span className="notice-actions">
+              <button className="btn btn-sm btn-primary" onClick={start}>
+                {Icon.refresh} Make a new code
+              </button>
+            </span>
+          </span>
+        </div>
+      )}
+
+      {done && (
         <div className="notice notice-ok" role="status">
           <span className="notice-body">
-            <span className="notice-title">{approved.name} is approved.</span>
+            <span className="notice-title">{done.name} is approved.</span>
             <span className="notice-text">
-              {approved.online
+              {done.online
                 ? "It's connected. Step 5 shows what it found."
                 : "It will connect as soon as the connector is running."}
             </span>
