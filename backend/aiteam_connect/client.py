@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import urlparse
@@ -21,7 +23,14 @@ from websockets.sync.client import connect
 from app.connector import protocol as P
 from app.router.runtimes import detect
 from aiteam_connect import store
+from aiteam_connect.limits import LimitRefused
 from aiteam_connect.local import Agent, Refused, computer_name, os_name
+
+#: Operations answered on the receiving thread: quick, and the ones that must get
+#: through while a model call is still generating.
+_INLINE = ("ping", "cancel")
+#: Threads for everything else. The limits decide how many model calls actually run.
+_WORKERS = 16
 
 #: Close codes that mean "stop", not "reconnect".
 STOP = {P.CLOSE_DISCONNECTED, P.CLOSE_FORGOTTEN, P.CLOSE_OUTDATED, P.CLOSE_LIMIT}
@@ -137,12 +146,32 @@ def _headers(server: Server, device_id: str, key) -> dict:
     }
 
 
+_send_lock = threading.Lock()
+
+
 def _send(ws, message: dict) -> None:
     text = json.dumps(message, separators=(",", ":"), default=str)
     if len(text.encode("utf-8")) > P.MAX_MESSAGE_BYTES:
         text = json.dumps({"type": "response", "id": message.get("id"), "ok": False,
-                           "error": "The answer was over the size limit."})
-    ws.send(text)
+                           "error": "The answer was over the size limit.", "code": P.ERR_LIMIT})
+    # Answers come from worker threads; one frame at a time on the socket.
+    with _send_lock:
+        ws.send(text)
+
+
+def _answer(ws, agent: Agent, message) -> None:
+    """Perform one request and send its answer. Never raises: a failure is an answer."""
+    try:
+        result = agent.handle(message.op, message.args, message.id)
+        reply = {"type": "response", "id": message.id, "ok": True, "result": result}
+    except (Refused, LimitRefused) as e:
+        reply = {"type": "response", "id": message.id, "ok": False, "error": str(e)[:2000], "code": e.code}
+    except Exception as e:  # noqa: BLE001 - a runtime error is an answer, not a crash
+        reply = {"type": "response", "id": message.id, "ok": False, "error": str(e)[:500], "code": P.ERR_RUNTIME}
+    try:
+        _send(ws, reply)
+    except ConnectionClosed:
+        pass  # the connection went while this was generating; the server resends it
 
 
 def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[str], None]) -> int:
@@ -155,6 +184,10 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
         user_agent_header=f"{P.PACKAGE}/{P.CONNECTOR_VERSION}",
     ) as ws:
         approved = waiting = False
+        # Two pools, so model calls waiting for a slot never hold up `hello` or
+        # `model_info` behind them.
+        pool = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="aiteam-connect-model")
+        info_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="aiteam-connect-info")
         try:
             while True:
                 # The server pings an approved computer every PING_EVERY_SECONDS, so
@@ -189,18 +222,25 @@ def session(server: Server, device_id: str, key, agent: Agent, say: Callable[[st
                 elif isinstance(message, P.RequestMessage):
                     if not approved:
                         _send(ws, {"type": "response", "id": message.id, "ok": False,
-                                   "error": "This computer hasn't been approved yet."})
+                                   "error": "This computer hasn't been approved yet.", "code": P.ERR_REFUSED})
                         continue
-                    try:
-                        result = agent.handle(message.op, message.args)
-                        _send(ws, {"type": "response", "id": message.id, "ok": True, "result": result})
-                    except Refused as e:
-                        _send(ws, {"type": "response", "id": message.id, "ok": False, "error": str(e)})
-                    except Exception as e:  # noqa: BLE001 - a runtime error is an answer, not a crash
-                        _send(ws, {"type": "response", "id": message.id, "ok": False, "error": str(e)[:500]})
+                    if message.op in _INLINE:
+                        _answer(ws, agent, message)
+                    elif message.op in P.MODEL_OPS:
+                        pool.submit(_answer, ws, agent, message)
+                    else:
+                        info_pool.submit(_answer, ws, agent, message)
         except ConnectionClosed as closed:
             # The code the server closed with — 4000 and 4401 mean "stop".
             return closed.rcvd.code if closed.rcvd is not None else 1006
+        finally:
+            # Nobody is left to read these answers: stop the runtime generating them.
+            if agent.cancel_all():
+                say("Connection lost — stopped what this computer was generating.")
+            # Queued work goes too: its answer has no connection to go back on,
+            # and the server sends it again once reconnected.
+            pool.shutdown(wait=False, cancel_futures=True)
+            info_pool.shutdown(wait=False, cancel_futures=True)
     return 1006
 
 
@@ -213,7 +253,7 @@ def run(server: Server, say: Callable[[str], None]) -> int:
     if entry.get("key_store") == "file":
         say("⚠ No OS keychain was available, so this computer's key is in a file only you can read "
             f"({store.home()}/keys). Any program running as you could still read it.")
-    agent = Agent(device_id, skip_ports=(server.port,) if server.local else ())
+    agent = Agent(device_id, skip_ports=(server.port,) if server.local else (), say=say)
     delay, refused = 1.0, 0
     while True:
         try:

@@ -136,7 +136,7 @@ export type Project = {
   id: string;
   idea: string;
   name: string | null;
-  /** created | running | awaiting_approval | completed | failed | cancelled */
+  /** created | running | awaiting_approval | completed | failed | cancelled | paused */
   status: string;
   current_phase: string | null;
   routing_mode: string;
@@ -310,6 +310,13 @@ export const api = {
   disconnectDevice: (id: string) =>
     req<{ ok: boolean; was_connected: boolean }>(`/api/devices/${id}/disconnect`, { method: "POST" }),
   forgetDevice: (id: string) => req<{ ok: boolean }>(`/api/devices/${id}`, { method: "DELETE" }),
+  /** A real round trip to the computer's model; a refusal comes back as `ok: false`. */
+  testDevice: (id: string, spec?: string) =>
+    req<DeviceTestResult>(
+      `/api/devices/${id}/test`,
+      { method: "POST", body: JSON.stringify(spec ? { spec } : {}) },
+      LLM_TIMEOUT_MS,
+    ),
 
   // ── Accounts ──
   authStatus: () => req<AuthStatus>("/api/auth/status"),
@@ -1111,7 +1118,39 @@ export type DeviceHello = {
   unknown: { base_url: string; openai: boolean; note: string }[];
   tried: string[];
   capabilities: string[];
+  /** What this computer lets a build use. Set on the computer, never here. */
+  limits?: DeviceLimits | null;
+  /** Model calls are paused on the computer (`aiteam-connect pause`). */
+  paused?: boolean;
 };
+
+export type DeviceLimits = {
+  concurrency: number;
+  requests_per_minute: number;
+  max_prompt_chars: number;
+  max_output_tokens: number;
+  timeout_seconds: number;
+};
+
+export type DeviceTestResult =
+  | {
+      ok: true;
+      spec: string;
+      seconds: number;
+      answer: string;
+      thought: boolean;
+      prompt_tokens: number;
+      completion_tokens: number;
+      finish_reason: string | null;
+    }
+  | {
+      ok: false;
+      spec: string;
+      seconds: number;
+      /** limit | paused | cancelled | refused | runtime | unreachable, or null when the connection failed. */
+      code: string | null;
+      error: string;
+    };
 
 export type Device = {
   id: string;

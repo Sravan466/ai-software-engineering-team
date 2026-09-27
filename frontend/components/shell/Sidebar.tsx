@@ -17,6 +17,7 @@ const DOT: Record<string, string> = {
   failed: "dot-bad",
   stalled: "dot-bad",
   cancelled: "dot-warn",
+  paused: "dot-warn",
 };
 
 const STATUS_TEXT: Record<string, string> = {
@@ -25,6 +26,7 @@ const STATUS_TEXT: Record<string, string> = {
   running: "Running",
   failed: "Failed",
   cancelled: "Stopped",
+  paused: "Paused — waiting for your computer",
   stalled: "Stalled — no longer responding",
   created: "Not started",
 };

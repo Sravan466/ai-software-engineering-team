@@ -307,6 +307,10 @@ class Settings(BaseSettings):
     stall_after_seconds: int = 900
     #: How often the live runner touches `heartbeat_at` while a phase generates.
     heartbeat_interval_seconds: int = 5
+    #: How long a model call waits for a user's computer that has just disconnected
+    #: — a laptop waking up, a Wi-Fi drop — before the build pauses for it instead.
+    #: The connector reconnects by itself within a few seconds of a drop.
+    connector_grace_seconds: int = 45
 
     # ── Derived helpers ──
     @property

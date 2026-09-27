@@ -101,6 +101,11 @@ class Project(Base):
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Why the last run stopped, in words a person can act on.
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The paired computer a `paused` build is waiting for. Set when the build
+    #: pauses, cleared when it resumes; when that computer reconnects, the build
+    #: picks itself back up. Not a foreign key: a computer forgotten meanwhile
+    #: leaves the build paused and resumable by hand, not deleted with it.
+    paused_device_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     # Routing config chosen for this project
     routing_mode: Mapped[str] = mapped_column(String(16), default="local_only")

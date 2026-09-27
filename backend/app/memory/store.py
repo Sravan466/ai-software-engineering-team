@@ -12,6 +12,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from app.router.base import ComputerDisconnected, RequestCancelled
 from app.core import identity
 from app.core.logging import get_logger
 from app.rag import chroma
@@ -50,6 +51,11 @@ class MemoryStore:
                 documents=[f"Idea: {idea}\n\nLessons & decisions:\n{summary}"],
                 metadatas=[{"project_id": project_id, "idea": idea[:300]}],
             )
+        except ComputerDisconnected:
+            # Memory is written after a build finishes; that is no reason to pause
+            # a finished build. Said plainly, so the missing memory isn't a mystery.
+            log.warning("Project memory for %s wasn't saved: the computer that makes embeddings "
+                        "isn't connected.", project_id)
         except Exception as e:  # noqa: BLE001
             log.warning("Failed to write project memory: %s", e)
 
@@ -105,6 +111,8 @@ class MemoryStore:
                 if len(blocks) >= k:
                     break
             return "\n\n---\n\n".join(blocks)
+        except (ComputerDisconnected, RequestCancelled):
+            raise  # the build pauses or stops on these; never "no results"
         except Exception as e:  # noqa: BLE001
             log.warning("Memory recall failed: %s", e)
             return ""

@@ -182,6 +182,61 @@
 .su-check-detail { color: var(--ink-2); font-size: var(--t-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .su-choose { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
 
+/* ── step 6: the test prompt ──
+   The route is the one moving part: while the prompt is out, a run-coloured
+   pulse travels the line between the hops; it settles green or red with the
+   answer. Everything else is the step's usual furniture. */
+.su-test { display: flex; flex-direction: column; gap: 14px; }
+.su-route {
+  list-style: none; margin: 0; padding: 12px 16px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 0;
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-panel);
+  --trip: var(--line-3);
+}
+.su-route li {
+  display: flex; align-items: center; min-width: 0;
+  font-size: var(--t-sm); color: var(--ink-2); overflow-wrap: anywhere;
+}
+.su-route li:not(:last-child)::after {
+  content: ""; flex: none; width: clamp(18px, 5vw, 44px); height: 2px; margin: 0 10px; border-radius: 2px;
+  background: var(--trip);
+  transition: background var(--tr-slow);
+}
+.su-route li:last-child { color: var(--ink); font-weight: 500; }
+.su-route[data-trip="ok"] { --trip: rgba(61, 214, 140, 0.55); }
+.su-route[data-trip="bad"] { --trip: rgba(240, 82, 82, 0.5); }
+.su-route[data-trip="live"] li:not(:last-child)::after {
+  background: linear-gradient(90deg, var(--line-3) 0%, var(--run) 45%, var(--line-3) 90%) 0 0 / 300% 100%;
+  animation: su-trip 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.su-route[data-trip="live"] li:nth-child(2)::after { animation-delay: 0.18s; }
+.su-route[data-trip="live"] li:nth-child(3)::after { animation-delay: 0.36s; }
+@keyframes su-trip { from { background-position: 100% 0; } to { background-position: 0 0; } }
+
+.su-test-go { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.su-test-go .btn svg { width: 15px; height: 15px; }
+.su-test-clock { font-size: var(--t-sm); color: var(--run); font-variant-numeric: tabular-nums; min-width: 5ch; }
+
+.su-trip {
+  display: flex; flex-direction: column; gap: 12px; padding: 16px 18px;
+  border: 1px solid rgba(61, 214, 140, 0.35); border-radius: var(--r-lg); background: var(--bg-panel);
+}
+.su-trip-time { margin: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.su-trip-num {
+  font-size: var(--t-3xl); font-weight: 600; line-height: 1; letter-spacing: -0.02em;
+  color: var(--ok); font-variant-numeric: tabular-nums;
+}
+.su-trip-unit { color: var(--ink-2); font-size: var(--t-sm); }
+.su-trip-answer {
+  margin: 0; padding: 10px 14px; border-radius: var(--r);
+  background: var(--bg-sunken); border: 1px solid var(--line);
+  color: var(--ink); font-size: var(--t-md); line-height: 1.55; overflow-wrap: anywhere;
+}
+.su-trip-facts { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px 18px; }
+.su-trip-facts dt { font-size: var(--t-xs); font-weight: 600; color: var(--ink-3); }
+.su-trip-facts dd { margin: 3px 0 0; font-size: var(--t-sm); color: var(--ink); }
+.su-test .notice .su-cmd { margin-top: 6px; }
+
 /* ── my computers ── */
 .su-devices { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .su-device {
@@ -225,5 +280,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .su-meter span, .su-chev, .su-marker { transition: none; }
+  .su-meter span, .su-chev, .su-marker, .su-route li::after { transition: none; }
+  /* Still says "in flight", without the motion. */
+  .su-route[data-trip="live"] li:not(:last-child)::after { animation: none; background: var(--run); }
 }

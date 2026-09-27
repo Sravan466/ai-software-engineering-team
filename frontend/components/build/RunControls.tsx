@@ -15,8 +15,8 @@ import { Icon } from "@/components/shell/icons";
  * Which control shows is derived from the status, so the surface never offers an
  * action the backend will refuse:
  *
- *   running · awaiting_approval → Stop      (work already done is kept)
- *   cancelled · failed · stalled → Resume   (from the last checkpoint)
+ *   running · awaiting_approval · paused → Stop    (work already done is kept)
+ *   cancelled · failed · stalled · paused → Resume (from the last checkpoint)
  *   any state                    → Delete   (two-step, never a modal)
  */
 export default function RunControls({
@@ -34,8 +34,8 @@ export default function RunControls({
 
   const { id, status, stalled } = project;
   const inFlight = status === "running" && !stalled;
-  const canStop = status === "running" || status === "awaiting_approval";
-  const canResume = stalled || status === "cancelled" || status === "failed";
+  const canStop = status === "running" || status === "awaiting_approval" || status === "paused";
+  const canResume = stalled || status === "cancelled" || status === "failed" || status === "paused";
 
   async function remove() {
     setDeleting(true);
@@ -89,7 +89,7 @@ export default function RunControls({
           onClick={() => act(() => api.stop(id))}
           title={
             inFlight
-              ? "The current model call finishes, then the pipeline halts."
+              ? "Stops the model call in flight, then the pipeline halts. Work already done is kept."
               : "Pause this build. Nothing already approved is lost."
           }
         >

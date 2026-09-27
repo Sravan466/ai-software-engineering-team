@@ -29,6 +29,32 @@ class ProviderError(RuntimeError):
         self.unreachable = unreachable
 
 
+class RequestCancelled(ProviderError):
+    """The call was stopped on purpose — Stop was pressed. Never retried, never
+    handed to the next link in the chain."""
+
+    def __init__(self, message: str = "Stopped.") -> None:
+        super().__init__(message, retryable=False)
+
+
+class ComputerDisconnected(ProviderError):
+    """The user's own computer, which runs this model, isn't connected — or is paused.
+
+    Not a failure of the build: nothing it did was wrong, and it can carry on the
+    moment the computer is back. The runner pauses on this instead of failing, and
+    the build resumes by itself when that computer reconnects.
+    """
+
+    def __init__(
+        self, message: str, *, device_id: str, device_name: str = "", paused_there: bool = False
+    ) -> None:
+        super().__init__(message, retryable=False, unreachable=True)
+        self.device_id = device_id
+        self.device_name = device_name
+        #: Paused on the computer itself (`aiteam-connect pause`), not disconnected.
+        self.paused_there = paused_there
+
+
 #: The providers that are services rather than model sources. Their names are never
 #: a source id, so `anthropic:…` cannot be read two ways.
 CLOUD_PROVIDERS = ("anthropic", "openai", "gemini")

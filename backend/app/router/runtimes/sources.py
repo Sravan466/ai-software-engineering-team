@@ -161,6 +161,9 @@ class SourceRegistry:
         #: Serialises detection itself, so concurrent callers share one probe.
         self._detect_lock = threading.Lock()
         self._background: Optional[threading.Thread] = None
+        #: The account's paired computers, whose runtimes are sources here too —
+        #: listed after this machine's, and never saved, added or removed here.
+        self.devices = None
 
     # ── what is known ────────────────────────────────────────────────────────
     def ensure_loaded(self) -> None:
@@ -200,15 +203,23 @@ class SourceRegistry:
         """Every source, configured first, then added, then detected."""
         order = {ORIGIN_CONFIGURED: 0, ORIGIN_ADDED: 1, ORIGIN_DETECTED: 2}
         with self._lock:
-            return sorted(self._providers.values(), key=lambda p: order.get(p.source.origin, 3))
+            mine = sorted(self._providers.values(), key=lambda p: order.get(p.source.origin, 3))
+        return mine + self._device_providers()
+
+    def _device_providers(self) -> list[SourceProvider]:
+        return list(self.devices.providers()) if self.devices is not None else []
 
     def get(self, source_id: str) -> Optional[SourceProvider]:
         with self._lock:
-            return self._providers.get(source_id)
+            found = self._providers.get(source_id)
+        if found is None and self.devices is not None:
+            return self.devices.get(source_id)
+        return found
 
     def ids(self) -> set[str]:
         with self._lock:
-            return set(self._providers)
+            mine = set(self._providers)
+        return mine | {p.name for p in self._device_providers()}
 
     @property
     def unknown(self) -> list[dict]:

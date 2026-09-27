@@ -8,6 +8,7 @@ requests that reach one are the typed operations in `app.connector.protocol`.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -208,6 +209,12 @@ def _check_mine(user_id: str, device_id: str) -> dict:
         return {"id": device.id, "hello": device.hello}
 
 
+def _check_device(user_id: str, device_id: str) -> dict:
+    with SessionLocal() as db:
+        device = _mine(db, db.get(User, user_id), device_id)
+        return {"id": device.id, "hello": device.hello, "chat_model": device.chat_model}
+
+
 def _delete(user_id: str, device_id: str) -> None:
     with SessionLocal() as db:
         db.delete(_mine(db, db.get(User, user_id), device_id))
@@ -223,6 +230,8 @@ async def approve(device_id: str, request: Request, user: User = Depends(current
             await refresh_hello(link)
         except ConnectorError as e:
             log.info("Approved device %s, but it didn't describe itself yet: %s", device_id, e)
+        if not link.closed:
+            hub.ready(link)
     return await anyio.to_thread.run_sync(_read, user.id, device_id, _ip(request))
 
 
@@ -296,6 +305,7 @@ def update_device(
             raise HTTPException(status_code=422, detail=f"{spec} only makes embeddings; it can't write.")
         setattr(device, field, spec)
     db.commit()
+    hub.touch()
     return _device(device, _ip(request))
 
 
@@ -318,6 +328,71 @@ async def model_details(device_id: str, spec: str, user: User = Depends(current_
         raise HTTPException(status_code=502, detail=str(e)) from None
 
 
+#: What "Send a test prompt" asks. Short, so the timing is the round trip and the
+#: model's first tokens — not a long generation.
+_TEST_PROMPT = "Reply with one short sentence confirming you can read this."
+
+
+class TestBody(BaseModel):
+    #: `source:model` on this computer; its chosen chat model when not given.
+    spec: Optional[str] = Field(default=None, max_length=300)
+
+
+@router.post("/{device_id}/test")
+async def test_prompt(device_id: str, body: Optional[TestBody] = None, user: User = Depends(current_user)) -> dict:
+    """A real round trip: this server → the connector → the runtime, and back.
+
+    Sent through the same `chat` operation a build uses, so it passes (or fails)
+    for the same reasons — the computer's limits, a model it doesn't have, a
+    runtime that isn't running. The prompt and answer aren't logged.
+    """
+    row = await anyio.to_thread.run_sync(_check_device, user.id, device_id)
+    spec = (body.spec if body else None) or row["chat_model"]
+    if not spec:
+        raise HTTPException(status_code=422, detail="Choose a model on this computer first.")
+    model = _reported_in(row["hello"], spec)
+    if model is None:
+        raise HTTPException(status_code=404, detail=f"This computer didn't report a model called {spec}.")
+    if model.get("kind") == "embedding":
+        raise HTTPException(status_code=422, detail=f"{spec} only makes embeddings; pick a model that writes.")
+    link = hub.live(device_id)
+    if link is None or not link.approved:
+        raise HTTPException(status_code=409, detail="This computer isn't connected right now.")
+    source, _, name = spec.partition(":")
+    args = P.ChatArgs(
+        source=source,
+        model=name,
+        messages=[P.ChatTurn(role="user", content=_TEST_PROMPT)],
+        max_tokens=256,
+        context_window=4096,
+        purpose="a test prompt from the Setup tab",
+    ).model_dump(exclude_none=True)
+    started = time.perf_counter()
+    try:
+        result = await link.request("chat", args, timeout=180.0)
+        report = P.ChatReport.model_validate(result)
+    except ValidationError:
+        raise HTTPException(status_code=502, detail="Your computer's answer couldn't be read.") from None
+    except ConnectorError as e:
+        return {
+            "ok": False,
+            "code": e.code,
+            "error": str(e),
+            "seconds": round(time.perf_counter() - started, 2),
+            "spec": spec,
+        }
+    return {
+        "ok": True,
+        "spec": spec,
+        "seconds": round(time.perf_counter() - started, 2),
+        "answer": report.text.strip()[:400],
+        "thought": bool(report.reasoning),
+        "prompt_tokens": report.prompt_tokens,
+        "completion_tokens": report.completion_tokens,
+        "finish_reason": report.finish_reason,
+    }
+
+
 @router.post("/{device_id}/disconnect")
 async def disconnect(device_id: str, user: User = Depends(current_user)) -> dict:
     """Stop the connector now. The pairing is kept: running it again reconnects."""
@@ -333,5 +408,6 @@ async def forget(device_id: str, user: User = Depends(current_user)) -> dict:
     """Revoke this computer: its key is deleted and any live connection closed now."""
     await anyio.to_thread.run_sync(_delete, user.id, device_id)
     await hub.drop(device_id, P.CLOSE_FORGOTTEN, "This computer was removed from the account.")
+    hub.touch()
     log.info("Device %s was forgotten by its account.", device_id)
     return {"ok": True}

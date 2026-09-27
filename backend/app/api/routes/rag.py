@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.router.base import ComputerDisconnected
 from app.api.deps import current_user
 from app.db.base import get_db
 from app.db.models import KnowledgeDoc, User
@@ -77,4 +78,8 @@ def delete_document(doc_id: str, user: User = Depends(current_user), db: Session
 @router.get("/query")
 def query_knowledge_base(q: str, k: int = 4, user: User = Depends(current_user)) -> dict:
     """Debug endpoint: see what context a query would retrieve from your documents."""
-    return {"query": q, "context": knowledge_base.query(q, k=max(1, min(k, 20)), owner_id=user.id)}
+    try:
+        context = knowledge_base.query(q, k=max(1, min(k, 20)), owner_id=user.id)
+    except ComputerDisconnected as e:
+        raise HTTPException(409, f"Document search runs on your computer, which isn't connected: {e}") from None
+    return {"query": q, "context": context}

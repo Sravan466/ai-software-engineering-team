@@ -12,11 +12,13 @@ timeout — no frame at all for `IDLE_TIMEOUT_SECONDS` and it is closed as dead.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import secrets
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from pydantic import ValidationError
 from starlette.websockets import WebSocket
@@ -29,7 +31,15 @@ log = get_logger(__name__)
 
 
 class ConnectorError(RuntimeError):
-    """A request the connector didn't answer, or answered with an error."""
+    """A request the connector didn't answer, or answered with an error.
+
+    `code` is the connector's reason (`protocol.ERROR_CODES`) when it refused; None
+    when the connection itself failed — closed, timed out, never there.
+    """
+
+    def __init__(self, message: str, code: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ProtocolViolation(Exception):
@@ -51,6 +61,9 @@ class Link:
         self.closed = False
         self._pending: dict[str, asyncio.Future] = {}
         self._send_lock = asyncio.Lock()
+        #: Request ids cancelled before they were sent: a `request` naming one is
+        #: refused, so a Stop that wins the race with the send still stops it.
+        self._cancelled: set[str] = set()
         self._reauth_nonce: Optional[str] = None
         self._reauth_deadline = 0.0
         #: Background work for this link (pings, a hello refresh). Held so it isn't
@@ -84,24 +97,79 @@ class Link:
                 self.closed = True
                 raise ConnectorError("The connection to your computer closed.") from e
 
-    async def request(self, op: str, args: Optional[dict] = None, *, timeout: float = 20.0) -> Any:
-        """Ask the connector for one typed operation, and wait for its answer."""
+    async def request(
+        self,
+        op: str,
+        args: Optional[dict] = None,
+        *,
+        timeout: float = 20.0,
+        request_id: Optional[str] = None,
+    ) -> Any:
+        """Ask the connector for one typed operation, and wait for its answer.
+
+        `request_id` names the request for `cancel_request`; one is made when not given.
+        """
         if op not in P.OPS:
             raise ConnectorError(f"'{op}' is not an operation a connector performs.")
         if not self.approved:
             raise ConnectorError("This computer hasn't been approved yet.")
         if self.closed:
             raise ConnectorError("This computer isn't connected.")
-        request_id = secrets.token_hex(8)
+        request_id = request_id or secrets.token_hex(8)
+        if request_id in self._cancelled:
+            self._cancelled.discard(request_id)
+            raise ConnectorError("Stopped.", code=P.ERR_CANCELLED)
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
             await self.send({"type": "request", "id": request_id, "op": op, "args": args or {}})
             return await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError as e:
+            if op in P.MODEL_OPS:
+                # Don't leave the computer generating an answer nobody will read.
+                self.spawn(self._send_cancel(request_id))
             raise ConnectorError(f"Your computer didn't answer '{op}' within {int(timeout)} seconds.") from e
+        except asyncio.CancelledError:
+            # Whoever was waiting went away — a backstop timeout, a closed browser
+            # tab. The computer is told too, or it generates for nobody.
+            if op in P.MODEL_OPS and not self.closed:
+                self.spawn(self._send_cancel(request_id))
+            raise
         finally:
             self._pending.pop(request_id, None)
+
+    async def cancel_request(self, request_id: str) -> bool:
+        """Stop a request in flight: fail it here now, and tell the computer to stop.
+
+        The local answer is immediate — Stop must not wait on a model that is still
+        generating. The `cancel` is sent after, and the connector passes it on to the
+        runtime, which stops generating.
+        """
+        future = self._pending.get(request_id)
+        if future is None:
+            # Not sent yet: refuse it when it is. Bounded, since a cancel for a
+            # request that never comes would otherwise be kept for ever.
+            if len(self._cancelled) < 1024:
+                self._cancelled.add(request_id)
+            return True
+        if not future.done():
+            future.set_exception(ConnectorError("Stopped.", code=P.ERR_CANCELLED))
+        await self._send_cancel(request_id)
+        return True
+
+    def forget_cancel(self, request_id: str) -> None:
+        """A request that will never be sent: stop remembering its cancel."""
+        self._cancelled.discard(request_id)
+
+    async def _send_cancel(self, request_id: str) -> None:
+        if self.closed:
+            return
+        try:
+            await self.send(
+                {"type": "request", "id": secrets.token_hex(8), "op": "cancel", "args": {"id": request_id}}
+            )
+        except ConnectorError:
+            pass  # the connection is gone, and the connector cancels everything it had
 
     async def close(self, code: int, reason: str) -> None:
         if self.closed:
@@ -147,7 +215,8 @@ class Link:
         if message.ok:
             future.set_result(message.result)
         else:
-            future.set_exception(ConnectorError(message.error or "Your computer refused the request."))
+            code = message.code if message.code in P.ERROR_CODES else None
+            future.set_exception(ConnectorError(message.error or "Your computer refused the request.", code))
 
     # ── keeping it honest ────────────────────────────────────────────────────
     async def reauth(self) -> None:
@@ -170,20 +239,97 @@ class Link:
 class Hub:
     def __init__(self) -> None:
         self._links: dict[str, Link] = {}
+        #: The event loop the links live on. Model calls come from worker threads
+        #: (a build runs in one) and reach a link through it.
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        #: When each device's last connection closed, by the monotonic clock.
+        self._dropped_at: dict[str, float] = {}
+        #: Woken whenever any computer connects, is approved or drops, so a thread
+        #: waiting for one to come back doesn't poll.
+        self._changed = threading.Condition()
+        #: Called with (owner_id, device_id) when an approved computer is ready to
+        #: take requests — how a build paused for it picks itself back up.
+        self.on_ready: list[Callable[[str, str], None]] = []
+        #: Bumped on every change, so a cache of who is connected knows it is stale.
+        self.version = 0
 
     def live(self, device_id: str) -> Optional[Link]:
         link = self._links.get(device_id)
         return link if link is not None and not link.closed else None
+
+    def dropped_at(self, device_id: str) -> Optional[float]:
+        """When this device's last connection closed, if it closed in this process."""
+        return self._dropped_at.get(device_id)
+
+    def touch(self) -> None:
+        """Something about a device changed (its models, its chosen model): anything
+        cached about who is connected with what is stale."""
+        self._changed_now()
+
+    def _changed_now(self) -> None:
+        with self._changed:
+            self.version += 1
+            self._changed.notify_all()
+
+    def wait_for(self, device_id: str, timeout: float) -> Optional[Link]:
+        """Block a worker thread until the device is connected and approved again.
+
+        Never call this on the event loop: it is the loop that reconnects it.
+        """
+        deadline = time.monotonic() + timeout
+        with self._changed:
+            while True:
+                link = self.live(device_id)
+                if link is not None and link.approved:
+                    return link
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._changed.wait(min(left, 1.0))
+
+    def ready(self, link: Link) -> None:
+        """An approved computer can take requests: wake waiters, resume its builds."""
+        self._changed_now()
+        self.notify_ready(link.owner_id, link.device_id)
+
+    def notify_ready(self, owner_id: str, device_id: str) -> None:
+        for callback in list(self.on_ready):
+            try:
+                callback(owner_id, device_id)
+            except Exception as e:  # noqa: BLE001 - one listener must not stop the rest
+                log.warning("A connect listener failed for device %s: %s", device_id, e)
+
+    def call(self, coro, timeout: float) -> Any:
+        """Run `coro` on the links' loop from a worker thread, and wait for it."""
+        loop = self.loop
+        if loop is None or loop.is_closed():
+            coro.close()
+            raise ConnectorError("This computer isn't connected.")
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            coro.close()
+            raise ConnectorError("A model call reached the connector from its own event loop.")
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout)
+        except concurrent.futures.TimeoutError as e:
+            future.cancel()
+            raise ConnectorError("Your computer didn't answer in time.") from e
 
     def count_for(self, owner_id: str) -> int:
         return sum(1 for link in self._links.values() if link.owner_id == owner_id and not link.closed)
 
     async def register(self, link: Link) -> None:
         """Hold `link` as its device's connection, closing any older one it replaces."""
+        self.loop = asyncio.get_running_loop()
         old = self._links.get(link.device_id)
         self._links[link.device_id] = link
         if old is not None and old is not link:
             await old.close(1000, "Replaced by a newer connection from the same computer.")
+        self._changed_now()
 
     def unregister(self, link: Link) -> None:
         link.closed = True
@@ -191,6 +337,8 @@ class Hub:
         link._fail_pending("The connection closed.")
         if self._links.get(link.device_id) is link:
             del self._links[link.device_id]
+            self._dropped_at[link.device_id] = time.monotonic()
+        self._changed_now()
 
     async def drop(self, device_id: str, code: int, reason: str) -> bool:
         link = self._links.get(device_id)
@@ -215,6 +363,7 @@ class Hub:
         except ConnectorError:
             self.unregister(link)
             return None
+        self._changed_now()
         return link
 
 

@@ -29,11 +29,13 @@ class SourceEmbeddingFunction:
     def __call__(self, input: list[str]) -> list[list[float]]:  # noqa: A002 - Chroma's name
         if not input:
             return []
-        from app.router.base import ProviderError
+        from app.router.base import ComputerDisconnected, ProviderError, RequestCancelled
         from app.router.router import router
 
         try:
             return router.embed(list(input))
+        except (ComputerDisconnected, RequestCancelled):
+            raise  # a computer to wait for, or a Stop: the build acts on these
         except ProviderError as e:
             raise RuntimeError(f"Embeddings failed: {e}") from e
 

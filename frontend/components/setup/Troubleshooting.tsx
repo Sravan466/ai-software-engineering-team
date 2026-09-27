@@ -1,7 +1,7 @@
 import type { ConnectorInfo } from "@/lib/api";
 import { CopyLine } from "./parts";
 
-/** The five ways setup goes wrong, each with what to do. Linked from the checklist. */
+/** The ways setup goes wrong, each with what to do. Linked from the checklist and the test. */
 export default function Troubleshooting({ connector }: { connector: ConnectorInfo | null }) {
   return (
     <section className="su-trouble" aria-labelledby="trouble-title">
@@ -51,11 +51,29 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
           it remembers the pairing and reconnects without a new code.
         </p>
       </details>
+      <details id="t-sleep" className="su-more">
+        <summary>The computer went to sleep</summary>
+        <p className="su-p">
+          A sleeping computer can’t answer, so a build using it pauses at the phase it was on — nothing already
+          finished is lost. Wake the computer: the connector reconnects by itself within a few seconds, and the
+          build carries on from the last finished phase. If the connector was closed, run the pinned command again;
+          it reconnects without a new code. For a long build, keep the computer awake — on macOS,{" "}
+          <code className="su-code">caffeinate -i</code> in another terminal.
+        </p>
+      </details>
+      <details id="t-limit" className="su-more">
+        <summary>A build was refused by a limit</summary>
+        <p className="su-p">
+          Your computer decides how much a build may use: calls at once, calls per minute, prompt and answer size,
+          and how long one call may run. The build says which limit it hit. Raise it on that computer:
+        </p>
+        <CopyLine command="aiteam-connect limits --requests-per-minute 120" label="Raise a connector limit" />
+      </details>
       {connector && (
         <details className="su-more">
           <summary>What the connector will and won’t do</summary>
           <p className="su-p">
-            It answers exactly four questions —{" "}
+            It answers exactly {connector.ops.length} kinds of request —{" "}
             {connector.ops.map((op, i) => (
               <span key={op}>
                 {i > 0 && ", "}
@@ -64,8 +82,15 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
             ))}{" "}
             — and refuses everything else, whatever this server asks, writing each refusal to{" "}
             <code className="su-code">~/.aiteam-connect/connector.log</code>. It never downloads or deletes a model,
-            runs a command, writes a file, or calls an address this website sends. It opens no port:{" "}
+            runs a command, writes a file, or calls an address this website sends. A model’s answer is sent back as
+            data; nothing on your computer acts on it. It opens no port:{" "}
             <code className="su-code">lsof -iTCP -sTCP:LISTEN</code> shows nothing from it.
+          </p>
+          <p className="su-p">
+            Every model call is written to <code className="su-code">~/.aiteam-connect/activity.log</code> — time,
+            model and token counts, never the prompt or the answer.{" "}
+            <code className="su-code">aiteam-connect pause</code> stops it answering until{" "}
+            <code className="su-code">aiteam-connect resume</code>.
           </p>
           <p className="su-fine">Verify the package before running it:</p>
           <CopyLine command={connector.verify} label="Verify the connector package" />

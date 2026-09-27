@@ -11,6 +11,8 @@ idempotency guard — two tabs racing to approve the same phase produce one winn
 one `409`, instead of quietly advancing the pipeline twice on one click's worth of intent.
 """
 from __future__ import annotations
+
+import threading
 from typing import Optional
 
 import io
@@ -21,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.connector.hub import hub
 from app.api.deps import current_user, get_project
 from app.core import artifacts, model_roles
 from app.core.config import settings
@@ -288,6 +291,42 @@ def _drive(project_id: str) -> None:
         _strand(db, project_id, str(e))
     finally:
         db.close()
+
+
+def _resume_paused(owner_id: str, device_id: str) -> None:
+    """Pick up every build that paused for this computer, now that it is back."""
+    db = SessionLocal()
+    try:
+        paused = (
+            db.query(Project)
+            .filter(
+                Project.owner_id == owner_id,
+                Project.status == PipelineStatus.PAUSED.value,
+                Project.paused_device_id == device_id,
+            )
+            .all()
+        )
+        for project in paused:
+            # Claimed first: a Stop that landed a moment ago keeps its own message.
+            if not _claim(db, project, {PipelineStatus.PAUSED.value}):
+                continue  # resumed by hand, or stopped, a moment ago
+            runner.prepare_resume(db, project)
+            log.info("Device %s reconnected; resuming build %s.", device_id, project.id)
+            threading.Thread(target=_drive, args=(project.id,), name=f"resume-{project.id[:8]}", daemon=True).start()
+    except Exception:  # noqa: BLE001 - the builds stay paused and resumable by hand
+        log.exception("Couldn't resume the builds paused for device %s", device_id)
+    finally:
+        db.close()
+
+
+def resume_paused_for(owner_id: str, device_id: str) -> None:
+    """`hub.on_ready` listener. Called on the event loop, so the work goes to a thread."""
+    threading.Thread(
+        target=_resume_paused, args=(owner_id, device_id), name="resume-paused", daemon=True
+    ).start()
+
+
+hub.on_ready.append(resume_paused_for)
 
 
 def _drive_reject(project_id: str, feedback: str) -> None:
@@ -716,14 +755,18 @@ def stop_pipeline(
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ) -> RunResponse:
-    """Stop a run. The current model call finishes, then the pipeline halts.
+    """Stop a run, interrupting the model call in flight.
 
     Marked `cancelled` immediately so the UI is never stuck watching a run it has
-    already abandoned — and everything produced so far is kept for the resume.
+    already abandoned — and everything produced so far is kept for the resume. The
+    call in flight is cancelled, so the runtime stops generating: over the connector
+    that is a `cancel` to the user's computer, and on this machine the connection
+    to the runtime is closed.
     """
     if project.status not in (
         PipelineStatus.RUNNING.value,
         PipelineStatus.AWAITING_APPROVAL.value,
+        PipelineStatus.PAUSED.value,
     ):
         raise HTTPException(400, f"This build isn't running (status '{project.status}').")
 
@@ -750,6 +793,7 @@ def resume_pipeline(
         PipelineStatus.CANCELLED.value,
         PipelineStatus.FAILED.value,
         PipelineStatus.CREATED.value,
+        PipelineStatus.PAUSED.value,
     }
     # A live `running` project is doing fine; only a stalled one may be taken over.
     if project.status == PipelineStatus.RUNNING.value and project.stalled:
