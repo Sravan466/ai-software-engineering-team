@@ -11,7 +11,8 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError, status_is_retryable
+from app.router.base import LLMProvider, ProviderError, status_is_retryable, status_of
+from app.router.providers.cloud_key import CloudKey
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
 log = get_logger(__name__)
@@ -20,30 +21,22 @@ log = get_logger(__name__)
 _ADAPTIVE_THINKING_PREFIXES = ("claude-opus-4-8", "claude-opus-4-7", "claude-fable-5")
 
 
-class AnthropicProvider(LLMProvider):
+class AnthropicProvider(CloudKey, LLMProvider):
     name = "anthropic"
     is_local = False
     #: Published rather than probed — there is no capability endpoint to ask.
     context_tokens = settings.anthropic_context_tokens
 
     def __init__(self, api_key: Optional[str] = None) -> None:
-        self.api_key = api_key or settings.anthropic_api_key
+        self._init_key(api_key or settings.anthropic_api_key)
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             import anthropic  # imported lazily so the package is optional at runtime
 
-            self._client = anthropic.Anthropic(api_key=self.api_key)
+            self._client = anthropic.Anthropic(api_key=self.secret())
         return self._client
-
-    def set_api_key(self, key: Optional[str]) -> None:
-        """Update the key at runtime (Settings UI) and drop the cached client."""
-        self.api_key = key or None
-        self._client = None
-
-    def available(self) -> bool:
-        return bool(self.api_key)
 
     def generate(
         self,
@@ -88,7 +81,7 @@ class AnthropicProvider(LLMProvider):
             resp = client.messages.create(**kwargs)
         except Exception as e:  # noqa: BLE001 - normalise SDK/network errors
             raise ProviderError(
-                f"Anthropic call failed: {e}", retryable=status_is_retryable(e)
+                f"Anthropic call failed: {e}", retryable=status_is_retryable(e), status=status_of(e)
             ) from e
 
         latency = int((time.perf_counter() - started) * 1000)

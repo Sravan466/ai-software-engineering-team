@@ -34,8 +34,11 @@ services:
 
   backend:
     build: ./backend
+    # This computer's loopback only. Docker publishes on every interface by default,
+    # and anything on the same network could then reach the settings API. To serve
+    # it to other machines, change this deliberately and set BACKEND_PUBLIC_URL.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
     environment:
@@ -54,6 +57,10 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - backend_data:/app/data
+      # The key saved API keys are encrypted with: its own volume, so a copy or
+      # backup of the data volume doesn't carry what unlocks it. (Or set
+      # SECRETS_ENCRYPTION_KEY in .env / a Docker secret.)
+      - backend_secrets:/root/.config/aiteam
 
   frontend:
     build: ./frontend
@@ -81,4 +88,5 @@ services:
 volumes:
   ollama:
   backend_data:
+  backend_secrets:
   pg:

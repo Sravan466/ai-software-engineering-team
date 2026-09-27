@@ -6,36 +6,29 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError, status_is_retryable
+from app.router.base import LLMProvider, ProviderError, status_is_retryable, status_of
+from app.router.providers.cloud_key import CloudKey
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
 log = get_logger(__name__)
 
 
-class OpenAIProvider(LLMProvider):
+class OpenAIProvider(CloudKey, LLMProvider):
     name = "openai"
     is_local = False
     #: Published rather than probed — there is no capability endpoint to ask.
     context_tokens = settings.openai_context_tokens
 
     def __init__(self, api_key: Optional[str] = None) -> None:
-        self.api_key = api_key or settings.openai_api_key
+        self._init_key(api_key or settings.openai_api_key)
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=self.api_key)
+            self._client = OpenAI(api_key=self.secret())
         return self._client
-
-    def set_api_key(self, key: Optional[str]) -> None:
-        """Update the key at runtime (Settings UI) and drop the cached client."""
-        self.api_key = key or None
-        self._client = None
-
-    def available(self) -> bool:
-        return bool(self.api_key)
 
     def generate(
         self,
@@ -63,7 +56,7 @@ class OpenAIProvider(LLMProvider):
             resp = self._get_client().chat.completions.create(**kwargs)
         except Exception as e:  # noqa: BLE001
             raise ProviderError(
-                f"OpenAI call failed: {e}", retryable=status_is_retryable(e)
+                f"OpenAI call failed: {e}", retryable=status_is_retryable(e), status=status_of(e)
             ) from e
 
         latency = int((time.perf_counter() - started) * 1000)

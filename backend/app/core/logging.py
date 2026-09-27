@@ -17,6 +17,10 @@ def configure_logging() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Provider errors quote keys back; nothing reaches a handler unscrubbed.
+    from app.core.scrub import install_log_scrubber
+
+    install_log_scrubber()
     _CONFIGURED = True
 
 

@@ -257,7 +257,9 @@ class SourceRegistry:
                 if not isinstance(entry["base_url"], str):
                     raise SourceError("its address isn't text")
                 url = normalise_url(entry["base_url"])
-                key = clean_key(entry.get("api_key") if isinstance(entry.get("api_key"), str) else None)
+                # Encrypted on disk. One that can't be decrypted is kept as saved, not
+                # loaded keyless — a save would otherwise write it back without its key.
+                key = clean_key(secrets_store.reveal(entry.get("api_key")))
             except Exception as e:  # noqa: BLE001 - kept as saved, never dropped
                 log.warning("The saved source at %s can't be used: %s", redact(entry.get("base_url")), e)
                 self._unloaded.append(entry)

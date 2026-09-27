@@ -25,7 +25,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.core import secrets_store
 from app.core.config import settings
+from app.router import keycheck
 from app.router.runtimes.detect import is_loopback
 from app.router.runtimes.sources import SourceError, normalise_url
 from app.router.router import router as model_router
@@ -89,24 +91,82 @@ class RoleModelUpdate(BaseModel):
 
 
 # ── Cloud provider API keys ──────────────────────────────────────────────────
+# Write-only: a key goes in through the body of a PUT and never comes back — only
+# whether one is set, its last four characters and its last check. Changing, checking
+# and removing one is taken only from a name this backend is served at, and checks
+# are rate-limited per account.
 @router.get("/providers")
 def get_providers() -> dict:
     return {
         "providers": model_router.provider_settings(),
         "default_mode": settings.default_routing_mode,
+        "store_error": model_router.store_error(),
     }
 
 
+def _guard_key_route(request: Request, provider: str, *, checks: bool) -> None:
+    if provider not in model_router.CLOUD_PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"'{provider}' isn't a cloud provider.")
+    if not _trusted_host(request):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "API keys can only be changed from an address this backend is served at "
+                "(localhost, or BACKEND_PUBLIC_URL)."
+            ),
+        )
+    if checks and not keycheck.limiter.allow(model_router.user_id or "install"):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many key checks in a short time. Wait a few minutes and try again.",
+        )
+
+
+def _unreadable(e: Exception) -> HTTPException:
+    return HTTPException(status_code=409, detail=str(e))
+
+
 @router.put("/providers/{provider}")
-def set_provider(provider: str, body: ProviderKeyUpdate) -> dict:
-    """Set a cloud provider's API key, its default model, or both."""
+def set_provider(provider: str, body: ProviderKeyUpdate, request: Request) -> dict:
+    """Set a cloud provider's API key, its default model, or both — checked first.
+
+    `{applied, check, provider}`: whether the change was made (a key the provider
+    rejects is not saved, and never replaces one that works), what the check found,
+    and the provider's row as Settings shows it now.
+    """
+    # Removing ("") makes no call to the provider, so it isn't counted as a check.
+    _guard_key_route(request, provider, checks=body.api_key != "")
     try:
-        model_router.set_provider_key(
+        result = model_router.save_provider_key(
             provider, api_key=body.api_key, default_model=body.default_model
         )
+    except secrets_store.StoreUnreadable as e:
+        raise _unreadable(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return model_router.provider_settings()[provider]
+    return {**result, "provider": model_router.provider_settings()[provider]}
+
+
+@router.post("/providers/{provider}/check")
+def check_provider(provider: str, request: Request) -> dict:
+    """Check the saved key again, now: a free request, then a one-token one."""
+    _guard_key_route(request, provider, checks=True)
+    try:
+        found = model_router.recheck_provider_key(provider)
+    except secrets_store.StoreUnreadable as e:
+        raise _unreadable(e)
+    return {"check": found.to_dict(), "provider": model_router.provider_settings()[provider]}
+
+
+@router.delete("/providers/{provider}")
+def remove_provider(provider: str, request: Request) -> dict:
+    """Forget the saved key. (Revoking it at the provider is the user's to do.)"""
+    _guard_key_route(request, provider, checks=False)
+    try:
+        model_router.remove_provider_key(provider)
+    except secrets_store.StoreUnreadable as e:
+        raise _unreadable(e)
+    return {"provider": model_router.provider_settings()[provider]}
 
 
 # ── which model each role runs on ────────────────────────────────────────────

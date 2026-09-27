@@ -145,8 +145,13 @@ npm run dev                   # http://localhost:3000
 - **`/settings`** — manage models at runtime (self-host): every local runtime found or added,
   its models (and a **download** field where the runtime has a download API, e.g. Ollama),
   the model each agent runs on, and your own **cloud API keys** (Claude / GPT / Gemini) without
-  editing `.env`. Keys are stored on the backend only, in the gitignored
-  `backend/data/providers.local.json`, and applied to the router immediately.
+  editing `.env`. A key is **checked when you save it** — a free request, then a one-token
+  one against the model you chose — and a key the provider rejects is never saved over one
+  that works. Keys are stored on the backend only, per account under the gitignored
+  `backend/data/users/<id>/providers.local.json`, **encrypted** (Fernet; the encryption key
+  comes from `SECRETS_ENCRYPTION_KEY` or a generated file outside `data/`, see `.env.example`).
+  They are never returned to the browser beyond their last four characters, and scrubbed
+  from logs and errors.
 
 - **`/setup`** — pair a computer with the connector, and see what its runtimes report.
 

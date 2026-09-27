@@ -602,7 +602,8 @@ def test_a_local_default_saved_the_old_way_is_read_with_its_source(tmp_path, mon
 
     secrets_store.set_local_default("llamacpp:qwen", cloud)
     data = json.loads((tmp_path / "providers.local.json").read_text())
-    assert data == {"anthropic": {"api_key": "k"}, "local": {"default_model": "llamacpp:qwen"}}
+    assert data["local"] == {"default_model": "llamacpp:qwen"} and set(data) == {"anthropic", "local"}
+    assert secrets_store.get_all()["anthropic"] == {"api_key": "k"}
     assert secrets_store.get_local_default(cloud) == "llamacpp:qwen"
 
 
@@ -821,8 +822,9 @@ def test_concurrent_settings_writes_keep_every_key(tmp_path, monkeypatch):
         t.start()
     for t in threads:
         t.join()
-    data = json.loads((tmp_path / "providers.local.json").read_text())
+    data = secrets_store.get_all()
     assert data["anthropic"]["api_key"] == "sk-ant-keep" and data["openai"]["api_key"] == "sk-oai-keep"
+    data = json.loads((tmp_path / "providers.local.json").read_text())
     assert data["local"]["default_model"] == "src:model-149"
     assert data["sources"][0]["id"] == "s149"
     assert stat.S_IMODE(os.stat(tmp_path / "providers.local.json").st_mode) == 0o600

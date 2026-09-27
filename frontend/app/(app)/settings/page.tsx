@@ -8,6 +8,7 @@ import {
   LocalStatus,
   ModelCheck,
   ModelProfile,
+  KeyStatus,
   ProviderSetting,
   RoleRow,
   RoleSettings,
@@ -24,25 +25,39 @@ import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { CheckDetail, VerdictChip } from "@/components/models/ModelCheck";
 import ModelTune from "@/components/models/ModelTune";
+import { ago, useNow } from "@/components/setup/parts";
 
-const PROVIDERS: { key: string; label: string; placeholder: string; console: string }[] = [
+const PROVIDERS: {
+  key: string;
+  label: string;
+  company: string;
+  placeholder: string;
+  console: string;
+  billing: string;
+}[] = [
   {
     key: "anthropic",
     label: "Anthropic — Claude",
+    company: "Anthropic",
     placeholder: "sk-ant-…",
     console: "https://console.anthropic.com/settings/keys",
+    billing: "https://console.anthropic.com/settings/billing",
   },
   {
     key: "openai",
     label: "OpenAI — GPT",
+    company: "OpenAI",
     placeholder: "sk-…",
     console: "https://platform.openai.com/api-keys",
+    billing: "https://platform.openai.com/settings/organization/billing",
   },
   {
     key: "gemini",
     label: "Google — Gemini",
+    company: "Google AI Studio",
     placeholder: "AIza…",
     console: "https://aistudio.google.com/apikey",
+    billing: "https://console.cloud.google.com/billing",
   },
 ];
 
@@ -1585,24 +1600,65 @@ function RoleLine({
 }
 
 // ── Cloud API keys ───────────────────────────────────────────────────────────
+/** How each check result reads: a badge (icon + words, never colour alone). */
+const KEY_BADGE: Record<KeyStatus, { tone: "ok" | "warn" | "bad" | ""; label: string; icon: ReactNode }> = {
+  valid: { tone: "ok", label: "Working", icon: Icon.check },
+  rate_limited: { tone: "ok", label: "Working · rate-limited", icon: Icon.check },
+  billing: { tone: "warn", label: "No credit", icon: Icon.alert },
+  model_unavailable: { tone: "warn", label: "Model not available", icon: Icon.alert },
+  invalid: { tone: "bad", label: "Rejected", icon: Icon.alert },
+  locked: { tone: "bad", label: "Can't be read", icon: Icon.alert },
+  unverified: { tone: "", label: "Not verified", icon: Icon.info },
+  unchecked: { tone: "", label: "Not checked yet", icon: Icon.info },
+  none: { tone: "", label: "Not configured", icon: null },
+};
+
+function KeyBadge({ status }: { status: KeyStatus }) {
+  const b = KEY_BADGE[status] ?? KEY_BADGE.unverified;
+  return (
+    <span className={`badge key-badge${b.tone ? ` badge-${b.tone}` : ""}`}>
+      {b.icon}
+      {b.label}
+    </span>
+  );
+}
+
+/** Where to go next for each outcome, per provider. */
+function keyAdvice(p: (typeof PROVIDERS)[number], status: KeyStatus): { href: string; text: string } | null {
+  if (status === "billing") return { href: p.billing, text: `Open ${p.company} billing` };
+  if (status === "invalid") return { href: p.console, text: `Create a key at ${p.company}` };
+  return null;
+}
+
 function ApiKeysCard() {
   const [providers, setProviders] = useState<Record<string, ProviderSetting> | null>(null);
+  const [storeError, setStoreError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, { key: string; model: string }>>({});
-  const [saving, setSaving] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
+  /** Which provider is busy, and doing what — the button says which. */
+  const [busy, setBusy] = useState<{ provider: string; action: "save" | "check" | "remove" } | null>(null);
+  /** The outcome of the last action per provider, shown under it until the next. */
+  const [outcome, setOutcome] = useState<
+    Record<string, { tone: "ok" | "warn" | "bad"; text: string; revoke?: boolean } | undefined>
+  >({});
   const [error, setError] = useState("");
+  const now = useNow(30_000);
+
+  const take = useCallback((provider: string, row: ProviderSetting) => {
+    setProviders((all) => (all ? { ...all, [provider]: row } : all));
+  }, []);
 
   const refresh = useCallback(async () => {
     setError("");
     try {
-      const { providers } = await api.getProviders();
-      setProviders(providers);
+      const res = await api.getProviders();
+      setProviders(res.providers);
+      setStoreError(res.store_error);
       setDrafts((d) => {
         const next = { ...d };
         for (const p of PROVIDERS) {
           next[p.key] = {
             key: "",
-            model: next[p.key]?.model ?? providers[p.key]?.default_model ?? "",
+            model: next[p.key]?.model ?? res.providers[p.key]?.default_model ?? "",
           };
         }
         return next;
@@ -1616,38 +1672,73 @@ function ApiKeysCard() {
     refresh();
   }, [refresh]);
 
+  function say(provider: string, value: (typeof outcome)[string]) {
+    setOutcome((o) => ({ ...o, [provider]: value }));
+  }
+
   async function onSave(provider: string) {
-    setSaving(provider);
+    const draft = drafts[provider] || { key: "", model: "" };
+    const key = draft.key.trim();
+    const current = providers?.[provider];
+    const model = draft.model.trim();
+    if (!key && (!model || model === current?.default_model)) return;
+    setBusy({ provider, action: "save" });
     setError("");
-    setSaved(null);
+    say(provider, undefined);
+    // The key leaves page state the moment it is sent — whatever the answer.
+    setDrafts((d) => ({ ...d, [provider]: { ...d[provider], key: "" } }));
     try {
-      const draft = drafts[provider] || { key: "", model: "" };
-      await api.setProviderKey(provider, {
-        api_key: draft.key.trim() ? draft.key.trim() : undefined,
-        default_model: draft.model.trim() || undefined,
+      const res = await api.setProviderKey(provider, {
+        api_key: key || undefined,
+        default_model: model || undefined,
       });
-      setDrafts((d) => ({ ...d, [provider]: { ...d[provider], key: "" } }));
-      await refresh();
-      // Confirm the write, then let the confirmation fade on its own.
-      setSaved(provider);
-      setTimeout(() => setSaved((s) => (s === provider ? null : s)), 2600);
+      take(provider, res.provider);
+      const check = res.check;
+      if (!res.applied && check) {
+        const kept = current?.configured ? " Your current key is still the one in use." : "";
+        say(provider, {
+          tone: check.status === "invalid" ? "bad" : "warn",
+          text: key ? `Not saved — ${check.message}${kept}` : `Model not changed — ${check.message}`,
+        });
+        if (!key) setDrafts((d) => ({ ...d, [provider]: { ...d[provider], model: res.provider.default_model ?? "" } }));
+      } else if (check) {
+        const good = check.status === "valid" || check.status === "rate_limited";
+        say(provider, { tone: good ? "ok" : "warn", text: `Saved. ${check.message}` });
+      } else {
+        say(provider, { tone: "ok", text: "Saved." });
+      }
     } catch (e: any) {
       setError(e.message);
     } finally {
-      setSaving(null);
+      setBusy(null);
+    }
+  }
+
+  async function onRecheck(provider: string) {
+    setBusy({ provider, action: "check" });
+    setError("");
+    say(provider, undefined);
+    try {
+      const res = await api.recheckProviderKey(provider);
+      take(provider, res.provider);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(null);
     }
   }
 
   async function onRemove(provider: string) {
-    setSaving(provider);
+    setBusy({ provider, action: "remove" });
     setError("");
     try {
-      await api.setProviderKey(provider, { api_key: "" });
-      await refresh();
+      const res = await api.removeProviderKey(provider);
+      take(provider, res.provider);
+      say(provider, { tone: "ok", text: "Key removed from this app.", revoke: true });
     } catch (e: any) {
       setError(e.message);
     } finally {
-      setSaving(null);
+      setBusy(null);
     }
   }
 
@@ -1659,8 +1750,38 @@ function ApiKeysCard() {
       </div>
       <p className="muted" style={{ margin: "0 0 6px", fontSize: "var(--t-base)", lineHeight: 1.6 }}>
         Add your own keys to let Auto and Manual routing reach Claude, GPT or Gemini. Leave them
-        blank to stay entirely local.
+        blank to stay entirely local. Each key is checked against its model when you save it, stored
+        encrypted on this backend, and never shown again — only its last four characters.
       </p>
+      <p className="field-hint key-safety">
+        Safer keys: an OpenAI{" "}
+        <a className="link" href="https://help.openai.com/en/articles/8867743-assign-api-key-permissions" target="_blank" rel="noreferrer">
+          project key with restricted permissions
+        </a>
+        , an Anthropic{" "}
+        <a className="link" href="https://platform.claude.com/docs/en/manage-claude/workspaces" target="_blank" rel="noreferrer">
+          workspace with a spend limit
+        </a>
+        . Best practices from{" "}
+        <a className="link" href="https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety" target="_blank" rel="noreferrer">
+          OpenAI
+        </a>{" "}
+        and{" "}
+        <a className="link" href="https://support.claude.com/en/articles/9767949-api-key-best-practices-keeping-your-keys-safe-and-secure" target="_blank" rel="noreferrer">
+          Anthropic
+        </a>
+        .
+      </p>
+
+      {storeError && (
+        <div className="notice notice-bad" role="alert" style={{ marginTop: 14 }}>
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-title">Saved keys can&apos;t be read</span>
+            <span className="notice-text">{storeError}</span>
+          </div>
+        </div>
+      )}
 
       {providers === null ? (
         <div style={{ marginTop: 16 }}>
@@ -1670,35 +1791,114 @@ function ApiKeysCard() {
         PROVIDERS.map((p) => {
           const info = providers[p.key];
           const draft = drafts[p.key] || { key: "", model: "" };
-          const isSaving = saving === p.key;
+          const mine = busy?.provider === p.key ? busy.action : null;
+          const locked = busy !== null && busy.provider === p.key;
+          const status: KeyStatus = info?.status ?? "none";
+          const said = outcome[p.key];
+          const advice = keyAdvice(p, status);
+          const statusId = `key-status-${p.key}`;
+          const unchanged = !draft.key.trim() && (!draft.model.trim() || draft.model.trim() === info?.default_model);
+          const troubled = status === "invalid" || status === "billing" || status === "model_unavailable" || status === "locked";
           return (
             <div key={p.key} className="provider">
               <div className="provider-head">
                 <span className="provider-name">{p.label}</span>
-                {info?.configured ? (
-                  <span className="badge badge-ok">
-                    <span className="dot dot-ok" aria-hidden="true" />
-                    Key saved{info.key_hint ? ` · ${info.key_hint}` : ""}
-                  </span>
-                ) : (
-                  <span className="badge">Not configured</span>
-                )}
+                <KeyBadge status={status} />
               </div>
+
+              {info?.configured && (
+                <div className="key-meta">
+                  <span className="mono">{info.key_hint}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>
+                    {info.checked_at ? (
+                      <>
+                        checked {ago(info.checked_at, now)}
+                        {info.checked_model && (
+                          <>
+                            {" "}with <span className="mono">{info.checked_model}</span>
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      "not checked yet"
+                    )}
+                  </span>
+                  <span className="key-actions">
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => onRecheck(p.key)}
+                      disabled={locked}
+                      aria-describedby={statusId}
+                    >
+                      {mine === "check" ? <span className="btn-spinner" aria-hidden="true" /> : Icon.refresh}
+                      {mine === "check" ? "Checking…" : "Re-check"}
+                    </button>
+                    <button className="btn btn-danger btn-sm" onClick={() => onRemove(p.key)} disabled={locked}>
+                      {mine === "remove" ? <span className="btn-spinner" aria-hidden="true" /> : Icon.trash}
+                      Remove
+                    </button>
+                  </span>
+                </div>
+              )}
+
+              {(info?.configured || status === "locked") && status !== "valid" && (
+                <div
+                  id={statusId}
+                  className={`notice ${troubled ? (status === "invalid" || status === "locked" ? "notice-bad" : "notice-warn") : ""} key-notice`}
+                  role="status"
+                >
+                  {troubled ? Icon.alert : Icon.info}
+                  <div className="notice-body">
+                    <span className="notice-text">
+                      {info.message}
+                      {troubled && status !== "locked" && " Builds won't use this key until it passes a check."}
+                    </span>
+                    {advice && (
+                      <a className="link notice-link" href={advice.href} target="_blank" rel="noreferrer">
+                        {advice.text} {Icon.external}
+                      </a>
+                    )}
+                    {info.models.length > 0 && (
+                      <div className="key-models">
+                        <span className="field-hint">This key can use — pick one, then Save:</span>
+                        <div className="model-list">
+                          {info.models.map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              className={`badge badge-mono key-model${draft.model === m ? " is-picked" : ""}`}
+                              aria-pressed={draft.model === m}
+                              onClick={() => setDrafts((d) => ({ ...d, [p.key]: { ...d[p.key], model: m } }))}
+                            >
+                              {m}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="provider-grid">
                 <div className="field field-key">
-                  <label htmlFor={`key-${p.key}`}>API key</label>
+                  <label htmlFor={`key-${p.key}`}>{info?.configured ? "Replace key" : "API key"}</label>
                   <input
                     id={`key-${p.key}`}
                     type="password"
                     autoComplete="off"
+                    spellCheck={false}
                     className="input input-mono"
-                    placeholder={info?.configured ? "Enter a new key to replace it" : p.placeholder}
+                    placeholder={info?.configured ? "Paste a new key to replace it" : p.placeholder}
                     value={draft.key}
-                    disabled={isSaving}
+                    disabled={locked}
                     onChange={(e) =>
                       setDrafts((d) => ({ ...d, [p.key]: { ...d[p.key], key: e.target.value } }))
                     }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !unchanged) onSave(p.key);
+                    }}
                   />
                 </div>
                 <div className="field field-model">
@@ -1706,34 +1906,46 @@ function ApiKeysCard() {
                   <input
                     id={`model-${p.key}`}
                     type="text"
+                    spellCheck={false}
                     className="input input-mono"
                     placeholder="model id"
                     value={draft.model}
-                    disabled={isSaving}
+                    disabled={locked}
                     onChange={(e) =>
                       setDrafts((d) => ({ ...d, [p.key]: { ...d[p.key], model: e.target.value } }))
                     }
                   />
                 </div>
-                <button className="btn btn-primary" onClick={() => onSave(p.key)} disabled={isSaving}>
-                  {isSaving && <span className="btn-spinner" aria-hidden="true" />}
-                  {isSaving ? "Saving…" : "Save"}
+                <button
+                  className="btn btn-primary"
+                  onClick={() => onSave(p.key)}
+                  disabled={locked || unchanged}
+                >
+                  {mine === "save" && <span className="btn-spinner" aria-hidden="true" />}
+                  {mine === "save" ? "Checking…" : "Save & check"}
                 </button>
-                {info?.configured && (
-                  <button className="btn btn-danger" onClick={() => onRemove(p.key)} disabled={isSaving}>
-                    Remove
-                  </button>
-                )}
               </div>
 
               <p className="field-hint" style={{ marginTop: 8 }} aria-live="polite">
-                {saved === p.key ? (
-                  <span style={{ color: "var(--ok)" }}>Saved.</span>
+                {said ? (
+                  <span className={`key-outcome key-outcome-${said.tone}`}>
+                    {said.text}
+                    {said.revoke && (
+                      <>
+                        {" "}If you think it leaked, also{" "}
+                        <a className="link" href={p.console} target="_blank" rel="noreferrer">
+                          revoke it at {p.company}
+                        </a>
+                        .
+                      </>
+                    )}
+                  </span>
                 ) : (
                   <>
-                    Get a key from{" "}
+                    Saving checks the key: a free request, then a one-token request against the model
+                    (a tiny fraction of a cent). Get a key from{" "}
                     <a className="link" href={p.console} target="_blank" rel="noreferrer">
-                      {p.label.split(" — ")[0]}
+                      {p.company}
                     </a>
                     .
                   </>

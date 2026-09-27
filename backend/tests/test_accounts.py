@@ -212,14 +212,17 @@ def test_a_recorded_call_is_owned_by_the_projects_owner():
 # ── keys, sources and choices are per account ─────────────────────────────────
 def test_a_cloud_key_is_one_accounts_and_never_returned_in_full(two):
     a, a_user, b, b_user = two
-    r = a.put("/api/settings/providers/anthropic", json={"api_key": "sk-ant-secret-abcd"})
-    assert r.status_code == 200 and r.json()["configured"] is True
+    r = a.put(
+        "/api/settings/providers/anthropic", json={"api_key": "sk-ant-secret-abcd"}, headers={"host": "localhost"}
+    )
+    assert r.status_code == 200 and r.json()["provider"]["configured"] is True
     assert "sk-ant-secret" not in a.get("/api/settings/providers").text
     assert a.get("/api/settings/providers").json()["providers"]["anthropic"]["key_hint"] == "…abcd"
     assert b.get("/api/settings/providers").json()["providers"]["anthropic"]["configured"] is False
 
     stored = json.loads(userdata.path(a_user.id, "providers.local.json").read_text())
-    assert stored["anthropic"]["api_key"] == "sk-ant-secret-abcd"
+    assert stored["anthropic"]["api_key"].startswith("enc:v1:")
+    assert "sk-ant-secret" not in userdata.path(a_user.id, "providers.local.json").read_text()
     assert not userdata.path(b_user.id, "providers.local.json").exists()
     assert (userdata.path(a_user.id, "providers.local.json").stat().st_mode & 0o077) == 0
 

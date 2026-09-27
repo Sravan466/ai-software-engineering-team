@@ -20,6 +20,14 @@ the local default under the runtime's own name (`{"<runtime>": {"default_model":
 Each account has its own file (`app.core.userdata`), held by a `ProviderStore`. The
 module-level functions are the store at `_PATH` — the single global file from before
 accounts, which the accounts migration moves into the first account's directory.
+
+Every API key in the file — a cloud provider's or a source's — is encrypted
+(`app.core.secretbox`); a file from before that is encrypted in place at startup
+(`migrate_all`). Beside each cloud key sits its last check (`"check"`): status,
+reason, when, and which key it was about — never the provider's own words.
+
+A file that can't be read is an error, never an empty file: reading it as empty
+used to make the next save write back one provider and erase the rest.
 """
 from __future__ import annotations
 
@@ -28,7 +36,11 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
+from app.core import secretbox
 from app.core.atomic import write_private
+from app.core.logging import get_logger
+
+log = get_logger(__name__)
 
 # Relative to the backend process cwd, mirroring `sqlite:///./data/aiteam.db`.
 _PATH = Path("data") / "providers.local.json"
@@ -55,32 +67,94 @@ def _lock_for(path: Path) -> threading.RLock:
         return lock
 
 
+class StoreUnreadable(RuntimeError):
+    """The settings file exists and can't be read. It is left exactly as it is."""
+
+
+def reveal(value: object) -> Optional[str]:
+    """A saved key, decrypted. Raises `secretbox.SecretsLocked` if it can't be."""
+    return secretbox.decrypt(value) if isinstance(value, str) else None
+
+
+def _sealed(data: dict) -> tuple[dict, int]:
+    """`data` with every plaintext key in it encrypted, and how many there were."""
+    count = 0
+    for name, entry in data.items():
+        if name in RESERVED or not isinstance(entry, dict):
+            continue
+        key = entry.get("api_key")
+        if isinstance(key, str) and key and not secretbox.is_encrypted(key):
+            entry["api_key"] = secretbox.encrypt(key)
+            count += 1
+    sources = data.get(SOURCES_KEY)
+    if isinstance(sources, list):
+        for entry in sources:
+            key = entry.get("api_key") if isinstance(entry, dict) else None
+            if isinstance(key, str) and key and not secretbox.is_encrypted(key):
+                entry["api_key"] = secretbox.encrypt(key)
+                count += 1
+    return data, count
+
+
 class ProviderStore:
     """One account's cloud keys, local default and added sources — one file."""
 
     def __init__(self, path: Callable[[], Path]) -> None:
         #: Resolved on every use, so a test that moves the directory moves the store.
         self._path = path
+        #: Why the file couldn't be read, the last time it couldn't. Shown in Settings.
+        self.error: Optional[str] = None
 
     @property
     def path(self) -> Path:
         return self._path()
 
-    def _read(self) -> dict:
+    def _read(self, *, strict: bool = False) -> dict:
+        """The file's content. Unreadable: `{}` for a reader, an error for a writer —
+        so nothing is ever saved over a file that could not be read."""
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("it doesn't hold a JSON object")
         except FileNotFoundError:
+            self.error = None
             return {}
-        except Exception:  # noqa: BLE001 - a corrupt file should not crash startup
+        except Exception as e:  # noqa: BLE001 - reported, never treated as empty on write
+            self.error = (
+                f"The saved settings file ({self.path.name}) can't be read, so nothing is being "
+                f"saved over it: {type(e).__name__}. Restore it from a backup, or move it aside "
+                "to start again."
+            )
+            log.error("%s", self.error)
+            if strict:
+                raise StoreUnreadable(self.error) from e
             return {}
-        return data if isinstance(data, dict) else {}
+        self.error = None
+        return data
 
     def _write(self, data: dict) -> None:
+        data, _ = _sealed(data)
         write_private(self.path, json.dumps(data, indent=2))
 
     def get_all(self) -> dict:
-        """Mapping of provider -> {api_key?, default_model?}. Reserved keys are left out."""
-        return {k: v for k, v in self._read().items() if k not in RESERVED and isinstance(v, dict)}
+        """Mapping of provider -> {api_key?, default_model?, check?, locked?}.
+
+        Keys come back decrypted. One that can't be decrypted comes back as
+        `locked: True`, with no key — and stays in the file as it was.
+        """
+        out: dict = {}
+        for name, entry in self._read().items():
+            if name in RESERVED or not isinstance(entry, dict):
+                continue
+            entry = dict(entry)
+            if "api_key" in entry:
+                try:
+                    entry["api_key"] = reveal(entry.get("api_key"))
+                except secretbox.SecretsLocked:
+                    entry.pop("api_key", None)
+                    entry["locked"] = True
+            out[name] = entry
+        return out
 
     def get_local_default(self, cloud: tuple[str, ...]) -> Optional[str]:
         """The local default the user chose, as `source:model` — or None if never chosen.
@@ -104,7 +178,7 @@ class ProviderStore:
     def set_local_default(self, spec: Optional[str], cloud: tuple[str, ...]) -> None:
         """Record (or, with None, clear) the local default, dropping the old-shape copy."""
         with _lock_for(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             for name in [n for n in data if n not in RESERVED and n not in cloud]:
                 entry = data.get(name)
                 if isinstance(entry, dict):
@@ -118,7 +192,8 @@ class ProviderStore:
             self._write(data)
 
     def get_sources(self) -> list[dict]:
-        """Sources added in Settings, as saved. Malformed entries are skipped."""
+        """Sources added in Settings, as saved — keys still encrypted (`reveal` them).
+        Malformed entries are skipped."""
         raw = self._read().get(SOURCES_KEY)
         if not isinstance(raw, list):
             return []
@@ -126,7 +201,7 @@ class ProviderStore:
 
     def save_sources(self, sources: list[dict]) -> None:
         with _lock_for(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             if sources:
                 data[SOURCES_KEY] = sources
             else:
@@ -146,14 +221,16 @@ class ProviderStore:
         - api_key == "..." -> store it
         """
         with _lock_for(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             entry = dict(data.get(provider, {}))
 
             if api_key is not None:
+                # A new key, or none: the old key's check is about the old key.
+                entry.pop("check", None)
                 if api_key == "":
                     entry.pop("api_key", None)
                 else:
-                    entry["api_key"] = api_key
+                    entry["api_key"] = secretbox.encrypt(api_key)
             if default_model:
                 entry["default_model"] = default_model
 
@@ -162,6 +239,36 @@ class ProviderStore:
             else:
                 data.pop(provider, None)
             self._write(data)
+
+
+    def set_check(self, provider: str, check: Optional[dict]) -> None:
+        """Record (or, with None, clear) the last check of a provider's key."""
+        with _lock_for(self.path):
+            data = self._read(strict=True)
+            entry = dict(data.get(provider, {}))
+            if check:
+                entry["check"] = check
+            else:
+                entry.pop("check", None)
+            if entry:
+                data[provider] = entry
+            else:
+                data.pop(provider, None)
+            self._write(data)
+
+    def migrate(self) -> int:
+        """Encrypt every plaintext key in the file, in place. Returns how many."""
+        with _lock_for(self.path):
+            if not self.path.is_file():
+                return 0
+            try:
+                data = self._read(strict=True)
+            except StoreUnreadable:
+                return 0  # reported; never rewritten
+            data, count = _sealed(data)
+            if count:
+                write_private(self.path, json.dumps(data, indent=2))
+            return count
 
 
 #: The global file from before accounts. Read through `_PATH` on every call, so a
@@ -202,3 +309,37 @@ def set_provider(
     default_model: Optional[str] = None,
 ) -> None:
     default_store.set_provider(provider, api_key, default_model)
+
+
+def migrate_all() -> int:
+    """Encrypt the plaintext keys in every settings file under the data directory.
+
+    The per-account files, the global file from before accounts, and the copies the
+    accounts migration set aside — those hold the same keys. Run at startup, after the
+    accounts migration; a second run finds nothing to do.
+    """
+    from app.core import userdata
+
+    paths: list[Path] = [_PATH, *sorted(_PATH.parent.glob(f"{_PATH.name}.moved-to-account-*"))]
+    if userdata.ROOT.is_dir():
+        paths += sorted(userdata.ROOT.glob("*/providers.local.json"))
+    total = 0
+    for path in paths:
+        try:
+            count = ProviderStore(lambda p=path: p).migrate()
+        except Exception as e:  # noqa: BLE001 - one file must not stop the rest, or startup
+            log.error("Could not encrypt the keys in %s: %s", path, type(e).__name__)
+            continue
+        if count:
+            log.warning(
+                "Encrypted %d API key(s) that were saved in plain text in %s. If a backup or "
+                "copy of that file exists from before, rotate those keys at the provider.",
+                count,
+                path,
+            )
+        total += count
+    return total
+
+
+def set_check(provider: str, check: Optional[dict]) -> None:
+    default_store.set_check(provider, check)

@@ -34,6 +34,10 @@ os.environ["OLLAMA_BASE_URL"] = ""
 os.environ["CHROMA_PERSIST_DIR"] = f"{_tmp}/chroma"
 # Each account's settings files, likewise cwd-relative.
 os.environ["USER_DATA_DIR"] = f"{_tmp}/users"
+# The key saved API keys are encrypted with. Left alone it would be generated into
+# the developer's own ~/.config.
+os.environ["SECRETS_KEY_FILE"] = f"{_tmp}/secrets.key"
+os.environ.pop("SECRETS_ENCRYPTION_KEY", None)
 _frontend = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
 if os.path.isfile(os.path.join(_frontend, "node_modules", "typescript", "package.json")):
     os.environ["BUILD_TOOLCHAIN_DIR"] = os.path.abspath(_frontend)
@@ -55,6 +59,13 @@ _model_roles._PATH = Path(_tmp) / "model_roles.local.json"
 _model_settings._PATH = Path(_tmp) / "model_settings.local.json"
 
 from app.main import app  # noqa: E402
+import httpx  # noqa: E402
+
+from app.router import keycheck as _keycheck  # noqa: E402
+
+# No test reaches a real provider. A key check that nobody stubbed finds the provider
+# "unreachable" — unverified, which leaves routing as it was before checks existed.
+_keycheck.transport = httpx.MockTransport(lambda request: httpx.Response(503, json={}))
 from app.core import auth as _auth, identity  # noqa: E402
 from app.db.base import SessionLocal, init_db  # noqa: E402
 from app.db.models import User  # noqa: E402
@@ -183,3 +194,10 @@ def client(stub_router):
     _auth.attempts.reset()
     with TestClient(app) as c:
         yield sign_in(c)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_key_check_limit():
+    """The key-check rate limit is per account, and the whole suite is one account."""
+    _keycheck.limiter.reset()
+    yield

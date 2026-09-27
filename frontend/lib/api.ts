@@ -189,6 +189,8 @@ export type Project = {
 // a model is thinking.
 const DEFAULT_TIMEOUT_MS = 15000;
 const LLM_TIMEOUT_MS = 300000; // 5 min — local generation on CPU is slow
+// Two bounded requests to the provider, plus listing models when the one chosen isn't there.
+const KEY_CHECK_TIMEOUT_MS = 60000;
 
 /**
  * A failed request, carrying the code as well as the sentence.
@@ -401,16 +403,32 @@ export const api = {
 
   // ── Settings: cloud API keys + local model sources ──
   getProviders: () =>
-    req<{ providers: Record<string, ProviderSetting>; default_mode: string }>(
-      "/api/settings/providers"
-    ),
+    req<{
+      providers: Record<string, ProviderSetting>;
+      default_mode: string;
+      store_error: string | null;
+    }>("/api/settings/providers"),
+  /** Save a key and/or model. The backend checks it first — a key the provider
+   * rejects is not saved (`applied: false`) and never replaces one that works. */
   setProviderKey: (
     provider: string,
     body: { api_key?: string | null; default_model?: string }
   ) =>
-    req<ProviderSetting>(`/api/settings/providers/${provider}`, {
-      method: "PUT",
-      body: JSON.stringify(body),
+    req<{ applied: boolean; check: KeyCheck | null; provider: ProviderSetting }>(
+      `/api/settings/providers/${provider}`,
+      { method: "PUT", body: JSON.stringify(body) },
+      KEY_CHECK_TIMEOUT_MS
+    ),
+  /** Check the saved key again, now (a free request, then a one-token one). */
+  recheckProviderKey: (provider: string) =>
+    req<{ check: KeyCheck; provider: ProviderSetting }>(
+      `/api/settings/providers/${provider}/check`,
+      { method: "POST" },
+      KEY_CHECK_TIMEOUT_MS
+    ),
+  removeProviderKey: (provider: string) =>
+    req<{ provider: ProviderSetting }>(`/api/settings/providers/${provider}`, {
+      method: "DELETE",
     }),
   /** Every model source and what it serves. `refresh` probes loopback again. */
   getLocalModel: (refresh = false) =>
@@ -651,11 +669,41 @@ export type RouterStatus = {
   fallback_chain: string[];
 };
 
+/** What a key check found. `message` is the backend's own sentence — never the
+ * provider's text, which can quote the key. */
+export type KeyStatus =
+  | "valid"
+  | "rate_limited"
+  | "invalid"
+  | "model_unavailable"
+  | "billing"
+  | "unverified"
+  | "unchecked"
+  | "locked"
+  | "none";
+
+export type KeyCheck = {
+  status: KeyStatus;
+  reason: string;
+  message: string;
+  checked_at: string;
+  model: string | null;
+  models: string[];
+  context_tokens: number | null;
+};
+
 export type ProviderSetting = {
   configured: boolean;
+  /** Set, and not rejected by its last check — what routing will use. */
   available: boolean;
   key_hint: string | null;
   default_model: string | null;
+  status: KeyStatus;
+  reason: string;
+  message: string;
+  checked_at: string | null;
+  checked_model: string | null;
+  models: string[];
 };
 
 /**

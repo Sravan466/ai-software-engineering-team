@@ -1100,8 +1100,11 @@ class PipelineRunner:
             hub.notify_ready(project.owner_id, error.device_id)
 
     def _fail(self, db: Session, project: Project, message: str) -> None:
+        from app.core.scrub import scrub
+
         project.status = PipelineStatus.FAILED.value
-        project.last_error = message
+        # Shown on the page and kept in the database: never a key a provider quoted.
+        project.last_error = scrub(message)
         db.commit()
         log.warning("Run failed: %s — %s", project.id, message)
 

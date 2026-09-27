@@ -23,10 +23,23 @@ class ProviderError(RuntimeError):
     does not wait on it too.
     """
 
-    def __init__(self, message: str, *, retryable: bool = True, unreachable: bool = False) -> None:
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        unreachable: bool = False,
+        status: Optional[int] = None,
+    ) -> None:
+        # Scrubbed here, once: this text goes on to the log, the attempts list, the
+        # project's `last_error` and the page, and a provider may have quoted the key.
+        from app.core.scrub import scrub
+
+        super().__init__(scrub(message))
         self.retryable = retryable
         self.unreachable = unreachable
+        #: The HTTP status the provider answered with, when there was one.
+        self.status = status
 
 
 class RequestCancelled(ProviderError):
@@ -81,14 +94,20 @@ def status_is_retryable(error: Exception) -> bool:
     socket. The cost of being wrong that way is a few seconds; the cost of being
     wrong the other way is a run that fails on a hiccup.
     """
+    status = status_of(error)
+    return True if status is None else status in RETRYABLE_STATUS
+
+
+def status_of(error: Exception) -> Optional[int]:
+    """The HTTP status an SDK exception carries, or None. (Not `code` — see above.)"""
     status = getattr(error, "status_code", None)
     if status is None:
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None) if response is not None else None
     try:
-        return int(status) in RETRYABLE_STATUS
+        return int(status)
     except (TypeError, ValueError):
-        return True
+        return None
 
 
 class LLMProvider(abc.ABC):
