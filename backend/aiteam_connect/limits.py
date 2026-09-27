@@ -104,8 +104,9 @@ class Gate:
                 self._started.popleft()
             if len(self._started) >= limits["requests_per_minute"]:
                 raise LimitRefused(
-                    f"This computer allows {limits['requests_per_minute']} model calls a minute, and "
-                    "that many have already started (aiteam-connect limits --requests-per-minute)."
+                    f"This computer allows {limits['requests_per_minute']} model "
+                    f"call{'' if limits['requests_per_minute'] == 1 else 's'} a minute, and that many "
+                    "have already started (aiteam-connect limits --requests-per-minute)."
                 )
             if self._waiting >= limits["concurrency"] * QUEUE_PER_SLOT:
                 raise LimitRefused(
