@@ -132,8 +132,30 @@ def start_round(
     return record
 
 
-def stop(t: dict, reason: str, left: int) -> None:
-    t["stopped"] = {"reason": reason, "left": left, "at": _now()}
+def stop(t: dict, reason: str, keys: list[str]) -> None:
+    t["stopped"] = {"reason": reason, "left": len(keys), "keys": list(keys), "at": _now()}
+
+
+def abandon_open_round(t: dict) -> bool:
+    """Forget a round whose fix never generated — a provider error, a disconnected
+    computer, a Stop. Judging it later would call it "fixed nothing" when nothing
+    was ever tried."""
+    if open_round(t) is None:
+        return False
+    t["rounds"].pop()
+    return True
+
+
+def settle(t: dict) -> None:
+    """The track's problems are all gone: the next problem is a new episode, with
+    its own budget, and its own "did the last round help?"."""
+    if t.get("resumed_after") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
+        int(settings.auto_fix_max_rounds), 0
+    ):
+        return
+    t["resumed_after"] = len(t["rounds"])
+    t["allowed"] = len(t["rounds"]) + max(int(settings.auto_fix_max_rounds), 0)
+    t["stopped"] = None
 
 
 def stuck(data: dict) -> list[str]:
@@ -153,6 +175,8 @@ def keep_trying(data: dict, more: int) -> list[str]:
 
 
 def accept(data: dict, kind: str, reason: str) -> list[str]:
+    # Only the problems on screen are accepted: a later rebuild that breaks the same
+    # phase differently is a new problem, and goes through the loop like any other.
     """Continue past every stuck *build* track, with the reason on the record.
 
     Security tracks are not accepted wholesale: each severe finding is waived on its
@@ -161,13 +185,21 @@ def accept(data: dict, kind: str, reason: str) -> list[str]:
     """
     names = [n for n in stuck(data) if n.startswith(BUILD_PREFIX)]
     for name in names:
-        data["tracks"][name]["accepted"] = {"kind": kind, "reason": reason, "at": _now()}
+        t = data["tracks"][name]
+        keys = list((t.get("stopped") or {}).get("keys") or [])
+        t["accepted"] = {"kind": kind, "reason": reason, "keys": keys, "at": _now()}
     return names
 
 
 def accepted(data: dict, name: str) -> bool:
     t = data["tracks"].get(name)
     return bool(t and t.get("accepted"))
+
+
+def covers(t: dict, keys: Iterable[str]) -> bool:
+    """Whether a person accepted exactly these problems (or a subset of them)."""
+    acc = t.get("accepted") or {}
+    return bool(acc) and set(keys) <= set(acc.get("keys") or [])
 
 
 # ── compile errors and stack contradictions, as problems with keys ───────────
@@ -210,13 +242,26 @@ def code_problems(row) -> list[dict]:
 CODE_NOTE_PREFIX = "Your last deliverable still has problems"
 
 
-def code_note(problems: list[dict], round_number: int) -> str:
-    """The note a phase is re-run with to fix its own compile or stack problems."""
+def code_note(
+    problems: list[dict],
+    round_number: int,
+    snippets: Optional[dict] = None,
+    standing: Optional[str] = None,
+) -> str:
+    """The note a phase is re-run with to fix its own compile or stack problems.
+
+    `snippets` is the code each problem is about, from the second round on.
+    `standing` is a security fix note this phase was already working to: a compile
+    fix that forgot it would bring the finding straight back.
+    """
     lines = []
     for p in problems:
         where = f" in `{p['where']}`" if p.get("where") else ""
         label = "contradicts the stack" if p["kind"] == "stack" else "does not compile"
         lines.append(f"- ({label}){where}: {p['title']}")
+        code = (snippets or {}).get(p["key"])
+        if code:
+            lines.append("\n".join(f"    {line}" for line in code.splitlines()))
     retry = (
         f"\n\nThis is fix round {round_number}. The previous attempt did not fix these. "
         "Do not repeat it: change the files named above, and check that every import "
@@ -224,10 +269,22 @@ def code_note(problems: list[dict], round_number: int) -> str:
         if round_number > 1
         else ""
     )
+    if round_number >= 3:
+        retry += (
+            " This is the last automatic round: rewrite the broken files properly rather "
+            "than patching them."
+        )
+    carried = (
+        "\n\nThis phase is also in the middle of a security fix. Keep every one of those "
+        "fixes while you fix the above:\n\n" + standing
+        if standing
+        else ""
+    )
     return (
         f"{CODE_NOTE_PREFIX}. Fix every one and return the complete deliverable:\n"
         + "\n".join(lines)
         + retry
+        + carried
         + "\n\nKeep the stack the architecture froze — the fix is to the code, not to "
         "the technology choices."
     )

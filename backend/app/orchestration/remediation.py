@@ -95,13 +95,21 @@ class Finding:
 #: Severities, most severe first.
 SEVERITY_ORDER: tuple[str, ...] = ("critical", "high", "medium", "low")
 
-#: Findings about how the product looks and reads, rather than whether it is safe.
+#: Categories about how the product looks and reads, rather than whether it is safe.
 #: Worth a person's judgement at any severity: "the contrast is low" has no single
 #: right fix the way a leaked credential does.
-_UI_UX = re.compile(
-    r"\bui\b|\bux\b|ui/ux|visual|cosmetic|layout|styling|typograph|contrast|spacing|"
-    r"polish|usability|a11y|accessib|\bcopy\b|wording",
-    re.I,
+#:
+#: Matched against the **category alone**, and only when *every* word in it is one
+#: of these. Titles are prose: "Admin API publicly accessible without authentication"
+#: is a critical security finding that happens to contain a UI word. And a category
+#: like "Insecure Design" or "Content injection" is security, so "design" and
+#: "content" are not on the list; "UI / UX" and "Usability & Accessibility (a11y)" are.
+_UI_UX_WORDS = frozenset(
+    {
+        "ui", "ux", "user", "interface", "experience", "visual", "cosmetic", "layout",
+        "styling", "typography", "contrast", "spacing", "polish", "usability", "a11y",
+        "accessibility", "copy", "copywriting", "wording", "and",
+    }
 )
 
 
@@ -115,7 +123,9 @@ def _threshold() -> int:
 
 
 def is_ui_ux(category: str, title: str = "") -> bool:
-    return bool(_UI_UX.search(f"{category} {title}"))
+    """Whether a finding's *category* is about UI/UX. The title is not consulted."""
+    words = re.findall(r"[a-z0-9]+", (category or "").lower())
+    return bool(words) and all(w in _UI_UX_WORDS for w in words) and words != ["and"]
 
 
 def is_serious(severity: str, category: str = "", title: str = "") -> bool:
@@ -456,6 +466,11 @@ def fix_instruction(
             "these — the re-check still reports every one of them. Do not repeat that "
             "attempt: change the code shown above, and make sure the fix is actually in "
             "the files you return."
+        )
+    if strategy == STRATEGY_STRONGER:
+        retry += (
+            " This is the last automatic round. Rewrite the affected code properly rather "
+            "than patching around it — whatever the earlier rounds kept is what did not work."
         )
     guidance = ""
     if procedures:

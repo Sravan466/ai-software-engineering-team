@@ -32,11 +32,22 @@ import { ReasonKinds } from "./ReasonKinds";
 
 const ORDER = PHASES.map((p) => p.key);
 
-export const STRATEGY: Record<AutoFixRound["strategy"], string> = {
+const STRATEGY: Record<AutoFixRound["strategy"], string> = {
   guided: "The findings, with advice checked against the skills library",
   with_code: "The code itself, and word that the last attempt didn't work",
-  stronger_model: "The most capable model the router has",
+  stronger_model: "A full rewrite, on the most capable model the router can reach",
 };
+
+/** A code round starts from the errors, not from a reviewer's advice. */
+const CODE_STRATEGY: Record<AutoFixRound["strategy"], string> = {
+  guided: "The errors, named file by file",
+  with_code: "The broken code itself, and word that the last attempt didn't work",
+  stronger_model: "A full rewrite, on the most capable model the router can reach",
+};
+
+export function approach(track: string, strategy: AutoFixRound["strategy"]): string {
+  return (track === "security" ? STRATEGY : CODE_STRATEGY)[strategy];
+}
 
 
 type Step = "queued" | "fixing" | "rechecking" | "fixed";
@@ -127,7 +138,8 @@ export function FixingPanel({ project }: { project: Project }) {
                   {count === 1 ? "" : "s"}
                 </h2>
                 <p>
-                  Round {round.n} of up to {t.allowed}
+                  {/* Counted within this episode: a fresh problem gets a fresh budget. */}
+                  Round {round.n - (t.resumed_after || 0)} of up to {t.allowed - (t.resumed_after || 0)}
                   {onIt && (
                     <>
                       {" · "}
@@ -145,7 +157,7 @@ export function FixingPanel({ project }: { project: Project }) {
             </header>
             <p className="fixing-approach">
               <span className="fixing-approach-label">This round</span>
-              {STRATEGY[round.strategy]}
+              {approach(name, round.strategy)}
             </p>
             <ul className="fix-list">
               {round.problems.map((p) => (
@@ -170,7 +182,7 @@ export function FixingPanel({ project }: { project: Project }) {
 }
 
 // ── what every round tried ───────────────────────────────────────────────────
-function RoundLedger({ track }: { track: AutoFixTrack }) {
+function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
   if (track.rounds.length === 0) {
     return (
       <p className="field-hint ledger-empty">
@@ -191,7 +203,7 @@ function RoundLedger({ track }: { track: AutoFixTrack }) {
               <span className="ledger-what">
                 Sent {sent} to {who}
               </span>
-              <span className="ledger-how">{STRATEGY[r.strategy]}</span>
+              <span className="ledger-how">{approach(name, r.strategy)}</span>
             </div>
             <span className={`badge ${fixed > 0 ? "badge-ok" : "badge"}`}>
               {r.fixed === null ? "Not re-checked" : `Fixed ${fixed} of ${sent}`}
@@ -237,10 +249,10 @@ export function NeedsHelp({
             <span className="field-hint">
               {t.stopped?.reason === "no_progress"
                 ? "Stopped early: the last round fixed nothing, and repeating it wouldn't either."
-                : `Stopped after ${t.rounds.length} of ${t.allowed} round${t.allowed === 1 ? "" : "s"}.`}
+                : `Stopped after ${t.rounds.length - (t.resumed_after || 0)} round${t.rounds.length - (t.resumed_after || 0) === 1 ? "" : "s"}.`}
             </span>
           </h3>
-          <RoundLedger track={t} />
+          <RoundLedger name={name} track={t} />
           {name !== "security" && <CodeLeft track={t} />}
         </div>
       ))}

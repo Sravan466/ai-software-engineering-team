@@ -483,9 +483,9 @@ def _require_findings_settled(db: Session, project: Project) -> None:
         return
     count = len(outstanding)
     subject = (
-        "1 security finding at high severity or above is"
+        "1 serious or high-severity security finding is"
         if count == 1
-        else f"{count} security findings at high severity or above are"
+        else f"{count} serious or high-severity security findings are"
     )
     raise HTTPException(
         status_code=409,

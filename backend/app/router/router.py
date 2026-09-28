@@ -319,6 +319,7 @@ class ModelRouter:
         preferred_model: Optional[str] = None,
         complexity: str = "medium",
         role: Optional[str] = None,
+        pin: Optional[str] = None,
     ) -> ModelProfile:
         """The profile of the model this request will most likely land on.
 
@@ -326,7 +327,7 @@ class ModelRouter:
         does — including the asking role's own model, or a phase pointed at a 128k
         model would go on being budgeted for the default's 32k.
         """
-        chain = self._resolve_chain(mode, preferred_model, complexity, role)
+        chain = self._pinned(self._resolve_chain(mode, preferred_model, complexity, role), pin)
         for pname, model in chain:
             prov = self.provider(pname)
             if prov is not None and prov.available():
@@ -335,6 +336,80 @@ class ModelRouter:
             return fallback_profile("none", "unresolved")
         pname, model = chain[0]
         return fallback_profile(pname, model, local=pname not in CLOUD_PROVIDERS)
+
+    def _pinned(self, chain: list[tuple[str, str]], pin: Optional[str]) -> list[tuple[str, str]]:
+        """`chain` with `pin` tried first — the fix loop's stronger model."""
+        if not pin:
+            return chain
+        try:
+            pair = self._saved_pair(pin)
+        except Exception:  # noqa: BLE001 - a pin that no longer resolves is ignored
+            return chain
+        return [pair, *(p for p in chain if p != pair)]
+
+    def strongest_for(
+        self,
+        mode: RoutingMode = RoutingMode.LOCAL_ONLY,
+        preferred_model: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> Optional[str]:
+        """The most capable model this call could run on, when it is not already on it.
+
+        For the fix loop's last round. Chosen by what the router knows, never by name:
+        where the routing mode allows the cloud, the strongest configured cloud model
+        in the router's own reasoning-strength order; otherwise the largest model the
+        same local source serves that can write an answer. None when nothing
+        reachable is stronger than what the call would use anyway.
+        """
+        try:
+            chain = self._resolve_chain(mode, preferred_model, "high", role)
+        except Exception:  # noqa: BLE001 - no pick is not an error here
+            return None
+        current = None
+        for pname, model in chain:
+            prov = self.provider(pname)
+            if prov is not None and prov.available():
+                current = (pname, model)
+                break
+        # The cloud only where the router was already free to choose it: Auto, with no
+        # model pinned to this role. A Manual build or a role someone pointed at a
+        # local model is a decision about where the code goes, and a fix round does
+        # not get to overrule it.
+        if mode == RoutingMode.AUTO and not self._roles.get(role):
+            for pname in CLOUD_PROVIDERS:
+                model = self._default_model.get(pname) or ""
+                if model and self._cloud[pname].available() and not self._refuses(pname, model):
+                    return None if (pname, model) == current else self._spec((pname, model))
+        if current is None or current[0] in CLOUD_PROVIDERS:
+            return None
+        src = self.sources.get(current[0])
+        if src is None or not src.available():
+            return None
+        now = src.entry(current[1])
+        floor = (now.size_bytes or 0) if now is not None else 0
+        bigger = sorted(
+            (
+                e
+                for e in src.entries()
+                if e.size_bytes
+                and e.size_bytes > floor
+                and e.name != current[1]
+                and src.writes(e.name) is not False
+                and (e.kind or "chat") not in ("embedding", "base")
+            ),
+            key=lambda e: e.size_bytes,
+            reverse=True,
+        )
+        # Largest first, but only one this machine can actually run: a model the Start
+        # check would block fails to load, and the call falls back with a prompt sized
+        # for the model it could not reach.
+        for entry in bigger[:4]:
+            try:
+                if src.compatibility(entry.name).level == "fits":
+                    return self._spec((current[0], entry.name))
+            except Exception:  # noqa: BLE001 - an unanswerable check is a no
+                continue
+        return None
 
     # ── runtime provider configuration (Settings UI) ───────────────────────────
     def _apply(
@@ -1343,10 +1418,11 @@ class ModelRouter:
         options: Optional[GenerationOptions] = None,
         complexity: str = "medium",  # "low" | "medium" | "high"
         role: Optional[str] = None,
+        pin: Optional[str] = None,
     ) -> LLMResponse:
         options = options or GenerationOptions()
         try:
-            chain = self._resolve_chain(mode, preferred_model, complexity, role)
+            chain = self._pinned(self._resolve_chain(mode, preferred_model, complexity, role), pin)
         except UnresolvedModel as e:
             raise ProviderError(str(e), retryable=False) from e
         if not chain:

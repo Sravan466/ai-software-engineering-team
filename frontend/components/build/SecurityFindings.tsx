@@ -105,7 +105,9 @@ export default function SecurityFindings({
     // The crew's own fixes are not decisions: they fold away below, not in this list.
     const rows = all.filter((f) =>
       scope === "small"
-        ? !f.serious
+        ? // A serious finding still open here is from a build parked before the crew
+          // fixed its own; hiding it would leave Approve blocked with nothing to click.
+          !f.serious || !SETTLED.has(f.status)
         : scope === "serious"
           ? f.serious && !SETTLED.has(f.status)
           : !(f.serious && f.status === "fixed"),
@@ -130,6 +132,11 @@ export default function SecurityFindings({
     [state, scope],
   );
   const open = ordered.filter((f) => !SETTLED.has(f.status)).length;
+  // What actually blocks shipping — the same rule the server applies. Open medium and
+  // low findings are worth reading, but they are not "needs a decision".
+  const blocking = ordered.filter(
+    (f) => !SETTLED.has(f.status) && (f.serious || f.severity === "critical" || f.severity === "high"),
+  ).length;
   useEffect(() => {
     if (state) onCount?.(open);
   }, [state, open, onCount]);
@@ -211,7 +218,7 @@ export default function SecurityFindings({
     );
   }
 
-  const unresolved = open;
+  const unresolved = blocking;
 
   return (
     <div className="findings">
@@ -220,7 +227,14 @@ export default function SecurityFindings({
           {unresolved > 0 ? (
             <>
               <span className="dot dot-bad dot-pulse" aria-hidden="true" />
-              {unresolved} still need{unresolved === 1 ? "s" : ""} a decision
+              {scope === "serious"
+                ? `${unresolved} still open`
+                : `${unresolved} still need${unresolved === 1 ? "s" : ""} a decision`}
+            </>
+          ) : open > 0 ? (
+            <>
+              <span className="dot dot-warn" aria-hidden="true" />
+              {open} open — none of them block shipping
             </>
           ) : (
             <>
@@ -283,8 +297,8 @@ export default function SecurityFindings({
 
               {needsDecision && waiving !== f.key && (!f.serious || allowWaive) && (
                 <div className="finding-acts">
-                  {/* A serious finding is the crew's to send back; it already did. */}
-                  {!f.serious && (
+                  {/* On "needs help" the crew already sent these back, round after round. */}
+                  {scope !== "serious" && (
                   <button
                     className="btn btn-sm btn-primary"
                     disabled={busy || mine || !f.owner_phase}

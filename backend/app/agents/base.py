@@ -101,6 +101,8 @@ class AgentContext:
     #: lands on the most capable model the router would pick for it, and give it one
     #: more self-repair round. Chosen by the router's own ranking, never by name.
     escalate: bool = False
+    #: The model an escalated call is pinned to, resolved once per run by the router.
+    pin_model: Optional[str] = None
 
 
 @dataclass
@@ -170,8 +172,17 @@ class BaseAgent:
 
     # ── public entrypoint ───────────────────────────────────────────────────
     def run(self, ctx: AgentContext) -> AgentResult:
+        if ctx.escalate and ctx.pin_model is None:
+            try:
+                ctx.pin_model = router.strongest_for(
+                    ctx.routing_mode, ctx.preferred_model, role=self.key
+                )
+            except Exception as e:  # noqa: BLE001 - escalation is best effort
+                log.warning("%s: no stronger model could be chosen: %s", self.title, e)
+            if ctx.pin_model:
+                log.info("%s: last fix round runs on %s", self.title, ctx.pin_model)
         profile = router.profile_for(
-            ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key
+            ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
         )
         ask = self._build_messages(ctx, profile)
         options = GenerationOptions(json_mode=True, json_schema=self.response_schema())
@@ -312,6 +323,7 @@ class BaseAgent:
                 options=options,
                 complexity=self._complexity(ctx),
                 role=self.key,
+                pin=ctx.pin_model,
             )
 
     # ── prompt construction ─────────────────────────────────────────────────
@@ -350,7 +362,7 @@ class BaseAgent:
     ) -> Prompt:
         if profile is None:
             profile = router.profile_for(
-                ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key
+                ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
             )
         # Serialised once: the budget pass and the real assembly both read these,
         # and they can be hundreds of kilobytes of generated source apiece.
@@ -462,7 +474,7 @@ class BaseAgent:
         """
         if profile is None:
             profile = router.profile_for(
-                ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key
+                ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
             )
 
         empty = dict.fromkeys(list(_PERSON_SHARE) + list(_CONTEXT_SHARE), 0)

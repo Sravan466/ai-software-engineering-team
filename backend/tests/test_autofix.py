@@ -195,6 +195,8 @@ def test_an_unowned_serious_finding_goes_to_the_backend_as_app_wide():
         ("low", "XSS", False),
         ("high", "UI/UX", False),
         ("critical", "Accessibility", False),
+        # UI words in the *title* do not make a security finding polish.
+        ("critical", "Authorization", True),
     ],
 )
 def test_what_counts_as_serious(severity, category, serious):
@@ -207,7 +209,7 @@ def test_no_progress_is_judged_only_since_the_last_keep_trying():
     autofix.start_round(t, "guided", ["backend_engineer"], [{"key": "a"}])
     assert autofix.close_round(t, ["a"]) == []
     assert autofix.next_step(t) == autofix.STOP_NO_PROGRESS
-    autofix.stop(t, autofix.STOP_NO_PROGRESS, 1)
+    autofix.stop(t, autofix.STOP_NO_PROGRESS, ["a"])
     assert autofix.keep_trying(data, 2) == [autofix.SECURITY]
     assert autofix.next_step(t) == "fix" and t["allowed"] == 3
 
@@ -230,3 +232,122 @@ def test_the_new_columns_migrate_onto_an_existing_database(tmp_path):
     cols = {c["name"] for c in inspect(engine).get_columns("security_dispositions")}
     assert {"fixed_round", "waive_kind"} <= cols
     assert run_migrations(engine) == []
+
+
+def test_a_ui_word_in_the_title_does_not_make_a_finding_small():
+    assert remediation.is_serious("critical", "Authorization", "Admin API publicly accessible")
+    assert remediation.is_serious("high", "Secrets", "API key exposed in the client UI")
+    assert remediation.is_serious("high", "Secrets", "Hardcoded secret in app/layout.tsx")
+    assert not remediation.is_serious("high", "UI/UX", "Low contrast")
+
+
+def test_a_fix_round_that_never_generated_is_not_judged(client, monkeypatch):
+    """A provider failure inside the fix is not "a round that fixed nothing"."""
+    from app.router.base import ProviderError
+
+    crew = Crew([[SECRET], []])
+    failing = {"on": True}
+
+    def flaky(messages, **kwargs):
+        if failing["on"] and remediation.FIX_NOTE_PREFIX in messages[-1].content:
+            raise ProviderError("the runtime went away", retryable=False)
+        return crew(messages, **kwargs)
+
+    stub(monkeypatch, "complete", flaky)
+    pid = client.post(
+        "/api/projects",
+        json={"idea": "A group expenses app", "routing_mode": "local_only", "approval_mode": "unattended"},
+    ).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    project = client.get(f"/api/projects/{pid}").json()
+    assert project["status"] == "failed"
+    assert project["auto_fix"]["tracks"]["security"]["rounds"] == []
+
+    failing["on"] = False
+    assert client.post(f"/api/projects/{pid}/resume").status_code == 200
+    project = client.get(f"/api/projects/{pid}").json()
+    assert project["status"] == "completed", project["gate_note"]
+    assert len(project["auto_fix"]["tracks"]["security"]["rounds"]) == 1
+
+
+def test_a_cleared_track_gets_a_fresh_budget_and_accepts_are_scoped():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    for i in range(3):
+        autofix.start_round(t, "guided", ["backend_engineer"], [{"key": f"k{i}"}])
+        autofix.close_round(t, [])
+    assert autofix.next_step(t) == autofix.STOP_LIMIT
+    autofix.settle(t)
+    assert autofix.next_step(t) == "fix"
+
+    autofix.stop(t, autofix.STOP_LIMIT, ["a", "b"])
+    autofix.accept(data, "accepted_risk", "stub")
+    assert autofix.covers(t, ["a"]) and not autofix.covers(t, ["a", "c"])
+
+
+def test_a_pinned_model_is_tried_first():
+    from app.router.router import ModelRouter
+
+    r = ModelRouter.__new__(ModelRouter)
+    r._saved_pair = lambda spec: tuple(spec.split(":", 1))
+    chain = [("ollama", "small"), ("gemini", "g")]
+    assert r._pinned(chain, "ollama:big") == [("ollama", "big"), ("ollama", "small"), ("gemini", "g")]
+    assert r._pinned(chain, None) == chain
+
+
+@pytest.mark.parametrize(
+    "category,small",
+    [
+        ("UI / UX", True),
+        ("Accessibility (a11y)", True),
+        ("Usability & Accessibility", True),
+        ("Design", False),  # OWASP "Insecure Design", shortened
+        ("Insecure Design", False),
+        ("Content injection", False),
+        ("", False),
+    ],
+)
+def test_ui_ux_is_read_from_every_word_of_the_category(category, small):
+    assert remediation.is_ui_ux(category) is small
+
+
+def test_a_compile_fix_that_works_closes_its_round_and_frees_the_budget(client, monkeypatch):
+    """Round 1 fixes the code: the round is judged a success, not left open."""
+    from tests.conftest import _fake_complete
+
+    calls = {"backend": 0}
+
+    def fake(messages, **kwargs):
+        resp = _fake_complete(messages, **kwargs)
+        if messages[0].content.startswith("You are the Backend Engineer"):
+            calls["backend"] += 1
+            if calls["backend"] <= 2:  # the first attempt and its own repair round
+                payload = json.loads(resp.text)
+                payload["files"] = [{"path": "main.py", "language": "python", "purpose": "app",
+                                     "code": "from fastapi import FastAPI\napp = FastAPI(\n"}]
+                return resp.model_copy(update={"text": json.dumps(payload)})
+        return resp
+
+    stub(monkeypatch, "complete", fake)
+    pid = client.post(
+        "/api/projects",
+        json={"idea": "An API", "routing_mode": "local_only", "approval_mode": "unattended"},
+    ).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    project = client.get(f"/api/projects/{pid}").json()
+    assert project["status"] == "completed", project["gate_note"]
+    track = project["auto_fix"]["tracks"]["build:backend_engineer"]
+    assert len(track["rounds"]) == 1 and track["rounds"][0]["fixed"]
+    assert track["resumed_after"] == 1 and track["allowed"] == 1 + settings.auto_fix_max_rounds
+
+
+def test_a_standing_security_note_survives_every_compile_round():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.SECURITY)
+    record = autofix.start_round(t, "guided", ["backend_engineer"], [{"key": "a"}])
+    record["notes"] = {"backend_engineer": remediation.FIX_NOTE_PREFIX + " … MongoDB"}
+    from app.orchestration.runner import PipelineRunner
+
+    note = PipelineRunner._standing_fix_note(data, "backend_engineer")
+    assert "MongoDB" in note
+    assert "MongoDB" in autofix.code_note([{"key": "k", "title": "x", "kind": "build"}], 2, None, note)
