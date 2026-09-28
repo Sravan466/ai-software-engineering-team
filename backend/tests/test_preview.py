@@ -584,3 +584,49 @@ def test_a_revision_can_be_read_for_before_and_after(client, monkeypatch):
     r = client.get(f"/api/projects/{pid}/preview/revisions/{rid}")
     assert r.status_code == 200 and r.json()["html"] == gen["html"]
     assert client.get(f"/api/projects/{pid}/preview/revisions/nope").status_code == 404
+
+
+def test_a_textarea_is_one_selectable_element():
+    tagged = O.tag('<body><form><textarea name="m"><b>not markup</b></textarea></form></body>')
+    assert re.search(r'<textarea name="m" data-oid="e\d+">', tagged)
+    assert "<b>not markup</b>" in tagged
+
+
+def test_an_element_edit_on_an_image_keeps_it_a_void_element(client, monkeypatch):
+    def element(messages, **kwargs):
+        if "ONE HTML element" in messages[0].content:
+            return LLMResponse(text='<img src="x.png" alt="A brighter photo" class="rounded-xl">', provider="mock",
+                               model="mock-model", usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2))
+        return _fake(messages, **kwargs)
+
+    monkeypatch.setattr(model_router, "complete", element)
+    pid = _create(client)
+    db = SessionLocal()
+    db.add(PreviewRevision(project_id=pid, html=SAMPLE.replace("<h1>", '<img src="a.png" alt="x"><h1>'), source="generated"))
+    db.commit()
+    db.close()
+    html = client.get(f"/api/projects/{pid}/preview").json()["html"]
+    oid = re.search(r'<img\b[^>]*data-oid="(e\d+)"', html).group(1)
+    r = client.post(f"/api/projects/{pid}/preview/edit", json={"oid": oid, "instruction": "brighter"})
+    assert r.status_code == 200, r.text
+    out = r.json()["html"]
+    assert "</img>" not in out
+    assert 'alt="A brighter photo"' in O.outer(out, oid) and f'data-oid="{oid}"' in O.outer(out, oid)
+
+
+def test_an_undone_edit_does_not_block_the_pipelines_redraw(client, monkeypatch):
+    from app.orchestration.runner import PipelineRunner
+
+    monkeypatch.setattr(model_router, "complete", _fake)
+    pid = _create(client)
+    html = _generate(client, pid)["html"]
+    heading = re.search(r'<h1\b[^>]*data-oid="(e\d+)"', html).group(1)
+    client.post(f"/api/projects/{pid}/preview/patch", json={"ops": [{"oid": heading, "kind": "text", "text": "Mine"}]})
+    db = SessionLocal()
+    try:
+        assert PipelineRunner._clear_generated_mockup(db, pid) is False  # the edit is live
+        client.post(f"/api/projects/{pid}/preview/undo")
+        db.expire_all()
+        assert PipelineRunner._clear_generated_mockup(db, pid) is True  # undone: redraw may go ahead
+    finally:
+        db.close()

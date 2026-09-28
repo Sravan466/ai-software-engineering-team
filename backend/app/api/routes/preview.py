@@ -34,6 +34,7 @@ from app.preview import history, oids, service
 from app.preview.document import ThemeRefused, apply_theme, is_site, site_data
 from app.preview.generator import EditRejected, EditTooLarge, edit_element, edit_section
 from app.preview.html import (
+    _VOID as VOID_TAGS,
     attr,
     extract_section,
     outer_element,
@@ -321,7 +322,9 @@ def _edit_element(db: Session, project: Project, current: str, oid: str, instruc
     if parts is None:
         raise HTTPException(502, "The model didn't return a usable element. Try rephrasing the change.")
     tag, attrs, inner = parts
-    new_fragment = wrap(tag, with_attrs(attrs, {oids.ATTR: oid}), inner)
+    attrs = with_attrs(attrs.rstrip().rstrip("/"), {oids.ATTR: oid})
+    # A void element (<img>, <input>) is its start tag; wrapping it would emit </img>.
+    new_fragment = f"<{tag}{attrs}>" if tag in VOID_TAGS else wrap(tag, attrs, inner)
     section = _section_of(current, oid)
     _save_revision(
         db,

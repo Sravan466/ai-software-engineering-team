@@ -47,6 +47,7 @@ from app.core.constants import (
 from app.core.logging import get_logger
 from app.db.base import SessionLocal
 from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
+from app.preview import history as preview_history
 from app.memory.store import memory_store
 from app.orchestration import autofix, remediation
 from app.orchestration.approval import Gate, decide_gate
@@ -867,10 +868,12 @@ class PipelineRunner:
         person has edited) let a redo skip scheduling its redraw, and an already
         in-flight draw of the replaced front end became the mockup by default.
         """
-        revisions = (
-            db.query(PreviewRevision).filter(PreviewRevision.project_id == project_id).all()
-        )
-        if any(r.source != "generated" for r in revisions):
+        revisions = preview_history.revisions(db, project_id)
+        # Only the version on screen and what it descends from count as someone's
+        # work. An edit they undid is off that line: it was deleted outright before
+        # undo became a pointer, and it must not block a redraw now that it is kept.
+        live = preview_history.lineage(preview_history.head(revisions), revisions)
+        if any(r.source != "generated" for r in live):
             return False
         for revision in revisions:
             db.delete(revision)

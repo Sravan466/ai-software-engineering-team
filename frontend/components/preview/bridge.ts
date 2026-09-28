@@ -260,6 +260,8 @@ export const BRIDGE_SCRIPT = String.raw`
     e.preventDefault(); e.stopPropagation();
     if (editing) commitText();
     if (e.altKey) { layers(e); return; }
+    // Keys go where the focus is: take it, so ↑, ↵ and Esc reach this document.
+    try { win.focus(); } catch(_){}
     var el = pickable(e.target);
     select(el, e.shiftKey || e.metaKey || e.ctrlKey, false);
   }, true);
@@ -387,6 +389,9 @@ export const BRIDGE_SCRIPT = String.raw`
       applyOps(d.ops);
     } else if (d.type === 'editText') {
       var p = selected[selected.length - 1]; if (p) startText(p);
+    } else if (d.type === 'key' && typeof d.key === 'string') {
+      // A key pressed with the focus in the Preview tab rather than in here.
+      key({ key: d.key, shiftKey: !!d.shift, metaKey: false, ctrlKey: false, altKey: false, target: doc.body, preventDefault: function(){} });
     } else if (d.type === 'route?') {
       post({ type: 'route', path: win.__app && win.__app.current ? win.__app.current : '/' });
     }

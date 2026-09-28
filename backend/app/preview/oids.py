@@ -88,7 +88,9 @@ def tag(html: str) -> str:
     for block in skip.finditer(body):
         out.append(re.sub(H._TAG, tag_start, body[pos: block.start()], flags=re.DOTALL))
         chunk = block.group(0)
-        if chunk[:4].lower() == "<svg":
+        # An <svg> and a <textarea> are one selectable element each: their start tag
+        # gets an id, their contents (drawing, field text) are left alone.
+        if chunk[:4].lower() == "<svg" or chunk[:9].lower() == "<textarea":
             first = re.match(H._TAG, chunk, re.DOTALL)
             chunk = tag_start(first) + chunk[first.end():] if first else chunk
         out.append(chunk)

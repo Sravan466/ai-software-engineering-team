@@ -18,7 +18,7 @@ import { BRIDGE_SCRIPT } from "./bridge";
  * With `stage`, the frame is the Preview tab's full canvas: the site renders at a real
  * device width (desktop 1280, tablet 768, mobile 390, or dragged to any width) and is
  * scaled to fit when the column is narrower, so `xl:` layouts render as they would on
- * a laptop. It can go fullscreen, open in its own tab, and reload. Without `stage` it
+ * a laptop. It can fill the whole window, open in its own tab, and reload. Without `stage` it
  * is the plain framed picture the Ship review shows.
  *
  * Two modes, and the difference is who gets the click. In **use** mode the prototype
@@ -61,6 +61,8 @@ export type MockupFrameHandle = {
   apply: (ops: PatchOp[]) => void;
   /** Start typing into the selected element. */
   editText: () => void;
+  /** A selection key (↑ ↓ ↵ Esc F2) pressed with the focus outside the frame. */
+  key: (key: string, shift?: boolean) => void;
   /** Whether a message came from this frame's document rather than any other window
    *  that can post to the page. (Script inside the frame is kept out by the server:
    *  model-written handlers are stripped before a section is saved.) */
@@ -77,15 +79,19 @@ type Props = {
   routes?: PreviewRoute[];
   /** Frame height in px, for the plain (non-stage) frame. */
   height?: number;
-  /** The full canvas: device sizes, fit, fullscreen, open in a tab, reload. */
+  /** The full canvas: device sizes, fit, full window, open in a tab, reload. */
   stage?: boolean;
+  /** Whether the Preview tab fills the browser window, and how to toggle it. The
+   *  owner decides what fills it — the toolbar and inspector come too. */
+  expanded?: boolean;
+  onExpand?: () => void;
   host?: string;
   /** Called after every load — a new revision, a reload — once the page is restored. */
   onLoad?: () => void;
 };
 
 const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
-  { html, selectable = false, mode = "use", routes = [], height, stage = false, host = "localhost:3000", onLoad },
+  { html, selectable = false, mode = "use", routes = [], height, stage = false, expanded = false, onExpand, host = "localhost:3000", onLoad },
   ref,
 ) {
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -98,7 +104,6 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
   const [width, setWidth] = useState<number>(DEVICE_WIDTH.desktop);
   const [fit, setFit] = useState(true);
   const [box, setBox] = useState({ w: 0, h: 0 });
-  const [full, setFull] = useState(false);
   const [reloads, setReloads] = useState(0);
   const pathRef = useRef(path);
   pathRef.current = path;
@@ -107,6 +112,16 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
     () => inject(html, GUARD_SCRIPT + (selectable ? BRIDGE_SCRIPT : "")),
     [html, selectable],
   );
+
+  // The page to go back to once a new document loads. Captured when the document
+  // changes, not when it loads: the new one's runtime boots on its home page and
+  // reports that, and the report can arrive before the frame's load event.
+  const restore = useRef<string | null>(null);
+  const lastDoc = useRef(srcDoc);
+  if (lastDoc.current !== srcDoc) {
+    lastDoc.current = srcDoc;
+    restore.current = pathRef.current;
+  }
 
   const post = useCallback((message: Record<string, unknown>) => {
     frameRef.current?.contentWindow?.postMessage({ __preview: true, ...message }, "*");
@@ -119,6 +134,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
       select: (oid, reveal = true) => post(oid ? { type: "select", oid, reveal } : { type: "clear" }),
       apply: (ops) => post({ type: "ops", ops }),
       editText: () => post({ type: "editText" }),
+      key: (key, shift = false) => post({ type: "key", key, shift }),
       owns: (source) => Boolean(source) && source === frameRef.current?.contentWindow,
     }),
     [post],
@@ -162,15 +178,11 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
     return () => ro.disconnect();
   }, [stage]);
 
-  useEffect(() => {
-    const onChange = () => setFull(document.fullscreenElement === shellRef.current);
-    document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
-  }, []);
-
   const gutter = 32;
   const room = Math.max(box.w - gutter, 1);
   const scale = stage && fit && box.w ? Math.min(1, room / width) : 1;
+  // Until the stage is measured, the device is not drawn at a guessed size.
+  const measured = !stage || box.w > 0;
   const frameH = stage && box.h ? Math.round((box.h - 24) / scale) : undefined;
 
   function pickDevice(next: Exclude<Device, "custom">) {
@@ -207,15 +219,6 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
     }
   }
 
-  async function toggleFullscreen() {
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await shellRef.current?.requestFullscreen();
-    } catch {
-      /* the browser refused — nothing to undo */
-    }
-  }
-
   // Its own tab, still sandboxed: the page is a wrapper with no script of its own
   // around the same sandboxed frame, so the mockup never runs as this app's origin.
   function openInTab() {
@@ -236,7 +239,12 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
   const onFrameLoad = () => {
     if (selectable) post({ type: "mode", mode });
     // Back to the page you were on: a new revision or a reload starts at home.
-    if (routes.length && pathRef.current && pathRef.current !== first) post({ type: "go", path: pathRef.current });
+    const target = restore.current;
+    restore.current = null;
+    if (routes.length && target && target !== first && routes.some((r) => r.path === target)) {
+      setPath(target);
+      post({ type: "go", path: target });
+    }
     onLoad?.();
   };
 
@@ -259,7 +267,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
   );
 
   return (
-    <div className={"prev-frame" + (stage ? " prev-frame-stage" : "") + (full ? " is-full" : "")} ref={shellRef}>
+    <div className={"prev-frame" + (stage ? " prev-frame-stage" : "") + (expanded ? " is-full" : "")} ref={shellRef}>
       <div className="prev-chrome">
         <span className="dots" aria-hidden="true">
           <i />
@@ -354,22 +362,33 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
               {fit && scale < 1 ? `${Math.round(scale * 100)}%` : "100%"}
             </button>
             <span className="prev-tools-rule" aria-hidden="true" />
-            <button type="button" className="prev-tool" onClick={() => setReloads((n) => n + 1)} title="Reload the mockup" aria-label="Reload">
+            <button
+              type="button"
+              className="prev-tool"
+              onClick={() => {
+                restore.current = pathRef.current;
+                setReloads((n) => n + 1);
+              }}
+              title="Reload the mockup"
+              aria-label="Reload"
+            >
               {Icon.refresh}
             </button>
             <button type="button" className="prev-tool" onClick={openInTab} title="Open in a new tab" aria-label="Open in a new tab">
               {Icon.external}
             </button>
-            <button
-              type="button"
-              className="prev-tool"
-              onClick={toggleFullscreen}
-              aria-pressed={full}
-              title={full ? "Exit fullscreen (Esc)" : "Fullscreen"}
-              aria-label={full ? "Exit fullscreen" : "Fullscreen"}
-            >
-              {full ? Icon.shrink : Icon.expand}
-            </button>
+            {onExpand && (
+              <button
+                type="button"
+                className="prev-tool"
+                onClick={onExpand}
+                aria-pressed={expanded}
+                title={expanded ? "Exit full window (Esc)" : "Full window"}
+                aria-label={expanded ? "Exit full window" : "Full window"}
+              >
+                {expanded ? Icon.shrink : Icon.expand}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -378,7 +397,11 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
           <div
             className="prev-device"
             data-device={device}
-            style={{ width: Math.round(width * scale), height: frameH ? Math.round(frameH * scale) : undefined }}
+            style={{
+              width: Math.round(width * scale),
+              height: frameH ? Math.round(frameH * scale) : undefined,
+              visibility: measured ? undefined : "hidden",
+            }}
           >
             {iframe}
             <div

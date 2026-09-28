@@ -78,6 +78,8 @@ export default function VisualPreview({ id }: { id: string }) {
   const [error, setError] = useState<Failure | null>(null);
   const [notice, setNotice] = useState<string>("");
   const [mode, setMode] = useState<Mode>("use");
+  // The Preview tab over the whole browser window: toolbar, canvas and inspector.
+  const [expanded, setExpanded] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [changes, setChangesState] = useState<Change[]>([]);
   const [redoStack, setRedoState] = useState<Change[]>([]);
@@ -380,10 +382,20 @@ export default function VisualPreview({ id }: { id: string }) {
         e.preventDefault();
         if (e.shiftKey) actions.current.redoPending();
         else actions.current.undoPending();
+      } else if (!mod && !e.altKey && modeRef.current === "edit" && selectionRef.current && ["ArrowUp", "ArrowDown", "Enter", "Escape", "F2"].includes(e.key)) {
+        // The selection keys work wherever the focus is — after clicking a
+        // breadcrumb or a toolbar button, it is out here, not in the frame.
+        if (e.key === "Enter" && t && /^(BUTTON|A)$/.test(t.tagName)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        frameRef.current?.key(e.key, e.shiftKey);
+      } else if (!mod && !e.altKey && k === "s" && stateRef.current?.html) {
+        e.preventDefault();
+        setMode((m) => (m === "edit" ? "use" : "edit"));
       }
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   useEffect(() => {
@@ -392,6 +404,22 @@ export default function VisualPreview({ id }: { id: string }) {
       frameRef.current?.select(null);
     }
   }, [mode]);
+
+  // Full window: Esc leaves it, and the page underneath stops scrolling.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (e.key === "Escape" && !(t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) setExpanded(false);
+    };
+    const before = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = before;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [expanded]);
 
   // Leaving with unsaved edits loses them: say so.
   useEffect(() => {
@@ -500,7 +528,7 @@ export default function VisualPreview({ id }: { id: string }) {
   const legacy = !state!.routes.length;
 
   return (
-    <div className="mk-stack">
+    <div className={"mk-stack" + (expanded ? " is-window" : "")} role={expanded ? "dialog" : undefined} aria-modal={expanded || undefined} aria-label={expanded ? "Mockup, full window" : undefined}>
       <div className="prev-toolbar">
         <h3 className="label">Mockup</h3>
         <span className="badge badge-mono" title="Every build, edit and restyle is kept">
@@ -547,6 +575,11 @@ export default function VisualPreview({ id }: { id: string }) {
           {busy && !building ? <span className="btn-spinner" aria-hidden="true" /> : Icon.refresh}
           Rebuild
         </button>
+        {expanded && (
+          <button className="btn btn-sm" onClick={() => setExpanded(false)} title="Back to the page (Esc)">
+            {Icon.shrink} Exit full window
+          </button>
+        )}
       </div>
 
       {building && job && (
@@ -556,7 +589,7 @@ export default function VisualPreview({ id }: { id: string }) {
         </>
       )}
       {errorNotice}
-      {state!.report && <MockupReport report={state!.report} />}
+      {state!.report && !expanded && <MockupReport report={state!.report} />}
 
       {review && (
         <div className="pv-review" role="status">
@@ -590,6 +623,8 @@ export default function VisualPreview({ id }: { id: string }) {
             routes={state!.routes}
             selectable
             stage
+            expanded={expanded}
+            onExpand={() => setExpanded((v) => !v)}
             mode={comparing ? "use" : mode}
             onLoad={() => {
               // A new revision or a reload: the frame restores the page; put back the
