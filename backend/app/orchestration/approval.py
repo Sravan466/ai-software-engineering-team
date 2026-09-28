@@ -306,7 +306,11 @@ def decide_gate(
         return Gate(GateKind.PLAN.value)
 
     if phase_key == Phase.SECURITY_ENGINEER.value:
-        severe = severe_findings(output)
+        # Only the small ones. A serious finding is the crew's to fix, and by the time
+        # a gate is being decided the fix loop has either fixed it or parked the build
+        # as "needs help" — so asking about it here would ask the reviewer to judge a
+        # leaked credential, which has one right answer.
+        severe = [f for f in severe_findings(output) if not _serious(f)]
         if severe:
             # Both facts, not the louder one. "Warden raised a critical" read alone
             # invites the reviewer to fix that one thing and move on — when the
@@ -321,6 +325,16 @@ def decide_gate(
             return Gate(GateKind.UNCHECKED.value, unchecked)
 
     return None
+
+
+def _serious(finding: dict) -> bool:
+    from app.orchestration.remediation import is_serious
+
+    return is_serious(
+        str(read_key(finding, "severity", "risk", "level", "impact") or ""),
+        str(read_key(finding, "category", "type", "class") or ""),
+        str(read_key(finding, "title", "name", "issue", "summary") or ""),
+    )
 
 
 def _both(*notes: Optional[str]) -> Optional[str]:
@@ -357,7 +371,7 @@ def build_note(problems: list) -> str:
     where = f"{first.get('path')}" + (f" line {first.get('line')}" if first.get("line") else "")
     subject = "file doesn't" if len(files) == 1 else "files don't"
     return (
-        f"{len(files)} {subject} compile, after each was sent back once with the errors. "
+        f"{len(files)} {subject} compile, after the crew's fix rounds. "
         f"The first: {where} — {first.get('message')}"
     )
 
@@ -392,11 +406,11 @@ def cost_overrun_note(project, output: object) -> Optional[str]:
 
 
 def _security_note(severe: list[dict]) -> str:
-    """"Warden raised 2 findings at high severity or above — SQL injection, XSS." """
+    """"Warden raised 2 findings for you to decide on — XSS, UI contrast." """
     named = (str(f.get("category") or f.get("title") or "").strip() for f in severe)
     # Deduplicate before taking three, or four findings across three categories can
     # report two of them and drop the one the reviewer most needed to see.
     kinds = list(dict.fromkeys(k for k in named if k))[:3]
     count = len(severe)
-    subject = f"{count} finding{'' if count == 1 else 's'} at high severity or above"
+    subject = f"{count} finding{'' if count == 1 else 's'} for you to decide on"
     return f"Warden raised {subject} — {', '.join(kinds)}." if kinds else f"Warden raised {subject}."

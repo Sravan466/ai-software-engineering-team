@@ -185,11 +185,25 @@ class Settings(BaseSettings):
     #: that follow it. Off means the charter is still recorded and shown — it just
     #: stops failing a phase that contradicts it.
     enforce_stack_charter: bool = True
-    #: How many times a build is sent back to fix its own severe security findings
-    #: before the reviewer is asked to decide. Each round re-runs the owning phase
-    #: and everything after it, so this is expensive; zero hands every finding
-    #: straight to the gate instead.
-    security_remediation_rounds: BlankTolerantInt(1) = 1
+    #: How many rounds the crew gets to fix its own serious problems — severe
+    #: security findings, code that does not compile, a phase that contradicts the
+    #: stack — before it stops and asks for help. Each round re-runs the owning
+    #: phase (and, for a security finding, everything after it), so this is paid
+    #: for; most of what self-repair gains comes in the first two or three rounds.
+    #: The loop also stops early when a round fixes nothing. Zero means no automatic
+    #: fixing: every serious problem goes straight to "needs help".
+    #: `SECURITY_REMEDIATION_ROUNDS` is the deprecated name, still read.
+    auto_fix_max_rounds: BlankTolerantInt(3) = Field(
+        3, validation_alias=_renamed("auto_fix_max_rounds", "security_remediation_rounds")
+    )
+    #: The lowest security severity the crew fixes by itself. Findings below it —
+    #: and UI/UX findings at any severity — are small enough to be a person's call,
+    #: and keep the "Send back to fix" / "Waive it" choice. One of critical, high,
+    #: medium, low — or `none`, which fixes nothing automatically and asks about
+    #: every severe finding, as builds did before the fix loop.
+    auto_fix_min_severity: str = "high"
+    #: How many more rounds "Keep trying" grants a build that asked for help.
+    auto_fix_retry_rounds: BlankTolerantInt(2) = 2
 
     # ── Skills (the procedural library injected into agent prompts) ──
     #: Whether agents are given skills at all. Off means an empty library and a

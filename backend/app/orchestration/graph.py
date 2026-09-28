@@ -202,6 +202,9 @@ def _make_node(phase: Phase):
             # frozen stack. System Design is the phase that decides it, so it is the
             # one phase given none — it cannot be held to a charter it is writing.
             charter=binding_on(phase.value, state.get("charter")),
+            # The fix loop's last round asks every phase it rebuilds for the most
+            # capable model. Set by `redo`, cleared by the next one.
+            escalate=phase.value in (state.get("escalate") or []),
         )
         result = agent.run(ctx)
 

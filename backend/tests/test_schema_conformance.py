@@ -74,6 +74,15 @@ def _ollama(base_url: str = "http://localhost:11434", source_id: str = "ollama")
     )
 
 
+@pytest.fixture
+def ask_about_every_finding(monkeypatch):
+    """The gate as it reads *every* severe finding — for tests about reading drift,
+    not about which findings the crew fixes by itself."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "auto_fix_min_severity", "none")
+
+
 class _Project:
     """The two fields `decide_gate` reads off the live row."""
 
@@ -528,7 +537,7 @@ def test_the_cost_gate_fires_on_a_drifted_ledger_payload():
     assert decide_gate(project, Phase.COST_ESTIMATION.value, itemised).kind == GateKind.COST.value
 
 
-def test_the_security_gate_fires_on_a_drifted_warden_payload():
+def test_the_security_gate_fires_on_a_drifted_warden_payload(ask_about_every_finding):
     project = _Project()
     drifted = {
         "summary": "…",
@@ -581,6 +590,11 @@ _CRITICAL = {
     "recommendation": "r",
 }
 _SEVERE = {"summary": "…", "findings": [_CRITICAL]}
+#: Severe, but about polish: a person's call at any severity.
+_SMALL = {
+    "summary": "…",
+    "findings": [{**_CRITICAL, "title": "Low contrast", "category": "UI/UX"}],
+}
 _CLEAN = {"summary": "…", "findings": []}
 _PRICEY = {"summary": "…", "total_monthly_high_usd": 490}
 _CHEAP = {"summary": "…", "total_monthly_high_usd": 50}
@@ -601,8 +615,11 @@ _CHEAP = {"summary": "…", "total_monthly_high_usd": 50}
         (ApprovalMode.CHECKPOINTS, Phase.SYSTEM_DESIGN, {}, "valid", GateKind.PLAN.value),
         (ApprovalMode.CHECKPOINTS, Phase.BACKEND_ENGINEER, {}, "valid", None),
         (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, _CHEAP, "valid", GateKind.SHIP.value),
-        # …plus what the run raises for itself.
-        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "valid", GateKind.SECURITY.value),
+        # …plus what the run raises for itself. A serious finding is not one of
+        # them: the crew fixes it (or asks for help) before any gate is decided.
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "valid", None),
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SMALL, "valid", GateKind.SECURITY.value),
+        (ApprovalMode.UNATTENDED, Phase.SECURITY_ENGINEER, _SMALL, "valid", None),
         (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _CLEAN, "valid", None),
         (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, _PRICEY, "valid", GateKind.COST.value),
         # …and, when a gate's own phase failed its shape, a stop that says so.
@@ -610,7 +627,8 @@ _CHEAP = {"summary": "…", "total_monthly_high_usd": 50}
         (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, {}, "invalid", GateKind.UNCHECKED.value),
         # A finding it *could* read outranks "could not read": a known critical is
         # more actionable than an unreadable report.
-        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "invalid", GateKind.SECURITY.value),
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SMALL, "invalid", GateKind.SECURITY.value),
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "invalid", GateKind.UNCHECKED.value),
     ],
 )
 def test_the_whole_gate_policy_in_one_table(mode, phase, output, status, expected):
@@ -648,7 +666,7 @@ def test_a_setting_left_blank_does_not_take_the_app_down():
     assert Settings(_env_file=None, ollama_context_ceiling="4096").local_context_ceiling == 4096
 
 
-def test_a_null_does_not_mask_the_alias_that_holds_the_findings():
+def test_a_null_does_not_mask_the_alias_that_holds_the_findings(ask_about_every_finding):
     """The nastiest shape of all: it used to validate as `valid` and lose a critical.
 
     `{"findings": null, "security_findings": [critical]}` — `AliasChoices` took the
@@ -716,7 +734,7 @@ def test_a_build_that_really_is_free_still_reads_as_free():
     ) == 0.0
 
 
-def test_an_empty_list_does_not_beat_the_alias_that_holds_the_findings():
+def test_an_empty_list_does_not_beat_the_alias_that_holds_the_findings(ask_about_every_finding):
     """The null fix, one value-type over — and just as fatal.
 
     A schema-constrained model *must* emit `findings`, so emitting it empty beside a
@@ -976,7 +994,7 @@ def test_a_large_cloud_window_is_not_an_invitation_to_fill_it():
     assert profile.prompt_token_budget <= settings.max_prompt_tokens
 
 
-def test_a_stop_reports_every_reason_it_happened():
+def test_a_stop_reports_every_reason_it_happened(ask_about_every_finding):
     """"Warden raised a critical" read alone invites fixing that one thing and
     moving on — when the report it came from failed its shape, and the findings
     that did not survive parsing are the ones nobody will go looking for."""

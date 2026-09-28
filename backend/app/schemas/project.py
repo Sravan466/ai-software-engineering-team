@@ -109,6 +109,23 @@ class WaiveRequest(BaseModel):
         min_length=3,
         description="Why this finding is acceptable for this build.",
     )
+    #: Required for a serious finding: false_positive | mitigated | accepted_risk.
+    kind: Optional[str] = Field(
+        None, description="Why a serious finding is being waived."
+    )
+
+
+class KeepTryingRequest(BaseModel):
+    """Give a build that asked for help more rounds to fix its own problems."""
+
+    rounds: Optional[int] = Field(None, ge=1, le=5)
+
+
+class AcceptRequest(BaseModel):
+    """Move past code problems the crew could not fix, with the reason on record."""
+
+    kind: str = Field(..., description="false_positive | mitigated | accepted_risk")
+    reason: str = Field(..., min_length=3)
 
 
 class RedoRequest(BaseModel):
@@ -211,6 +228,9 @@ class ProjectOut(BaseModel):
     #: How many times this build has already been sent back to fix its own severe
     #: security findings.
     remediation_rounds: Optional[int] = None
+    #: The crew's fix loop: one track per kind of serious problem, each with its
+    #: rounds, what they fixed, and — when it stopped — why. See `orchestration.autofix`.
+    auto_fix: Optional[dict] = None
     #: The skills this build forces on or off, over the automatic choice. `None` on
     #: a build that never said anything about them.
     skill_overrides: Optional[SkillOverrides] = None

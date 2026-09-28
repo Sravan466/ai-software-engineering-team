@@ -3,7 +3,9 @@ name: secure-secrets
 title: Handling secrets and credentials
 description: Use whenever code or configuration touches API keys, passwords, tokens or connection strings.
 agents: [backend_engineer, devops_engineer, security_engineer]
-keywords: [secret, credential, api key, password, token, env, environment variable, encryption, vault, auth, authentication, login, payment]
+keywords: [secret, credential, api key, password, token, env, environment variable, encryption, vault, auth, authentication, login, payment, connection string, database url]
+fixes: [secret, credential, hardcoded, hard-coded, api key, connection string, database url, mongodb uri, password in source]
+rejects: [obfuscate, base64]
 ---
 
 No secret is ever a literal in source. Not a default, not a fallback, not in a comment,
@@ -13,6 +15,10 @@ is compromised and has to be rotated, not deleted.
 Read secrets from the environment at startup, through one settings object, and fail
 loudly at boot when a required one is missing. A service that starts without its
 signing key and discovers that on the first request fails somewhere much worse.
+
+Database connection strings are secrets too — `mongodb://user:pass@…`, `postgres://…`.
+Read the whole URL from one variable such as `DATABASE_URL` or `MONGODB_URI`, and never
+build a fallback URL with a password in it.
 
 Ship a `.env.example` with every key listed and every value blank, and keep the real
 `.env` out of version control. The example is how the next person knows what to set;

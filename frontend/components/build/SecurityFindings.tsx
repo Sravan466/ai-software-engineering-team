@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type SecurityFinding, type SecurityState } from "@/lib/api";
+import { api, type SecurityFinding, type SecurityState, type WaiveKind } from "@/lib/api";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
+import { ReasonKinds, WAIVE_KINDS } from "./ReasonKinds";
 
 /**
  * What was actually done about each thing Warden found.
@@ -21,7 +22,15 @@ import { SkeletonLines } from "@/components/ui/Skeleton";
  * the one route that can fix it — and because that rewinds everything built on top,
  * the security review runs again by itself. Nothing here marks a finding fixed on
  * the strength of having asked.
+ *
+ * Since #50 the list is split by who decides. Serious findings (critical/high, not
+ * UI/UX) are the crew's: it fixes them itself, and they appear here as "Fixed
+ * automatically", folded away with the round that fixed each. Small ones — medium,
+ * low and polish — keep the Send back / Waive cards, exactly as before.
  */
+
+/** Which findings a surface is about. */
+type Scope = "small" | "serious" | "all";
 
 const RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -53,17 +62,27 @@ export default function SecurityFindings({
   busy,
   act,
   onChange,
+  scope = "all",
+  allowWaive = true,
+  onCount,
 }: {
   id: string;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<boolean>;
   /** Fired whenever a disposition changes, so the gate above can re-read itself. */
   onChange?: () => void;
+  /** Small findings (the Security stop), serious ones (needs help), or both. */
+  scope?: Scope;
+  /** False hides Waive — on "needs help" it lives behind More. */
+  allowWaive?: boolean;
+  /** How many findings in scope still need something done. */
+  onCount?: (n: number) => void;
 }) {
   const [state, setState] = useState<SecurityState | null>(null);
   const [error, setError] = useState("");
   const [waiving, setWaiving] = useState<string | null>(null);
   const [reason, setReason] = useState("");
+  const [kind, setKind] = useState<WaiveKind | null>(null);
   const [working, setWorking] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -82,7 +101,17 @@ export default function SecurityFindings({
   // Severity first, then the ones still needing a decision — the reviewer's job here
   // is to empty the top of this list, so the top of the list is what needs them.
   const ordered = useMemo(() => {
-    const rows = state?.findings ?? [];
+    const all = state?.findings ?? [];
+    // The crew's own fixes are not decisions: they fold away below, not in this list.
+    const rows = all.filter((f) =>
+      scope === "small"
+        ? // A serious finding still open here is from a build parked before the crew
+          // fixed its own; hiding it would leave Approve blocked with nothing to click.
+          !f.serious || !SETTLED.has(f.status)
+        : scope === "serious"
+          ? f.serious && !SETTLED.has(f.status)
+          : !(f.serious && f.status === "fixed"),
+    );
     return [...rows].sort((a, b) => {
       const settled = (f: SecurityFinding) => (SETTLED.has(f.status) ? 1 : 0);
       return (
@@ -91,7 +120,26 @@ export default function SecurityFindings({
         a.title.localeCompare(b.title)
       );
     });
-  }, [state]);
+  }, [state, scope]);
+
+  const fixedByCrew = useMemo(
+    () =>
+      scope === "serious"
+        ? []
+        : (state?.findings ?? [])
+            .filter((f) => f.serious && f.status === "fixed")
+            .sort((a, b) => (a.fixed_round ?? 99) - (b.fixed_round ?? 99)),
+    [state, scope],
+  );
+  const open = ordered.filter((f) => !SETTLED.has(f.status)).length;
+  // What actually blocks shipping — the same rule the server applies. Open medium and
+  // low findings are worth reading, but they are not "needs a decision".
+  const blocking = ordered.filter(
+    (f) => !SETTLED.has(f.status) && (f.serious || f.severity === "critical" || f.severity === "high"),
+  ).length;
+  useEffect(() => {
+    if (state) onCount?.(open);
+  }, [state, open, onCount]);
 
   async function sendBack(finding: SecurityFinding) {
     setWorking(finding.key);
@@ -102,13 +150,14 @@ export default function SecurityFindings({
 
   async function waive(finding: SecurityFinding) {
     const text = reason.trim();
-    if (!text) return;
+    if (!text || (finding.serious && !kind)) return;
     setWorking(finding.key);
     setError("");
     try {
-      await api.waiveFinding(id, finding.key, text);
+      await api.waiveFinding(id, finding.key, text, finding.serious ? (kind ?? undefined) : undefined);
       setWaiving(null);
       setReason("");
+      setKind(null);
       await refresh();
       onChange?.();
     } catch (e: any) {
@@ -158,15 +207,18 @@ export default function SecurityFindings({
           <div className="notice-body">
             <span className="notice-title">Nothing outstanding</span>
             <span className="notice-text">
-              The security review reported no findings this build has to answer for.
+              {fixedByCrew.length
+                ? "Every serious finding was fixed by the crew and confirmed by a re-audit."
+                : "The security review reported no findings this build has to answer for."}
             </span>
           </div>
         </div>
+        <FixedByCrew findings={fixedByCrew} />
       </div>
     );
   }
 
-  const unresolved = state?.unresolved ?? 0;
+  const unresolved = blocking;
 
   return (
     <div className="findings">
@@ -175,24 +227,25 @@ export default function SecurityFindings({
           {unresolved > 0 ? (
             <>
               <span className="dot dot-bad dot-pulse" aria-hidden="true" />
-              {unresolved} still need{unresolved === 1 ? "s" : ""} a decision
+              {scope === "serious"
+                ? `${unresolved} still open`
+                : `${unresolved} still need${unresolved === 1 ? "s" : ""} a decision`}
+            </>
+          ) : open > 0 ? (
+            <>
+              <span className="dot dot-warn" aria-hidden="true" />
+              {open} open — none of them block shipping
             </>
           ) : (
             <>
               <span className="dot dot-ok" aria-hidden="true" />
-              Every serious finding has been settled
+              {scope === "small" ? "Every finding for you has been settled" : "Every finding has been settled"}
             </>
           )}
         </span>
         <span className="rule" />
-        {state && state.rounds_used > 0 && (
-          <span
-            className="field-hint"
-            title="Each round sends the findings back to the agents that own the files, then re-runs the review."
-          >
-            {state.rounds_used} of {state.rounds_allowed} automatic fix round
-            {state.rounds_allowed === 1 ? "" : "s"} used
-          </span>
+        {scope === "small" && (
+          <span className="field-hint">Medium, low and UI/UX findings — your call</span>
         )}
       </div>
 
@@ -231,12 +284,21 @@ export default function SecurityFindings({
               {f.recommendation && <p className="finding-fix">{f.recommendation}</p>}
               {f.note && (
                 <p className="finding-note">
-                  <b>Waived:</b> {f.note}
+                  <b>
+                    Waived
+                    {f.waive_kind
+                      ? ` · ${WAIVE_KINDS.find((k) => k.key === f.waive_kind)?.label ?? f.waive_kind}`
+                      : ""}
+                    :
+                  </b>{" "}
+                  {f.note}
                 </p>
               )}
 
-              {needsDecision && waiving !== f.key && (
+              {needsDecision && waiving !== f.key && (!f.serious || allowWaive) && (
                 <div className="finding-acts">
+                  {/* On "needs help" the crew already sent these back, round after round. */}
+                  {scope !== "serious" && (
                   <button
                     className="btn btn-sm btn-primary"
                     disabled={busy || mine || !f.owner_phase}
@@ -251,6 +313,7 @@ export default function SecurityFindings({
                     {Icon.undo}
                     {f.status === "fix_requested" ? "Send back again" : "Send back to fix"}
                   </button>
+                  )}
                   <button className="btn btn-sm" disabled={busy || mine} onClick={() => setWaiving(f.key)}>
                     Waive it
                   </button>
@@ -259,6 +322,7 @@ export default function SecurityFindings({
 
               {waiving === f.key && (
                 <div className="finding-waive">
+                  {f.serious && <ReasonKinds name={`kind-${f.key}`} kind={kind} setKind={setKind} />}
                   <div className="field">
                     <label htmlFor={`waive-${f.key}`}>Why is this acceptable for this build?</label>
                     <input
@@ -279,7 +343,7 @@ export default function SecurityFindings({
                   </div>
                   <button
                     className="btn btn-sm btn-primary"
-                    disabled={!reason.trim() || mine}
+                    disabled={!reason.trim() || mine || (f.serious && !kind)}
                     onClick={() => waive(f)}
                   >
                     {mine && <span className="btn-spinner" aria-hidden="true" />}
@@ -290,6 +354,7 @@ export default function SecurityFindings({
                     onClick={() => {
                       setWaiving(null);
                       setReason("");
+                      setKind(null);
                     }}
                   >
                     Cancel
@@ -305,6 +370,8 @@ export default function SecurityFindings({
         })}
       </ul>
 
+      <FixedByCrew findings={fixedByCrew} />
+
       {error && (
         <div className="notice notice-bad" role="alert" style={{ margin: "14px 16px" }}>
           {Icon.alert}
@@ -314,5 +381,35 @@ export default function SecurityFindings({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * What the crew fixed by itself, folded away. Proof, not a decision: each one names
+ * the round whose re-audit stopped reporting it.
+ */
+function FixedByCrew({ findings }: { findings: SecurityFinding[] }) {
+  if (findings.length === 0) return null;
+  return (
+    <details className="fixed-crew">
+      <summary>
+        <span className="fixed-crew-chev" aria-hidden="true">{Icon.chevron}</span>
+        <span className="dot dot-ok" aria-hidden="true" />
+        Fixed automatically
+        <span className="seg-count">{findings.length}</span>
+      </summary>
+      <ul className="fixed-crew-list">
+        {findings.map((f) => (
+          <li key={f.key} className="fixed-crew-row">
+            <span className={`badge ${SEVERITY_CLASS[f.severity] ?? "badge"}`}>{f.severity}</span>
+            <span className="fixed-crew-title">{f.title}</span>
+            {f.location && <code className="mono">{f.location}</code>}
+            <span className="fixed-crew-proof">
+              {f.fixed_round ? `Round ${f.fixed_round}` : "Fixed"} · the re-audit no longer reports it
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }

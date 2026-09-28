@@ -54,6 +54,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "skill_overrides",
         # Nullable: only a build paused for a user's computer names one.
         "paused_device_id",
+        # Nullable: a build from before the fix loop has no rounds to report, and
+        # its `remediation_rounds` count still says what it used.
+        "auto_fix",
     ),
     "phase_results": (
         "started_at",
@@ -84,6 +87,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     # write a fact nobody checked into every historical event.
     "usage_events": ("cost_known", "is_local", "owner_id"),
     "knowledge_docs": ("owner_id",),
+    # Both nullable: a finding settled before the fix loop was fixed by hand or not at
+    # all, and a waiver recorded before reasons had kinds keeps its free-text reason.
+    "security_dispositions": ("fixed_round", "waive_kind"),
 }
 
 

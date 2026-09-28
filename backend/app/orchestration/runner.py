@@ -40,6 +40,7 @@ from app.core.constants import (
     PhaseStatus,
     PipelineStatus,
     RoutingMode,
+    BuildStatus,
     SchemaStatus,
     StackStatus,
 )
@@ -47,7 +48,7 @@ from app.core.logging import get_logger
 from app.db.base import SessionLocal
 from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
 from app.memory.store import memory_store
-from app.orchestration import remediation
+from app.orchestration import autofix, remediation
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import binding_on
 from app.orchestration.graph import graph, gather_skills
@@ -144,6 +145,14 @@ def _initial_state(project: Project) -> PipelineState:
     )
 
 
+def _is_fix_note(note: object) -> bool:
+    """Whether a phase's standing note was written by the fix loop, not a person."""
+    text = str(note or "")
+    return text.startswith(remediation.FIX_NOTE_PREFIX) or text.startswith(
+        autofix.CODE_NOTE_PREFIX
+    )
+
+
 class CancelledRun(Exception):
     """Raised inside the run loop when the reviewer pressed Stop."""
 
@@ -226,14 +235,14 @@ class PipelineRunner:
                 row = self._reconcile_current_phase(db, project)
 
                 if row is not None and row.status == PhaseStatus.PENDING_APPROVAL.value:
-                    gate = decide_gate(
-                        project,
-                        row.phase,
-                        row.output,
-                        row.schema_status,
-                        row.stack_note,
-                        artifacts.build_problems(project),
-                    )
+                    # Serious problems are the crew's to fix, before anyone is asked
+                    # anything: a severe finding goes back to whoever wrote the file,
+                    # code that does not compile or contradicts the stack goes back to
+                    # its phase. Either this sends it back (and the run continues from
+                    # the rebuild), parks the build as "needs help", or finds nothing.
+                    if self._auto_fix(db, project, row):
+                        return project
+                    gate = self.gate_for(project, row)
                     if gate is not None:
                         self._park(db, project, gate)
                         return project
@@ -244,6 +253,15 @@ class PipelineRunner:
 
                 started, next_node = self._graph_position(project.id)
                 if started and next_node is None:
+                    # Never "complete" over a serious finding nobody fixed or waived —
+                    # in any review mode, unattended included.
+                    # Through the loop rather than straight to "needs help", so there is
+                    # always a round to show and a Keep trying that does something — a
+                    # build from before the loop can reach here with findings open.
+                    if remediation.unresolved(db, project, serious=True) and self._remediate(
+                        db, project
+                    ):
+                        return project
                     self._finalize(db, project)
                     return project
 
@@ -259,14 +277,9 @@ class PipelineRunner:
                     )
                     return project
 
+                # What the phase found wrong with itself is dealt with at the top of
+                # the next pass, where the finished row is read back.
                 self._run_phase(db, project, phase_key)
-
-                # Warden's findings used to stop here — in a report, with the code
-                # unchanged. They now go back to whoever wrote the offending file,
-                # before anyone is asked to approve anything, so the reviewer is only
-                # ever asked about what a fix could not resolve.
-                if phase_key == Phase.SECURITY_ENGINEER.value and self._remediate(db, project):
-                    return project
         except (CancelledRun, RequestCancelled):
             self._settle_cancelled(db, project)
             return project
@@ -281,45 +294,162 @@ class PipelineRunner:
                 self._fail(db, project, str(e))
             return project
 
-    # ── acting on what the security review found ─────────────────────────────
+    # ── the crew fixing its own serious problems ──────────────────────────────
+    def gate_for(self, project: Project, row: PhaseResult) -> Optional[Gate]:
+        """`decide_gate` for a finished row, minus what a person already accepted."""
+        data = autofix.load(project)
+        stack = None if autofix.accepted(data, autofix.build_track(row.phase)) else row.stack_note
+        return decide_gate(
+            project,
+            row.phase,
+            row.output,
+            row.schema_status,
+            stack,
+            self.build_problems(project),
+        )
+
+    @staticmethod
+    def build_problems(project: Project) -> list[dict]:
+        """Compile problems still outstanding, less the phases a person moved past
+        on the record — asking again at the Ship review would ask twice."""
+        data = autofix.load(project)
+        return [
+            p
+            for p in artifacts.build_problems(project)
+            if not autofix.accepted(data, autofix.build_track(str(p.get("phase") or "")))
+        ]
+
+    def _auto_fix(self, db: Session, project: Project, row: PhaseResult) -> bool:
+        """Send a finished phase's serious problems back to be fixed. True if it
+        took the run over — by sending work back, or by parking as needs-help."""
+        if row.phase == Phase.SECURITY_ENGINEER.value:
+            return self._remediate(db, project)
+        track = autofix.load(project)["tracks"].get(autofix.build_track(row.phase))
+        # Also when the phase came back clean but a fix round is waiting on it: that
+        # round has to be closed as a success, and the track settled for next time.
+        if (
+            row.stack_note
+            or row.build_status == BuildStatus.FAILED.value
+            or (track is not None and autofix.open_round(track) is not None)
+        ):
+            return self._fix_code(db, project, row)
+        return False
+
+    def _fix_code(self, db: Session, project: Project, row: PhaseResult) -> bool:
+        """Re-run a phase whose code does not compile or contradicts the stack.
+
+        The phase already had its own repair round inside `agent.run`; this is the
+        loop around it, with the same stopping rule as security findings. Re-run in
+        place: nothing after this phase exists yet.
+        """
+        name = autofix.build_track(row.phase)
+        data = autofix.load(project)
+        t = autofix.track(data, name)
+        problems = autofix.code_problems(row)
+        keys = [p["key"] for p in problems]
+        if autofix.accepted(data, name):
+            if autofix.covers(t, keys):
+                return False
+            # Broken differently from what a person accepted: a new problem.
+            t["accepted"] = None
+            autofix.settle(t)
+        autofix.close_round(t, keys)
+        if not problems:
+            autofix.settle(t)
+            autofix.save(project, data)
+            db.commit()
+            return False
+
+        step = autofix.next_step(t)
+        if step != "fix":
+            autofix.stop(t, step, keys)
+            autofix.save(project, data)
+            db.commit()
+            self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))
+            return True
+
+        n = len(t["rounds"]) + 1
+        k = n - int(t.get("episode_start") or 0)
+        strategy = remediation.strategy_for(k)
+        autofix.start_round(t, strategy, [row.phase], problems)
+        autofix.save(project, data)
+        db.commit()
+        log.info(
+            "Fixing %d code problem(s) in %s on %s (round %d, %s).",
+            len(problems), row.phase, project.id, n, strategy,
+        )
+        snippets = {}
+        if strategy != remediation.STRATEGY_GUIDED:
+            for p in problems:
+                code = remediation.snippet(
+                    project,
+                    remediation.Finding(
+                        key=p["key"], title=p["title"], severity="", category="",
+                        location=p.get("where") or "", recommendation="", owner_phase=row.phase,
+                    ),
+                    row.phase,
+                )
+                if code:
+                    snippets[p["key"]] = code
+        self.redo(
+            db,
+            project,
+            row.phase,
+            autofix.code_note(problems, k, snippets, self._standing_fix_note(data, row.phase)),
+            escalate=(row.phase,) if strategy == remediation.STRATEGY_STRONGER else (),
+            continue_after=True,
+            fix_track=name,
+        )
+        return True
+
     def _remediate(self, db: Session, project: Project) -> bool:
-        """Send severe findings back to the agents that own them. True if it fired.
+        """Send serious findings back to the agents that own them. True if it fired.
 
         The mechanism is the one that already exists: `redo` re-runs one phase and
         rewinds everything built on top of it — which, when the phase being rewound
-        is upstream of Warden, *is* a fix followed by a re-audit. Nothing new had to
-        be invented here; the findings simply had nowhere to go before.
+        is upstream of Warden, *is* a fix followed by a re-audit.
 
-        One owner per round, earliest phase first, because rewinding the Backend
-        Engineer rebuilds the Frontend anyway: sending the same round's findings to
-        both would run the back half of the pipeline twice for one fix.
+        Every owner in one round. The earliest phase is re-run with its findings, and
+        every later owner's findings travel with the rewind as that phase's own note,
+        so one rebuild fixes them all — sending only the first owner's findings left
+        the others rebuilt without being told, and counted as a round used.
 
-        Bounded by `security_remediation_rounds`. A model that could not fix a finding
-        with the remediation text in front of it will not fix it on the fourth
-        attempt, and the reviewer is a better use of the next few minutes than another
-        rebuild. What survives the bound reaches the gate, which will not let it ship
-        unfixed and unwaived.
+        Bounded by `auto_fix_max_rounds`, and stopped sooner when a round fixes
+        nothing. What survives parks the build as "needs help" — never at the
+        send-back-or-waive gate, which is for small findings, and never "complete".
         """
         row = self.latest_row(db, project, Phase.SECURITY_ENGINEER.value)
         if row is None:
             return False
 
-        outstanding = remediation.unresolved(db, project)
+        data = autofix.load(project)
+        t = autofix.track(data, autofix.SECURITY)
+        outstanding = remediation.unresolved(db, project, serious=True)
+        fixed = autofix.close_round(t, [f.finding_key for f in outstanding])
+        if fixed:
+            last = t["rounds"][-1]
+            for record in self._dispositions(db, project, fixed):
+                if record.status == FindingStatus.FIXED.value:
+                    record.fixed_round = last["n"]
         if not outstanding:
+            autofix.settle(t)
+            autofix.save(project, data)
+            db.commit()
             return False
 
-        rounds = project.remediation_rounds or 0
-        if rounds >= max(settings.security_remediation_rounds, 0):
+        step = autofix.next_step(t)
+        if step != "fix":
+            autofix.stop(t, step, [f.finding_key for f in outstanding])
+            autofix.save(project, data)
+            db.commit()
             log.info(
-                "%d severe finding(s) left after %d remediation round(s) on %s — "
-                "handing the decision to the reviewer.",
-                len(outstanding),
-                rounds,
-                project.id,
+                "%d serious finding(s) left on %s (%s) — asking for help.",
+                len(outstanding), project.id, step,
             )
-            return False
+            self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))
+            return True
 
-        owned = remediation.group_by_owner(
+        findings = [
             remediation.Finding(
                 key=f.finding_key,
                 title=f.title,
@@ -330,31 +460,122 @@ class PipelineRunner:
                 owner_phase=f.owner_phase,
             )
             for f in outstanding
-        )
-        if not owned:
-            # Nothing here names a file anyone wrote — an architectural finding, or a
-            # location the model invented. There is no agent to send it to, and
-            # picking one would make a correct phase redo correct work and call the
-            # result a remediation. The reviewer decides these.
-            return False
+        ]
+        order = [p.value for p in PHASE_ORDER]
+        by_owner: dict[str, list[remediation.Finding]] = {}
+        for f in findings:
+            by_owner.setdefault(remediation.route_owner(f), []).append(f)
+        owners = sorted(by_owner, key=order.index)
 
-        phase_key, items = next(iter(owned.items()))
-        keys = {f.key for f in items}
-        for record in outstanding:
-            if record.finding_key in keys:
-                record.status = FindingStatus.FIX_REQUESTED.value
-        project.remediation_rounds = rounds + 1
+        n = len(t["rounds"]) + 1
+        k = n - int(t.get("episode_start") or 0)
+        strategy = remediation.strategy_for(k)
+        notes = {
+            phase: remediation.fix_instruction(
+                items, strategy=strategy, project=project, owner=phase, round_number=k
+            )
+            for phase, items in by_owner.items()
+        }
+        record = autofix.start_round(
+            t,
+            strategy,
+            owners,
+            [
+                {
+                    "key": f.key,
+                    "title": f.title,
+                    "severity": f.severity,
+                    "where": f.location or None,
+                    "phase": remediation.route_owner(f),
+                    "kind": "security",
+                }
+                for f in findings
+            ],
+        )
+        # Kept with the round, so a compile fix inside it can carry the security fix
+        # along — the phase's own note is overwritten by the first such fix.
+        record["notes"] = notes
+        for finding in outstanding:
+            finding.status = FindingStatus.FIX_REQUESTED.value
+        project.remediation_rounds = n
+        autofix.save(project, data)
         db.commit()
 
         log.info(
-            "Sending %d severe finding(s) back to %s on %s (remediation round %d).",
-            len(items),
-            phase_key,
-            project.id,
-            rounds + 1,
+            "Sending %d serious finding(s) back to %s on %s (round %d, %s).",
+            len(findings), ", ".join(owners), project.id, n, strategy,
         )
-        self.redo(db, project, phase_key, remediation.fix_instruction(items))
+        first, rest = owners[0], owners[1:]
+        self.redo(
+            db,
+            project,
+            first,
+            notes[first],
+            extra_feedback={phase: notes[phase] for phase in rest},
+            escalate=tuple(owners) if strategy == remediation.STRATEGY_STRONGER else (),
+            continue_after=True,
+            fix_track=autofix.SECURITY,
+        )
         return True
+
+    @staticmethod
+    def _standing_fix_note(data: dict, phase: str) -> Optional[str]:
+        """The security fix note `phase` is working to, while that round is open."""
+        live = autofix.open_round(autofix.track(data, autofix.SECURITY))
+        if live is None:
+            return None
+        return (live.get("notes") or {}).get(phase)
+
+    def _abandon_round(self, db: Session, project: Project, name: str) -> None:
+        """Forget the one fix round whose redo never generated, so it isn't judged."""
+        data = autofix.load(project)
+        if name in data["tracks"] and autofix.abandon_open_round(data["tracks"][name]):
+            project.remediation_rounds = len(autofix.track(data, autofix.SECURITY)["rounds"])
+            autofix.save(project, data)
+            db.commit()
+
+    @staticmethod
+    def _dispositions(db: Session, project: Project, keys: list[str]) -> list:
+        from app.db.models import SecurityDisposition
+
+        return (
+            db.query(SecurityDisposition)
+            .filter(
+                SecurityDisposition.project_id == project.id,
+                SecurityDisposition.finding_key.in_(keys),
+            )
+            .all()
+        )
+
+    @staticmethod
+    def _help_note(project: Project) -> str:
+        """One line saying what the crew could not fix, and why it stopped."""
+        data = autofix.load(project)
+        parts: list[str] = []
+        for name, t in data["tracks"].items():
+            if not t.get("stopped") or t.get("accepted"):
+                continue
+            rounds = len(t.get("rounds") or [])
+            left = int(t["stopped"].get("left") or 0)
+            if name == autofix.SECURITY:
+                what = f"{left} serious security finding{'' if left == 1 else 's'}"
+            else:
+                phase = name[len(autofix.BUILD_PREFIX):]
+                try:
+                    title = get_agent(phase).title
+                except Exception:  # noqa: BLE001
+                    title = phase
+                what = f"{left} code problem{'' if left == 1 else 's'} in {title}'s work"
+            if t["stopped"]["reason"] == autofix.STOP_NO_PROGRESS:
+                why = "the last round fixed none of them"
+            elif rounds:
+                why = f"after {rounds} fix round{'' if rounds == 1 else 's'}"
+            else:
+                why = "automatic fixing is switched off"
+            parts.append(f"The crew couldn't fix {what} — {why}.")
+        return " ".join(parts) or (
+            "A serious security finding is still open and was neither fixed nor waived."
+        )
 
     @_as_owner
     def reject(self, db: Session, project: Project, feedback: str) -> Project:
@@ -368,7 +589,15 @@ class PipelineRunner:
 
     @_as_owner
     def redo(
-        self, db: Session, project: Project, phase_key: Optional[str], feedback: str
+        self,
+        db: Session,
+        project: Project,
+        phase_key: Optional[str],
+        feedback: str,
+        extra_feedback: Optional[dict] = None,
+        escalate: tuple = (),
+        continue_after: bool = False,
+        fix_track: Optional[str] = None,
     ) -> Project:
         """Re-run one phase with reviewer feedback, patching the checkpoint in place.
 
@@ -380,9 +609,26 @@ class PipelineRunner:
         whole file tree assembled from several phases, and "this file is wrong" has
         to reach the agent that wrote *that* file — otherwise per-file redo is a
         button that sends a note to whoever happens to have finished last.
+
+        The fix loop adds three things. `extra_feedback` is a note for each later
+        phase the rewind rebuilds, so one rewind fixes every owner's findings.
+        `escalate` names the phases that should run on the most capable model the
+        router has. `continue_after` carries on with the run instead of parking on
+        the same decision — the crew fixing its own work is not a person's redo.
         """
         if not phase_key:
             return project
+
+        if not continue_after:
+            # A person acting on a build the crew gave up on starts a new episode: the
+            # verdict on the crew's last round is not a verdict on this.
+            data = autofix.load(project)
+            stuck = autofix.stuck(data)
+            if stuck:
+                for name in stuck:
+                    autofix.settle(data["tracks"][name])
+                autofix.save(project, data)
+                db.commit()
 
         # Where to return to once the agent is done: the decision this redo was
         # requested from, which is not necessarily the phase being re-run.
@@ -443,6 +689,7 @@ class PipelineRunner:
                         # Design is the exception, and `binding_on` is where that
                         # exception lives rather than here.
                         charter=binding_on(phase_key, values.get("charter")),
+                        escalate=phase_key in escalate,
                     )
                     # Inside the lock, model call and all. This is a read-modify-write:
                     # the patch below is built from the snapshot above, so a write to this
@@ -461,11 +708,27 @@ class PipelineRunner:
                         for key, value in values.get("prior_outputs", {}).items()
                         if key not in stale
                     }
+                    # A fix note belongs to the round that wrote it. A phase this
+                    # rewind rebuilds without a note of its own this time must not be
+                    # handed the last round's findings again — it may have fixed them.
+                    notes = {
+                        k: v
+                        for k, v in (values.get("feedback") or {}).items()
+                        if not (k in stale and _is_fix_note(v))
+                    }
+                    notes[phase_key] = feedback
+                    notes.update(extra_feedback or {})
                     patch = {
                         "prior_outputs": {**kept, phase_key: result.output},
                         "last_phase": phase_key,
                         "last_result": last_result,
-                        "feedback": {**values.get("feedback", {}), phase_key: feedback},
+                        "feedback": notes,
+                        # This round's escalations — plus, for a fix in place, the
+                        # ones an open round still owes the phases after this.
+                        "escalate": sorted(
+                            (set(escalate) | (set(values.get("escalate") or []) if not stale else set()))
+                            - {phase_key}
+                        ),
                     }
                     if phase_key == Phase.SYSTEM_DESIGN.value:
                         # The architecture was rewritten, so the charter frozen from
@@ -484,6 +747,8 @@ class PipelineRunner:
                         as_node=phase_key,
                     )
         except ProviderError as e:
+            if fix_track:
+                self._abandon_round(db, project, fix_track)
             # Put the previous attempt back. Both `rejected` and `failed` count as
             # superseded when the archive is assembled, so leaving them that way
             # leaves this phase with *no* current attempt: its files vanish from the
@@ -544,17 +809,17 @@ class PipelineRunner:
             return project
 
         if gate_phase == phase_key:
+            if continue_after:
+                # The crew re-ran its own phase to fix it. The loop reads the new
+                # attempt back and decides: another round, a gate, or onwards.
+                return self.continue_run(db, project)
             # The reviewer sent back the phase they were looking at. Nothing
-            # downstream exists yet, so put them back on the same decision.
+            # downstream exists yet, so put them back on the same decision — once
+            # anything serious in the new attempt has been dealt with.
             gate_row = self.latest_row(db, project, phase_key)
-            gate = decide_gate(
-                project,
-                phase_key,
-                gate_row.output if gate_row else None,
-                gate_row.schema_status if gate_row else None,
-                gate_row.stack_note if gate_row else None,
-                artifacts.build_problems(project),
-            )
+            if gate_row is not None and self._auto_fix(db, project, gate_row):
+                return project
+            gate = self.gate_for(project, gate_row) if gate_row is not None else None
             self._park(db, project, gate or fallback)
             return project
 

@@ -142,6 +142,10 @@ def _save(name: str, payload: SkillBody, created: bool) -> dict:
         # feature is trying not to have.
         raise HTTPException(422, " ".join(problems))
 
+    # What a finding-fixing skill says it fixes and what advice it overrules is not
+    # part of the editing form, so an edit keeps whatever the skill already had —
+    # overriding the bundled CSRF skill must not quietly stop it governing CSRF fixes.
+    before = registry.get(name)
     skill = Skill(
         name=name,
         title=title,
@@ -156,6 +160,8 @@ def _save(name: str, payload: SkillBody, created: bool) -> dict:
             if cleaned
         ),
         body=body,
+        fixes=before.fixes if before is not None else (),
+        rejects=before.rejects if before is not None else (),
         source="user",
     )
     try:

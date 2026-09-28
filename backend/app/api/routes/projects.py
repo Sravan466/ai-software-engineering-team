@@ -31,18 +31,20 @@ from app.core.constants import (
     PHASE_ORDER,
     ApprovalMode,
     FindingStatus,
+    GateKind,
     PipelineStatus,
     RoutingMode,
 )
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
 from app.db.models import Project, SecurityDisposition, User
-from app.orchestration import remediation
-from app.orchestration.approval import decide_gate
+from app.orchestration import autofix, remediation
 from app.orchestration.runner import runner
 from app.router.router import router as model_router
 from app.schemas.project import (
+    AcceptRequest,
     ApprovalRequest,
+    KeepTryingRequest,
     PreflightRequest,
     ProjectCreate,
     ProjectOut,
@@ -142,6 +144,10 @@ def _rederive_gate(db: Session, project: Project) -> None:
     """
     if project.status != PipelineStatus.AWAITING_APPROVAL.value or not project.current_phase:
         return
+    # "Needs help" is not a policy's gate: the crew stopped on something it could not
+    # fix, and no review mode makes that go away.
+    if project.gate_kind == GateKind.NEEDS_HELP.value:
+        return
     # The runner's own definition of "latest", so this cannot re-derive the gate from
     # a different row than the one the loop parked on.
     row = runner.latest_row(db, project, project.current_phase)
@@ -151,14 +157,7 @@ def _rederive_gate(db: Session, project: Project) -> None:
     # would drop the "this check could not run" warning off a parked gate, and the
     # only sign the reviewer had that nothing was actually checked would vanish the
     # moment they adjusted the cost cap.
-    gate = decide_gate(
-        project,
-        row.phase,
-        row.output,
-        row.schema_status,
-        row.stack_note,
-        artifacts.build_problems(project),
-    )
+    gate = runner.gate_for(project, row)
     if gate is not None:
         project.gate_kind = gate.kind
         project.gate_note = gate.note
@@ -477,16 +476,16 @@ def _require_findings_settled(db: Session, project: Project) -> None:
     and re-audited, or waived on the record with a reason. This is the sentence that
     makes the second option a decision rather than an omission.
     """
-    if project.effective_approval_mode == ApprovalMode.UNATTENDED.value:
-        return
+    # Every review mode, unattended included: a build that parked with a severe
+    # finding open is being approved by a person, and the same rule applies to them.
     outstanding = remediation.unresolved(db, project)
     if not outstanding:
         return
     count = len(outstanding)
     subject = (
-        "1 security finding at high severity or above is"
+        "1 serious or high-severity security finding is"
         if count == 1
-        else f"{count} security findings at high severity or above are"
+        else f"{count} serious or high-severity security findings are"
     )
     raise HTTPException(
         status_code=409,
@@ -508,6 +507,12 @@ def approve_phase(
             _conflict(project, "approve")
             if project.status == PipelineStatus.RUNNING.value
             else HTTPException(400, f"Nothing to approve (status '{project.status}').")
+        )
+    if project.gate_kind == GateKind.NEEDS_HELP.value:
+        raise HTTPException(
+            409,
+            "The crew is stuck on a serious problem, and approving would ship it. Keep "
+            "trying, stop the build, or waive each finding with a reason.",
         )
     _require_findings_settled(db, project)
     # Every route that starts model calls asks first, as `run` and `resume` do —
@@ -577,6 +582,7 @@ def list_findings(
         .order_by(SecurityDisposition.created_at)
         .all()
     )
+    track = autofix.track(autofix.load(project), autofix.SECURITY)
     return {
         "findings": [
             {
@@ -589,12 +595,19 @@ def list_findings(
                 "owner_phase": row.owner_phase,
                 "status": row.status,
                 "note": row.note,
+                # The crew's to fix (true), or the reviewer's to judge.
+                "serious": remediation.row_is_serious(row),
+                "fixed_round": row.fixed_round,
+                "waive_kind": row.waive_kind,
             }
             for row in rows
         ],
         "unresolved": len(remediation.unresolved(db, project)),
-        "rounds_used": project.remediation_rounds or 0,
-        "rounds_allowed": max(settings.security_remediation_rounds, 0),
+        # Only the small ones: what the Security stop asks about.
+        "unresolved_small": len(remediation.unresolved(db, project, serious=False)),
+        "rounds_used": len(track["rounds"]),
+        "rounds_allowed": int(track["allowed"]),
+        "auto_fix_min_severity": settings.auto_fix_min_severity,
     }
 
 
@@ -697,17 +710,113 @@ def waive_finding(
     """
     rows = _findings(db, project, key)
     row = rows[0]
+    kind = (payload.kind or "").strip() or None
+    if remediation.row_is_serious(row) and kind not in autofix.WAIVE_KINDS:
+        # A serious finding is the crew's to fix. Waiving one is a risk decision, and
+        # the record says which kind: it was never real, it is handled elsewhere, or
+        # the risk is knowingly accepted.
+        raise HTTPException(
+            422,
+            "Waiving a serious finding needs a reason kind — false positive, mitigated "
+            "elsewhere, or accepted risk — as well as the reason itself.",
+        )
+    if kind is not None and kind not in autofix.WAIVE_KINDS:
+        raise HTTPException(422, f"'{kind}' is not a waiver reason this build records.")
     for tracked in rows:
         tracked.status = FindingStatus.WAIVED.value
         tracked.note = payload.reason.strip()
+        tracked.waive_kind = kind
     db.commit()
     log.info("Security finding waived on %s: %s — %s", project.id, row.title, row.note)
     return {
         "key": row.finding_key,
         "status": row.status,
         "note": row.note,
+        "waive_kind": row.waive_kind,
         "unresolved": len(remediation.unresolved(db, project)),
     }
+
+
+# ── when the crew asked for help ─────────────────────────────────────────────
+def _require_needs_help(project: Project, action: str) -> None:
+    if (
+        project.status != PipelineStatus.AWAITING_APPROVAL.value
+        or project.gate_kind != GateKind.NEEDS_HELP.value
+    ):
+        raise (
+            _conflict(project, action)
+            if project.status == PipelineStatus.RUNNING.value
+            else HTTPException(400, "This build isn't waiting for help.")
+        )
+
+
+@router.post("/{project_id}/auto-fix/retry", response_model=RunResponse)
+def keep_trying(
+    background: BackgroundTasks,
+    payload: Optional[KeepTryingRequest] = None,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> RunResponse:
+    """Give the crew more rounds on whatever it stopped on, and carry on.
+
+    Also how a build moves on once every serious finding it stopped on has been
+    waived: with nothing left to fix, the loop finds nothing and the run continues.
+    """
+    _require_needs_help(project, "retry")
+    _require_models(project)
+    more = (payload.rounds if payload and payload.rounds else None) or settings.auto_fix_retry_rounds
+    data = autofix.load(project)
+    names = autofix.keep_trying(data, more)
+    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+        raise _conflict(project, "retry")
+    autofix.save(project, data)
+    db.commit()
+    log.info("Keep trying on %s: %s, %d more round(s)", project.id, names, more)
+    background.add_task(_drive, project.id)
+    return RunResponse(
+        project_id=project.id,
+        status=project.status,
+        current_phase=project.current_phase,
+        message=f"Trying again — up to {more} more round{'' if more == 1 else 's'}.",
+    )
+
+
+@router.post("/{project_id}/auto-fix/accept", response_model=RunResponse)
+def accept_code_problems(
+    payload: AcceptRequest,
+    background: BackgroundTasks,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> RunResponse:
+    """Carry on past code the crew could not fix, with the reason on the record.
+
+    Only for compile errors and stack contradictions. A serious security finding is
+    waived one at a time, with its own reason.
+    """
+    _require_needs_help(project, "accept")
+    if payload.kind not in autofix.WAIVE_KINDS:
+        raise HTTPException(422, f"'{payload.kind}' is not a reason this build records.")
+    data = autofix.load(project)
+    if not any(n.startswith(autofix.BUILD_PREFIX) for n in autofix.stuck(data)):
+        raise HTTPException(
+            400,
+            "There are no code problems to move past — waive the security findings "
+            "one at a time instead.",
+        )
+    _require_models(project)
+    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+        raise _conflict(project, "accept")
+    names = autofix.accept(data, payload.kind, payload.reason.strip())
+    autofix.save(project, data)
+    db.commit()
+    log.info("Code problems accepted on %s: %s — %s", project.id, names, payload.reason)
+    background.add_task(_drive, project.id)
+    return RunResponse(
+        project_id=project.id,
+        status=project.status,
+        current_phase=project.current_phase,
+        message="Continuing — the problems you accepted are on the record.",
+    )
 
 
 @router.post("/{project_id}/redo", response_model=RunResponse)
