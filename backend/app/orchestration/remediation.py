@@ -85,6 +85,52 @@ class Finding:
     def severe(self) -> bool:
         return self.severity in STOPPING_SEVERITIES
 
+    @property
+    def serious(self) -> bool:
+        """The crew fixes this one itself. See `is_serious`."""
+        return is_serious(self.severity, self.category, self.title)
+
+
+# ── serious (the crew fixes it) and small (a person decides) ─────────────────
+#: Severities, most severe first.
+SEVERITY_ORDER: tuple[str, ...] = ("critical", "high", "medium", "low")
+
+#: Findings about how the product looks and reads, rather than whether it is safe.
+#: Worth a person's judgement at any severity: "the contrast is low" has no single
+#: right fix the way a leaked credential does.
+_UI_UX = re.compile(
+    r"\bui\b|\bux\b|ui/ux|visual|cosmetic|layout|styling|typograph|contrast|spacing|"
+    r"polish|usability|a11y|accessib|\bcopy\b|wording",
+    re.I,
+)
+
+
+def _threshold() -> int:
+    from app.core.config import settings
+
+    wanted = str(settings.auto_fix_min_severity or "high").strip().lower()
+    if wanted in ("none", "off"):
+        return -1  # nothing is the crew's to fix: every severe finding is asked about
+    return SEVERITY_ORDER.index(wanted) if wanted in SEVERITY_ORDER else 1
+
+
+def is_ui_ux(category: str, title: str = "") -> bool:
+    return bool(_UI_UX.search(f"{category} {title}"))
+
+
+def is_serious(severity: str, category: str = "", title: str = "") -> bool:
+    """Whether a finding is the crew's to fix, rather than a person's to judge.
+
+    Serious means rated at or above `auto_fix_min_severity` (high, by default) and
+    not about UI/UX. A leaked database password has one right answer, and asking a
+    person whether to fix it is asking them to do the crew's job. Everything else —
+    medium and low findings, and polish — is a judgement call and stays one.
+    """
+    rank = str(severity or "").strip().lower()
+    if rank not in SEVERITY_ORDER:
+        return False
+    return SEVERITY_ORDER.index(rank) <= _threshold() and not is_ui_ux(category, title)
+
 
 def _text(value: object) -> str:
     return str(value).strip() if has_content(value) else ""
@@ -248,24 +294,199 @@ def severe(findings: Iterable[Finding]) -> list[Finding]:
     return [f for f in findings if f.severe]
 
 
-def fix_instruction(items: Iterable[Finding]) -> str:
+#: How every automatic fix note starts, so a later round can tell its own notes
+#: apart from a person's and clear the ones that no longer apply.
+FIX_NOTE_PREFIX = "The security review found problems"
+
+#: The approach each round takes. Repeating the same prompt to the same model is the
+#: one thing self-repair research says not to do, so each round adds something.
+STRATEGY_GUIDED = "guided"  # the finding, with advice checked against the skills
+STRATEGY_WITH_CODE = "with_code"  # + the code it is about, and "the last try failed"
+STRATEGY_STRONGER = "stronger_model"  # + the most capable model the router has
+
+
+def strategy_for(round_number: int) -> str:
+    if round_number <= 1:
+        return STRATEGY_GUIDED
+    if round_number == 2:
+        return STRATEGY_WITH_CODE
+    return STRATEGY_STRONGER
+
+
+def _mentions(text: str, terms: Iterable[str]) -> bool:
+    low = text.lower()
+    return any(re.search(rf"(?<![\w-]){re.escape(t)}(?![\w-])", low) for t in terms if t)
+
+
+def guidance_for(finding: Finding) -> list:
+    """The skills that are the trusted fix for this finding, best known first.
+
+    Matched on what the finding is *about* (title and category), not on the advice
+    attached to it — the advice is the thing being checked.
+    """
+    try:
+        from app.skills import registry
+
+        library = registry.library()
+        disabled = registry.disabled_names()
+    except Exception as e:  # noqa: BLE001 - a missing library must not stop a fix
+        log.warning("Skill library unavailable for fix guidance: %s", e)
+        return []
+    about = f"{finding.title} {finding.category}"
+    return [
+        s
+        for s in library
+        if s.fixes and s.usable and s.name not in disabled and _mentions(about, s.fixes)
+    ]
+
+
+def checked_recommendation(finding: Finding, skills: Optional[list] = None) -> Optional[str]:
+    """The reviewer's advice, or None when a governing skill contradicts it.
+
+    Warden once told an agent to fix CSRF with Helmet, which only sets headers; the
+    agent did as told, the re-audit found the same hole, and the round was wasted.
+    Advice that names something a governing skill rejects is dropped, and the
+    skill's own procedure goes in its place.
+    """
+    rec = finding.recommendation
+    if not rec:
+        return None
+    for skill in skills if skills is not None else guidance_for(finding):
+        if _mentions(rec, skill.rejects):
+            log.info(
+                "Dropped advice for '%s' that contradicts the %s skill: %s",
+                finding.title,
+                skill.name,
+                rec,
+            )
+            return None
+    return rec
+
+
+def snippet(project, finding: Finding, owner: Optional[str], limit: int = 1600) -> Optional[str]:
+    """The code a finding is about, as it stands now — what round 2 shows the agent.
+
+    Read from the owning phase's current deliverable. With a line number, the lines
+    around it; without one, the top of the file. None when the file cannot be found,
+    which is normal for an app-wide finding.
+    """
+    if project is None or not owner or not finding.location:
+        return None
+    from app.core.artifacts import current_phases
+
+    row = next((p for p in current_phases(project) if p.phase == owner), None)
+    if row is None or not isinstance(row.output, dict):
+        return None
+    files = list(iter_files(row.output))
+    hay = finding.location.lower().replace("\\", "/")
+    best = None
+    for path, content, _lang in files:
+        candidate = path.lower()
+        base = candidate.rsplit("/", 1)[-1]
+        if candidate in hay or (len(base) > 4 and base in hay):
+            if best is None or len(path) > len(best[0]):
+                best = (path, content or "")
+    if best is None:
+        return None
+    path, content = best
+    lines = content.splitlines()
+    found = re.search(r":(\d+)", finding.location)
+    if found:
+        at = max(int(found.group(1)) - 1, 0)
+        start = max(at - 10, 0)
+        chosen = lines[start : at + 11]
+        first = start + 1
+    else:
+        chosen, first = lines[:40], 1
+    text = "\n".join(f"{first + i:>4}  {line}" for i, line in enumerate(chosen))
+    if len(text) > limit:
+        text = text[:limit] + "\n      …"
+    return f"`{path}` as it is now:\n{text}" if text.strip() else None
+
+
+def fix_instruction(
+    items: Iterable[Finding],
+    strategy: str = STRATEGY_GUIDED,
+    project=None,
+    owner: Optional[str] = None,
+    round_number: int = 1,
+) -> str:
     """The note that goes back with the phase — a work order, not a complaint.
 
     Every severe finding this phase owns, in one message, because sending them one at
     a time would re-run the whole back half of the pipeline once per finding.
+
+    What each finding carries depends on the round. Every round gets the finding and
+    the advice for it — checked against the skills library, so advice a governing
+    skill contradicts is replaced by the skill's own procedure. From the second
+    round the agent also sees the code as it stands and is told plainly that the
+    previous attempt did not fix it.
     """
+    items = list(items)
     lines = []
+    procedures: dict[str, object] = {}
     for f in items:
+        skills = guidance_for(f)
+        for skill in skills:
+            procedures.setdefault(skill.name, skill)
+        rec = checked_recommendation(f, skills)
         where = f" in `{f.location}`" if f.location else ""
-        fix = f" Apply this fix: {f.recommendation}" if f.recommendation else ""
-        lines.append(f"- [{f.severity or 'unrated'}] {f.title}{where}.{fix}")
+        app_wide = (
+            " This is an app-wide concern rather than one file: fix it wherever the app "
+            "handles it."
+            if not f.owner_phase
+            else ""
+        )
+        if rec:
+            fix = f" Apply this fix: {rec}"
+        elif skills:
+            fix = f" Fix it the way the {skills[0].title.lower()} procedure below says."
+        else:
+            fix = ""
+        lines.append(f"- [{f.severity or 'unrated'}] {f.title}{where}.{app_wide}{fix}")
+        if strategy != STRATEGY_GUIDED:
+            code = snippet(project, f, owner)
+            if code:
+                lines.append(_indent(code))
+
+    retry = ""
+    if strategy != STRATEGY_GUIDED:
+        retry = (
+            f"\n\nThis is fix round {round_number}. The previous attempt did not fix "
+            "these — the re-check still reports every one of them. Do not repeat that "
+            "attempt: change the code shown above, and make sure the fix is actually in "
+            "the files you return."
+        )
+    guidance = ""
+    if procedures:
+        from app.skills.loader import render
+
+        guidance = "\n\nTrusted procedure for these fixes:\n\n" + "\n\n".join(
+            render(skill) for skill in procedures.values()
+        )
     return (
-        "The security review found problems in the files you wrote. Fix all of them "
+        f"{FIX_NOTE_PREFIX} in the files you wrote. Fix all of them "
         "and return the complete deliverable:\n"
         + "\n".join(lines)
+        + retry
+        + guidance
         + "\n\nKeep everything that was already correct, and keep the same stack — "
         "the fix is to the code, not to the technology choices."
     )
+
+
+def _indent(text: str) -> str:
+    return "\n".join(f"    {line}" for line in text.splitlines())
+
+
+def route_owner(f: Finding) -> str:
+    """Who fixes a finding: the phase that wrote its file, or whoever owns its
+    category — and when neither says, the backend, as an app-wide concern.
+
+    A finding with no owner used to skip the fix loop entirely, and those were
+    exactly the ones that needed it: CSRF and session handling are app-wide.
+    """
+    return f.owner_phase or Phase.BACKEND_ENGINEER.value
 
 
 def group_by_owner(findings: Iterable[Finding]) -> dict[str, list[Finding]]:
@@ -371,8 +592,16 @@ def sync_dispositions(db, project, output: object, readable: bool = True) -> lis
     )
 
 
-def unresolved(db, project) -> list:
-    """Severe findings that have been neither fixed nor waived — the gate's question."""
+def row_is_serious(row) -> bool:
+    return is_serious(row.severity, row.category or "", row.title or "")
+
+
+def unresolved(db, project, serious: Optional[bool] = None) -> list:
+    """Severe findings that have been neither fixed nor waived.
+
+    `serious=True` is the crew's to-do list, `serious=False` the reviewer's question,
+    and `None` both — what has to be settled before a build ships.
+    """
     from app.db.models import SecurityDisposition
 
     return [
@@ -381,7 +610,9 @@ def unresolved(db, project) -> list:
         .filter(SecurityDisposition.project_id == project.id)
         .order_by(SecurityDisposition.created_at)
         .all()
-        if row.severity in STOPPING_SEVERITIES and row.status not in FindingStatus.settled()
+        if (row.severity in STOPPING_SEVERITIES or row_is_serious(row))
+        and row.status not in FindingStatus.settled()
+        and (serious is None or row_is_serious(row) == serious)
     ]
 
 
@@ -391,6 +622,8 @@ __all__ = [
     "finding_key",
     "fix_instruction",
     "group_by_owner",
+    "is_serious",
+    "route_owner",
     "read_findings",
     "severe",
     "severe_findings",

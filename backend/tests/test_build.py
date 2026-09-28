@@ -209,13 +209,23 @@ def test_a_phase_that_writes_broken_code_is_sent_back_and_recorded(client, monke
     client.post(f"/api/projects/{pid}/run")
     project = client.get(f"/api/projects/{pid}").json()
 
-    # Sent back once, with the file and the error named.
-    assert len(asked) == 2 and "backend/main.py" in asked[1] and "does not parse" in asked[1]
-    backend = next(p for p in project["phases"] if p["phase"] == "backend_engineer")
+    # Its own repair round names the file and the error; then the crew's fix loop
+    # re-runs the phase with the problems as its note. That round fixed nothing, so
+    # the loop stops rather than spending a third identical attempt.
+    assert "backend/main.py" in asked[1] and "does not parse" in asked[1]
+    assert len(asked) == 4 and "does not compile" in asked[2]
+    backend = next(
+        p for p in project["phases"]
+        if p["phase"] == "backend_engineer" and p["status"] != "rejected"
+    )
     assert backend["build_status"] == "failed"
     assert backend["build_note"][0]["path"] == "backend/main.py"
-    # Unattended, and still stopped: at the finish, as a build that does not compile.
-    assert project["status"] == "awaiting_approval" and project["gate_kind"] == "build"
+    # Unattended, and still stopped — never "complete", and not a ship-it-anyway
+    # question either: the crew asks for help, right where the problem is.
+    assert project["status"] == "awaiting_approval" and project["gate_kind"] == "needs_help"
+    assert project["current_phase"] == "backend_engineer"
+    track = project["auto_fix"]["tracks"]["build:backend_engineer"]
+    assert track["stopped"]["reason"] == "no_progress" and len(track["rounds"]) == 1
 
     art = client.get(f"/api/projects/{pid}/artifacts").json()
     assert art["build"]["status"] == "failed"

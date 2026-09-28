@@ -97,6 +97,10 @@ class AgentContext:
     #: The technology decisions frozen after the architecture was settled. Printed
     #: into this agent's system prompt and checked against what it writes.
     charter: Optional[Charter] = None
+    #: The fix loop's last round: route this call as the hardest kind of work, so it
+    #: lands on the most capable model the router would pick for it, and give it one
+    #: more self-repair round. Chosen by the router's own ranking, never by name.
+    escalate: bool = False
 
 
 @dataclass
@@ -167,7 +171,7 @@ class BaseAgent:
     # ── public entrypoint ───────────────────────────────────────────────────
     def run(self, ctx: AgentContext) -> AgentResult:
         profile = router.profile_for(
-            ctx.routing_mode, ctx.preferred_model, complexity=self.complexity, role=self.key
+            ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key
         )
         ask = self._build_messages(ctx, profile)
         options = GenerationOptions(json_mode=True, json_schema=self.response_schema())
@@ -183,7 +187,8 @@ class BaseAgent:
         best_skills = list(ask.skills_used)
 
         rounds = 0
-        while errors and rounds < max(settings.schema_repair_rounds, 0):
+        allowed = max(settings.schema_repair_rounds, 0) + (1 if ctx.escalate else 0)
+        while errors and rounds < allowed:
             rounds += 1
             log.warning(
                 "%s returned output that does not match its shape (%s). Repair round %d.",
@@ -259,6 +264,9 @@ class BaseAgent:
             skills_used=best_skills,
         )
 
+    def _complexity(self, ctx: AgentContext) -> str:
+        return "high" if ctx.escalate else self.complexity
+
     def _check(self, raw: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
         """Everything wrong with one attempt: its shape, and its stack.
 
@@ -302,7 +310,7 @@ class BaseAgent:
                 mode=ctx.routing_mode,
                 preferred_model=ctx.preferred_model,
                 options=options,
-                complexity=self.complexity,
+                complexity=self._complexity(ctx),
                 role=self.key,
             )
 
@@ -342,7 +350,7 @@ class BaseAgent:
     ) -> Prompt:
         if profile is None:
             profile = router.profile_for(
-                ctx.routing_mode, ctx.preferred_model, complexity=self.complexity, role=self.key
+                ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key
             )
         # Serialised once: the budget pass and the real assembly both read these,
         # and they can be hundreds of kilobytes of generated source apiece.
@@ -454,7 +462,7 @@ class BaseAgent:
         """
         if profile is None:
             profile = router.profile_for(
-                ctx.routing_mode, ctx.preferred_model, complexity=self.complexity, role=self.key
+                ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key
             )
 
         empty = dict.fromkeys(list(_PERSON_SHARE) + list(_CONTEXT_SHARE), 0)

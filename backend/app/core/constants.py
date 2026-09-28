@@ -58,6 +58,11 @@ class GateKind(str, Enum):
     BUILD = "build"
     #: A single handoff, in every-phase mode.
     PHASE = "phase"
+    #: The crew could not fix a serious problem by itself — a severe security
+    #: finding, code that does not compile, a stack contradiction — within its
+    #: rounds, or a round fixed nothing. Not a judgement call like the others: the
+    #: choices are to keep trying or stop, and waiving is the exception, on record.
+    NEEDS_HELP = "needs_help"
 
 
 class BuildStatus(str, Enum):

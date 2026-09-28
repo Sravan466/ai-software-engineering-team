@@ -138,6 +138,13 @@ class Project(Base):
     #: everything after it — and a model that could not fix a finding twice will not
     #: fix it on the fourth attempt. Past the bound the decision goes to a person.
     remediation_rounds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: The crew's own fix loop, one track per kind of serious problem — `security`
+    #: for severe findings, `build:<phase>` for a phase whose code does not compile
+    #: or contradicts the stack. Each track records every round (what was sent back,
+    #: to whom, how, and what the re-check found fixed), whether the loop stopped and
+    #: why, and how many rounds it is allowed. See `orchestration.autofix`. Null on a
+    #: build that never had anything to fix, and on every build from before the loop.
+    auto_fix: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     #: What this build was told about skills, over what scoring would have chosen:
     #: `{"pinned": [...], "excluded": [...]}`. Selection is a keyword score, and a
@@ -400,6 +407,13 @@ class SecurityDisposition(Base):
     status: Mapped[str] = mapped_column(String(16), default="open")
     #: The reviewer's reason for a waiver, or the note sent back with a fix.
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Which automatic fix round made this finding go away, when one did. Null for a
+    #: finding fixed by hand, or not fixed.
+    fixed_round: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: Why a serious finding was waived: false_positive | mitigated | accepted_risk.
+    #: Required for those — a leaked credential is not waived on a free-text shrug —
+    #: and null on every waiver of a small finding, which keeps its free-text reason.
+    waive_kind: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(

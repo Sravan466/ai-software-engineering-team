@@ -256,7 +256,7 @@ def readme_md(project: Project, assembled: dict) -> str:
         lines += [
             "## Known build problems",
             "",
-            "The compile check still reports these after each was sent back once:",
+            "The compile check still reports these after the crew's fix rounds:",
             "",
         ]
         lines += [

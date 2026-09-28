@@ -78,6 +78,14 @@ class Skill:
     #: What makes it relevant to a particular build.
     keywords: tuple[str, ...] = ()
     body: str = ""
+    #: Words that mark a security finding this skill is the trusted fix for — a
+    #: finding whose title or category says one of them gets this skill's procedure
+    #: in its fix note. Optional; most skills govern no findings.
+    fixes: tuple[str, ...] = ()
+    #: Words that mark advice this skill contradicts. A reviewer's recommendation
+    #: for a finding this skill fixes is dropped from the fix note when it names
+    #: one — "use Helmet for CSRF" is advice the fixing agent must not be handed.
+    rejects: tuple[str, ...] = ()
     #: `bundled` (shipped in this repo) or `user` (added on this machine).
     source: str = "bundled"
     path: str = ""
@@ -244,6 +252,8 @@ def load_file(
     description = _scalar(str(meta.get("description") or ""))
     agents = _as_list(meta.get("agents"))
     keywords = tuple(k.lower() for k in _as_list(meta.get("keywords")))
+    fixes = tuple(k.lower() for k in _as_list(meta.get("fixes")))
+    rejects = tuple(k.lower() for k in _as_list(meta.get("rejects")))
 
     problems = check(name, title, description, body, max_chars)
     unknown = [a for a in agents if a not in known_phases]
@@ -260,6 +270,8 @@ def load_file(
         agents=agents,
         keywords=keywords,
         body=body,
+        fixes=fixes,
+        rejects=rejects,
         source=source,
         path=str(path),
         problems=tuple(problems),
@@ -297,6 +309,8 @@ def to_markdown(skill: Skill) -> str:
         f"description: {skill.description}",
         f"agents: [{', '.join(skill.agents)}]",
         f"keywords: [{', '.join(skill.keywords)}]",
+        *([f"fixes: [{', '.join(skill.fixes)}]"] if skill.fixes else []),
+        *([f"rejects: [{', '.join(skill.rejects)}]"] if skill.rejects else []),
         "---",
         "",
         skill.body.strip(),

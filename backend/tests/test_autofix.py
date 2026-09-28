@@ -1,0 +1,232 @@
+"""The crew fixes its own serious problems, and only asks about small ones (#50)."""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from app.core.config import settings
+from app.orchestration import autofix, remediation
+from tests.conftest import _fake_complete, stub
+
+SECRET = {
+    "title": "Hardcoded MongoDB connection string",
+    "severity": "critical",
+    "category": "Secrets",
+    "location": "backend/app/index.js",
+    "description": "d",
+    "recommendation": "Move it to an environment variable.",
+}
+CSRF = {
+    "title": "No CSRF protection on forms",
+    "severity": "high",
+    "category": "CSRF",
+    "location": "frontend/pages/groups/new.jsx",
+    "description": "d",
+    "recommendation": "Use Helmet to add CSRF protection.",
+}
+POLISH = {
+    "title": "Low contrast on the sign-in button",
+    "severity": "high",
+    "category": "UI/UX",
+    "location": "frontend/pages/signin.jsx",
+    "description": "d",
+    "recommendation": "Raise the contrast.",
+}
+
+
+class Crew:
+    """A fake model: Warden reports whatever `audits` says next; everyone else
+    answers their schema. Records every prompt each agent was sent."""
+
+    def __init__(self, audits: list[list[dict]]):
+        self.audits = audits
+        self.asked: dict[str, list[str]] = {}
+
+    def __call__(self, messages, **kwargs):
+        system = messages[0].content
+        role = system.split(" on an AI", 1)[0].replace("You are the ", "")
+        self.asked.setdefault(role, []).append(messages[-1].content)
+        resp = _fake_complete(messages, **kwargs)
+        if role == "Security Engineer":
+            findings = self.audits.pop(0) if len(self.audits) > 1 else self.audits[0]
+            payload = json.loads(resp.text)
+            payload["findings"] = findings
+            return resp.model_copy(update={"text": json.dumps(payload)})
+        return resp
+
+
+def _build(client, monkeypatch, audits, mode="unattended"):
+    crew = Crew(audits)
+    stub(monkeypatch, "complete", crew)
+    pid = client.post(
+        "/api/projects",
+        json={"idea": "A group expenses app", "routing_mode": "local_only", "approval_mode": mode},
+    ).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    return pid, crew
+
+
+def _fix_notes(crew: Crew, role: str) -> list[str]:
+    return [p for p in crew.asked.get(role, []) if remediation.FIX_NOTE_PREFIX in p]
+
+
+# ── the loop ─────────────────────────────────────────────────────────────────
+def test_serious_findings_are_fixed_and_re_audited_without_asking(client, monkeypatch):
+    """The build from the issue: a leaked URI and CSRF, fixed in one rewind."""
+    pid, crew = _build(client, monkeypatch, [[SECRET, CSRF], []])
+    project = client.get(f"/api/projects/{pid}").json()
+
+    # Never asked "send back or waive" — it finished.
+    assert project["status"] == "completed", project["last_error"]
+    # Both owners got their own findings in the same round.
+    backend, frontend = _fix_notes(crew, "Backend Engineer"), _fix_notes(crew, "Frontend Engineer")
+    assert len(backend) == 1 and "MongoDB" in backend[0] and "CSRF" not in backend[0].split("Trusted")[0]
+    assert len(frontend) == 1 and "CSRF" in frontend[0]
+    rounds = project["auto_fix"]["tracks"]["security"]["rounds"]
+    assert len(rounds) == 1 and set(rounds[0]["phases"]) == {"backend_engineer", "frontend_engineer"}
+
+    security = client.get(f"/api/projects/{pid}/security").json()
+    assert {f["status"] for f in security["findings"]} == {"fixed"}
+    assert {f["fixed_round"] for f in security["findings"]} == {1}
+
+
+def test_the_loop_stops_when_a_round_fixes_nothing(client, monkeypatch):
+    """Unattended, and never complete over a serious finding nobody fixed."""
+    pid, crew = _build(client, monkeypatch, [[SECRET]])
+    project = client.get(f"/api/projects/{pid}").json()
+
+    assert project["status"] == "awaiting_approval"
+    assert project["gate_kind"] == "needs_help"
+    track = project["auto_fix"]["tracks"]["security"]
+    assert len(track["rounds"]) == 1 and track["stopped"]["reason"] == "no_progress"
+    assert "fixed none" in project["gate_note"]
+    # And it cannot be approved past.
+    assert client.post(f"/api/projects/{pid}/approve").status_code == 409
+
+
+def test_the_loop_stops_at_its_round_limit(client, monkeypatch):
+    """Progress every round, but never all the way: bounded all the same."""
+    monkeypatch.setattr(settings, "auto_fix_max_rounds", 3)
+    many = [dict(SECRET, title=f"Leaked key {i}") for i in range(5)]
+    # Each audit fixes one more; five findings, three rounds.
+    audits = [many[i:] for i in range(5)]
+    pid, crew = _build(client, monkeypatch, audits)
+    project = client.get(f"/api/projects/{pid}").json()
+
+    track = project["auto_fix"]["tracks"]["security"]
+    assert [r["strategy"] for r in track["rounds"]] == ["guided", "with_code", "stronger_model"]
+    assert track["stopped"]["reason"] == "limit"
+    assert project["gate_kind"] == "needs_help"
+    # Round two says the last attempt failed; round three asked for a stronger model.
+    notes = _fix_notes(crew, "Backend Engineer")
+    assert "previous attempt did not fix" in notes[1]
+
+
+def test_keep_trying_grants_more_rounds_and_a_waiver_needs_a_kind(client, monkeypatch):
+    pid, crew = _build(client, monkeypatch, [[SECRET]])
+    key = client.get(f"/api/projects/{pid}/security").json()["findings"][0]["key"]
+
+    r = client.post(f"/api/projects/{pid}/auto-fix/retry", json={"rounds": 1})
+    assert r.status_code == 200
+    project = client.get(f"/api/projects/{pid}").json()
+    track = project["auto_fix"]["tracks"]["security"]
+    assert len(track["rounds"]) == 2 and project["gate_kind"] == "needs_help"
+
+    # A serious finding is not waived on a free-text shrug.
+    bad = client.post(f"/api/projects/{pid}/security/{key}/waive", json={"reason": "fine"})
+    assert bad.status_code == 422
+    ok = client.post(
+        f"/api/projects/{pid}/security/{key}/waive",
+        json={"reason": "Rotated and moved to the vault", "kind": "mitigated"},
+    )
+    assert ok.status_code == 200 and ok.json()["waive_kind"] == "mitigated"
+
+    # With nothing left to fix, carrying on finishes the build.
+    assert client.post(f"/api/projects/{pid}/auto-fix/retry").status_code == 200
+    assert client.get(f"/api/projects/{pid}").json()["status"] == "completed"
+
+
+def test_small_findings_still_ask_the_reviewer(client, monkeypatch):
+    """UI/UX polish keeps today's cards: no automatic round, a Security stop."""
+    pid, crew = _build(client, monkeypatch, [[POLISH]], mode="checkpoints")
+    # Past the plan review.
+    assert client.post(f"/api/projects/{pid}/approve").status_code == 200
+    project = client.get(f"/api/projects/{pid}").json()
+
+    assert project["gate_kind"] == "security"
+    assert not _fix_notes(crew, "Frontend Engineer")
+    finding = client.get(f"/api/projects/{pid}/security").json()["findings"][0]
+    assert finding["serious"] is False
+    # Waived exactly as before: a reason, no kind needed.
+    waived = client.post(
+        f"/api/projects/{pid}/security/{finding['key']}/waive", json={"reason": "Brand colour"}
+    )
+    assert waived.status_code == 200
+
+
+# ── the fix note ─────────────────────────────────────────────────────────────
+def test_advice_a_skill_contradicts_is_replaced_by_the_skill():
+    finding = remediation.Finding(
+        key="k", title=CSRF["title"], severity="high", category="CSRF",
+        location=CSRF["location"], recommendation=CSRF["recommendation"],
+        owner_phase="frontend_engineer",
+    )
+    note = remediation.fix_instruction([finding])
+    assert "Use Helmet to add CSRF" not in note
+    assert "csrf-csrf" in note and "Trusted procedure" in note
+
+
+def test_an_unowned_serious_finding_goes_to_the_backend_as_app_wide():
+    finding = remediation.Finding(
+        key="k", title="Sessions never expire", severity="high", category="Misc",
+        location="", recommendation="Expire them.", owner_phase=None,
+    )
+    assert remediation.route_owner(finding) == "backend_engineer"
+    assert "app-wide concern" in remediation.fix_instruction([finding])
+
+
+@pytest.mark.parametrize(
+    "severity,category,serious",
+    [
+        ("critical", "Secrets", True),
+        ("high", "CSRF", True),
+        ("medium", "CSRF", False),
+        ("low", "XSS", False),
+        ("high", "UI/UX", False),
+        ("critical", "Accessibility", False),
+    ],
+)
+def test_what_counts_as_serious(severity, category, serious):
+    assert remediation.is_serious(severity, category) is serious
+
+
+def test_no_progress_is_judged_only_since_the_last_keep_trying():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.SECURITY)
+    autofix.start_round(t, "guided", ["backend_engineer"], [{"key": "a"}])
+    assert autofix.close_round(t, ["a"]) == []
+    assert autofix.next_step(t) == autofix.STOP_NO_PROGRESS
+    autofix.stop(t, autofix.STOP_NO_PROGRESS, 1)
+    assert autofix.keep_trying(data, 2) == [autofix.SECURITY]
+    assert autofix.next_step(t) == "fix" and t["allowed"] == 3
+
+
+def test_the_new_columns_migrate_onto_an_existing_database(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+
+    from app.db.migrations import run_migrations
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE projects (id VARCHAR(32) PRIMARY KEY)"))
+        conn.execute(
+            text("CREATE TABLE security_dispositions (id VARCHAR(32) PRIMARY KEY, status VARCHAR(16))")
+        )
+        conn.execute(text("INSERT INTO security_dispositions VALUES ('x', 'open')"))
+    applied = run_migrations(engine)
+    assert "projects.auto_fix" in applied
+    assert {"security_dispositions.fixed_round", "security_dispositions.waive_kind"} <= set(applied)
+    cols = {c["name"] for c in inspect(engine).get_columns("security_dispositions")}
+    assert {"fixed_round", "waive_kind"} <= cols
+    assert run_migrations(engine) == []

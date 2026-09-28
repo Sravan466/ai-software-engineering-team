@@ -41,3 +41,6 @@ class PipelineState(TypedDict, total=False):
     #: run shipping a Postgres architecture, a Mongo backend and Python tests aimed at
     #: JavaScript. Empty until System Design has run; rewritten only when it re-runs.
     charter: dict
+
+    #: Phases the fix loop's current round asks to run on the most capable model.
+    escalate: list[str]
