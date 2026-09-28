@@ -16,6 +16,7 @@ import PhaseArtifact from "@/components/build/PhaseArtifact";
 import FileBrowser from "@/components/build/FileBrowser";
 import BuildLine from "@/components/build/BuildLine";
 import Decision from "@/components/build/Decision";
+import { FixingPanel } from "@/components/build/AutoFix";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
 import { Elapsed, formatDuration } from "@/components/build/Elapsed";
@@ -757,6 +758,9 @@ function BuildTab({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {interrupted && <RunInterrupted project={project} busy={busy} act={act} id={id} />}
+
+      {/* The crew fixing its own serious problems: progress, not a question. */}
+      {state === "running" && <FixingPanel project={project} />}
 
       {/* One decision surface, always in the same place, whatever stopped the run.
           The gate used to be buried inside whichever of eight phase rows happened

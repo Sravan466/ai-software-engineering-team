@@ -20,6 +20,7 @@ import SchemaBadge from "./SchemaBadge";
 import FileBrowser from "./FileBrowser";
 import CharterPanel, { StackViolations } from "./Charter";
 import SecurityFindings from "./SecurityFindings";
+import { NeedsHelp, trackEntries } from "./AutoFix";
 import BuildProblems from "./BuildProblems";
 import BuildLine from "./BuildLine";
 import BuildProgress from "@/components/preview/BuildProgress";
@@ -44,6 +45,8 @@ import { artifactFiles, latestRow, type PayloadFile } from "./payload";
  *   build    — the finished build's code does not compile, after each broken file
  *              was sent back once. Reviewed like a ship, with what is broken first.
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
+ *   needs_help — the crew could not fix a serious problem by itself. Not a judgement
+ *              call: Keep trying or Stop, with waiving as the exception.
  *
  * Whatever the shape, the rule is the same: the work is above the buttons, in the
  * same panel, and sending it back reaches the agent that produced it.
@@ -72,7 +75,9 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
   },
   security: {
     title: "Security stop",
-    blurb: "Warden found something serious enough to interrupt the build.",
+    blurb:
+      "Warden found things that are your call — polish and lower-severity findings. " +
+      "Anything serious, the crew fixes by itself.",
     approve: "Accept and continue",
     after: "The remaining phases then run without stopping.",
   },
@@ -88,7 +93,7 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
     title: "Build doesn't compile",
     blurb:
       "Some files the crew wrote don't parse, use names they never import, or import " +
-      "things that don't exist. Each was sent back once with the errors named.",
+      "things that don't exist. The crew already went back over them with the errors named.",
     approve: "Ship it anyway",
     after: "Approving marks a build that does not compile as complete.",
   },
@@ -96,9 +101,17 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
     title: "Build disagrees with itself",
     blurb:
       "This phase was written against a different stack than the architecture froze. " +
-      "It was already sent back once with the contradiction named.",
+      "The crew already went back over it with the contradiction named.",
     approve: "Ship both halves anyway",
     after: "Approving puts code written against two different stacks in one archive.",
+  },
+  needs_help: {
+    title: "The crew needs a hand",
+    blurb:
+      "Something serious is still wrong after the crew's own fix rounds. Here is " +
+      "what each round tried and what is left.",
+    approve: "Keep trying",
+    after: "",
   },
   phase: {
     title: "Handoff",
@@ -123,7 +136,20 @@ export default function Decision({
 }) {
   const kind: GateKind = (project.gate_kind as GateKind) || "phase";
   const gatePhase = project.current_phase || "";
-  const copy = HEAD[kind] ?? HEAD.phase;
+  const base = HEAD[kind] ?? HEAD.phase;
+  // "Sent back once" was true when there was one round. Say how many there were.
+  const codeRounds = trackEntries(project).find(([name]) => name === `build:${gatePhase}`)?.[1]
+    ?.rounds.length;
+  const copy =
+    (kind === "build" || kind === "stack") && codeRounds
+      ? {
+          ...base,
+          blurb: base.blurb.replace(
+            "The crew already went back over",
+            `The crew went back ${codeRounds === 1 ? "once" : `${codeRounds} times`} over`,
+          ),
+        }
+      : base;
 
   const [target, setTarget] = useState<Target | null>(null);
   const [note, setNote] = useState("");
@@ -240,6 +266,31 @@ export default function Decision({
     }
   }
 
+  if (kind === "needs_help") {
+    return (
+      <section className="decision decision-needs_help" aria-labelledby="decision-title">
+        <header className="decision-head">
+          <span className="decision-mark" aria-hidden="true">{Icon.alert}</span>
+          <div className="decision-headings">
+            <h2 id="decision-title">{copy.title}</h2>
+            <p>{copy.blurb}</p>
+          </div>
+          <span className="badge badge-warn">
+            <span className="dot dot-warn dot-pulse" aria-hidden="true" />
+            Waiting on you
+          </span>
+        </header>
+        {project.gate_note && (
+          <p className="decision-alarm" role="status">
+            {Icon.alert}
+            <span>{project.gate_note}</span>
+          </p>
+        )}
+        <NeedsHelp project={project} id={id} busy={busy} act={act} />
+      </section>
+    );
+  }
+
   return (
     <section className={`decision decision-${kind}`} aria-labelledby="decision-title">
       <header className="decision-head">
@@ -285,6 +336,7 @@ export default function Decision({
               id={id}
               busy={busy}
               act={act}
+              scope="small"
               onChange={() => setFindingsTick((n) => n + 1)}
             />
             <SinglePhase project={project} phase={gatePhase} onRedo={aim} />

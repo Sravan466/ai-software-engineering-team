@@ -89,15 +89,59 @@ export type SecurityFinding = {
   status: "open" | "fix_requested" | "fixed" | "gone" | "waived";
   /** The reviewer's reason for a waiver. */
   note: string | null;
+  /** The crew's to fix by itself (true), or small enough to be the reviewer's call. */
+  serious: boolean;
+  /** The automatic round whose re-audit no longer reported it, when one did. */
+  fixed_round: number | null;
+  /** Why a serious finding was waived. */
+  waive_kind: WaiveKind | null;
 };
+
+export type WaiveKind = "false_positive" | "mitigated" | "accepted_risk";
 
 export type SecurityState = {
   findings: SecurityFinding[];
   /** Critical/high findings neither fixed nor waived — what blocks approval. */
   unresolved: number;
+  /** Of those, the small ones: what the Security stop asks about. */
+  unresolved_small: number;
   rounds_used: number;
   rounds_allowed: number;
 };
+
+/** One thing a fix round was sent to fix. */
+export type AutoFixProblem = {
+  key: string;
+  title: string;
+  severity?: string;
+  where: string | null;
+  /** The phase that was sent back to fix it. */
+  phase: string;
+  kind: "security" | "build" | "stack";
+};
+
+export type AutoFixRound = {
+  n: number;
+  strategy: "guided" | "with_code" | "stronger_model";
+  phases: string[];
+  problems: AutoFixProblem[];
+  /** Keys the re-check no longer reports. `null` while the round is still running. */
+  fixed: string[] | null;
+  remaining?: string[];
+  at: string;
+  checked_at?: string;
+};
+
+export type AutoFixTrack = {
+  allowed: number;
+  rounds: AutoFixRound[];
+  stopped: { reason: "limit" | "no_progress"; left: number; at: string } | null;
+  accepted: { kind: WaiveKind; reason: string; at: string } | null;
+  resumed_after: number;
+};
+
+/** The crew's own fix loop: `security`, and `build:<phase>` per phase. */
+export type AutoFix = { tracks: Record<string, AutoFixTrack> };
 
 export type ApprovalMode = "checkpoints" | "every_phase" | "unattended";
 export type GateKind =
@@ -108,7 +152,8 @@ export type GateKind =
   | "phase"
   | "unchecked"
   | "stack"
-  | "build";
+  | "build"
+  | "needs_help";
 
 /**
  * One technology decision the whole crew is held to.
@@ -161,6 +206,8 @@ export type Project = {
   charter: Charter | null;
   /** How many times this build has been sent back to fix its own security findings. */
   remediation_rounds: number | null;
+  /** The crew fixing its own serious problems, round by round. */
+  auto_fix: AutoFix | null;
   /** Skills this build forces on or off, over what keyword scoring would choose. */
   skill_overrides: SkillOverrides | null;
 
@@ -512,11 +559,23 @@ export const api = {
   getSecurity: (id: string) => req<SecurityState>(`/api/projects/${id}/security`),
   fixFinding: (id: string, key: string) =>
     req<RunResponse>(`/api/projects/${id}/security/${key}/fix`, { method: "POST" }),
-  waiveFinding: (id: string, key: string, reason: string) =>
+  waiveFinding: (id: string, key: string, reason: string, kind?: WaiveKind) =>
     req<{ key: string; status: string; note: string; unresolved: number }>(
       `/api/projects/${id}/security/${key}/waive`,
-      { method: "POST", body: JSON.stringify({ reason }) },
+      { method: "POST", body: JSON.stringify({ reason, kind }) },
     ),
+
+  // ── When the crew asked for help ──
+  keepTrying: (id: string, rounds?: number) =>
+    req<RunResponse>(`/api/projects/${id}/auto-fix/retry`, {
+      method: "POST",
+      body: JSON.stringify(rounds ? { rounds } : {}),
+    }),
+  acceptProblems: (id: string, kind: WaiveKind, reason: string) =>
+    req<RunResponse>(`/api/projects/${id}/auto-fix/accept`, {
+      method: "POST",
+      body: JSON.stringify({ kind, reason }),
+    }),
 
   // ── GitHub publishing (OAuth "Connect" → push to the user's own account) ──
   githubStatus: () => req<GithubStatus>("/api/github/status"),
