@@ -80,6 +80,10 @@ def track(data: dict, name: str) -> dict:
     # Rounds before this index were judged when the loop last stopped; "Keep trying"
     # moves it forward so the round that stopped it cannot stop it again.
     found.setdefault("resumed_after", 0)
+    # Where the current episode began: a fresh problem gets a fresh budget and starts
+    # again from the first approach. Keep trying does *not* move it, so the rounds it
+    # buys carry on escalating instead of repeating the approach that already failed.
+    found.setdefault("episode_start", found["resumed_after"])
     return found
 
 
@@ -149,11 +153,12 @@ def abandon_open_round(t: dict) -> bool:
 def settle(t: dict) -> None:
     """The track's problems are all gone: the next problem is a new episode, with
     its own budget, and its own "did the last round help?"."""
-    if t.get("resumed_after") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
+    if t.get("episode_start") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
         int(settings.auto_fix_max_rounds), 0
     ):
         return
     t["resumed_after"] = len(t["rounds"])
+    t["episode_start"] = len(t["rounds"])
     t["allowed"] = len(t["rounds"]) + max(int(settings.auto_fix_max_rounds), 0)
     t["stopped"] = None
 

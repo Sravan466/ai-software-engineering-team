@@ -139,7 +139,7 @@ export function FixingPanel({ project }: { project: Project }) {
                 </h2>
                 <p>
                   {/* Counted within this episode: a fresh problem gets a fresh budget. */}
-                  Round {round.n - (t.resumed_after || 0)} of up to {t.allowed - (t.resumed_after || 0)}
+                  Round {round.n - (t.episode_start ?? 0)} of up to {t.allowed - (t.episode_start ?? 0)}
                   {onIt && (
                     <>
                       {" · "}
@@ -249,7 +249,7 @@ export function NeedsHelp({
             <span className="field-hint">
               {t.stopped?.reason === "no_progress"
                 ? "Stopped early: the last round fixed nothing, and repeating it wouldn't either."
-                : `Stopped after ${t.rounds.length - (t.resumed_after || 0)} round${t.rounds.length - (t.resumed_after || 0) === 1 ? "" : "s"}.`}
+                : `Stopped after ${t.rounds.length - (t.episode_start ?? 0)} round${t.rounds.length - (t.episode_start ?? 0) === 1 ? "" : "s"}.`}
             </span>
           </h3>
           <RoundLedger name={name} track={t} />

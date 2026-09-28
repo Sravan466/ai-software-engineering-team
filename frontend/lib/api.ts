@@ -138,6 +138,8 @@ export type AutoFixTrack = {
   stopped: { reason: "limit" | "no_progress"; left: number; at: string } | null;
   accepted: { kind: WaiveKind; reason: string; at: string } | null;
   resumed_after: number;
+  /** Where the current episode began: a fresh problem gets a fresh budget. */
+  episode_start?: number;
 };
 
 /** The crew's own fix loop: `security`, and `build:<phase>` per phase. */

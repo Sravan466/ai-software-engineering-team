@@ -369,7 +369,7 @@ class PipelineRunner:
             return True
 
         n = len(t["rounds"]) + 1
-        k = n - int(t.get("resumed_after") or 0)
+        k = n - int(t.get("episode_start") or 0)
         strategy = remediation.strategy_for(k)
         autofix.start_round(t, strategy, [row.phase], problems)
         autofix.save(project, data)
@@ -468,7 +468,7 @@ class PipelineRunner:
         owners = sorted(by_owner, key=order.index)
 
         n = len(t["rounds"]) + 1
-        k = n - int(t.get("resumed_after") or 0)
+        k = n - int(t.get("episode_start") or 0)
         strategy = remediation.strategy_for(k)
         notes = {
             phase: remediation.fix_instruction(

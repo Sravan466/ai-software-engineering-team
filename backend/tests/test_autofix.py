@@ -132,6 +132,9 @@ def test_keep_trying_grants_more_rounds_and_a_waiver_needs_a_kind(client, monkey
     project = client.get(f"/api/projects/{pid}").json()
     track = project["auto_fix"]["tracks"]["security"]
     assert len(track["rounds"]) == 2 and project["gate_kind"] == "needs_help"
+    # The round Keep trying bought moves on to the next approach, not back to the first.
+    assert [r["strategy"] for r in track["rounds"]] == ["guided", "with_code"]
+    assert "previous attempt did not fix" in _fix_notes(crew, "Backend Engineer")[-1]
 
     # A serious finding is not waived on a free-text shrug.
     bad = client.post(f"/api/projects/{pid}/security/{key}/waive", json={"reason": "fine"})
