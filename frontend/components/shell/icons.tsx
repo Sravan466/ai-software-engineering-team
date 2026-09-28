@@ -52,7 +52,16 @@ export type IconName =
   | "eye"
   | "eyeOff"
   | "copy"
-  | "laptop";
+  | "laptop"
+  | "monitor"
+  | "tablet"
+  | "phone"
+  | "expand"
+  | "shrink"
+  | "redo"
+  | "layers"
+  | "arrowUp"
+  | "close";
 
 export const Icon: Record<IconName, ReactNode> = {
   menu: svg(<path d="M4 6h16M4 12h16M4 18h16" />),
@@ -124,4 +133,13 @@ export const Icon: Record<IconName, ReactNode> = {
   eyeOff: svg(<path d="M4 4l16 16M9.9 6A9.6 9.6 0 0 1 12 5.5c5.8 0 9.2 6.5 9.2 6.5a16 16 0 0 1-2.6 3.4M6.4 7.7C4.1 9.3 2.8 12 2.8 12s3.4 6.5 9.2 6.5c1.4 0 2.6-.4 3.7-.9M10 10a2.8 2.8 0 0 0 4 4" />),
   copy: svg(<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h8A1.5 1.5 0 0 1 20 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 9 18.5zM15 8V5.5A1.5 1.5 0 0 0 13.5 4h-8A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H9" />),
   laptop: svg(<path d="M5.5 6A1.5 1.5 0 0 1 7 4.5h10A1.5 1.5 0 0 1 18.5 6v9h-13zM3 15h18l-1 3.2a1.2 1.2 0 0 1-1.1.8H5.1a1.2 1.2 0 0 1-1.1-.8z" />),
+  monitor: svg(<path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h12a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 18 16H6a1.5 1.5 0 0 1-1.5-1.5zM9 20h6M12 16v4" />),
+  tablet: svg(<path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 19.5zM11 18h2" />),
+  phone: svg(<path d="M7.5 4.5A1.5 1.5 0 0 1 9 3h6a1.5 1.5 0 0 1 1.5 1.5v15A1.5 1.5 0 0 1 15 21H9a1.5 1.5 0 0 1-1.5-1.5zM11 18h2" />),
+  expand: svg(<path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15" />),
+  shrink: svg(<path d="M9 4.5V9H4.5M19.5 9H15V4.5M15 19.5V15h4.5M4.5 15H9v4.5" />),
+  redo: svg(<path d="M20 9H10a5 5 0 0 0 0 10h4M20 9l-4-4M20 9l-4 4" />),
+  layers: svg(<path d="M12 4 3.5 8.5 12 13l8.5-4.5zM3.5 12.5 12 17l8.5-4.5M3.5 16.5 12 21l8.5-4.5" />),
+  arrowUp: svg(<path d="M12 19.5v-15m0 0-5.5 5.5M12 4.5l5.5 5.5" />),
+  close: svg(<path d="M6 6l12 12M18 6 6 18" />),
 };

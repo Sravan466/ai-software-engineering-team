@@ -175,3 +175,49 @@ def replace_data(html: str, data: dict) -> str:
         count=1,
         flags=re.IGNORECASE,
     )
+
+
+# ── site style ───────────────────────────────────────────────────────────────
+#: Everything `head_html` writes, from the font preconnect to the base stylesheet.
+_HEAD_BLOCK = re.compile(
+    r'<link rel="preconnect" href="https://fonts\.googleapis\.com">[\s\S]*?<style id="ds-base">[\s\S]*?</style>'
+)
+#: The tokens a person may change from Site style. Voice and tagline are copy, not style.
+THEME_KEYS = ("primary", "accent", "tint", "font_pair", "radius", "shadow", "density")
+
+
+class ThemeRefused(ValueError):
+    pass
+
+
+def apply_theme(html: str, changes: dict) -> str:
+    """The document restyled: new tokens in `<head>`, and recorded in its data block.
+
+    The design system already binds every section through tokens and the remapped
+    palettes, so swapping the head is enough to change the font or brand colour on
+    every page — no section is rewritten and no model is asked. A primary that white
+    text cannot sit on is darkened, exactly as it is when a build chooses one.
+    """
+    from app.preview import design as D
+
+    data = site_data(html)
+    if data is None or not _HEAD_BLOCK.search(html or ""):
+        raise ThemeRefused(
+            "This mockup was drawn before site styles existed. Rebuild it to change fonts and colours here."
+        )
+    current = D.from_dict(data.get("design"), str(data.get("product") or "")).as_dict()
+    merged = {**current, **{k: v for k, v in changes.items() if k in THEME_KEYS and v is not None}}
+    for key in ("primary", "accent"):
+        if merged.get(key) and D._hex(merged[key]) is None:
+            raise ThemeRefused(f"'{merged[key]}' isn't a colour. Use #rrggbb.")
+    if merged.get("font_pair") not in D.FONT_PAIRS:
+        raise ThemeRefused(f"'{merged.get('font_pair')}' isn't one of the font pairings.")
+    for key, allowed in (("tint", D._TINTS), ("radius", D._RADIUS), ("shadow", D._SHADOW), ("density", D._DENSITY)):
+        if merged.get(key) not in allowed:
+            raise ThemeRefused(f"'{merged.get(key)}' isn't a {key} the mockup offers.")
+    ds = D.from_dict(merged, str(data.get("product") or ""))
+    primary, _ = D._readable_on_white(ds.primary)
+    ds = D.DesignSystem(**{**ds.as_dict(), "primary": primary, "notes": tuple(ds.notes)})
+    head = D.head_html(ds)
+    out = _HEAD_BLOCK.sub(lambda _m: head, html, count=1)
+    return replace_data(out, {**data, "design": ds.as_dict()})

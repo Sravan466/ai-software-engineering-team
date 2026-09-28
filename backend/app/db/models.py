@@ -288,8 +288,8 @@ class PhaseResult(Base):
 class PreviewRevision(Base):
     """One version of the project's visual HTML preview (a self-contained mockup).
 
-    Revisions form an append-only history per project: the newest row is the live
-    preview, and `undo` simply drops the latest row. `source` records how it came to be
+    Revisions form an append-only history per project: undo and redo move a head
+    pointer over them (see `parent_id`/`head_at`) and never delete a row. `source` records how it came to be
     (a full regenerate vs a single-section edit); `section_id`/`instruction` capture which
     section a user edited and what they asked for.
     """
@@ -315,6 +315,13 @@ class PreviewRevision(Base):
     # assembled site and their results. Null for single-document mockups drawn
     # before the site builder, and for edits — an edit carries its parent's report.
     report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Undo and redo move a pointer instead of deleting rows. `parent_id` is the
+    # revision this one was made from; the live one is the row with the latest
+    # `head_at`. Both are null on rows written before the pointer existed: their
+    # parent is the revision before them, and with no head set the newest is live.
+    parent_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    head_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

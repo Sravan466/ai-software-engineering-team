@@ -20,6 +20,7 @@ for the profile of the model that will answer it and sizes itself from that.
 """
 from __future__ import annotations
 
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -80,6 +81,20 @@ class EditRejected(ValueError):
         #: The calls it took to find out — billed even though nothing was saved.
         self.responses = list(responses or [])
         super().__init__("; ".join(problems))
+
+
+class EditTooLarge(ValueError):
+    """The part to edit does not fit in what the model can read.
+
+    It used to be cut to fit, silently: the model rewrote the half it saw and the
+    other half disappeared from the mockup. Now the edit is refused, so the person
+    can select something smaller.
+    """
+
+    def __init__(self, size: int, room: int) -> None:
+        self.size = size
+        self.room = room
+        super().__init__(f"{size} characters, and the model can read {room}")
 
 
 # ── one call ─────────────────────────────────────────────────────────────────
@@ -440,9 +455,11 @@ def edit_section(
         "Return the whole section element with the change applied."
     )
     room = max(calls.char_budget - len(_EDIT_SYSTEM) - len(fixed) - 40, 0)
+    if len(fragment) > room:
+        raise EditTooLarge(len(fragment), room)
     base = [
         ChatMessage(role="system", content=_EDIT_SYSTEM),
-        ChatMessage(role="user", content=f"# Current section\n{fragment[:room]}\n\n{fixed}"),
+        ChatMessage(role="user", content=f"# Current section\n{fragment}\n\n{fixed}"),
     ]
     options = GenerationOptions(json_mode=False, temperature=0.3)
 
@@ -483,7 +500,10 @@ def _edit_legacy(calls: _Calls, fragment: str, instruction: str) -> str:
         )
 
     overhead = len(_LEGACY_EDIT_SYSTEM) + len(assemble(""))
-    user = assemble(fragment[: max(calls.char_budget - overhead, 0)])
+    room = max(calls.char_budget - overhead, 0)
+    if len(fragment) > room:
+        raise EditTooLarge(len(fragment), room)
+    user = assemble(fragment)
     resp = calls.complete(
         [
             ChatMessage(role="system", content=_LEGACY_EDIT_SYSTEM),
@@ -492,3 +512,98 @@ def _edit_legacy(calls: _Calls, fragment: str, instruction: str) -> str:
         GenerationOptions(json_mode=False, temperature=0.3),
     )
     return H.clean_fragment(resp.text)
+
+
+# ── editing one element ──────────────────────────────────────────────────────
+_ELEMENT_SYSTEM = (
+    "You are a precise front-end editor. You receive ONE HTML element from a clickable "
+    "prototype styled with Tailwind utility classes, the elements it sits inside, and a change "
+    "request. Return ONLY that element with the change applied.\n\n"
+    "Rules:\n"
+    "- Same outer tag. Keep every data-* attribute exactly as given: the prototype's runtime "
+    "drives the page through them.\n"
+    "- No <html>/<head>/<body>, no <script> or <style>, no markdown fences, no commentary.\n"
+    "- Apply the change faithfully and leave everything else intact."
+)
+#: Attributes the runtime reads. An edited element must keep each one it had.
+_BINDING = re.compile(
+    r"\s(data-(?:section|route|list|field|stat|count|empty|form|filter|sort|toggle|action|"
+    r"modal|open|close|to|limit|error-for|success|redirect))\s*=\s*([\"'])(.*?)\2"
+)
+
+
+def _bindings(markup: str) -> set:
+    return {(m.group(1), m.group(3)) for m in _BINDING.finditer(markup or "")}
+
+
+def edit_element(
+    fragment: str,
+    instruction: str,
+    *,
+    context: list[str],
+    mode: RoutingMode = RoutingMode.LOCAL_ONLY,
+    preferred_model: Optional[str] = None,
+    site: Optional[dict] = None,
+) -> tuple[str, list[LLMResponse]]:
+    """Rewrite one element — a heading, a card, a list's row template — and nothing else.
+
+    The model sees the element and the start tags around it, so "make this bolder"
+    knows it is a link in the navbar. What it returns must keep every binding the
+    element had; one repair round, then the edit is refused with what went missing.
+    """
+    calls = _Calls(mode, preferred_model)
+    ds = None
+    if site is not None:
+        plan = P.site_from_data(site)
+        ds = D.from_dict(site.get("design"), plan.product)
+    around = "\n".join(context) or "(the page body)"
+    fixed = (
+        (f"{ds.vocabulary()}\n\n" if ds else "")
+        + f"# Inside\n{around}\n\n# Change request\n{instruction}\n\n"
+        "Return the whole element with the change applied."
+    )
+    room = max(calls.char_budget - len(_ELEMENT_SYSTEM) - len(fixed) - 40, 0)
+    if len(fragment) > room:
+        raise EditTooLarge(len(fragment), room)
+    base = [
+        ChatMessage(role="system", content=_ELEMENT_SYSTEM),
+        ChatMessage(role="user", content=f"# Current element\n{fragment}\n\n{fixed}"),
+    ]
+    options = GenerationOptions(json_mode=False, temperature=0.3)
+    wanted = _bindings(fragment)
+    original = H.outer_element(fragment)
+
+    def attempt(messages: list[ChatMessage]) -> tuple[str, list[str], str]:
+        resp = calls.complete(messages, options)
+        cleaned = H.clean_fragment(resp.text)
+        problems = []
+        got = H.outer_element(cleaned)
+        if got is None:
+            problems.append("it didn't come back as one element")
+        elif original and got[0] != original[0]:
+            problems.append(f"it came back as a <{got[0]}> instead of a <{original[0]}>")
+        missing = sorted(f'{n}="{v}"' for n, v in wanted - _bindings(cleaned))
+        if missing:
+            problems.append("it dropped " + ", ".join(missing[:4]))
+        if cleaned and not H.tags_balance(cleaned):
+            problems.append("its tags don't close")
+        return cleaned, problems, resp.text
+
+    cleaned, problems, raw = attempt(base)
+    if problems:
+        retry = base + [
+            ChatMessage(role="assistant", content=raw[:4000]),
+            ChatMessage(
+                role="user",
+                content="That can't be used: " + "; ".join(problems)
+                + ". Return the corrected element only.",
+            ),
+        ]
+        cleaned2, problems2, _raw2 = attempt(retry)
+        if len(problems2) <= len(problems):
+            cleaned, problems = cleaned2, problems2
+    if problems:
+        raise EditRejected(problems, calls.responses)
+    if ds is not None:
+        cleaned, _drawn = document.draw_images(cleaned, ds)
+    return cleaned, calls.responses
