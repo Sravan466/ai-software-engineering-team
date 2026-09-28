@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.analytics import tracker
 from app.core.constants import RoutingMode
 from app.db.models import PreviewRevision, Project
+from app.preview import history, oids
 from app.preview.brief import site_brief
 from app.preview.generator import BuildResult, build_site
 from app.preview.jobs import Reporter
@@ -37,17 +38,15 @@ def bill(db: Session, project: Project, responses: Iterable[LLMResponse]) -> Non
 
 def save(db: Session, project: Project, result: BuildResult) -> PreviewRevision:
     """Keep a finished build as the newest revision, and bill every call it made."""
-    row = PreviewRevision(
-        project_id=project.id,
-        html=result.html,
+    row = history.new_row(
+        db,
+        project.id,
+        html=oids.tag(result.html),
         source="generated",
         model_used=result.report.get("model"),
         provider_used=result.report.get("provider"),
         report=result.report,
     )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
     bill(db, project, result.responses)
     return row
 

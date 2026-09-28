@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import re
+
+import pytest
 
 from app.db.base import SessionLocal
 from app.db.models import PreviewRevision
@@ -222,7 +225,11 @@ def test_generate_builds_a_site_then_edit_then_undo(client, monkeypatch):
 
     undone = client.post(f"/api/projects/{pid}/preview/undo").json()
     assert "EDITED HERO" not in undone["html"]
-    assert len(undone["revisions"]) == 1
+    # Undo moves the head; the edit is still there to redo.
+    assert len(undone["revisions"]) == 2
+    assert undone["can_redo"] and not undone["can_undo"]
+    redone = client.post(f"/api/projects/{pid}/preview/redo").json()
+    assert "EDITED HERO" in redone["html"] and redone["can_undo"]
 
 
 def test_an_edit_that_breaks_a_list_is_refused(client, monkeypatch):
@@ -253,7 +260,7 @@ def test_a_mockup_from_before_sites_is_still_editable(client, monkeypatch):
         f"/api/projects/{pid}/preview/edit",
         json={"section_id": "home-hero", "instruction": "x"},
     ).json()
-    assert "EDITED HERO" in edited["html"] and "<li>A</li>" in edited["html"]
+    assert "EDITED HERO" in edited["html"] and ">A</li>" in edited["html"]
     assert edited["report"] is None and edited["routes"] == []
 
 
@@ -375,3 +382,205 @@ def test_a_content_element_carrying_the_section_id_keeps_its_tag():
     cta = SectionPlan(id="cta", kind="cta", label="CTA", brief="")
     inner, _ = unwrap('<a data-section="cta" href="#/signup" class="btn">Join</a>', cta)
     assert inner == '<a href="#/signup" class="btn">Join</a>'
+
+
+# ── element ids, direct edits, site style, the undo pointer (#52) ────────────
+from app.preview import oids as O  # noqa: E402
+from app.preview.document import apply_theme  # noqa: E402
+
+
+def test_every_body_element_gets_a_stable_id():
+    html = (
+        "<html><head><title>x</title><script>var a='<div>';</script></head><body>"
+        '<nav data-section="nav"><a href="#/">Home</a><svg><path d="M0"/></svg></nav>'
+        '<ul data-list="items"><template><li data-field="name">x</li></template></ul>'
+        "<script>if (a<b) {}</script></body></html>"
+    )
+    tagged = O.tag(html)
+    assert O.tag(tagged) == tagged  # ids already present are kept, nothing re-tagged
+    assert O.tag(html) == tagged  # deterministic: an untagged mockup gets the same ids
+    assert "<title>x</title>" in tagged and "var a='<div>'" in tagged
+    assert '<path d="M0"/>' in tagged  # an SVG is one element; its drawing isn't tagged
+    assert "<template>" in tagged  # the template itself is structure
+    assert 'data-field="name" data-oid=' in tagged  # its row pattern is selectable
+    assert "if (a<b)" in tagged
+
+
+def test_patch_changes_text_classes_and_links_without_a_model(client, monkeypatch):
+    calls = []
+
+    def counting(messages, **kwargs):
+        calls.append(messages)
+        return _fake(messages, **kwargs)
+
+    monkeypatch.setattr(model_router, "complete", counting)
+    pid = _create(client)
+    gen = _generate(client, pid)
+    built = len(calls)
+    html = gen["html"]
+    heading = re.search(r'<h1\b[^>]*data-oid="(e\d+)"', html).group(1)
+    link = re.search(r'<a\b[^>]*href="#/[^"]*"[^>]*data-oid="(e\d+)"', html).group(1)
+
+    r = client.post(
+        f"/api/projects/{pid}/preview/patch",
+        json={
+            "summary": "Heading",
+            "ops": [
+                {"oid": heading, "kind": "text", "text": "Homes <you> love"},
+                {"oid": heading, "kind": "classes", "add": ["text-6xl", "md:text-7xl"], "remove": ["text-4xl"]},
+                {"oid": link, "kind": "attr", "name": "href", "value": "#/listings"},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert len(calls) == built  # no model call
+    h1 = O.outer(out["html"], heading)
+    assert "Homes &lt;you&gt; love" in h1 and "text-6xl" in h1 and "md:text-7xl" in h1
+    assert out["revisions"][0]["source"] == "patched" and out["can_undo"]
+    # Survives a reload.
+    assert "Homes &lt;you&gt; love" in client.get(f"/api/projects/{pid}/preview").json()["html"]
+
+
+def test_patch_refuses_what_it_cannot_do_safely(client, monkeypatch):
+    monkeypatch.setattr(model_router, "complete", _fake)
+    pid = _create(client)
+    html = _generate(client, pid)["html"]
+    in_template = re.search(r"<template\b[^>]*>[\s\S]*?data-oid=\"(e\d+)\"", html).group(1)
+    link = re.search(r'<a\b[^>]*data-oid="(e\d+)"', html).group(1)
+
+    for op, words in (
+        ({"oid": in_template, "kind": "classes", "add": ["text-xl"]}, "template"),
+        ({"oid": link, "kind": "attr", "name": "href", "value": "javascript:alert(1)"}, "can't be used"),
+        ({"oid": link, "kind": "attr", "name": "onclick", "value": "x"}, "can't be changed"),
+        ({"oid": link, "kind": "classes", "add": ['x" onclick="y']}, "isn't a class"),
+        ({"oid": "e999999", "kind": "text", "text": "x"}, "isn't in the current mockup"),
+    ):
+        r = client.post(f"/api/projects/{pid}/preview/patch", json={"ops": [op]})
+        assert r.status_code == 422 and words in r.json()["detail"], (op, r.text)
+    assert len(client.get(f"/api/projects/{pid}/preview").json()["revisions"]) == 1
+
+
+def test_theme_restyles_every_page_without_a_rebuild(client, monkeypatch):
+    monkeypatch.setattr(model_router, "complete", _fake)
+    pid = _create(client)
+    gen = _generate(client, pid)
+    assert gen["theme"]["current"]["font_pair"]
+    r = client.patch(
+        f"/api/projects/{pid}/preview/theme", json={"font_pair": "editorial", "primary": "#0f766e"}
+    )
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert "Fraunces" in out["html"] and "--c-primary:15 118 110" in out["html"]
+    assert site_data(out["html"])["design"]["font_pair"] == "editorial"
+    assert out["theme"]["current"]["primary"] == "#0f766e"
+    assert out["html"].count('id="ds-tokens"') == 1  # replaced, not appended
+    assert out["revisions"][0]["source"] == "themed"
+    bad = client.patch(f"/api/projects/{pid}/preview/theme", json={"primary": "teal"})
+    assert bad.status_code == 422 and "isn't a colour" in bad.text
+
+
+def test_theme_on_a_mockup_from_before_sites_asks_for_a_rebuild(client):
+    pid = _create(client)
+    db = SessionLocal()
+    db.add(PreviewRevision(project_id=pid, html=SAMPLE, source="generated"))
+    db.commit()
+    db.close()
+    r = client.patch(f"/api/projects/{pid}/preview/theme", json={"font_pair": "editorial"})
+    assert r.status_code == 409 and "Rebuild" in r.text
+    with pytest.raises(Exception):
+        apply_theme(SAMPLE, {"font_pair": "editorial"})
+
+
+def test_undo_never_removes_the_original_build(client, monkeypatch):
+    monkeypatch.setattr(model_router, "complete", _fake)
+    pid = _create(client)
+    gen = _generate(client, pid)
+    assert not gen["can_undo"] and not gen["can_redo"]
+    r = client.post(f"/api/projects/{pid}/preview/undo")
+    assert r.status_code == 409 and "original build" in r.text
+    assert client.get(f"/api/projects/{pid}/preview").json()["html"] == gen["html"]
+
+
+def test_an_edit_after_undo_starts_a_new_branch(client, monkeypatch):
+    monkeypatch.setattr(model_router, "complete", _fake)
+    pid = _create(client)
+    html = _generate(client, pid)["html"]
+    heading = re.search(r'<h1\b[^>]*data-oid="(e\d+)"', html).group(1)
+
+    def text(t):
+        return client.post(
+            f"/api/projects/{pid}/preview/patch", json={"ops": [{"oid": heading, "kind": "text", "text": t}]}
+        ).json()
+
+    text("First")
+    text("Second")
+    back = client.post(f"/api/projects/{pid}/preview/undo").json()
+    assert ">First<" in O.outer(back["html"], heading)
+    third = text("Third")
+    assert not third["can_redo"]  # "Second" is off the branch now
+    assert ">First<" in O.outer(client.post(f"/api/projects/{pid}/preview/undo").json()["html"], heading)
+    assert ">Third<" in O.outer(client.post(f"/api/projects/{pid}/preview/redo").json()["html"], heading)
+    assert len(client.get(f"/api/projects/{pid}/preview").json()["revisions"]) == 4
+
+
+def test_legacy_revisions_undo_in_order(client):
+    """Rows from before the pointer: no parent, no head — a straight line, newest live."""
+    pid = _create(client)
+    db = SessionLocal()
+    for word in ("one", "two", "three"):
+        db.add(PreviewRevision(project_id=pid, html=SAMPLE.replace("<li>A</li>", f"<li>{word}</li>"), source="generated"))
+        db.commit()
+    db.close()
+    now = client.get(f"/api/projects/{pid}/preview").json()
+    assert "three" in now["html"] and now["can_undo"] and not now["can_redo"]
+    assert "two" in client.post(f"/api/projects/{pid}/preview/undo").json()["html"]
+    assert "one" in client.post(f"/api/projects/{pid}/preview/undo").json()["html"]
+    assert client.post(f"/api/projects/{pid}/preview/undo").status_code == 409
+
+
+def test_element_edit_rewrites_only_that_element(client, monkeypatch):
+    def element(messages, **kwargs):
+        if "ONE HTML element" in messages[0].content:
+            from app.schemas.llm import LLMResponse as R, Usage as U
+
+            return R(text='<h1 class="text-6xl">Bigger words</h1>', provider="mock", model="mock-model",
+                     usage=U(prompt_tokens=1, completion_tokens=1, total_tokens=2))
+        return _fake(messages, **kwargs)
+
+    monkeypatch.setattr(model_router, "complete", element)
+    pid = _create(client)
+    html = _generate(client, pid)["html"]
+    heading = re.search(r'<h1\b[^>]*data-oid="(e\d+)"', html).group(1)
+    r = client.post(f"/api/projects/{pid}/preview/edit", json={"oid": heading, "instruction": "bigger"})
+    assert r.status_code == 200, r.text
+    out = r.json()["html"]
+    assert f'data-oid="{heading}"' in O.outer(out, heading)  # selection survives
+    assert "Bigger words" in O.outer(out, heading)
+    # Everything outside the element is untouched.
+    before, after = html.split(O.outer(html, heading))
+    assert out.startswith(before) and out.endswith(after)
+
+
+def test_an_edit_too_large_to_read_is_refused_not_cut(client, monkeypatch):
+    from app.preview import generator as G
+
+    monkeypatch.setattr(model_router, "complete", _fake)
+    monkeypatch.setattr(G._Calls, "char_budget", property(lambda self: 900))
+    pid = _create(client)
+    _generate(client, pid)
+    r = client.post(
+        f"/api/projects/{pid}/preview/edit",
+        json={"section_id": "home-hero", "instruction": "make it better"},
+    )
+    assert r.status_code == 422 and "too large" in r.text
+
+
+def test_a_revision_can_be_read_for_before_and_after(client, monkeypatch):
+    monkeypatch.setattr(model_router, "complete", _fake)
+    pid = _create(client)
+    gen = _generate(client, pid)
+    rid = gen["revisions"][0]["id"]
+    r = client.get(f"/api/projects/{pid}/preview/revisions/{rid}")
+    assert r.status_code == 200 and r.json()["html"] == gen["html"]
+    assert client.get(f"/api/projects/{pid}/preview/revisions/nope").status_code == 404

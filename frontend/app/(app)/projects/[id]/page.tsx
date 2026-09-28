@@ -360,7 +360,8 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   }
 
   return (
-    <div className="build-wrap">
+    // The Preview tab is a canvas: it takes the width a desktop layout needs.
+    <div className={"build-wrap" + (tab === "preview" ? " build-wrap-wide" : "")}>
       <div className="build-head">
         <div style={{ minWidth: 0 }}>
           <h1>{project.name || project.idea}</h1>

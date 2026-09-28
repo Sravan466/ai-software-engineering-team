@@ -447,8 +447,31 @@ export const api = {
       { method: "POST", body: JSON.stringify({ section_id, instruction }) },
       LLM_TIMEOUT_MS
     ),
+  /** A plain-language change scoped to one element (by `data-oid`) — the model sees only it. */
+  editPreviewElement: (id: string, oid: string, instruction: string) =>
+    req<PreviewState>(
+      `/api/projects/${id}/preview/edit`,
+      { method: "POST", body: JSON.stringify({ oid, instruction }) },
+      LLM_TIMEOUT_MS
+    ),
+  /** Direct edits — text, classes, links, images. No model call. */
+  patchPreview: (id: string, ops: PatchOp[], summary?: string) =>
+    req<PreviewState>(`/api/projects/${id}/preview/patch`, {
+      method: "POST",
+      body: JSON.stringify({ ops, summary }),
+    }),
+  /** Site style: fonts, palette and shape for every page at once. No model call. */
+  themePreview: (id: string, changes: Partial<ThemeTokens>) =>
+    req<PreviewState>(`/api/projects/${id}/preview/theme`, {
+      method: "PATCH",
+      body: JSON.stringify(changes),
+    }),
   undoPreview: (id: string) =>
     req<PreviewState>(`/api/projects/${id}/preview/undo`, { method: "POST" }),
+  redoPreview: (id: string) =>
+    req<PreviewState>(`/api/projects/${id}/preview/redo`, { method: "POST" }),
+  getPreviewRevision: (id: string, revisionId: string) =>
+    req<{ id: string; html: string }>(`/api/projects/${id}/preview/revisions/${revisionId}`),
 
   // ── Settings: cloud API keys + local model sources ──
   getProviders: () =>
@@ -1116,9 +1139,37 @@ export type MockupReport = {
   tokens: number;
   elapsed_ms: number;
 };
+/** One change the server makes without a model, on the element with this `data-oid`. */
+export type PatchOp =
+  | { oid: string; kind: "text"; text: string }
+  | { oid: string; kind: "classes"; add: string[]; remove: string[] }
+  | { oid: string; kind: "attr"; name: string; value: string | null };
+
+export type ThemeTokens = {
+  primary: string;
+  accent: string;
+  tint: string;
+  font_pair: string;
+  radius: string;
+  shadow: string;
+  density: string;
+};
+export type PreviewTheme = {
+  current: ThemeTokens;
+  fonts: { id: string; label: string; display: string; body: string }[];
+  tints: string[];
+  radii: string[];
+  shadows: string[];
+  densities: string[];
+  /** The ramps the design system derives — the swatches a colour control offers. */
+  palette: Record<"primary" | "accent" | "neutral", Record<string, string>>;
+};
+
 export type PreviewRevision = {
   id: string;
+  /** generated | edited (a model) | patched (direct edits) | themed (site style) */
   source: string;
+  parent_id?: string | null;
   section_id: string | null;
   instruction: string | null;
   model_used: string | null;
@@ -1135,6 +1186,12 @@ export type PreviewState = {
   has_frontend: boolean;
   report: MockupReport | null;
   job: PreviewJob | null;
+  /** The revision on screen. Undo and redo move it; nothing is deleted. */
+  head_id: string | null;
+  can_undo: boolean;
+  can_redo: boolean;
+  /** Null for a single-page mockup drawn before sites — it can't be restyled in place. */
+  theme: PreviewTheme | null;
 };
 
 export type GenFile = {

@@ -81,7 +81,13 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     ),
     # Nullable for the same reason: a mockup drawn by the single-shot generator has
     # no pages, sections or checks to report.
-    "preview_revisions": ("report",),
+    "preview_revisions": (
+        "report",
+        # Both nullable: a revision from before undo became a pointer has the one
+        # before it as its parent, and with no head recorded the newest is live.
+        "parent_id",
+        "head_at",
+    ),
     # `cost_known` is nullable rather than defaulted to true: an existing row cannot
     # say whether its zero was a price or a gap, and claiming it was a price would
     # write a fact nobody checked into every historical event.
