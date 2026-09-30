@@ -688,7 +688,7 @@
   background: var(--bg-panel);
 }
 .artifact-skills-label { font-size: var(--t-xs); color: var(--ink-3); margin-right: 2px; }
-.artifact-skills .pick { font-family: var(--mono); font-size: 11px; }
+.artifact-skills .pick { font-size: 11px; }
 
 /* ── which procedures this build works from ─────────────────────────────────
    Full width under the two columns above: twelve rows of a three-way control

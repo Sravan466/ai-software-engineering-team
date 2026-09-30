@@ -383,6 +383,26 @@ h1, h2, h3, h4 {
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field > label { font-size: var(--t-sm); font-weight: 500; color: var(--ink-2); }
 .field-hint { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.45; }
+/* A problem with this one field, printed under it and tied to it with
+   aria-describedby — never a paragraph at the foot of the form that the reader has
+   to map back to a field. Warn is the same shape for "allowed, but probably not
+   what you meant". */
+.field-error,
+.field-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--t-xs);
+  line-height: 1.5;
+}
+.field-error { color: var(--bad); }
+.field-warn { color: var(--warn); }
+.field-error svg,
+.field-warn svg { width: 13px; height: 13px; flex: none; margin-top: 2px; }
+.field-warn .mono { color: var(--ink); }
+.input[aria-invalid="true"],
+.textarea[aria-invalid="true"] { border-color: var(--bad); }
 
 .input,
 .textarea,

@@ -7,6 +7,7 @@ import { Icon } from "@/components/shell/icons";
 import DetailFields from "./DetailFields";
 import FileBrowser from "./FileBrowser";
 import Mermaid from "./Mermaid";
+import { useSkillTitles } from "@/components/skills/skills";
 import { extractFiles, extractMermaid, fileKeys, fileSummary, toFields } from "./payload";
 
 /**
@@ -144,6 +145,9 @@ export default function PhaseArtifact({
  * someone off to add keywords that are already matching.
  */
 function SkillsUsed({ row }: { row: PhaseResult }) {
+  // Titles, as the Skills page and the composer print them. The row stores names,
+  // which is right for the record and wrong for a person scanning the line.
+  const titles = useSkillTitles();
   const used = row.skills_used;
   if (used === null || used === undefined) return null;
   return (
@@ -167,7 +171,7 @@ function SkillsUsed({ row }: { row: PhaseResult }) {
           <span className="artifact-skills-label">Worked from</span>
           {used.map((name) => (
             <span key={name} className="pick">
-              {name}
+              {titles[name] ?? name}
             </span>
           ))}
         </>

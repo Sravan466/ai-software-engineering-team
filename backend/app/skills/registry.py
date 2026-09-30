@@ -179,7 +179,14 @@ def delete(name: str) -> Optional[Skill]:
             "alongside and leaves the original where it is."
         )
     shutil.rmtree(path.parent, ignore_errors=True)
-    return get(name)
+    restored = get(name)
+    # A skill that is gone takes its switch with it. Left behind, the name stays in
+    # the state file and a new skill added under it later is born switched off, with
+    # nothing on screen to say why. A restored original keeps the switch: it is the
+    # same skill, and the person turned it off.
+    if restored is None and name in disabled_names():
+        set_enabled(name, True)
+    return restored
 
 
 def is_override(name: str) -> bool:

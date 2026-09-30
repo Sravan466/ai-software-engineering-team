@@ -20,6 +20,8 @@ import { canRunABuild, runtimeSays } from "@/lib/capabilities";
 import { hostOf, modelName, sourceFor, splitSpec, triedText } from "@/lib/models";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
+import PreviewRows from "@/components/skills/PreviewRows";
+import { byTitle } from "@/components/skills/skills";
 
 /**
  * How a run is routed and how often it stops — and whether it can run at all.
@@ -543,7 +545,7 @@ function SkillPicker({
     let live = true;
     api
       .listSkills()
-      .then((lib) => live && setSkills(lib.skills.filter((s) => s.usable)))
+      .then((lib) => live && setSkills(lib.skills.filter((s) => s.usable).sort(byTitle)))
       .catch(() => live && setSkills([]));
     return () => {
       live = false;
@@ -670,39 +672,7 @@ function SkillPicker({
             )}
           </div>
 
-          {preview && (
-            <ol className="dryrun-rows">
-              {preview.phases.map((phase) => {
-                const agent = AGENT_BY_KEY[phase.phase];
-                return (
-                  <li
-                    key={phase.phase}
-                    className="dryrun-row"
-                    style={{ ["--agent" as string]: agent?.accent }}
-                  >
-                    <span className="dryrun-who">
-                      <b className="agent-line-name">{agent?.codename ?? phase.phase}</b>
-                    </span>
-                    {phase.skills.length === 0 ? (
-                      <span className="dryrun-none">nothing matched</span>
-                    ) : (
-                      <span className="dryrun-picks">
-                        {phase.skills.map((s) => (
-                          <span
-                            key={s.name}
-                            className={"pick" + (s.pinned ? " pick-pinned" : "")}
-                            title={s.reason}
-                          >
-                            {s.title}
-                          </span>
-                        ))}
-                      </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-          )}
+          {preview && <PreviewRows preview={preview} />}
         </div>
       )}
     </div>

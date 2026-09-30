@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  ApiError,
   type Skill,
   type SkillDraft,
   type SkillLibrary,
@@ -12,6 +13,8 @@ import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
+import PreviewRows from "@/components/skills/PreviewRows";
+import { alwaysMatching, byTitle, forgetSkillTitles } from "@/components/skills/skills";
 
 /**
  * The skill library: what the crew knows before a build starts.
@@ -52,6 +55,9 @@ export default function SkillsPage() {
     setLoading(true);
     try {
       setLib(await api.listSkills());
+      // A build page opened after this reads titles fresh, not the ones from
+      // before an edit.
+      forgetSkillTitles();
       setError("");
     } catch (e: any) {
       setError(e.message);
@@ -65,8 +71,9 @@ export default function SkillsPage() {
   }, [refresh]);
 
   const skills = lib?.skills ?? [];
-  const bundled = skills.filter((s) => s.source === "bundled");
-  const mine = skills.filter((s) => s.source === "user");
+  const bundled = skills.filter((s) => s.source === "bundled").sort(byTitle);
+  const mine = skills.filter((s) => s.source === "user").sort(byTitle);
+  const canEdit = lib?.can_edit ?? false;
 
   return (
     <div className="skills-wrap">
@@ -120,16 +127,26 @@ export default function SkillsPage() {
                 up to {lib.max_per_phase} per phase
               </span>
             )}
-            <button
-              className="btn btn-sm"
-              onClick={() => setEditing((e) => (e === "" ? null : ""))}
-              aria-expanded={editing === ""}
-            >
-              {Icon.plus} Add a skill
-            </button>
+            {canEdit && (
+              <button
+                className="btn btn-sm"
+                onClick={() => setEditing((e) => (e === "" ? null : ""))}
+                aria-expanded={editing === ""}
+              >
+                {Icon.plus} Add a skill
+              </button>
+            )}
           </div>
 
-          {editing === "" && lib && (
+          {lib && !canEdit && (
+            <p className="field-hint skills-readonly">
+              The library is shared by every account on this install, so only its owner
+              can add, edit or switch skills. You can read all of them, and pin or skip
+              any of them on your own builds from the composer.
+            </p>
+          )}
+
+          {editing === "" && lib && canEdit && (
             <Editor
               draft={BLANK}
               phases={lib.phases}
@@ -152,6 +169,7 @@ export default function SkillsPage() {
                   note={lib ? `saved in ${lib.user_dir}` : ""}
                   skills={mine}
                   lib={lib}
+                  canEdit={canEdit}
                   editing={editing}
                   setEditing={setEditing}
                   onChanged={refresh}
@@ -161,6 +179,7 @@ export default function SkillsPage() {
                 heading={mine.length > 0 ? "Shipped with the platform" : undefined}
                 skills={bundled}
                 lib={lib}
+                canEdit={canEdit}
                 editing={editing}
                 setEditing={setEditing}
                 onChanged={refresh}
@@ -211,6 +230,7 @@ function DryRun() {
   }
 
   const empty = result?.phases.filter((p) => p.skills.length === 0) ?? [];
+  const crowded = result?.phases.filter((p) => (p.over_cap ?? []).length > 0) ?? [];
 
   return (
     <section className="card">
@@ -252,38 +272,7 @@ function DryRun() {
 
       {result && (
         <>
-          <ol className="dryrun-rows">
-            {result.phases.map((p) => {
-              const agent = AGENT_BY_KEY[p.phase];
-              return (
-                <li
-                  key={p.phase}
-                  className="dryrun-row"
-                  style={{ ["--agent" as string]: agent?.accent }}
-                >
-                  <span className="dryrun-who">
-                    <b className="agent-line-name">{agent?.codename ?? p.phase}</b>
-                    <span className="dryrun-what">{p.label}</span>
-                  </span>
-                  {p.skills.length === 0 ? (
-                    <span className="dryrun-none">nothing matched</span>
-                  ) : (
-                    <span className="dryrun-picks">
-                      {p.skills.map((s) => (
-                        <span
-                          key={s.name}
-                          className={"pick" + (s.pinned ? " pick-pinned" : "")}
-                          title={s.reason}
-                        >
-                          {s.title}
-                        </span>
-                      ))}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ol>
+          <PreviewRows preview={result} showLabels />
           {empty.length > 0 && (
             <p className="field-hint" style={{ marginTop: 12 }}>
               {empty.length === 1
@@ -291,6 +280,16 @@ function DryRun() {
                 : `${empty.length} phases would get no skills for this idea.`}{" "}
               That is a keyword miss, not a verdict — add a keyword below, or pin the
               skill on the build itself from the composer.
+            </p>
+          )}
+          {crowded.length > 0 && (
+            <p className="field-hint" style={{ marginTop: 12 }}>
+              {crowded.length === 1
+                ? `${AGENT_BY_KEY[crowded[0].phase]?.codename ?? crowded[0].label} matched more skills than it can take.`
+                : `${crowded.length} phases matched more skills than they can take.`}{" "}
+              Each phase gets at most {result.max_per_phase}, strongest match first, so the
+              ones listed as left out never reach the model. Pin one on the build to put it
+              first, or tighten a stronger skill&apos;s keywords.
             </p>
           )}
           <p className="field-hint" style={{ marginTop: 8 }}>
@@ -309,6 +308,7 @@ function SkillGroup({
   note,
   skills,
   lib,
+  canEdit,
   editing,
   setEditing,
   onChanged,
@@ -317,6 +317,7 @@ function SkillGroup({
   note?: string;
   skills: Skill[];
   lib: SkillLibrary | null;
+  canEdit: boolean;
   editing: string | null;
   setEditing: (name: string | null) => void;
   onChanged: () => void;
@@ -336,6 +337,7 @@ function SkillGroup({
             key={`${skill.source}-${skill.name}`}
             skill={skill}
             lib={lib}
+            canEdit={canEdit}
             editing={editing === skill.name}
             onEdit={() => setEditing(editing === skill.name ? null : skill.name)}
             onChanged={onChanged}
@@ -349,12 +351,14 @@ function SkillGroup({
 function SkillRow({
   skill,
   lib,
+  canEdit,
   editing,
   onEdit,
   onChanged,
 }: {
   skill: Skill;
   lib: SkillLibrary | null;
+  canEdit: boolean;
   editing: boolean;
   onEdit: () => void;
   onChanged: () => void;
@@ -372,6 +376,10 @@ function SkillRow({
             .map((a) => AGENT_BY_KEY[a]?.codename ?? a)
             .join(" · "),
     [skill.agents],
+  );
+  const everywhere = useMemo(
+    () => (lib ? alwaysMatching(skill.keywords, skill.agents, lib.phases) : []),
+    [lib, skill.keywords, skill.agents],
   );
 
   async function toggle() {
@@ -409,12 +417,14 @@ function SkillRow({
           role="switch"
           aria-checked={skill.enabled}
           aria-label={`${skill.enabled ? "Switch off" : "Switch on"} ${skill.title}`}
-          disabled={busy || !skill.usable}
+          disabled={busy || !skill.usable || !canEdit}
           onClick={toggle}
           title={
-            skill.usable
-              ? "Off means no build gets it unless it names it"
-              : "This skill can never be injected — see the reason below"
+            !canEdit
+              ? "Only the install's owner can switch skills"
+              : skill.usable
+                ? "Off means no build gets it unless it names it"
+                : "This skill can never be injected — see the reason below"
           }
         >
           <span className="switch-track" aria-hidden="true" />
@@ -442,10 +452,13 @@ function SkillRow({
         </button>
 
         <div className="skill-acts">
-          <button className="btn btn-sm" onClick={onEdit} aria-expanded={editing}>
-            {Icon.pen} Edit
-          </button>
-          {skill.source === "user" &&
+          {canEdit && (
+            <button className="btn btn-sm" onClick={onEdit} aria-expanded={editing}>
+              {Icon.pen} Edit
+            </button>
+          )}
+          {canEdit &&
+            skill.source === "user" &&
             (confirming ? (
               <>
                 <button className="btn btn-sm" onClick={() => setConfirming(false)}>
@@ -487,6 +500,16 @@ function SkillRow({
         </p>
       )}
 
+      {everywhere.length > 0 && (
+        <p className="skill-warn">
+          {Icon.alert}
+          <span>
+            <EverywhereText hits={everywhere} /> It arrives whether or not the idea has
+            anything to do with it.
+          </span>
+        </p>
+      )}
+
       {!skill.usable && (
         <p className="skill-problem">
           {skill.problems.join(" ")}
@@ -501,7 +524,7 @@ function SkillRow({
 
       {open && <pre className="skill-body">{skill.body}</pre>}
 
-      {editing && lib && (
+      {editing && lib && canEdit && (
         <Editor
           draft={{
             name: skill.name,
@@ -527,6 +550,44 @@ function SkillRow({
 }
 
 // ── the editor ───────────────────────────────────────────────────────────────
+/** The server's `NAME_RE`: a slug that starts and ends with a letter or digit. */
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
+
+/** Typing a name: anything that is not a slug character becomes one hyphen. A
+ *  trailing hyphen is left while typing — it is how "api-" becomes "api-design" —
+ *  and trimmed when the field is left or saved. */
+function slugify(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+/, "");
+}
+
+type Field = "name" | "title" | "description" | "body";
+
+/**
+ * "`frontend` is in Prism's own phase name" — the sentence both the row and the
+ * editor print for keywords that match every build.
+ */
+function EverywhereText({ hits }: { hits: { keyword: string; who: string[] }[] }) {
+  const words = hits.map((h) => h.keyword);
+  const who = Array.from(new Set(hits.flatMap((h) => h.who)));
+  return (
+    <>
+      {words.map((w, n) => (
+        <span key={w}>
+          {n > 0 && (n === words.length - 1 ? " and " : ", ")}
+          <span className="mono">{w}</span>
+        </span>
+      ))}{" "}
+      {words.length === 1 ? "is" : "are"} in {who.join(" and ")}&apos;s own phase name,
+      so {words.length === 1 ? "it matches" : "they match"} every build{" "}
+      {who.length === 1 ? "that phase runs" : "those phases run"}.
+    </>
+  );
+}
+
 function Editor({
   draft,
   locked,
@@ -541,7 +602,7 @@ function Editor({
   locked?: string;
   /** True when saving will shadow a skill that ships with the platform. */
   bundled?: boolean;
-  phases: { key: string; label: string }[];
+  phases: SkillLibrary["phases"];
   maxChars: number;
   onDone: () => void;
   onCancel: () => void;
@@ -550,6 +611,18 @@ function Editor({
   const [keywords, setKeywords] = useState(draft.keywords.join(", "));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // What the server refused about the name itself — taken, usually. Shown on the
+  // field it is about, and dropped the moment the name changes.
+  const [nameTaken, setNameTaken] = useState("");
+  // Problems show once Save has been tried, then follow every keystroke. Before
+  // that, a blank form shouting four errors at someone who has not typed is noise.
+  const [tried, setTried] = useState(false);
+  const refs = {
+    name: useRef<HTMLInputElement>(null),
+    title: useRef<HTMLInputElement>(null),
+    description: useRef<HTMLInputElement>(null),
+    body: useRef<HTMLTextAreaElement>(null),
+  };
 
   // What this skill will actually cost a prompt. The title and the description are
   // injected beside the procedure, so counting the textarea alone under-reports the
@@ -558,33 +631,74 @@ function Editor({
   // server counts code points, so an emoji in a title made the two disagree — the
   // counter on screen is meant to be the number the ceiling is checked against.
   const cost = [
-    ...`## ${form.title}${form.description ? `\n${form.description}` : ""}\n${form.body}`.trim(),
+    ...`## ${form.title.trim()}${form.description.trim() ? `\n${form.description.trim()}` : ""}\n${form.body.trim()}`.trim(),
   ].length;
   const over = cost > maxChars;
-  const slug = (locked ?? form.name ?? "").trim();
+  const slug = (locked ?? form.name ?? "").trim().replace(/-+$/, "");
+  const keywordList = keywords
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+  const everywhere = alwaysMatching(keywordList, form.agents, phases);
+
+  // The same rules the server applies on save, said next to the field they are
+  // about. The server still checks — it is the authority — and anything it refuses
+  // that is not listed here (a format instruction in the body) shows under the form.
+  const problems: Partial<Record<Field, string>> = {};
+  if (!locked && !NAME_RE.test(slug))
+    problems.name = slug
+      ? "Use 2–64 lowercase letters, digits and hyphens, starting and ending with a letter or digit."
+      : "Give it a name — it is the folder it is saved in, and what a build pins it by.";
+  else if (nameTaken) problems.name = nameTaken;
+  if (!form.title.trim()) problems.title = "Give it a title — it is what every list shows.";
+  if (!form.description.trim())
+    problems.description = "Say when it applies — it is the one line the preview can show.";
+  if (!form.body.trim()) problems.body = "Write the procedure the agent will follow.";
+  else if (over)
+    problems.body = `${cost.toLocaleString()} characters is over the ${maxChars.toLocaleString()} ceiling. Cut the procedure, or the title and description beside it.`;
+  const shown = (f: Field) => (tried || (f === "name" && nameTaken) ? problems[f] : undefined);
 
   async function save() {
     if (busy) return;
+    setTried(true);
+    const first = (["name", "title", "description", "body"] as Field[]).find((f) => problems[f]);
+    if (first) {
+      refs[first].current?.focus();
+      return;
+    }
     setBusy(true);
     setError("");
-    const body: SkillDraft = {
-      ...form,
-      name: slug,
-      keywords: keywords
-        .split(",")
-        .map((k) => k.trim())
-        .filter(Boolean),
-    };
+    const body: SkillDraft = { ...form, name: slug, keywords: keywordList };
     try {
       if (locked) await api.updateSkill(locked, body);
       else await api.createSkill(body);
       onDone();
     } catch (e: any) {
-      setError(e.message);
+      if (e instanceof ApiError && e.status === 409 && !locked) {
+        setNameTaken(e.message);
+        refs.name.current?.focus();
+      } else {
+        setError(e.message);
+      }
     } finally {
       setBusy(false);
     }
   }
+
+  /** aria wiring for one field: its hint, and its problem when there is one. */
+  const described = (f: Field, hint?: boolean) => ({
+    "aria-invalid": shown(f) ? true : undefined,
+    "aria-describedby":
+      [hint ? `sk-${f}-hint` : "", shown(f) ? `sk-${f}-err` : ""].filter(Boolean).join(" ") ||
+      undefined,
+  });
+  const problem = (f: Field) =>
+    shown(f) ? (
+      <p className="field-error" id={`sk-${f}-err`}>
+        {Icon.alert}
+        <span>{shown(f)}</span>
+      </p>
+    ) : null;
 
   return (
     <div className="skill-editor">
@@ -600,40 +714,53 @@ function Editor({
           <label htmlFor="sk-name">Name</label>
           <input
             id="sk-name"
+            ref={refs.name}
             className="input input-mono"
             placeholder="api-contract-design"
-            value={slug}
+            value={locked ?? form.name ?? ""}
             disabled={Boolean(locked) || busy}
-            onChange={(e) =>
-              setForm({ ...form, name: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-") })
-            }
+            onChange={(e) => {
+              setNameTaken("");
+              setForm({ ...form, name: slugify(e.target.value) });
+            }}
+            onBlur={() => !locked && setForm((f) => ({ ...f, name: (f.name ?? "").replace(/-+$/, "") }))}
+            {...described("name", true)}
           />
-          <p className="field-hint">Lowercase, hyphens. Also the folder it is saved in.</p>
+          {problem("name")}
+          <p className="field-hint" id="sk-name-hint">
+            Lowercase, hyphens. Also the folder it is saved in.
+          </p>
         </div>
 
         <div className="field skill-f-title">
           <label htmlFor="sk-title">Title</label>
           <input
             id="sk-title"
+            ref={refs.title}
             className="input"
             placeholder="API contract design"
             value={form.title}
             disabled={busy}
             onChange={(e) => setForm({ ...form, title: e.target.value })}
+            {...described("title")}
           />
+          {problem("title")}
         </div>
 
         <div className="field skill-f-wide">
           <label htmlFor="sk-desc">When it applies</label>
           <input
             id="sk-desc"
+            ref={refs.description}
             className="input"
             placeholder="Use when defining HTTP endpoints — paths, shapes, status codes…"
             value={form.description}
             disabled={busy}
             onChange={(e) => setForm({ ...form, description: e.target.value })}
+            {...described("description", true)}
           />
-          <p className="field-hint">
+          {problem("description")}
+          <p className="field-hint" id="sk-description-hint">
             An agent given a procedure with no trigger applies it to everything.
           </p>
         </div>
@@ -685,8 +812,19 @@ function Editor({
             value={keywords}
             disabled={busy}
             onChange={(e) => setKeywords(e.target.value)}
+            aria-describedby={"sk-keys-hint" + (everywhere.length ? " sk-keys-warn" : "")}
           />
-          <p className="field-hint">
+          {everywhere.length > 0 && (
+            <p className="field-warn" id="sk-keys-warn" aria-live="polite">
+              {Icon.alert}
+              <span>
+                <EverywhereText hits={everywhere} /> {everywhere.length === 1 ? "It says" : "They say"}{" "}
+                nothing about the idea — drop {everywhere.length === 1 ? "it" : "them"}, or
+                leave the skill with no keywords if it really belongs on every build.
+              </span>
+            </p>
+          )}
+          <p className="field-hint" id="sk-keys-hint">
             Matched whole-word against the idea, the phase and what earlier phases
             wrote. No keywords means it is relevant to every build its agents run in.
           </p>
@@ -696,14 +834,17 @@ function Editor({
           <label htmlFor="sk-body">The procedure</label>
           <textarea
             id="sk-body"
+            ref={refs.body}
             className="textarea"
             rows={12}
             placeholder={"Name resources as plural nouns and act on them with methods…"}
             value={form.body}
             disabled={busy}
             onChange={(e) => setForm({ ...form, body: e.target.value })}
+            {...described("body", true)}
           />
-          <p className={"field-hint" + (over ? " over" : "")}>
+          {problem("body")}
+          <p className={"field-hint" + (over ? " over" : "")} id="sk-body-hint">
             <span className="mono">
               {cost.toLocaleString()} / {maxChars.toLocaleString()}
             </span>{" "}
@@ -723,7 +864,7 @@ function Editor({
       )}
 
       <div className="skill-editor-acts">
-        <button className="btn btn-primary" onClick={save} disabled={busy || !slug}>
+        <button className="btn btn-primary" onClick={save} disabled={busy}>
           {busy && <span className="btn-spinner" aria-hidden="true" />}
           {busy ? "Saving…" : locked ? "Save changes" : "Add skill"}
         </button>
