@@ -113,6 +113,8 @@
   white-space: nowrap;
   color: inherit;
 }
+.sb-db { flex: none; display: inline-grid; place-items: center; color: var(--accent); }
+.sb-db svg { width: 13px; height: 13px; }
 .sb-item-time { flex: none; font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
 
 /* Delete lives on the row, revealed on hover or focus so the rail stays a list of

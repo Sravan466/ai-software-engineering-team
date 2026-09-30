@@ -63,6 +63,24 @@ class GateKind(str, Enum):
     #: rounds, or a round fixed nothing. Not a judgement call like the others: the
     #: choices are to keep trying or stop, and waiving is the exception, on record.
     NEEDS_HELP = "needs_help"
+    #: Atlas picked a database that needs credentials, and only the person can give
+    #: them — or say they will add them later. Asked in every review mode, unattended
+    #: included, right after the architecture, before the Plan review.
+    DATABASE = "database"
+
+
+class DatabaseStatus(str, Enum):
+    """Whether a build's database is connected, and how the person answered."""
+
+    #: Tested against the real database, and it answered.
+    CONNECTED = "connected"
+    #: Saved, but nothing here could sign in to check it (no driver installed).
+    #: A test that fails saves nothing, so there is no "failed" status to record.
+    UNCHECKED = "unchecked"
+    #: "Continue, I'll add it later."
+    LATER = "later"
+    #: The database needs nothing: SQLite, or no database at all.
+    NONE = "none"
 
 
 class BuildStatus(str, Enum):

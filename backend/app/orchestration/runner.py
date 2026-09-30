@@ -30,10 +30,12 @@ from sqlalchemy.orm import Session
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
-from app.core import artifacts, identity
+from app.build import dbconnect
+from app.core import artifacts, identity, project_secrets
 from app.core.config import settings
 from app.core.constants import (
     PHASE_ORDER,
+    DatabaseStatus,
     FindingStatus,
     GateKind,
     Phase,
@@ -51,7 +53,7 @@ from app.preview import history as preview_history
 from app.memory.store import memory_store
 from app.orchestration import autofix, remediation
 from app.orchestration.approval import Gate, decide_gate
-from app.orchestration.charter import binding_on
+from app.orchestration.charter import Charter, binding_on
 from app.orchestration.graph import graph, gather_skills
 from app.orchestration.state import PipelineState
 from app.preview import service as mockup
@@ -298,6 +300,13 @@ class PipelineRunner:
     # ── the crew fixing its own serious problems ──────────────────────────────
     def gate_for(self, project: Project, row: PhaseResult) -> Optional[Gate]:
         """`decide_gate` for a finished row, minus what a person already accepted."""
+        if row.phase == Phase.SYSTEM_DESIGN.value:
+            # Before any review policy: only the person can hand over a database's
+            # credentials, so this is asked in unattended mode too, and ahead of the
+            # Plan review, which still parks once it is answered.
+            asked = self.database_question(project)
+            if asked is not None:
+                return asked
         data = autofix.load(project)
         stack = None if autofix.accepted(data, autofix.build_track(row.phase)) else row.stack_note
         return decide_gate(
@@ -308,6 +317,95 @@ class PipelineRunner:
             stack,
             self.build_problems(project),
         )
+
+    @staticmethod
+    def database_question(project: Project) -> Optional[Gate]:
+        """The "connect your database" gate, while it is still unanswered."""
+        if project.database_status is not None:
+            return None
+        charter = Charter.from_dict(project.charter)
+        choice = charter.get("database") if charter else None
+        if choice is None or choice.token not in dbconnect.NEEDS_CREDENTIALS:
+            return None
+        contract = dbconnect.contract_for(choice.token, charter.database_provider)
+        # "PostgreSQL on Supabase", but never "PostgreSQL on Postgres".
+        on = f" on {contract.label}" if contract and contract.provider != "generic" and contract.label != choice.label else ""
+        return Gate(
+            GateKind.DATABASE.value,
+            f"Atlas picked {choice.label}{on}. Connect it now, or continue and add it later.",
+        )
+
+    @staticmethod
+    def set_database_provider(project: Project, charter: Charter) -> None:
+        """Re-point the charter at another host's variables, at the database gate.
+
+        The person said "it's on Supabase" where Atlas wrote plain Postgres, before
+        any code exists. Written to the checkpoint the agents read their charter
+        from as well as to the row, attributed to System Design exactly as a redo
+        of it is, so the run still resumes at the Backend Engineer. The caller commits.
+        """
+        data = charter.as_dict()
+        with _checkpoint_lock(project.id):
+            graph.update_state(_config(project.id), {"charter": data}, as_node=Phase.SYSTEM_DESIGN.value)
+        project.charter = data
+        log.info("Database host for %s set to %s; the crew reads %s", project.id, charter.database_provider, ", ".join(charter.env))
+
+    @staticmethod
+    def at_database_gate(project: Project) -> bool:
+        """Parked on the database question. The one definition every route uses."""
+        return (
+            project.status == PipelineStatus.AWAITING_APPROVAL.value
+            and project.gate_kind == GateKind.DATABASE.value
+        )
+
+    @classmethod
+    def settle_database(cls, project: Project, before: object) -> None:
+        """After the charter is (re)frozen: ask again if the database changed.
+
+        Credentials saved for MongoDB are no use to a build that now uses Postgres,
+        so they are removed rather than kept beside a database they don't open. A
+        database that needs nothing — SQLite, or none — is recorded as `none`.
+        """
+        def token(data: object) -> Optional[str]:
+            charter = Charter.from_dict(data)
+            choice = charter.get("database") if charter else None
+            return choice.token if choice else None
+
+        old, new = token(before), token(project.charter)
+        if new not in dbconnect.NEEDS_CREDENTIALS:
+            if old in dbconnect.NEEDS_CREDENTIALS and project.owner_id:
+                project_secrets.remove(project.owner_id, project.id)
+            project.database_status = DatabaseStatus.NONE.value
+            return
+        if project.database_status == DatabaseStatus.NONE.value:
+            # It needed nothing before, and it does now: that is a new question.
+            project.database_status = None
+        elif old is not None and old != new:
+            if project.owner_id:
+                project_secrets.remove(project.owner_id, project.id)
+            project.database_status = None
+        elif project.owner_id:
+            saved = project_secrets.load(project.owner_id, project.id).get("provider")
+            charter = Charter.from_dict(project.charter)
+            previous = Charter.from_dict(before)
+            said_before = previous.frozen_provider if previous else None
+            said_now = charter.frozen_provider if charter else None
+            if (
+                charter is not None
+                and saved in dbconnect.PROVIDERS.get(new or "", ())
+                and saved != charter.database_provider
+            ):
+                if said_now in (said_before, dbconnect.default_provider(new)):
+                    # Atlas said what it said before (or named no host): the host the
+                    # person chose and saved values under stands, or the code would
+                    # read names that were never saved.
+                    cls.set_database_provider(project, charter.with_provider(saved))
+                else:
+                    # The redo named a different host than Atlas did before — which
+                    # is how the host is changed after the gate. What was saved is
+                    # for the old one.
+                    project_secrets.remove(project.owner_id, project.id)
+                    project.database_status = None
 
     @staticmethod
     def build_problems(project: Project) -> list[dict]:
@@ -790,7 +888,9 @@ class PipelineRunner:
 
         self._complete_row(db, project, row, last_result)
         if charter_update is not None:
+            before = project.charter
             project.charter = charter_update or None
+            self.settle_database(project, before)
             db.commit()
             log.info("Stack charter re-frozen for %s after redoing the architecture", project.id)
         if phase_key == Phase.FRONTEND_ENGINEER.value:
@@ -980,7 +1080,9 @@ class PipelineRunner:
             # Mirrored out of the graph's own state rather than re-derived here, so
             # there is exactly one charter and the row cannot drift from the
             # checkpoint the agents are actually reading.
+            before = project.charter
             project.charter = state.get("charter") or None
+            self.settle_database(project, before)
             db.commit()
         self._raise_if_cancelled(db, project)
 

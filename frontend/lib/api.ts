@@ -155,7 +155,8 @@ export type GateKind =
   | "unchecked"
   | "stack"
   | "build"
-  | "needs_help";
+  | "needs_help"
+  | "database";
 
 /**
  * One technology decision the whole crew is held to.
@@ -170,7 +171,12 @@ export type CharterChoice = {
   label: string;
   source: "debate" | "system_design" | "implied";
 };
-export type Charter = Partial<Record<CharterCategory, CharterChoice>>;
+export type Charter = Partial<Record<CharterCategory, CharterChoice>> & {
+  /** Which host the database lives on: supabase, neon, atlas, planetscale, firebase, aws, generic. */
+  database_provider?: string;
+  /** The variable names the code reads the database from. Names only, never values. */
+  env?: string[];
+};
 export type CharterCategory =
   | "language"
   | "backend_framework"
@@ -198,6 +204,8 @@ export type Project = {
   gate_kind: GateKind | null;
   /** One line on why the run stopped here — a severe finding, a cost overrun. */
   gate_note: string | null;
+  /** connected | unchecked | later | none — or null until asked. Never a value. */
+  database_status?: DatabaseStatus | null;
 
   /**
    * The technology decisions frozen after the architecture was approved. `null`
@@ -434,7 +442,25 @@ export const api = {
 
   // ── Generated-project artifacts (Preview / Summary / Download) ──
   getArtifacts: (id: string) => req<Artifacts>(`/api/projects/${id}/artifacts`),
-  downloadUrl: (id: string) => `${BASE}/api/projects/${id}/download`,
+  downloadUrl: (id: string, includeCredentials = false) =>
+    `${BASE}/api/projects/${id}/download${includeCredentials ? "?include_credentials=true" : ""}`,
+
+  // ── The build's database (write-only: values go in, hints come back) ──
+  getDatabase: (id: string, provider?: string) =>
+    req<DatabaseState>(
+      `/api/projects/${id}/database${provider ? `?provider=${encodeURIComponent(provider)}` : ""}`,
+    ),
+  checkDatabase: (id: string, values: Record<string, string>, provider?: string) =>
+    req<DatabaseSaveResult>(`/api/projects/${id}/database/check`, {
+      method: "POST",
+      body: JSON.stringify({ values, provider: provider ?? null }),
+    }),
+  removeDatabase: (id: string) =>
+    req<DatabaseState>(`/api/projects/${id}/database`, { method: "DELETE" }),
+  databaseContinue: (id: string) =>
+    req<RunResponse>(`/api/projects/${id}/database/continue`, { method: "POST" }),
+  databaseLater: (id: string) =>
+    req<RunResponse>(`/api/projects/${id}/database/later`, { method: "POST" }),
 
   // ── Visual preview (render + select-to-edit) ──
   getPreview: (id: string) => req<PreviewState>(`/api/projects/${id}/preview`),
@@ -1395,4 +1421,62 @@ export type DeviceModelInfo = {
   thinking: string | null;
   is_local: boolean;
   weights_bytes: number | null;
+};
+
+// ── the build's database ─────────────────────────────────────────────────────
+/** A failed test saves nothing, so "failed" is never a status — only a check result. */
+export type DatabaseStatus = "connected" | "unchecked" | "later" | "none";
+
+export type DatabaseVar = {
+  name: string;
+  label: string;
+  secret: boolean;
+  required: boolean;
+  placeholder: string;
+  /** uri | url | key | text */
+  kind: string;
+  help: string;
+};
+
+export type DatabaseContract = {
+  database: string;
+  provider: string;
+  label: string;
+  variables: DatabaseVar[];
+  /** Firebase: one pasted `firebaseConfig` object instead of six fields. */
+  paste_object: boolean;
+};
+
+export type DatabaseCheck = {
+  status: "connected" | "unchecked" | "failed";
+  message: string;
+  reason: string;
+  name: string | null;
+  step: number | null;
+  host: string;
+  latency_ms: number | null;
+};
+
+export type DatabaseState = {
+  needed: boolean;
+  status: DatabaseStatus | null;
+  database: string | null;
+  database_label: string | null;
+  at_gate: boolean;
+  provider?: string;
+  providers?: { provider: string; label: string }[];
+  contract?: DatabaseContract;
+  saved?: { name: string; hint: string }[];
+  check?: { status: string; host: string; latency_ms: number | null; at: string } | null;
+};
+
+export type DatabaseProblem = { name: string; message: string; step: number | null };
+
+export type DatabaseSaveResult = {
+  ok: boolean;
+  status: "invalid" | "connected" | "unchecked" | "failed";
+  problems?: DatabaseProblem[];
+  notices?: DatabaseProblem[];
+  check?: DatabaseCheck;
+  state: DatabaseState;
 };

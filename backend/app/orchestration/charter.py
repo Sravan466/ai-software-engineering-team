@@ -29,6 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
 
+from app.build import dbconnect
+
 from app.core.constants import Phase
 from app.core.logging import get_logger
 from app.orchestration import stack
@@ -118,6 +120,18 @@ class Charter:
     """The decisions, keyed by category. Immutable once the run has frozen one."""
 
     choices: Mapping[str, Choice]
+    #: Which host the database lives on — `supabase`, `neon`, `atlas`, `planetscale`,
+    #: `firebase`, `aws` or `generic`. The `database` token folds Supabase into
+    #: Postgres, which is right for checking code and wrong for telling a person
+    #: where their key is. None when the database needs no credentials.
+    database_provider: Optional[str] = None
+    #: The variable *names* the code must read the database connection from. Names
+    #: only — a value never reaches a charter, a prompt or a model.
+    env: tuple[str, ...] = ()
+    #: The host the architecture itself named, kept when the person picks another
+    #: at the gate — so a later re-freeze can tell "Atlas said the same thing again"
+    #: from "Atlas changed its mind".
+    frozen_provider: Optional[str] = None
 
     # ── construction ─────────────────────────────────────────────────────────
     @classmethod
@@ -141,10 +155,40 @@ class Charter:
                 label=str(entry.get("label") or stack.label_for(token)),
                 source=str(entry.get("source") or SOURCE_DESIGN),
             )
-        return cls(choices) if choices else None
+        if not choices:
+            return None
+        database = choices.get("database")
+        token = database.token if database else None
+        provider = data.get("database_provider")
+        if not isinstance(provider, str) or not provider:
+            # A charter from before providers were kept reads as the database's default.
+            provider = dbconnect.default_provider(token)
+        env = data.get("env")
+        names = (
+            tuple(n for n in env if isinstance(n, str) and n)
+            if isinstance(env, list)
+            else dbconnect.env_names(token, provider)
+        )
+        frozen = data.get("database_provider_frozen")
+        return cls(choices, provider, names, frozen if isinstance(frozen, str) and frozen else provider)
+
+    def with_provider(self, provider: str) -> "Charter":
+        """The same stack, hosted somewhere else — and so read from other names."""
+        database = self.choices.get("database")
+        token = database.token if database else None
+        return Charter(
+            self.choices, provider, dbconnect.env_names(token, provider), self.frozen_provider
+        )
 
     def as_dict(self) -> dict:
-        return {category: choice.as_dict() for category, choice in self.choices.items()}
+        out: dict = {category: choice.as_dict() for category, choice in self.choices.items()}
+        if self.database_provider:
+            out["database_provider"] = self.database_provider
+        if self.env:
+            out["env"] = list(self.env)
+        if self.frozen_provider and self.frozen_provider != self.database_provider:
+            out["database_provider_frozen"] = self.frozen_provider
+        return out
 
     def __bool__(self) -> bool:
         return bool(self.choices)
@@ -176,6 +220,18 @@ class Charter:
             "security review against these same choices, and a substitution silently "
             "breaks their work. If you think a different choice is better, say so in "
             "your summary and still write the code against the charter."
+            + self._env_block()
+        )
+
+    def _env_block(self) -> str:
+        if not self.env:
+            return ""
+        names = ", ".join(self.env)
+        return (
+            f"\n\nDATABASE CONNECTION — read it from exactly these environment variables: "
+            f"{names}. Use these names verbatim (os.getenv / process.env) and never "
+            "hardcode a connection string, host, user or password in any file. The "
+            "values are supplied at run time from .env; you will never be shown them."
         )
 
     def summary_line(self) -> str:
@@ -301,7 +357,19 @@ def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Cha
         )
         return None
 
-    charter = Charter(chosen)
+    database = chosen.get("database")
+    provider: Optional[str] = None
+    if database is not None:
+        spoken = debate.get("decision") if isinstance(debate, dict) else None
+        # The same guard the verdict gets above: a transcript is not a verdict.
+        if not isinstance(spoken, str) or len(spoken.strip()) > _MAX_VERDICT_CHARS:
+            spoken = None
+        provider = dbconnect.provider_for(
+            database.token,
+            [*tech.get("database", ()), *tech.get("backend", ()), *tech.get("infra", ()), spoken or ""],
+        )
+    token = database.token if database else None
+    charter = Charter(chosen, provider, dbconnect.env_names(token, provider), provider)
     log.info("Stack charter frozen — %s", charter.summary_line())
     return charter
 

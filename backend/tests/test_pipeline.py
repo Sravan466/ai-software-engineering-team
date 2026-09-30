@@ -1,6 +1,8 @@
 """End-to-end pipeline tests using the stubbed LLM (see conftest)."""
 from __future__ import annotations
 
+from tests.conftest import through_database_gate
+
 PHASES = [
     "product_manager",
     "system_design",
@@ -44,6 +46,11 @@ def test_full_run_with_approvals(client):
         if proj["status"] == "completed":
             break
         assert proj["status"] == "awaiting_approval"
+        if proj["gate_kind"] == "database":
+            # Right after the architecture, before its own handoff: answered once.
+            assert proj["current_phase"] == "system_design"
+            assert client.post(f"/api/projects/{pid}/database/later").status_code == 200
+            continue
         seen_phases.append(proj["current_phase"])
         resp = client.post(f"/api/projects/{pid}/approve").json()
         # Approve hands the next phase to a background task and returns at once.
@@ -98,9 +105,9 @@ def test_auto_run_without_approvals(client):
     # Approvals disabled -> runs to completion in a background task.
     run = client.post(f"/api/projects/{pid}/run").json()
     assert run["status"] == "running"
-    # TestClient runs the background task synchronously after the response,
-    # so by the time we poll, it has completed.
-    proj = client.get(f"/api/projects/{pid}").json()
+    # TestClient runs the background task synchronously after the response. The one
+    # stop an unattended run makes is the database question, answered here.
+    proj = through_database_gate(client, pid)
     assert proj["status"] == "completed"
     assert proj["current_phase"] is None
     assert {p["phase"] for p in proj["phases"]} == set(PHASES)
@@ -267,7 +274,11 @@ def test_two_builds_on_two_projects_generate_at_the_same_time(client, monkeypatc
     def drive(project_id: str) -> None:
         db = SessionLocal()
         try:
-            runner.continue_run(db, db.get(Project, project_id))
+            project = db.get(Project, project_id)
+            # Answered up front: this test is about two builds generating at once.
+            project.database_status = "later"
+            db.commit()
+            runner.continue_run(db, project)
         finally:
             db.close()
 

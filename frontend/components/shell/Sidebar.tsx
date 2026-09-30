@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api, type Account, type LocalStatus, type Project } from "@/lib/api";
 import { canRunABuild } from "@/lib/capabilities";
+import { databaseUnconnected } from "@/lib/database";
 import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -242,6 +243,11 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
                     title={STATUS_TEXT[state] || state}
                   />
                   <span className="sb-item-title">{title}</span>
+                  {databaseUnconnected(p) && (
+                      <span className="sb-db" role="img" aria-label="Database not connected" title="Database not connected">
+                        {Icon.database}
+                      </span>
+                    )}
                   <span className="sb-item-time">{timeAgo(p.updated_at || p.created_at)}</span>
                 </Link>
                 <button

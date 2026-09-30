@@ -288,8 +288,62 @@ def slug(text: str) -> str:
     return s or "project"
 
 
-def build_zip(project: Project, assembled: dict) -> bytes:
-    """A real, unzippable project archive: README + code files + docs."""
+def env_file(example: str, values: dict[str, str]) -> str:
+    """`.env.example` with the saved values filled in, and any it lacks appended."""
+    lines: list[str] = []
+    placed: set[str] = set()
+    for line in (example or "").splitlines():
+        name = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else ""
+        if name in values:
+            lines.append(f"{name}={_env_value(values[name])}")
+            placed.add(name)
+        else:
+            lines.append(line)
+    missing = [n for n in values if n not in placed]
+    if missing:
+        lines += ["", "# Your database connection."]
+        lines += [f"{n}={_env_value(values[n])}" for n in missing]
+    header = [
+        "# Real credentials, added because you asked for them in this download.",
+        "# Never commit this file. It is in .gitignore.",
+        "",
+    ]
+    return "\n".join(header + lines) + "\n"
+
+
+#: Characters a bare `.env` value can hold and mean the same to every reader.
+_BARE = re.compile(r"^[A-Za-z0-9_./:@%+=,~?&!*()\[\]{}^|;<>-]*$")
+
+
+def _env_value(value: str) -> str:
+    """A value python-dotenv and Node's dotenv both read back unchanged, when one exists.
+
+    Bare when every character is ordinary; single-quoted when it holds no backslash,
+    single quote or `${` — both readers take that literally. Connection strings always
+    land here: their user and password are fully percent-encoded when saved.
+
+    Past that no quoting means the same thing to both (python-dotenv expands `${…}`
+    even in single quotes and unescapes `\\'`, Node's dotenv does neither), so the
+    line says so rather than pretending: python-dotenv's form, and a comment.
+    """
+    if _BARE.match(value) and "${" not in value:
+        return value
+    if "\\" not in value and "'" not in value and "${" not in value:
+        return f"'{value}'"
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return (
+        f"'{escaped}'  # holds a quote, backslash or ${{ — check it survived your dotenv "
+        "reader (python-dotenv: load with interpolate=False)"
+    )
+
+
+def build_zip(project: Project, assembled: dict, env: Optional[dict[str, str]] = None) -> bytes:
+    """A real, unzippable project archive: README + code files + docs.
+
+    `env` — the saved database values — adds a real `backend/.env`. Only the
+    download does this, and only when the person asked; `assemble` never does,
+    because `/artifacts` and the GitHub push both send what it returns.
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("README.md", readme_md(project, assembled))
@@ -300,4 +354,10 @@ def build_zip(project: Project, assembled: dict) -> bytes:
             z.writestr(path, f["content"])
         for d in assembled["docs"]:
             z.writestr(d["path"], d["content"])
+        if env:
+            example = next(
+                (f["content"] for f in assembled["files"] if f["path"] == "backend/.env.example"),
+                "",
+            )
+            z.writestr("backend/.env", env_file(example, env))
     return buf.getvalue()

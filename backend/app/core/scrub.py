@@ -5,6 +5,7 @@ provided: sk-qVL45***…D1Vi` — and that text used to reach the log, the proje
 `last_error` and the page. One step, `scrub`, is applied wherever such text goes:
 
 - known key shapes (`sk-…`, `sk-proj-…`, `sk-ant-…`, `AIza…`), whole or masked;
+- the password in a connection string (`postgres://user:<password>@host`);
 - the text after "API key provided:", whatever shape it is;
 - any run of 8+ characters of a key this process holds (`register`).
 
@@ -33,6 +34,12 @@ _PATTERNS = (
     re.compile(r"AIza[0-9A-Za-z_\-]{10,}"),
     # Bearer / x-api-key header values quoted in an error.
     re.compile(r"(?i)((?:bearer|x-api-key|x-goog-api-key)[\s:=']+)[A-Za-z0-9_\-\.]{8,}"),
+    # The password in a connection string: scheme://user:<password>@host. Only the
+    # password goes; the user and host stay, so the line still says which database.
+    re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+(?=@)", re.IGNORECASE),
+    # …or in its query: ?password=…, &sslpassword=….
+    # (Same key endings as `dbconnect.QUERY_SECRET_KEY`; never a `%s` placeholder.)
+    re.compile(r"([?&][a-z_]*(?:pass(?:word)?|pwd|secret|token)=)(?!%[sdrif]\b)[^&\s#]+", re.IGNORECASE),
     # A masked token on its own: "abcd****wxyz".
     re.compile(r"[A-Za-z0-9_\-]{2,}\*{3,}[.…]*[A-Za-z0-9_\-]*"),
 )
@@ -63,6 +70,18 @@ def register(secret: "str | None") -> None:
             _KNOWN[secret] = _KNOWN.get(secret, 0) + 1
             if _KNOWN[secret] == 1:
                 _rebuild()
+
+
+def register_many(secrets: "list[str]") -> None:
+    """Several at once, with one rebuild — startup registers every saved secret."""
+    added = False
+    with _KNOWN_LOCK:
+        for secret in secrets:
+            if secret and len(secret) >= _MIN_FRAGMENT:
+                _KNOWN[secret] = _KNOWN.get(secret, 0) + 1
+                added = added or _KNOWN[secret] == 1
+        if added:
+            _rebuild()
 
 
 def forget(secret: "str | None") -> None:
@@ -103,6 +122,13 @@ def _known_fragments(text: str) -> str:
     return text
 
 
+def holds_known(text: object) -> bool:
+    """Whether `text` contains a run of 8+ characters of a secret this process holds."""
+    with _KNOWN_LOCK:
+        anchors = _ANCHORS
+    return bool(anchors is not None and text and anchors.search(str(text)))
+
+
 def scrub(text: object) -> str:
     """`text` with every key, and every recognisable piece of one, replaced."""
     if text is None:
@@ -110,13 +136,15 @@ def scrub(text: object) -> str:
     out = text if isinstance(text, str) else str(text)
     if not out:
         return out
-    out = _known_fragments(out)
+    # Shapes first, then fragments of held secrets. The other way round, a fragment
+    # redacted from the middle of a key (a password `…12345678` inside `AIza…1234567890…`)
+    # broke the key's shape, and the rest of it no longer matched anything.
     for pattern in _PATTERNS:
         if pattern.groups:
             out = pattern.sub(lambda m: m.group(1) + REDACTED, out)
         else:
             out = pattern.sub(REDACTED, out)
-    return out
+    return _known_fragments(out)
 
 
 def _scrub_other(value: object) -> object:

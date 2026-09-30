@@ -57,6 +57,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # Nullable: a build from before the fix loop has no rounds to report, and
         # its `remediation_rounds` count still says what it used.
         "auto_fix",
+        # Nullable: a build from before the database question was never asked it,
+        # and "later" would claim an answer nobody gave.
+        "database_status",
     ),
     "phase_results": (
         "started_at",
