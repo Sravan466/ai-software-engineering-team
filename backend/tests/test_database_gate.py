@@ -647,7 +647,9 @@ def test_a_redo_that_names_another_host_changes_it(client, monkeypatch):
     with SessionLocal() as db:
         project = db.get(Project, pid)
         before = dict(project.charter)
-        project.charter = Charter.from_dict(before).with_provider("supabase").as_dict()
+        # A real re-freeze: Atlas's own words now name Supabase.
+        old = Charter.from_dict(before)
+        project.charter = Charter(old.choices, "supabase", dbconnect.env_names("postgres", "supabase"), "supabase").as_dict()
         runner.settle_database(project, before)
         assert Charter.from_dict(project.charter).database_provider == "supabase"
         assert project.database_status is None
@@ -699,3 +701,39 @@ def test_query_secrets_every_form_and_log_templates_survive():
     assert "abc+def123xyz" in parts and "abc def123xyz" in parts
     assert "abc+def123xyz" not in scrub.scrub("GET mongodb://h/db?authToken=abc+def123xyz")
     assert scrub.scrub("connecting to %s?password=%s") == "connecting to %s?password=%s"
+
+
+def test_a_redo_repeating_atlas_s_own_host_keeps_the_person_s(client, monkeypatch):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+
+    monkeypatch.setattr(
+        dbconnect, "check_connection",
+        lambda *a: dbconnect.CheckResult(dbconnect.CONNECTED, "ok", reason="ok", host="h"),
+    )
+    pid = _to_gate(client)
+    with SessionLocal() as db:
+        # Atlas's own words named Supabase.
+        project = db.get(Project, pid)
+        atlas = Charter.from_dict(project.charter).with_provider("supabase")
+        project.charter = Charter(atlas.choices, "supabase", atlas.env, "supabase").as_dict()
+        db.commit()
+    client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"provider": "neon", "values": {"DATABASE_URL": "postgresql://u:pw12345678@ep-x.neon.tech/app?sslmode=require"}},
+        headers=LOCAL,
+    )
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        before = dict(project.charter)
+        assert before["database_provider"] == "neon" and before["database_provider_frozen"] == "supabase"
+        # An unrelated redo: Atlas names Supabase again.
+        project.charter = Charter(atlas.choices, "supabase", atlas.env, "supabase").as_dict()
+        runner.settle_database(project, before)
+        assert Charter.from_dict(project.charter).database_provider == "neon"
+        assert project.database_status == "connected"
+    assert project_secrets.load(TEST_USER_ID, pid)["provider"] == "neon"
+
+
+def test_a_percent_encoded_query_password_is_still_scrubbed():
+    assert "%40Hunter2x" not in scrub.scrub("dial mongodb://h/db?password=%40Hunter2x")

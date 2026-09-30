@@ -128,6 +128,10 @@ class Charter:
     #: The variable *names* the code must read the database connection from. Names
     #: only — a value never reaches a charter, a prompt or a model.
     env: tuple[str, ...] = ()
+    #: The host the architecture itself named, kept when the person picks another
+    #: at the gate — so a later re-freeze can tell "Atlas said the same thing again"
+    #: from "Atlas changed its mind".
+    frozen_provider: Optional[str] = None
 
     # ── construction ─────────────────────────────────────────────────────────
     @classmethod
@@ -165,13 +169,16 @@ class Charter:
             if isinstance(env, list)
             else dbconnect.env_names(token, provider)
         )
-        return cls(choices, provider, names)
+        frozen = data.get("database_provider_frozen")
+        return cls(choices, provider, names, frozen if isinstance(frozen, str) and frozen else provider)
 
     def with_provider(self, provider: str) -> "Charter":
         """The same stack, hosted somewhere else — and so read from other names."""
         database = self.choices.get("database")
         token = database.token if database else None
-        return Charter(self.choices, provider, dbconnect.env_names(token, provider))
+        return Charter(
+            self.choices, provider, dbconnect.env_names(token, provider), self.frozen_provider
+        )
 
     def as_dict(self) -> dict:
         out: dict = {category: choice.as_dict() for category, choice in self.choices.items()}
@@ -179,6 +186,8 @@ class Charter:
             out["database_provider"] = self.database_provider
         if self.env:
             out["env"] = list(self.env)
+        if self.frozen_provider and self.frozen_provider != self.database_provider:
+            out["database_provider_frozen"] = self.frozen_provider
         return out
 
     def __bool__(self) -> bool:
@@ -360,7 +369,7 @@ def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Cha
             [*tech.get("database", ()), *tech.get("backend", ()), *tech.get("infra", ()), spoken or ""],
         )
     token = database.token if database else None
-    charter = Charter(chosen, provider, dbconnect.env_names(token, provider))
+    charter = Charter(chosen, provider, dbconnect.env_names(token, provider), provider)
     log.info("Stack charter frozen — %s", charter.summary_line())
     return charter
 

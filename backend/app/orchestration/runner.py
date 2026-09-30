@@ -387,19 +387,23 @@ class PipelineRunner:
         elif project.owner_id:
             saved = project_secrets.load(project.owner_id, project.id).get("provider")
             charter = Charter.from_dict(project.charter)
+            previous = Charter.from_dict(before)
+            said_before = previous.frozen_provider if previous else None
+            said_now = charter.frozen_provider if charter else None
             if (
                 charter is not None
                 and saved in dbconnect.PROVIDERS.get(new or "", ())
                 and saved != charter.database_provider
             ):
-                if charter.database_provider == dbconnect.default_provider(new):
-                    # Same database, and the architecture names no host: the one the
+                if said_now in (said_before, dbconnect.default_provider(new)):
+                    # Atlas said what it said before (or named no host): the host the
                     # person chose and saved values under stands, or the code would
                     # read names that were never saved.
                     cls.set_database_provider(project, charter.with_provider(saved))
                 else:
-                    # The redo named another host on purpose — which is how the host
-                    # is changed after the gate. What was saved is for the old one.
+                    # The redo named a different host than Atlas did before — which
+                    # is how the host is changed after the gate. What was saved is
+                    # for the old one.
                     project_secrets.remove(project.owner_id, project.id)
                     project.database_status = None
 

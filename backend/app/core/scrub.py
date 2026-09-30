@@ -39,7 +39,7 @@ _PATTERNS = (
     re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+(?=@)", re.IGNORECASE),
     # …or in its query: ?password=…, &sslpassword=….
     # (Same key endings as `dbconnect.QUERY_SECRET_KEY`; never a `%s` placeholder.)
-    re.compile(r"([?&][a-z_]*(?:pass(?:word)?|pwd|secret|token)=)(?!%)[^&\s#]+", re.IGNORECASE),
+    re.compile(r"([?&][a-z_]*(?:pass(?:word)?|pwd|secret|token)=)(?!%[sdrif]\b)[^&\s#]+", re.IGNORECASE),
     # A masked token on its own: "abcd****wxyz".
     re.compile(r"[A-Za-z0-9_\-]{2,}\*{3,}[.…]*[A-Za-z0-9_\-]*"),
 )
@@ -136,13 +136,15 @@ def scrub(text: object) -> str:
     out = text if isinstance(text, str) else str(text)
     if not out:
         return out
-    out = _known_fragments(out)
+    # Shapes first, then fragments of held secrets. The other way round, a fragment
+    # redacted from the middle of a key (a password `…12345678` inside `AIza…1234567890…`)
+    # broke the key's shape, and the rest of it no longer matched anything.
     for pattern in _PATTERNS:
         if pattern.groups:
             out = pattern.sub(lambda m: m.group(1) + REDACTED, out)
         else:
             out = pattern.sub(REDACTED, out)
-    return out
+    return _known_fragments(out)
 
 
 def _scrub_other(value: object) -> object:
