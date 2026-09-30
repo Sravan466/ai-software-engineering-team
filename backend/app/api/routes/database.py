@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.build import dbconnect
 from app.core import project_secrets, secretbox
-from app.core.constants import DatabaseStatus, GateKind, PipelineStatus
+from app.core.constants import DatabaseStatus, PipelineStatus
 from app.core.logging import get_logger
 from app.db.base import get_db
 from app.db.models import Project
@@ -65,7 +65,7 @@ def _contract(project: Project, provider: Optional[str] = None) -> dbconnect.Con
         )
     if provider and provider not in dbconnect.PROVIDERS[choice.token]:
         raise HTTPException(422, f"'{provider}' isn't a host for {choice.label}.")
-    if provider and provider != charter.database_provider and not _at_gate(project):
+    if provider and provider != charter.database_provider and not runner.at_database_gate(project):
         # The crew has written code that reads the charter's variable names. Values
         # saved under another host's names would leave that code reading nothing.
         current = dbconnect.contract_for(choice.token, charter.database_provider)
@@ -76,12 +76,6 @@ def _contract(project: Project, provider: Optional[str] = None) -> dbconnect.Con
         )
     return dbconnect.contract_for(choice.token, provider or charter.database_provider)  # type: ignore[return-value]
 
-
-def _at_gate(project: Project) -> bool:
-    return (
-        project.status == PipelineStatus.AWAITING_APPROVAL.value
-        and project.gate_kind == GateKind.DATABASE.value
-    )
 
 
 def _guard_write(request: Request) -> None:
@@ -102,7 +96,7 @@ def _state(project: Project, want: Optional[str] = None) -> dict:
     charter = Charter.from_dict(project.charter)
     choice = charter.get("database") if charter else None
     needed = bool(choice and choice.token in dbconnect.NEEDS_CREDENTIALS)
-    at_gate = _at_gate(project)
+    at_gate = runner.at_database_gate(project)
     out: dict = {
         "needed": needed,
         "status": project.database_status,
@@ -158,7 +152,9 @@ def _save(project: Project, body: DatabaseValues, db: Session) -> dict:
         raise HTTPException(
             429, "Too many connection tests in a short time. Wait a few minutes and try again."
         )
-    result = dbconnect.check_connection(contract, parsed.values)
+    # Scrubbed while the test runs: a driver may quote a value back in its error.
+    with project_secrets.held(dbconnect.secret_parts(contract, parsed.values)):
+        result = dbconnect.check_connection(contract, parsed.values)
     if result.status == dbconnect.FAILED:
         # A value that failed its test is not saved over one that might work, and is
         # kept on the page for the person to fix.
@@ -170,21 +166,33 @@ def _save(project: Project, body: DatabaseValues, db: Session) -> dict:
             "notices": [n.as_dict() for n in parsed.notices],
             "state": _state(project, contract.provider),
         }
-    try:
-        project_secrets.save(project.owner_id, project.id, contract, parsed.values, result)
-    except secretbox.SecretsLocked as e:
-        raise HTTPException(503, str(e))
     charter = Charter.from_dict(project.charter)
-    if charter is not None and charter.database_provider != contract.provider:
-        # Only reachable at the gate (see `_contract`): the code isn't written yet,
-        # so it is told to read the names that were actually saved.
-        runner.set_database_provider(project, charter.with_provider(contract.provider))
-    project.database_status = (
-        DatabaseStatus.CONNECTED.value
-        if result.status == dbconnect.CONNECTED
-        else DatabaseStatus.UNCHECKED.value
-    )
-    db.commit()
+    moved = charter is not None and charter.database_provider != contract.provider
+    try:
+        if moved:
+            # Only reachable at the gate (see `_contract`): the code isn't written
+            # yet, so it is told to read the names that were actually saved.
+            runner.set_database_provider(project, charter.with_provider(contract.provider))
+        project_secrets.save(project.owner_id, project.id, contract, parsed.values, result)
+        project.database_status = (
+            DatabaseStatus.CONNECTED.value
+            if result.status == dbconnect.CONNECTED
+            else DatabaseStatus.UNCHECKED.value
+        )
+        db.commit()
+    except Exception as e:
+        # All three agree or none changes: the checkpoint goes back to the charter
+        # the row still holds, and the row is rolled back.
+        db.rollback()
+        if moved:
+            try:
+                runner.set_database_provider(project, charter)
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                log.exception("Couldn't restore the charter after a failed save on %s", project.id)
+        if isinstance(e, secretbox.SecretsLocked):
+            raise HTTPException(503, str(e))
+        raise
     db.refresh(project)
     return {
         "ok": True,
@@ -235,10 +243,7 @@ def delete_database(
 
 
 def _require_gate(project: Project, action: str) -> None:
-    if (
-        project.status != PipelineStatus.AWAITING_APPROVAL.value
-        or project.gate_kind != GateKind.DATABASE.value
-    ):
+    if not runner.at_database_gate(project):
         raise (
             _conflict(project, action)
             if project.status == PipelineStatus.RUNNING.value

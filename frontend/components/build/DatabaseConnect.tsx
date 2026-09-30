@@ -182,7 +182,12 @@ export function DatabaseGate({
   const panelId = useId();
 
   const label = state?.database_label ?? project.charter?.database?.label ?? "a database";
-  const provider = state?.providers?.find((p) => p.provider === state.provider)?.label;
+  // A named host ("Supabase", "MongoDB Atlas") — never the generic one, which would
+  // read "PostgreSQL on Postgres".
+  const provider =
+    state?.provider && state.provider !== "generic"
+      ? state.providers?.find((p) => p.provider === state.provider)?.label
+      : undefined;
   const names = state?.contract?.variables.map((v) => v.name) ?? project.charter?.env ?? [];
   const saved = Boolean(state?.saved?.length) &&
     (project.database_status === "connected" || project.database_status === "unchecked" ||

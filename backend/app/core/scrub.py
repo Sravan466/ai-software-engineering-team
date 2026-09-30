@@ -37,6 +37,8 @@ _PATTERNS = (
     # The password in a connection string: scheme://user:<password>@host. Only the
     # password goes; the user and host stay, so the line still says which database.
     re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+(?=@)", re.IGNORECASE),
+    # …or in its query: ?password=…, &sslpassword=….
+    re.compile(r"([?&][a-z_]*(?:password|pwd)=)[^&\s#]+", re.IGNORECASE),
     # A masked token on its own: "abcd****wxyz".
     re.compile(r"[A-Za-z0-9_\-]{2,}\*{3,}[.…]*[A-Za-z0-9_\-]*"),
 )

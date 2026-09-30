@@ -311,20 +311,25 @@ def env_file(example: str, values: dict[str, str]) -> str:
     return "\n".join(header + lines) + "\n"
 
 
+#: Characters a bare `.env` value can hold and mean the same to every reader.
+_BARE = re.compile(r"^[A-Za-z0-9_./:@%+=,~?&!*()\[\]{}^|;<>-]*$")
+
+
 def _env_value(value: str) -> str:
-    """A value every common dotenv reader gives back unchanged.
+    """A value python-dotenv and Node's dotenv both read back unchanged.
 
-    Bare when nothing in it is special. Single-quoted otherwise, which both
-    python-dotenv and Node's dotenv read literally — no `$` expansion, no escapes.
-    Only a value that itself holds a single quote is double-quoted, with its
-    backslashes and double quotes escaped.
+    Bare when every character is ordinary. Otherwise single-quoted, which both read
+    literally as long as the value holds no backslash, single quote or `${` (python-
+    dotenv still unescapes the first two, and expands the third, inside them). Connection strings never get
+    that far: their user and password are fully percent-encoded when saved.
     """
-    if not re.search(r"[\s#\"'\\$`]", value):
+    if _BARE.match(value) and "${" not in value:
         return value
-    if "'" not in value:
+    if "\\" not in value and "'" not in value and "${" not in value:
         return f"'{value}'"
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
+    # No quoting means the same thing to both readers here; this is python-dotenv's.
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'  # check this value survived your dotenv reader"
 
 
 def build_zip(project: Project, assembled: dict, env: Optional[dict[str, str]] = None) -> bytes:

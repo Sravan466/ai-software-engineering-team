@@ -328,7 +328,8 @@ class PipelineRunner:
         if choice is None or choice.token not in dbconnect.NEEDS_CREDENTIALS:
             return None
         contract = dbconnect.contract_for(choice.token, charter.database_provider)
-        on = f" on {contract.label}" if contract and contract.label != choice.label else ""
+        # "PostgreSQL on Supabase", but never "PostgreSQL on Postgres".
+        on = f" on {contract.label}" if contract and contract.provider != "generic" and contract.label != choice.label else ""
         return Gate(
             GateKind.DATABASE.value,
             f"Atlas picked {choice.label}{on}. Connect it now, or continue and add it later.",
@@ -350,7 +351,15 @@ class PipelineRunner:
         log.info("Database host for %s set to %s; the crew reads %s", project.id, charter.database_provider, ", ".join(charter.env))
 
     @staticmethod
-    def settle_database(project: Project, before: object) -> None:
+    def at_database_gate(project: Project) -> bool:
+        """Parked on the database question. The one definition every route uses."""
+        return (
+            project.status == PipelineStatus.AWAITING_APPROVAL.value
+            and project.gate_kind == GateKind.DATABASE.value
+        )
+
+    @classmethod
+    def settle_database(cls, project: Project, before: object) -> None:
         """After the charter is (re)frozen: ask again if the database changed.
 
         Credentials saved for MongoDB are no use to a build that now uses Postgres,
@@ -375,6 +384,17 @@ class PipelineRunner:
             if project.owner_id:
                 project_secrets.remove(project.owner_id, project.id)
             project.database_status = None
+        elif project.owner_id:
+            # Same database, re-frozen: the host the person chose and saved values
+            # under outlives Atlas's prose, or the code would read names never saved.
+            saved = project_secrets.load(project.owner_id, project.id).get("provider")
+            charter = Charter.from_dict(project.charter)
+            if (
+                charter is not None
+                and saved in dbconnect.PROVIDERS.get(new or "", ())
+                and saved != charter.database_provider
+            ):
+                cls.set_database_provider(project, charter.with_provider(saved))
 
     @staticmethod
     def build_problems(project: Project) -> list[dict]:

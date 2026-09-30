@@ -29,7 +29,7 @@ import socket
 import time
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 from app.core.logging import get_logger
 
@@ -359,10 +359,11 @@ def parse_uri(var: Var, raw: str, database: str, provider: str) -> tuple[Optiona
         return None, problems, notices
     if userinfo:
         user, sep, password = userinfo.partition(":")
-        fixed_user = user if not (_RESERVED & set(user)) else _encode_part(user)
-        fixed_password = password
-        if sep and _RESERVED & set(password):
-            fixed_password = _encode_part(password)
+        # Always fully encoded — the same credential either way, and a string with no
+        # quote, backslash, `$` or space in it survives every `.env` reader unchanged.
+        fixed_user = _encode_part(user)
+        fixed_password = _encode_part(password) if sep else ""
+        if sep and _RESERVED & set(unquote(password)) and _RESERVED & set(password):
             shown = "".join(sorted(_RESERVED & set(password)))
             notices.append(
                 Problem(var.name, f"Your password has {' '.join(shown)} in it — we encoded it so the string still reads correctly.")
@@ -496,6 +497,12 @@ def secret_parts(contract: Contract, values: dict[str, str]) -> list[str]:
         if var.kind == "uri":
             split = _split_uri(value)
             password = split[1].partition(":")[2] if split else ""
+            # A password can also ride in the query: ?password=… / &sslpassword=….
+            query = split[3].split("?", 1)[1] if split and "?" in split[3] else ""
+            for key, found in parse_qsl(query, keep_blank_values=False):
+                if re.search(r"pass|pwd|secret|token", key, re.IGNORECASE):
+                    password = password or found
+                    parts.extend({found, quote(found, safe="")} - {""})
             for form in {password, unquote(password)}:
                 if form:
                     parts.append(form)

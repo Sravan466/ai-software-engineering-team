@@ -535,10 +535,7 @@ def _require_findings_settled(db: Session, project: Project) -> None:
 
 
 def _refuse_at_database_gate(project: Project) -> None:
-    if (
-        project.status == PipelineStatus.AWAITING_APPROVAL.value
-        and project.gate_kind == GateKind.DATABASE.value
-    ):
+    if runner.at_database_gate(project):
         raise HTTPException(
             409,
             "This build is waiting on its database. Connect it, or choose \"Continue, "
@@ -553,8 +550,10 @@ _CREDENTIAL_IN_FEEDBACK = (
 )
 
 
-def _refuse_credentials(text: str) -> None:
-    if dbconnect.looks_like_credential(text):
+def _refuse_credentials(text: str, project: Project) -> None:
+    if dbconnect.looks_like_credential(text) or project_secrets.holds_saved_secret(
+        project.owner_id, project.id, text
+    ):
         # Not logged with the text, for the obvious reason.
         raise HTTPException(422, _CREDENTIAL_IN_FEEDBACK)
 
@@ -577,6 +576,8 @@ def approve_phase(
             "The crew is stuck on a serious problem, and approving would ship it. Keep "
             "trying, stop the build, or waive each finding with a reason.",
         )
+    # Before anything else is checked, so the answer names what is actually waiting.
+    _refuse_at_database_gate(project)
     _require_findings_settled(db, project)
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
@@ -608,7 +609,8 @@ def reject_phase(
     """
     if not payload.feedback or not payload.feedback.strip():
         raise HTTPException(400, "Feedback is required when rejecting a phase.")
-    _refuse_credentials(payload.feedback)
+    _refuse_credentials(payload.feedback, project)
+    _refuse_at_database_gate(project)
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "reject")
@@ -900,7 +902,8 @@ def redo_phase(
         raise HTTPException(400, f"'{payload.phase}' is not a phase of this pipeline.")
     if not payload.feedback.strip():
         raise HTTPException(400, "Say what to change — an agent cannot act on blank feedback.")
-    _refuse_credentials(payload.feedback)
+    _refuse_credentials(payload.feedback, project)
+    _refuse_at_database_gate(project)
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "redo")

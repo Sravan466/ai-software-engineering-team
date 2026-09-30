@@ -515,14 +515,20 @@ def test_only_secret_parts_are_scrubbed(monkeypatch):
     assert not scrub.holds_known("Zq9Kx2Lm7Np4Rt")
 
 
-def test_env_values_survive_every_dotenv_reader():
+def test_env_values_survive_python_dotenv():
+    from dotenv import dotenv_values
+
     from app.core.artifacts import _env_value, env_file
 
-    assert _env_value("mongodb://u:p@h/db") == "mongodb://u:p@h/db"
-    assert _env_value('p"a$s#s') == "'p\"a$s#s'"
-    assert _env_value("it's") == '"it\'s"'
+    for value in ("mongodb://u:p%40s@h/db?a=1&b=2", "a b", "x$y", 'p"a#s', "sk/+=AbC", "it's", "b\\s"):
+        line = f"K={_env_value(value)}\n"
+        assert dotenv_values(stream=io.StringIO(line))["K"] == value, line
     body = env_file("# x\nDATABASE_URL=postgresql://localhost/app\nPORT=8000\n", {"DATABASE_URL": "postgres://u:p@h/db"})
     assert "DATABASE_URL=postgres://u:p@h/db" in body and "PORT=8000" in body
+    # A connection string is fully encoded when saved, so it never needs quoting.
+    out = _parse("postgres", "generic", {"DATABASE_URL": "postgresql://app:it's$x\\y@h:5432/app"})
+    assert out.values["DATABASE_URL"] == "postgresql://app:it%27s%24x%5Cy@h:5432/app"
+    assert _env_value(out.values["DATABASE_URL"]) == out.values["DATABASE_URL"]
 
 
 def test_the_architects_name_is_not_a_host():
@@ -541,3 +547,83 @@ def test_no_route_that_claims_a_build_releases_the_gate(client):
     with pytest.raises(Exception) as refused:
         routes._claim(None, project, {"awaiting_approval"})
     assert getattr(refused.value, "status_code", None) == 409
+
+
+def test_a_redo_keeps_the_host_the_person_saved(client, monkeypatch):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+
+    monkeypatch.setattr(
+        dbconnect, "check_connection",
+        lambda *a: dbconnect.CheckResult(dbconnect.CONNECTED, "ok", reason="ok", host="h"),
+    )
+    pid = _to_gate(client)
+    client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"provider": "neon", "values": {"DATABASE_URL": "postgresql://u:pw@ep-x.neon.tech/app?sslmode=require"}},
+        headers=LOCAL,
+    )
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        before = dict(project.charter)
+        # Atlas re-freezes plain Postgres: provider generic.
+        project.charter = {k: v for k, v in before.items() if k not in ("database_provider", "env")}
+        runner.settle_database(project, before)
+        assert Charter.from_dict(project.charter).database_provider == "neon"
+        assert project.database_status == "connected"
+
+
+def test_generic_hosts_are_not_named_twice():
+    project = SimpleNamespace(
+        database_status=None,
+        charter={"database": {"token": "postgres", "label": "PostgreSQL", "source": "debate"}},
+    )
+    assert runner.database_question(project).note == (
+        "Atlas picked PostgreSQL. Connect it now, or continue and add it later."
+    )
+
+
+def test_a_saved_secret_without_a_shape_is_refused_after_a_restart(client, monkeypatch):
+    monkeypatch.setattr(
+        dbconnect, "check_connection",
+        lambda *a: dbconnect.CheckResult(dbconnect.UNCHECKED, "saved"),
+    )
+    pid = _to_gate(client)
+    secret = "unusualPasswordNoShape"
+    client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"values": {"DATABASE_URL": f"postgresql://app:{secret}@db.example.com/app"}},
+        headers=LOCAL,
+    )
+    client.post(f"/api/projects/{pid}/database/later")
+    # As after a restart: nothing registered in this process.
+    project_secrets._forget(pid)
+    assert not scrub.holds_known(secret)
+    r = client.post(f"/api/projects/{pid}/redo", json={"phase": "system_design", "feedback": f"the pw is {secret}"})
+    assert r.status_code == 422
+    assert project_secrets.register_all() >= 1 and scrub.holds_known(secret)
+
+
+def test_values_are_scrubbed_while_their_test_runs(client, monkeypatch):
+    seen = {}
+
+    def echoing(contract, values):
+        seen["scrubbed"] = scrub.scrub("driver said: bad password Zx81MnopQrs")
+        return dbconnect.CheckResult(dbconnect.FAILED, "no", reason="auth")
+
+    monkeypatch.setattr(dbconnect, "check_connection", echoing)
+    pid = _to_gate(client)
+    client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"values": {"DATABASE_URL": "postgresql://app:Zx81MnopQrs@db.example.com/app"}},
+        headers=LOCAL,
+    )
+    assert "Zx81MnopQrs" not in seen["scrubbed"]
+    # A failed test saves nothing, and holds nothing afterwards either.
+    assert not scrub.holds_known("Zx81MnopQrs")
+
+
+def test_approve_at_the_gate_names_the_gate_first(client, monkeypatch):
+    pid = _to_gate(client)
+    r = client.post(f"/api/projects/{pid}/approve")
+    assert r.status_code == 409 and "database" in r.text
