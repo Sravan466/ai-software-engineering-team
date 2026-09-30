@@ -122,7 +122,8 @@
 .ship-conn b { color: var(--ink); font-weight: 600; }
 .ship-conn-mark { display: grid; color: var(--ink); }
 .ship-conn-mark svg { width: 14px; height: 14px; }
-.ship-conn-text { display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ship-conn-text { flex: 1; min-width: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.ship-conn-text .badge { margin-left: 8px; vertical-align: 1px; }
 .ship-conn-actions { display: inline-flex; gap: 4px; }
 .ship-avatar { width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line-2); }
 

@@ -35,6 +35,9 @@ VERCEL_FRAMEWORK = {"nextjs": "nextjs", "react": "vite", "vue": "vite", "svelte"
 _API_URL = re.compile(r"(API|BACKEND|SERVER).*URL|URL.*(API|BACKEND|SERVER)")
 _CORS = re.compile(r"CORS|ALLOWED_ORIGIN|FRONTEND_URL|CLIENT_URL|ORIGIN")
 _GENERATED = re.compile(r"SECRET|TOKEN|SALT|KEY")
+#: A connection the app can't run without, whatever the charter said: Render asks.
+_CONNECTION = re.compile(r"DATABASE|MONGO|REDIS|POSTGRES|MYSQL|_URI$|_DSN$|^DB_")
+_PY_ENTRIES = ("main.py", "app.py", "server.py", "run.py", "wsgi.py", "src/main.py", "app/main.py")
 
 
 def kind(scaffold_info: dict) -> Optional[str]:
@@ -139,7 +142,8 @@ def blueprint(
     # ── the backend ──────────────────────────────────────────────────────────
     lines += [f"  - type: web", f"    name: {_q(api_name)}", "    plan: free", f"    rootDir: {BACKEND}"]
     if language == "python":
-        start = _python_start(back, framework) or "python main.py"
+        fallback = next((f"python {e}" for e in _PY_ENTRIES if e in back), "python main.py")
+        start = _python_start(back, framework) or fallback
         if "migrate.py" in back:
             start = f"python migrate.py && {start}"
         lines += ["    runtime: python", f"    buildCommand: {_q('pip install -r requirements.txt')}"]
@@ -148,7 +152,8 @@ def blueprint(
         lines += ["    runtime: node", f"    buildCommand: {_q('npm install')}"]
     if cors:
         # Render gives the other service's host, not its URL; the scheme goes on here.
-        start = f"{cors}=https://$WEB_HOST {start}"
+        # Exported, so it reaches every command in the chain, not just the first.
+        start = f"export {cors}=https://$WEB_HOST && {start}"
     lines += [f"    startCommand: {_q(start)}", "    autoDeployTrigger: \"off\""]
     env_lines: list[str] = []
     for var in back_env:
@@ -161,7 +166,7 @@ def blueprint(
                 f"          name: {_q(db_name)}",
                 "          property: connectionString",
             ]
-        elif var in saved_env or var in contract_names:
+        elif var in saved_env or var in contract_names or _CONNECTION.search(var):
             env_lines += [f"      - key: {var}", "        sync: false"]
         elif _GENERATED.search(var) and not _API_URL.search(var):
             env_lines += [f"      - key: {var}", "        generateValue: true"]
@@ -180,7 +185,7 @@ def blueprint(
     if has_front:
         build = "npm install && npm run build"
         if api_var:
-            build = f"{api_var}=https://$API_HOST {build}"
+            build = f"export {api_var}=https://$API_HOST && {build}"
         lines += [f"  - type: web", f"    name: {_q(web_name)}", f"    rootDir: {FRONTEND}"]
         if frontend in _STATIC:
             lines += [

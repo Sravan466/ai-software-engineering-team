@@ -262,7 +262,8 @@ def test_a_react_fastapi_blueprint_has_a_static_site_an_api_and_a_free_database(
     assert "uvicorn main:app --host 0.0.0.0 --port $PORT" in render
     assert "fromDatabase" in render and "databases:" in render and "plan: free" in render
     assert "key: JWT_SECRET\n        generateValue: true" in render
-    assert "CORS_ORIGINS=https://$WEB_HOST" in render and "VITE_API_URL=https://$API_HOST" in render
+    assert "export CORS_ORIGINS=https://$WEB_HOST && python migrate.py && uvicorn main:app" in render
+    assert "export VITE_API_URL=https://$API_HOST && npm install && npm run build" in render
     assert ".env\"" not in json.dumps(sorted(files)) and "backend/.env" not in files
 
 
@@ -525,3 +526,21 @@ def test_the_new_columns_are_added_to_an_existing_database(tmp_path):
 def _row_with_phases(pid: str) -> Project:
     db = SessionLocal()
     return db.get(Project, pid)
+
+
+def test_times_reach_the_page_as_utc_with_their_offset(client, fakes):
+    _connect_github()
+    pid = _project(_REACT, None, _charter("react", None, None))
+    client.post(f"/api/github/push/{pid}", json={"name": "grocery-pal"})
+    pushed = client.get(f"/api/projects/{pid}/ship").json()["github_pushed_at"]
+    assert pushed.endswith("+00:00"), "a naive time reads as local time in the browser"
+
+
+def test_a_build_from_before_the_database_question_still_has_render_ask_for_its_connection():
+    info = {"frontend": None, "backend": "python", "backend_framework": None, "database": "mongodb"}
+    render = blueprint.blueprint(
+        {"backend/app.py": "import os\nURI = os.getenv('MONGODB_URI')\nKEY = os.getenv('API_SECRET')\n"}, info, "Links"
+    )
+    assert "key: MONGODB_URI\n        sync: false" in render
+    assert "key: API_SECRET\n        generateValue: true" in render
+    assert 'startCommand: "python app.py"' in render

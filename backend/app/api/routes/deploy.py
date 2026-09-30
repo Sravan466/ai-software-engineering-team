@@ -99,6 +99,16 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    """UTC, always with its offset: SQLite hands back naive datetimes, and a browser
+    reads a naive ISO string as local time."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
 # ── connections ──────────────────────────────────────────────────────────────
 @router.get("/api/deploy/connections")
 def connections(request: Request) -> dict:
@@ -198,7 +208,7 @@ def ship(request: Request, project: Project = Depends(get_project)) -> dict:
         "render": render,
         "github_repo": project.github_repo,
         "github_branch": project.github_branch,
-        "github_pushed_at": project.github_pushed_at.isoformat() if project.github_pushed_at else None,
+        "github_pushed_at": _iso(project.github_pushed_at),
         "deploy": _deploy_state(project),
         "connections": {
             "github": github_routes.status_for(user_id),
@@ -213,7 +223,7 @@ def _deploy_state(project: Project, log_lines: Optional[list[str]] = None) -> di
         "status": project.deploy_status,
         "url": project.deploy_url,
         "error": project.deploy_error,
-        "deployed_at": project.deployed_at.isoformat() if project.deployed_at else None,
+        "deployed_at": _iso(project.deployed_at),
         "log": log_lines or [],
     }
 
@@ -281,9 +291,8 @@ def _claim_deploy(db: Session, project: Project, target: str, status: str) -> bo
 
 
 def _run_vercel(project_id: str, user_id: str) -> None:
-    """Background: upload the frontend and start the deployment."""
-    with _uploading_lock:
-        _uploading.add(project_id)
+    """Background: upload the frontend and start the deployment. The route has
+    already put `project_id` in `_uploading`; this takes it out when done."""
     try:
         with SessionLocal() as db:
             project = db.get(Project, project_id)
@@ -363,7 +372,13 @@ def deploy(
             )
         if not limiter.allow(user_id):
             raise HTTPException(429, f"That's {settings.deploys_per_hour} deploys this hour — try again later.")
+        # Marked as ours before the row says `queued`: a poll arriving before the
+        # background task starts would otherwise read it as cut off by a restart.
+        with _uploading_lock:
+            _uploading.add(project.id)
         if not _claim_deploy(db, project, "vercel", "queued"):
+            with _uploading_lock:
+                _uploading.discard(project.id)
             raise HTTPException(409, "A deploy of this build is already running — wait for it to finish.")
         background.add_task(_run_vercel, project.id, user_id)
         return {"target": "vercel", "deploy": _deploy_state(project)}

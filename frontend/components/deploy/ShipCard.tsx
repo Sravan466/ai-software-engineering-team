@@ -624,7 +624,7 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
             Keep {vc.hint}
           </button>
         )}
-        {mine && state.status === "error" && state.error && !replacing && (
+        {mine && state.status === "error" && state.error?.includes("rejected") && !replacing && (
           <Problem title="Token rejected — replace it">{state.error}</Problem>
         )}
         <VercelConnect
@@ -655,7 +655,7 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
             : status
               ? "done"
               : "todo",
-      time: since("uploading", "building"),
+      time: since(seen.current.uploading ? "uploading" : "queued", "building"),
     },
     {
       label: "Building on Vercel",
@@ -759,17 +759,32 @@ function RenderFlow({
   const step = !gh.connected ? 1 : !info.github_repo ? 2 : 3;
   const handedOff = info.deploy.target === "render" && info.deploy.status === "handed_off";
 
-  // Push (or push the update), then open Render's Blueprint page. The window is
-  // opened inside the click, so no pop-up blocker stops it; it is pointed at Render
-  // once the push has landed.
-  async function pushAndOpen(name?: string, priv?: boolean, useExisting = false) {
+  // Step 2: only the push. Step 3 is the hand-off.
+  async function push(body: { name: string; private?: boolean; use_existing?: boolean }) {
     setBusy(true);
     setError("");
     setConflict(null);
-    const win = step === 3 && !useExisting ? window.open("about:blank", "_blank") : null;
     try {
-      if (useExisting && name) await api.pushToGithub(id, { name, use_existing: true });
-      const r = await api.deploy(id, name && !useExisting ? { name, private: priv } : {});
+      await api.pushToGithub(id, body);
+      await onChange();
+    } catch (e: any) {
+      if (e instanceof ApiError && e.data?.conflict) setConflict(e.data.conflict);
+      else if (e instanceof ApiError && e.data?.needs) await onChange();
+      else setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Step 3: push the latest build (no commit when nothing changed), then open
+  // Render's Blueprint page. The window is opened inside the click, so no pop-up
+  // blocker stops it; it is pointed at Render once the push has landed.
+  async function openRender() {
+    setBusy(true);
+    setError("");
+    const win = window.open("about:blank", "_blank");
+    try {
+      const r = await api.deploy(id);
       const url = r.handoff_url || null;
       setHandoff(url);
       if (url && win) {
@@ -779,8 +794,7 @@ function RenderFlow({
       await onChange();
     } catch (e: any) {
       win?.close();
-      if (e instanceof ApiError && e.data?.conflict) setConflict(e.data.conflict);
-      else if (e instanceof ApiError && e.data?.needs) await onChange();
+      if (e instanceof ApiError && e.data?.needs) await onChange();
       else setError(e.message);
     } finally {
       setBusy(false);
@@ -836,8 +850,8 @@ function RenderFlow({
             busy={busy}
             action="Push"
             conflict={conflict}
-            onSubmit={(name, priv) => pushAndOpen(name, priv)}
-            onUseExisting={(name) => pushAndOpen(name, true, true)}
+            onSubmit={(name, priv) => push({ name, private: priv })}
+            onUseExisting={(name) => push({ name, use_existing: true })}
           />
         </>
       )}
@@ -869,7 +883,7 @@ function RenderFlow({
             )}
           </ul>
           <div className="ship-actions">
-            <button type="button" className="btn btn-primary ship-go" onClick={() => pushAndOpen()} disabled={busy || !info.ready}>
+            <button type="button" className="btn btn-primary ship-go" onClick={openRender} disabled={busy || !info.ready}>
               {busy && <span className="btn-spinner" aria-hidden="true" />}
               {busy ? "Pushing the latest…" : "Open Render to deploy"} {!busy && Icon.external}
             </button>
