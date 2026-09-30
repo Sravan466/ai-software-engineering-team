@@ -3,6 +3,7 @@ import "@/components/agents/agents.css";
 import "@/components/build/build.css";
 import "@/components/models/models.css";
 import "@/components/setup/setup.css";
+import "@/components/deploy/deploy.css";
 import AppShell from "@/components/shell/AppShell";
 
 // The whole app lives inside the v3 workspace shell: a persistent left sidebar

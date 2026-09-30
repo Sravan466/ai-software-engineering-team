@@ -60,6 +60,17 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # Nullable: a build from before the database question was never asked it,
         # and "later" would claim an answer nobody gave.
         "database_status",
+        # All nullable: a build from before #55 was never pushed or deployed from
+        # here, and any value would claim somewhere it went.
+        "github_repo",
+        "github_branch",
+        "github_pushed_at",
+        "deploy_target",
+        "deploy_url",
+        "deploy_status",
+        "deploy_id",
+        "deployed_at",
+        "deploy_error",
     ),
     "phase_results": (
         "started_at",

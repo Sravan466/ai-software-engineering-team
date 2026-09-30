@@ -129,6 +129,25 @@ class Project(Base):
     #: themselves are never in the database — see `app.core.project_secrets`.
     database_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
+    # ── where the finished build went (#55) ──────────────────────────────────
+    #: The repository in the user's own GitHub (`owner/name`) this build was pushed
+    #: to, so a second push adds a commit there instead of failing on the name.
+    github_repo: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    github_branch: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    github_pushed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: `vercel` (uploaded straight to the user's Vercel) or `render` (handed off to
+    #: Render's Blueprint page, from the GitHub repo).
+    deploy_target: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: The live URL: Vercel's, or the one the user pasted back from Render.
+    deploy_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    #: `queued`, `uploading`, `building`, `ready`, `error`, or `handed_off` for Render.
+    deploy_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: Vercel's deployment id, polled for its state.
+    deploy_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    deployed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Why the last deploy failed, scrubbed, in words a person can act on.
+    deploy_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # ── the stack this build is held to ──────────────────────────────────────
     #: Frozen once the architecture is settled, and binding on every phase after it:
     #: language, frameworks, database, test runner, package manager. Mirrored out of

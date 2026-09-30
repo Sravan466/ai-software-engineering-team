@@ -1,0 +1,1061 @@
+"use client";
+
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import {
+  ApiError,
+  api,
+  type DeployState,
+  type GithubPushResult,
+  type ShipInfo,
+} from "@/lib/api";
+import { Icon } from "@/components/shell/icons";
+import { SkeletonLines } from "@/components/ui/Skeleton";
+
+/** Which flow the card has open. The completion banner can ask for one. */
+export type ShipIntent = "deploy" | "github";
+
+// Light client-side mirror of the backend slug() so the prefilled repo name
+// matches what GitHub will actually get.
+function slug(text: string): string {
+  const s = (text || "project")
+    .slice(0, 48)
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+  return s || "project";
+}
+
+const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
+const IN_FLIGHT = new Set(["queued", "uploading", "building"]);
+
+// Monochrome brand marks (Simple Icons paths), drawn in currentColor.
+const VercelMark = (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor">
+    <path d="m12 1.608 12 20.784H0Z" />
+  </svg>
+);
+const RenderMark = (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor">
+    <path d="M18.263.007c-3.121-.147-5.744 2.109-6.192 5.082-.018.138-.045.272-.067.405-.696 3.703-3.936 6.507-7.827 6.507-1.388 0-2.691-.356-3.825-.979a.202.202 0 0 0-.302.178V24H12v-8.999c0-1.656 1.338-3 2.987-3h2.988c3.382 0 6.103-2.817 5.97-6.244-.12-3.084-2.61-5.603-5.682-5.75" />
+  </svg>
+);
+
+function kindLabel(info: ShipInfo): string {
+  const kind =
+    info.kind === "frontend" ? "frontend only" : info.kind === "backend" ? "backend only" : "full stack";
+  return info.stack ? `${kind} · ${info.stack}` : kind;
+}
+
+function ago(iso: string | null): string {
+  if (!iso) return "";
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function handoffUrl(repo: string, branch: string | null): string {
+  let url = `https://github.com/${repo}`;
+  if (branch && branch !== "main" && branch !== "master") url += `/tree/${encodeURIComponent(branch)}`;
+  return `https://render.com/deploy?repo=${url}`;
+}
+
+export default function ShipCard({
+  id,
+  defaultName,
+  intent,
+  onIntentUsed,
+  onShipped,
+}: {
+  id: string;
+  defaultName: string;
+  /** Asked for from the completion banner: open that flow once. */
+  intent?: ShipIntent | null;
+  onIntentUsed?: () => void;
+  /** A push or deploy changed where this build lives — the header reloads. */
+  onShipped?: () => void;
+}) {
+  const [info, setInfo] = useState<ShipInfo | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [open, setOpen] = useState<ShipIntent | null>(null);
+  const [oauthNotice, setOauthNotice] = useState<"connected" | "error" | "">("");
+  const cardRef = useRef<HTMLElement>(null);
+  const panelId = useId();
+
+  const refresh = useCallback(async () => {
+    try {
+      setInfo(await api.shipInfo(id));
+      setLoadError("");
+    } catch (e: any) {
+      setLoadError(e?.message || "The backend didn't answer.");
+    }
+  }, [id]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Back from GitHub's sign-in: say how it went, reopen the flow it started from
+  // (`next`), and clean the URL so a reload doesn't say it again.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const g = sp.get("github");
+    const next = sp.get("next");
+    if (g === "connected" || g === "error") setOauthNotice(g);
+    if (next === "deploy" || next === "github") setOpen(next);
+    else if (g) setOpen("github");
+    if (g || next) {
+      sp.delete("github");
+      sp.delete("next");
+      const qs = sp.toString();
+      window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+      requestAnimationFrame(() => cardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!intent) return;
+    setOpen(intent);
+    onIntentUsed?.();
+    requestAnimationFrame(() => cardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }, [intent, onIntentUsed]);
+
+  const changed = useCallback(async () => {
+    await refresh();
+    onShipped?.();
+  }, [refresh, onShipped]);
+
+  const toggle = (which: ShipIntent) => setOpen((cur) => (cur === which ? null : which));
+
+  if (loadError && !info) {
+    return (
+      <section className="card" ref={cardRef}>
+        <div className="sec-head">
+          <h2 className="label">Ship it</h2>
+          <span className="rule" />
+        </div>
+        <div className="notice notice-bad" role="alert">
+          {Icon.alert}
+          <div className="notice-body">
+            <span className="notice-title">Deploy options didn&apos;t load</span>
+            <span className="notice-text">
+              The backend didn&apos;t answer, so we can&apos;t tell what this build can be deployed to. Check
+              that it is running on <code>:8000</code> — the .zip above still works.
+            </span>
+            <span className="notice-detail mono">{loadError}</span>
+            <div className="notice-actions">
+              <button className="btn btn-sm" onClick={refresh}>
+                {Icon.refresh} Try again
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (!info) {
+    return (
+      <section className="card" ref={cardRef}>
+        <SkeletonLines lines={3} />
+      </section>
+    );
+  }
+
+  const vercelTarget = info.target === "vercel";
+  const deploySub = !info.kind
+    ? "Nothing to deploy yet"
+    : vercelTarget
+      ? "To Vercel · live URL in about a minute"
+      : info.kind === "backend"
+        ? "GitHub → Render · API and database"
+        : "GitHub → Render · frontend, API and database";
+
+  return (
+    <section className="card ship" ref={cardRef} aria-labelledby={`${panelId}-title`}>
+      <div className="sec-head">
+        <h2 className="label" id={`${panelId}-title`}>
+          Ship it
+        </h2>
+        <span className="rule" />
+        {info.kind && <span className="badge badge-mono">{kindLabel(info)}</span>}
+      </div>
+      <p className="ship-lead">
+        Put it online in your own {vercelTarget ? "Vercel" : "Render"} account, or keep the code in your GitHub.
+      </p>
+
+      {info.deploy.url && (
+        <p className="ship-live">
+          <span className="dot dot-ok" aria-hidden="true" />
+          Live at{" "}
+          <a className="link mono" href={info.deploy.url} target="_blank" rel="noreferrer">
+            {info.deploy.url.replace(/^https:\/\//, "")}
+          </a>
+        </p>
+      )}
+
+      <div className="ship-tiles">
+        <button
+          type="button"
+          className="ship-tile ship-tile-accent"
+          aria-expanded={open === "deploy"}
+          aria-controls={`${panelId}-deploy`}
+          onClick={() => toggle("deploy")}
+          disabled={!info.target}
+        >
+          <span className="ship-tile-mark">{vercelTarget ? VercelMark : RenderMark}</span>
+          <span className="ship-tile-text">
+            <span className="ship-tile-title">Deploy it</span>
+            <span className="ship-tile-sub">{deploySub}</span>
+          </span>
+          <span className="ship-tile-chev" aria-hidden="true">
+            {Icon.chevron}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="ship-tile"
+          aria-expanded={open === "github"}
+          aria-controls={`${panelId}-github`}
+          onClick={() => toggle("github")}
+        >
+          <span className="ship-tile-mark">{Icon.github}</span>
+          <span className="ship-tile-text">
+            <span className="ship-tile-title">{info.github_repo ? "GitHub" : "Connect to GitHub"}</span>
+            <span className="ship-tile-sub">
+              {info.github_repo ? info.github_repo : "Push to a private repo in your account"}
+            </span>
+          </span>
+          <span className="ship-tile-chev" aria-hidden="true">
+            {Icon.chevron}
+          </span>
+        </button>
+      </div>
+
+      <div className="ship-drawer" data-open={open === "deploy"} id={`${panelId}-deploy`}>
+        <div className="ship-drawer-inner">
+          {open === "deploy" &&
+            (vercelTarget ? (
+              <VercelFlow id={id} info={info} onChange={changed} />
+            ) : (
+              <RenderFlow id={id} info={info} defaultName={defaultName} oauthNotice={oauthNotice} onChange={changed} />
+            ))}
+        </div>
+      </div>
+      <div className="ship-drawer" data-open={open === "github"} id={`${panelId}-github`}>
+        <div className="ship-drawer-inner">
+          {open === "github" && (
+            <GithubFlow id={id} info={info} defaultName={defaultName} oauthNotice={oauthNotice} onChange={changed} />
+          )}
+        </div>
+      </div>
+
+      {!info.ready && info.kind && (
+        <p className="field-hint ship-foot">Deploy is ready once the build is complete. GitHub takes any output.</p>
+      )}
+      <p className="ship-trust">
+        {Icon.lock}
+        <span>Your tokens stay encrypted on this server. Nothing is hosted on our account.</span>
+      </p>
+    </section>
+  );
+}
+
+// ── shared bits ─────────────────────────────────────────────────────────────
+function Problem({ title, children, actions }: { title: string; children?: ReactNode; actions?: ReactNode }) {
+  return (
+    <div className="notice notice-bad" role="alert">
+      {Icon.alert}
+      <div className="notice-body">
+        <span className="notice-title">{title}</span>
+        {children && <span className="notice-text">{children}</span>}
+        {actions && <div className="notice-actions">{actions}</div>}
+      </div>
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      className="btn btn-sm"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setDone(true);
+          setTimeout(() => setDone(false), 1600);
+        } catch {
+          setDone(false);
+        }
+      }}
+    >
+      {done ? Icon.check : Icon.copy} {done ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+function connectGithub(next: ShipIntent) {
+  const back = `${window.location.origin}${window.location.pathname}?next=${next}`;
+  window.location.href = api.githubConnectUrl(back);
+}
+
+function GithubConnect({
+  info,
+  next,
+  lead,
+  oauthNotice,
+}: {
+  info: ShipInfo;
+  next: ShipIntent;
+  lead: string;
+  oauthNotice: string;
+}) {
+  const gh = info.connections.github;
+  if (!gh.configured) {
+    return (
+      <p className="ship-copy">
+        GitHub isn&apos;t enabled on this server yet. The operator needs to add a free{" "}
+        <a className="link" href="https://github.com/settings/developers" target="_blank" rel="noreferrer">
+          GitHub OAuth App
+        </a>{" "}
+        and set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in the backend&apos;s{" "}
+        <code>.env</code>.
+      </p>
+    );
+  }
+  return (
+    <div className="ship-stack">
+      {gh.reason === "revoked" ? (
+        <Problem title="GitHub access was removed — reconnect">
+          GitHub no longer accepts the saved connection, so it was forgotten. Connect again to keep pushing.
+        </Problem>
+      ) : (
+        <p className="ship-copy">{lead}</p>
+      )}
+      {oauthNotice === "error" && (
+        <Problem title="The GitHub connection didn't complete">
+          It was cancelled, or GitHub didn&apos;t answer. Connect again.
+        </Problem>
+      )}
+      <div>
+        <button type="button" className="btn btn-primary" onClick={() => connectGithub(next)}>
+          {Icon.github} Connect GitHub
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Repo name + Private, and the answer to a name that's already taken. */
+function RepoForm({
+  defaultName,
+  busy,
+  action,
+  onSubmit,
+  conflict,
+  onUseExisting,
+}: {
+  defaultName: string;
+  busy: boolean;
+  action: string;
+  onSubmit: (name: string, priv: boolean) => void;
+  conflict: { full_name: string; usable: boolean } | null;
+  onUseExisting: (name: string) => void;
+}) {
+  const [name, setName] = useState(slug(defaultName));
+  const [priv, setPriv] = useState(true);
+  const fieldId = useId();
+  const valid = REPO_NAME.test(name.trim());
+  return (
+    <div className="ship-stack">
+      <form
+        className="ship-repo"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (valid && !busy) onSubmit(name.trim(), priv);
+        }}
+      >
+        <div className="field ship-repo-name">
+          <label htmlFor={fieldId}>Repository name</label>
+          <input
+            id={fieldId}
+            className="input input-mono"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+            aria-invalid={!valid}
+            aria-describedby={`${fieldId}-hint`}
+            disabled={busy}
+          />
+        </div>
+        <button
+          type="button"
+          className="switch ship-switch"
+          role="switch"
+          aria-checked={priv}
+          onClick={() => setPriv((v) => !v)}
+          disabled={busy}
+        >
+          <span className="switch-track" aria-hidden="true" />
+          Private
+        </button>
+        <button type="submit" className="btn btn-primary ship-go" disabled={busy || !valid}>
+          {busy && <span className="btn-spinner" aria-hidden="true" />}
+          {busy ? "Pushing…" : action}
+        </button>
+      </form>
+      <p className={`field-hint${valid ? "" : " ship-hint-bad"}`} id={`${fieldId}-hint`}>
+        {valid ? "Letters, digits, - _ and . only." : "Use letters, digits, - _ and . — no spaces."}
+      </p>
+      {conflict && (
+        <Problem
+          title={`You already have ${conflict.full_name}`}
+          actions={
+            conflict.usable ? (
+              <button type="button" className="btn btn-sm" onClick={() => onUseExisting(name.trim())} disabled={busy}>
+                Use existing repo
+              </button>
+            ) : undefined
+          }
+        >
+          {conflict.usable
+            ? "It's empty, so this project can go into it. Or pick another name above."
+            : "It already has other code in it. Pick another name above."}
+        </Problem>
+      )}
+    </div>
+  );
+}
+
+// ── Vercel ──────────────────────────────────────────────────────────────────
+export function VercelConnect({ onSaved }: { onSaved: () => void }) {
+  const [token, setToken] = useState("");
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const fieldId = useId();
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const r = await api.saveVercelToken(token.trim());
+      if (r.applied) {
+        setToken("");
+        onSaved();
+      } else {
+        setError(r.message || "Vercel didn't accept that token.");
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="ship-stack" onSubmit={save}>
+      <p className="ship-copy">
+        Connect Vercel once. We deploy with a token from <b>your</b> account, so the site is yours.
+      </p>
+      <ol className="ship-guide">
+        <li>
+          Open <b>vercel.com → Account Settings → Tokens</b>
+        </li>
+        <li>
+          <b>Create</b> a token, scoped to your personal account
+        </li>
+        <li>Copy it and paste it here</li>
+      </ol>
+      <div>
+        <a className="btn btn-sm" href="https://vercel.com/account/tokens" target="_blank" rel="noreferrer">
+          Open Vercel tokens {Icon.external}
+        </a>
+      </div>
+      <div className="ship-token">
+        <div className="field ship-token-field">
+          <label htmlFor={fieldId}>Vercel token</label>
+          <div className="ship-secret">
+            <input
+              id={fieldId}
+              className="input input-mono"
+              type={show ? "text" : "password"}
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Paste the token"
+              disabled={busy}
+              aria-invalid={Boolean(error)}
+              aria-describedby={error ? `${fieldId}-err` : undefined}
+            />
+            <button
+              type="button"
+              className="icon-btn ship-reveal"
+              onClick={() => setShow((v) => !v)}
+              aria-label={show ? "Hide token" : "Show token"}
+              aria-pressed={show}
+            >
+              {show ? Icon.eyeOff : Icon.eye}
+            </button>
+          </div>
+        </div>
+        <button type="submit" className="btn btn-primary ship-go" disabled={busy || !token.trim()}>
+          {busy && <span className="btn-spinner" aria-hidden="true" />}
+          {busy ? "Checking…" : "Check and save"}
+        </button>
+      </div>
+      {error && (
+        <p className="ship-error" id={`${fieldId}-err`} role="alert">
+          {Icon.alert} {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+type StepState = "todo" | "run" | "done" | "bad";
+
+function Steps({ steps }: { steps: { label: string; state: StepState; time?: string }[] }) {
+  return (
+    <ol className="ship-steps">
+      {steps.map((s) => (
+        <li key={s.label} className="ship-step" data-state={s.state}>
+          <span className="ship-step-mark" aria-hidden="true">
+            {s.state === "run" ? (
+              <span className="btn-spinner" />
+            ) : s.state === "done" ? (
+              Icon.check
+            ) : s.state === "bad" ? (
+              Icon.alert
+            ) : (
+              <span className="dot" />
+            )}
+          </span>
+          <span className="ship-step-label">{s.label}</span>
+          {s.time && <span className="ship-step-time mono">{s.time}</span>}
+          <span className="sr-only">
+            {s.state === "run" ? " — in progress" : s.state === "done" ? " — done" : s.state === "bad" ? " — failed" : ""}
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChange: () => Promise<void> }) {
+  const vc = info.connections.vercel;
+  const [state, setState] = useState<DeployState>(info.deploy);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [removing, setRemoving] = useState(false);
+  const [replacing, setReplacing] = useState(false);
+  // When each step was first seen, for the elapsed time beside it.
+  const seen = useRef<Record<string, number>>({});
+  const [, tick] = useState(0);
+
+  useEffect(() => setState(info.deploy), [info.deploy]);
+
+  const mine = state.target === "vercel";
+  const status = mine ? state.status : null;
+  const live = status && IN_FLIGHT.has(status);
+
+  useEffect(() => {
+    if (status && !seen.current[status]) seen.current[status] = Date.now();
+  }, [status]);
+
+  useEffect(() => {
+    if (!live) return;
+    let stop = false;
+    const t = setInterval(async () => {
+      tick((n) => n + 1);
+      try {
+        const next = await api.deployState(id);
+        if (stop) return;
+        setState(next);
+        if (next.status === "ready" || next.status === "error") onChange();
+      } catch {
+        // The next poll tries again.
+      }
+    }, 2500);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [live, id, onChange]);
+
+  async function start() {
+    setBusy(true);
+    setError("");
+    seen.current = {};
+    try {
+      const r = await api.deploy(id);
+      setState(r.deploy);
+    } catch (e: any) {
+      if (e instanceof ApiError && e.data?.needs === "vercel") await onChange();
+      else setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    setRemoving(true);
+    try {
+      await api.removeVercelToken();
+      await onChange();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setRemoving(false);
+    }
+  }
+
+  if (!vc.connected || replacing) {
+    return (
+      <div className="ship-stack">
+        {replacing && (
+          <button type="button" className="btn btn-sm btn-ghost ship-back" onClick={() => setReplacing(false)}>
+            Keep {vc.hint}
+          </button>
+        )}
+        {mine && state.status === "error" && state.error && !replacing && (
+          <Problem title="Token rejected — replace it">{state.error}</Problem>
+        )}
+        <VercelConnect
+          onSaved={async () => {
+            setReplacing(false);
+            await onChange();
+          }}
+        />
+      </div>
+    );
+  }
+
+  const since = (key: string, until?: string) => {
+    const a = seen.current[key];
+    if (!a) return undefined;
+    const b = until && seen.current[until] ? seen.current[until] : Date.now();
+    return `${Math.max(0, Math.round((b - a) / 1000))}s`;
+  };
+  const failedAt = status === "error" ? (seen.current.building ? "Building" : "Uploading files") : null;
+  const steps: { label: string; state: StepState; time?: string }[] = [
+    {
+      label: "Uploading files",
+      state:
+        status === "queued" || status === "uploading"
+          ? "run"
+          : failedAt === "Uploading files"
+            ? "bad"
+            : status
+              ? "done"
+              : "todo",
+      time: since("uploading", "building"),
+    },
+    {
+      label: "Building on Vercel",
+      state: status === "building" ? "run" : failedAt === "Building" ? "bad" : status === "ready" ? "done" : "todo",
+      time: since("building", "ready"),
+    },
+    { label: "Live", state: status === "ready" ? "done" : "todo" },
+  ];
+
+  return (
+    <div className="ship-stack">
+      <div className="ship-conn">
+        <span className="ship-conn-mark">{VercelMark}</span>
+        <span className="ship-conn-text">
+          Connected as <b>{vc.username}</b> · <span className="mono">{vc.hint}</span>
+        </span>
+        <span className="ship-conn-actions">
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => setReplacing(true)} disabled={Boolean(live)}>
+            Replace
+          </button>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={remove} disabled={removing || Boolean(live)}>
+            Remove
+          </button>
+        </span>
+      </div>
+
+      {status && (
+        <div aria-live="polite">
+          <Steps steps={steps} />
+        </div>
+      )}
+
+      {status === "ready" && state.url && (
+        <div className="notice notice-ok">
+          {Icon.check}
+          <div className="notice-body">
+            <span className="notice-title">It&apos;s live</span>
+            <a className="link mono ship-url" href={state.url} target="_blank" rel="noreferrer">
+              {state.url} {Icon.external}
+            </a>
+            <div className="notice-actions">
+              <CopyButton text={state.url} />
+              <a className="btn btn-sm" href="https://vercel.com/dashboard" target="_blank" rel="noreferrer">
+                Open in Vercel {Icon.external}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {status === "error" && (
+        <Problem title={state.error?.startsWith("Build failed") ? "Build failed — see log" : "The deploy didn't finish"}>
+          {state.error}
+        </Problem>
+      )}
+      {status === "error" && state.log.length > 0 && (
+        <details className="ship-log">
+          <summary>Last {state.log.length} lines of the build log</summary>
+          <pre className="mono">{state.log.join("\n")}</pre>
+        </details>
+      )}
+      {error && <Problem title="Couldn't start the deploy">{error}</Problem>}
+
+      <div className="ship-actions">
+        <button type="button" className="btn btn-primary ship-go" onClick={start} disabled={busy || Boolean(live) || !info.ready}>
+          {(busy || live) && <span className="btn-spinner" aria-hidden="true" />}
+          {live ? "Deploying…" : status === "ready" ? "Redeploy" : status === "error" ? "Retry" : "Deploy to Vercel"}
+        </button>
+        {!status && (
+          <span className="field-hint">Uploads the frontend straight to your Vercel. No GitHub needed.</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── GitHub → Render ─────────────────────────────────────────────────────────
+function RenderFlow({
+  id,
+  info,
+  defaultName,
+  oauthNotice,
+  onChange,
+}: {
+  id: string;
+  info: ShipInfo;
+  defaultName: string;
+  oauthNotice: string;
+  onChange: () => Promise<void>;
+}) {
+  const gh = info.connections.github;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [conflict, setConflict] = useState<{ full_name: string; usable: boolean } | null>(null);
+  const [handoff, setHandoff] = useState<string | null>(null);
+  const [liveUrl, setLiveUrl] = useState(info.deploy.target === "render" ? info.deploy.url || "" : "");
+  const [savedUrl, setSavedUrl] = useState("");
+  const [urlError, setUrlError] = useState("");
+  const urlId = useId();
+
+  const step = !gh.connected ? 1 : !info.github_repo ? 2 : 3;
+  const handedOff = info.deploy.target === "render" && info.deploy.status === "handed_off";
+
+  // Push (or push the update), then open Render's Blueprint page. The window is
+  // opened inside the click, so no pop-up blocker stops it; it is pointed at Render
+  // once the push has landed.
+  async function pushAndOpen(name?: string, priv?: boolean, useExisting = false) {
+    setBusy(true);
+    setError("");
+    setConflict(null);
+    const win = step === 3 && !useExisting ? window.open("about:blank", "_blank") : null;
+    try {
+      if (useExisting && name) await api.pushToGithub(id, { name, use_existing: true });
+      const r = await api.deploy(id, name && !useExisting ? { name, private: priv } : {});
+      const url = r.handoff_url || null;
+      setHandoff(url);
+      if (url && win) {
+        win.opener = null;
+        win.location.href = url;
+      } else win?.close();
+      await onChange();
+    } catch (e: any) {
+      win?.close();
+      if (e instanceof ApiError && e.data?.conflict) setConflict(e.data.conflict);
+      else if (e instanceof ApiError && e.data?.needs) await onChange();
+      else setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveUrl(e: React.FormEvent) {
+    e.preventDefault();
+    setUrlError("");
+    try {
+      const r = await api.setLiveUrl(id, liveUrl);
+      setLiveUrl(r.url || "");
+      setSavedUrl(r.url || "");
+      await onChange();
+    } catch (err: any) {
+      setUrlError(err.message);
+    }
+  }
+
+  const stepState = (n: number) => (step > n ? "done" : step === n ? "current" : "todo");
+  const openUrl = handoff || (info.github_repo ? handoffUrl(info.github_repo, info.github_branch) : null);
+
+  return (
+    <div className="ship-stack">
+      <ol className="ship-stepper" aria-label="Deploy steps">
+        {["GitHub", "Push", "Render"].map((label, i) => (
+          <li key={label} data-state={stepState(i + 1)} aria-current={step === i + 1 ? "step" : undefined}>
+            <span className="ship-stepper-n" aria-hidden="true">
+              {step > i + 1 ? Icon.check : i + 1}
+            </span>
+            {label}
+          </li>
+        ))}
+      </ol>
+
+      {step === 1 && (
+        <GithubConnect
+          info={info}
+          next="deploy"
+          oauthNotice={oauthNotice}
+          lead="Full-stack apps deploy from a GitHub repo. Connect GitHub to continue."
+        />
+      )}
+
+      {step === 2 && (
+        <>
+          <p className="ship-copy">
+            Pushing to <b>@{gh.login}</b>. The repo gets the code and a <code>render.yaml</code> that tells
+            Render what to create — variable names only, never values.
+          </p>
+          <RepoForm
+            defaultName={defaultName}
+            busy={busy}
+            action="Push"
+            conflict={conflict}
+            onSubmit={(name, priv) => pushAndOpen(name, priv)}
+            onUseExisting={(name) => pushAndOpen(name, true, true)}
+          />
+        </>
+      )}
+
+      {step === 3 && info.github_repo && (
+        <>
+          <p className="ship-repo-line">
+            {Icon.github}
+            <a className="link mono" href={`https://github.com/${info.github_repo}`} target="_blank" rel="noreferrer">
+              {info.github_repo}
+            </a>
+            {info.github_pushed_at && <span className="dim">· pushed {ago(info.github_pushed_at)}</span>}
+          </p>
+          <ul className="ship-checklist">
+            <li>Free web services sleep after 15 min idle; the first visit then takes 30–60 s.</li>
+            {info.render?.free_postgres && <li>Free Postgres is deleted after 30 days, and there&apos;s one per workspace.</li>}
+            <li>If the repo is private, Render will ask to access it.</li>
+            {info.render && info.render.asks_for.length > 0 && (
+              <li>
+                Render will ask you for{" "}
+                {info.render.asks_for.map((n, i) => (
+                  <span key={n}>
+                    {i > 0 && ", "}
+                    <code>{n}</code>
+                  </span>
+                ))}{" "}
+                on its own page — paste the values there.
+              </li>
+            )}
+          </ul>
+          <div className="ship-actions">
+            <button type="button" className="btn btn-primary ship-go" onClick={() => pushAndOpen()} disabled={busy || !info.ready}>
+              {busy && <span className="btn-spinner" aria-hidden="true" />}
+              {busy ? "Pushing the latest…" : "Open Render to deploy"} {!busy && Icon.external}
+            </button>
+            <span className="field-hint">Pushes the latest build first, then opens Render in a new tab.</span>
+          </div>
+          {handoff && openUrl && (
+            <p className="field-hint">
+              Render didn&apos;t open?{" "}
+              <a className="link" href={openUrl} target="_blank" rel="noopener noreferrer">
+                Open it here {Icon.external}
+              </a>
+            </p>
+          )}
+        </>
+      )}
+
+      {error && <Problem title="That didn't go through">{error}</Problem>}
+
+      {(handedOff || handoff) && step === 3 && (
+        <form className="ship-live-form" onSubmit={saveUrl}>
+          <div className="field">
+            <label htmlFor={urlId}>Finish on Render. Paste your app URL here to keep it with the project</label>
+            <div className="ship-repo">
+              <input
+                id={urlId}
+                className="input input-mono ship-repo-name"
+                value={liveUrl}
+                onChange={(e) => setLiveUrl(e.target.value)}
+                placeholder="https://your-app.onrender.com"
+                spellCheck={false}
+                autoComplete="off"
+                inputMode="url"
+                aria-invalid={Boolean(urlError)}
+              />
+              <button type="submit" className="btn ship-go">
+                Save
+              </button>
+            </div>
+          </div>
+          {urlError && (
+            <p className="ship-error" role="alert">
+              {Icon.alert} {urlError}
+            </p>
+          )}
+          {savedUrl && !urlError && (
+            <p className="field-hint" role="status">
+              Saved — it shows on this build from now on.
+            </p>
+          )}
+        </form>
+      )}
+    </div>
+  );
+}
+
+// ── GitHub on its own ───────────────────────────────────────────────────────
+function GithubFlow({
+  id,
+  info,
+  defaultName,
+  oauthNotice,
+  onChange,
+}: {
+  id: string;
+  info: ShipInfo;
+  defaultName: string;
+  oauthNotice: string;
+  onChange: () => Promise<void>;
+}) {
+  const gh = info.connections.github;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [conflict, setConflict] = useState<{ full_name: string; usable: boolean } | null>(null);
+  const [result, setResult] = useState<GithubPushResult | null>(null);
+
+  async function push(body: { name?: string; private?: boolean; use_existing?: boolean }) {
+    setBusy(true);
+    setError("");
+    setConflict(null);
+    setResult(null);
+    try {
+      setResult(await api.pushToGithub(id, body));
+      await onChange();
+    } catch (e: any) {
+      if (e instanceof ApiError && e.data?.conflict) setConflict(e.data.conflict);
+      else {
+        setError(e.message);
+        if (e instanceof ApiError && e.status === 409) await onChange();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    setError("");
+    try {
+      await api.githubDisconnect();
+      setResult(null);
+      await onChange();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
+  if (!gh.connected) {
+    return (
+      <GithubConnect
+        info={info}
+        next="github"
+        oauthNotice={oauthNotice}
+        lead="Sign in with your own GitHub and we'll push this project — source, docs and README — into a private repo there."
+      />
+    );
+  }
+
+  return (
+    <div className="ship-stack">
+      <div className="ship-conn">
+        {gh.avatar ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img className="ship-avatar" src={gh.avatar} alt="" width={24} height={24} />
+        ) : (
+          <span className="ship-conn-mark">{Icon.github}</span>
+        )}
+        <span className="ship-conn-text">
+          <b>@{gh.login}</b>
+          {oauthNotice === "connected" && <span className="badge badge-ok">Connected</span>}
+        </span>
+        <span className="ship-conn-actions">
+          <button type="button" className="btn btn-sm btn-ghost" onClick={disconnect} disabled={busy}>
+            Disconnect
+          </button>
+        </span>
+      </div>
+
+      {info.github_repo ? (
+        <>
+          <p className="ship-repo-line">
+            {Icon.github}
+            <a className="link mono" href={`https://github.com/${info.github_repo}`} target="_blank" rel="noreferrer">
+              github.com/{info.github_repo}
+            </a>
+            {Icon.external}
+            {info.github_pushed_at && <span className="dim">· last push {ago(info.github_pushed_at)}</span>}
+          </p>
+          <div className="ship-actions">
+            <button type="button" className="btn btn-primary ship-go" onClick={() => push({})} disabled={busy}>
+              {busy && <span className="btn-spinner" aria-hidden="true" />}
+              {busy ? "Pushing…" : "Push update"}
+            </button>
+            <span className="field-hint">Adds one commit with the current build. Files you added on GitHub stay.</span>
+          </div>
+        </>
+      ) : (
+        <RepoForm
+          defaultName={defaultName}
+          busy={busy}
+          action="Push to GitHub"
+          conflict={conflict}
+          onSubmit={(name, priv) => push({ name, private: priv })}
+          onUseExisting={(name) => push({ name, use_existing: true })}
+        />
+      )}
+
+      {result && (
+        <div className="notice notice-ok" role="status">
+          {Icon.check}
+          <div className="notice-body">
+            <span className="notice-title">
+              {result.changed === false
+                ? "Already up to date — nothing new to push"
+                : result.created
+                  ? `Pushed ${result.files} files`
+                  : "Pushed the update"}
+            </span>
+            <span className="notice-text">
+              <a className="link mono" href={result.html_url} target="_blank" rel="noreferrer">
+                {result.full_name}
+              </a>{" "}
+              · {result.private ? "private" : "public"} · branch <code>{result.branch}</code>
+            </span>
+          </div>
+        </div>
+      )}
+      {error && <Problem title="That push didn't go through">{error}</Problem>}
+    </div>
+  );
+}

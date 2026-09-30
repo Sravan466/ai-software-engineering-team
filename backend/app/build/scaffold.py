@@ -119,6 +119,7 @@ class Scaffold:
             "backend": self.backend,
             "backend_framework": self.backend_framework,
             "database": self.database,
+            "required_env": list(self.required_env),
             "commands": list(self.commands),
             "notes": list(self.notes),
             "files": sorted(self.paths()),

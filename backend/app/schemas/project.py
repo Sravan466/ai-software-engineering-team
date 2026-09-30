@@ -220,6 +220,13 @@ class ProjectOut(BaseModel):
     gate_note: Optional[str] = None
     #: How the database question was answered — see `DatabaseStatus`. Never a value.
     database_status: Optional[str] = None
+    #: Where the finished build went: its GitHub repo and its live deploy (#55).
+    #: Names and URLs only — never a token.
+    github_repo: Optional[str] = None
+    github_pushed_at: Optional[UtcDatetime] = None
+    deploy_target: Optional[str] = None
+    deploy_url: Optional[str] = None
+    deploy_status: Optional[str] = None
 
     #: The technology decisions frozen after the architecture was approved, which
     #: every phase after it is written against and checked against. `None` on a run

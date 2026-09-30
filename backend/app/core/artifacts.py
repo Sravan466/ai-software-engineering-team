@@ -283,6 +283,50 @@ def readme_md(project: Project, assembled: dict) -> str:
     return "\n".join(lines)
 
 
+def project_kind(assembled: dict) -> Optional[str]:
+    """`frontend`, `fullstack` or `backend`: which way "Deploy it" goes. None with no code."""
+    from app.build import blueprint
+
+    return blueprint.kind(assembled.get("scaffold") or {})
+
+
+def saved_env_names(project: Project) -> tuple[str, ...]:
+    """The names (never the values) of the database variables saved for this project."""
+    from app.core import project_secrets
+
+    if not project.owner_id:
+        return ()
+    try:
+        record = project_secrets.load(project.owner_id, project.id)
+    except ValueError:
+        return ()
+    return tuple(sorted((record.get("values") or {}).keys()))
+
+
+def ship_files(project: Project, assembled: dict) -> dict[str, str]:
+    """What a repository gets: the .zip's files, plus a Render Blueprint for a build
+    with a backend. Never a real `.env` — `assemble` has only `.env.example`."""
+    from app.build import blueprint
+
+    files: dict[str, str] = {"README.md": readme_md(project, assembled)}
+    for f in assembled["files"]:
+        path = "docs/README.from-agents.md" if f["path"] == "README.md" else f["path"]
+        files[path] = f["content"]
+    for d in assembled["docs"]:
+        files[d["path"]] = d["content"]
+    scaffold_info = assembled.get("scaffold") or {}
+    render = blueprint.blueprint(
+        {f["path"]: f["content"] for f in assembled["files"]},
+        scaffold_info,
+        project.name or project.idea or "app",
+        saved_env=saved_env_names(project),
+        required_env=tuple(scaffold_info.get("required_env") or ()),
+    )
+    if render and "render.yaml" not in files:
+        files["render.yaml"] = render
+    return files
+
+
 def slug(text: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9_-]+", "-", (text or "project")[:48]).strip("-").lower()
     return s or "project"

@@ -206,6 +206,12 @@ export type Project = {
   gate_note: string | null;
   /** connected | unchecked | later | none — or null until asked. Never a value. */
   database_status?: DatabaseStatus | null;
+  /** Where the finished build went: its repo (`owner/name`) and its live deploy. */
+  github_repo?: string | null;
+  github_pushed_at?: string | null;
+  deploy_target?: "vercel" | "render" | null;
+  deploy_url?: string | null;
+  deploy_status?: string | null;
 
   /**
    * The technology decisions frozen after the architecture was approved. `null`
@@ -282,16 +288,32 @@ export type AuthStatus = {
 
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** The parsed JSON body, when there was one — some refusals say what's missing
+   *  (`needs: "github"`) or carry the details a choice needs (`conflict`). */
+  readonly data: Record<string, any> | null;
+  constructor(message: string, status: number, data: Record<string, any> | null = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.data = data;
   }
 }
 
 // FastAPI reports failures as {"detail": "..."} — sometimes a list of validation
 // objects. Surfacing the raw body means users read a JSON blob with an HTTP code
 // bolted to the front, so unwrap it into the sentence the backend actually wrote.
+async function apiError(res: Response): Promise<ApiError> {
+  const body = await res.clone().text().catch(() => "");
+  let data: Record<string, any> | null = null;
+  try {
+    const parsed = body ? JSON.parse(body) : null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) data = parsed;
+  } catch {
+    // Not JSON: the message says what it can.
+  }
+  return new ApiError(await errorMessage(res), res.status, data);
+}
+
 async function errorMessage(res: Response): Promise<string> {
   const body = await res.text().catch(() => "");
   if (body) {
@@ -335,7 +357,7 @@ async function req<T>(
       // this and takes the person to sign in, back to where they were.
       if (typeof window !== "undefined") window.dispatchEvent(new Event(SIGNED_OUT_EVENT));
     }
-    if (!res.ok) throw new ApiError(await errorMessage(res), res.status);
+    if (!res.ok) throw await apiError(res);
     if (res.status === 204) return undefined as T;
     return res.json();
   } catch (e: any) {
@@ -637,13 +659,38 @@ export const api = {
     req<{ connected: boolean }>("/api/github/disconnect", { method: "POST" }),
   pushToGithub: (
     id: string,
-    body: { name?: string; private?: boolean; description?: string }
+    body: { name?: string; private?: boolean; description?: string; use_existing?: boolean }
   ) =>
     req<GithubPushResult>(
       `/api/github/push/${id}`,
       { method: "POST", body: JSON.stringify(body) },
       LLM_TIMEOUT_MS
     ),
+
+  // ── Deploying a finished build (always into the user's own accounts) ──
+  shipInfo: (id: string) => req<ShipInfo>(`/api/projects/${id}/ship`),
+  deployConnections: () =>
+    req<{ github: GithubStatus; vercel: VercelConnection }>("/api/deploy/connections"),
+  saveVercelToken: (token: string) =>
+    req<VercelTokenResult>(
+      "/api/deploy/vercel/token",
+      { method: "PUT", body: JSON.stringify({ token }) },
+      KEY_CHECK_TIMEOUT_MS
+    ),
+  removeVercelToken: () =>
+    req<{ vercel: VercelConnection }>("/api/deploy/vercel/token", { method: "DELETE" }),
+  deploy: (id: string, body: { name?: string; private?: boolean } = {}) =>
+    req<DeployStart>(
+      `/api/projects/${id}/deploy`,
+      { method: "POST", body: JSON.stringify(body) },
+      LLM_TIMEOUT_MS
+    ),
+  deployState: (id: string) => req<DeployState>(`/api/projects/${id}/deploy`),
+  setLiveUrl: (id: string, url: string) =>
+    req<DeployState>(`/api/projects/${id}/deploy/url`, {
+      method: "PUT",
+      body: JSON.stringify({ url }),
+    }),
   // Streams NDJSON download progress from one source; calls onLine per object.
   // Only sources whose runtime has a download API (`can_download`) accept it.
   pullLocalModel: async (
@@ -759,6 +806,8 @@ export type GithubStatus = {
   login: string | null;
   name: string | null;
   avatar: string | null;
+  /** "revoked" when GitHub turned the saved token down and it was forgotten. */
+  reason?: "revoked" | null;
 };
 
 export type GithubPushResult = {
@@ -767,6 +816,61 @@ export type GithubPushResult = {
   branch: string;
   private: boolean;
   files: number;
+  commit?: string;
+  /** A new repository was made (the first push). */
+  created?: boolean;
+  /** False when the repository already had exactly this build — no commit made. */
+  changed?: boolean;
+};
+
+export type VercelConnection = {
+  connected: boolean;
+  username: string | null;
+  /** `…last4` — the token itself never reaches the page. */
+  hint: string | null;
+  checked_at: string | null;
+};
+
+export type VercelTokenResult = {
+  applied: boolean;
+  reason: "ok" | "rejected" | "unreachable";
+  message: string;
+  vercel: VercelConnection;
+};
+
+export type DeployStatus = "queued" | "uploading" | "building" | "ready" | "error" | "handed_off";
+
+export type DeployState = {
+  target: "vercel" | "render" | null;
+  status: DeployStatus | null;
+  url: string | null;
+  error: string | null;
+  deployed_at: string | null;
+  /** The last lines of a failed build's log, scrubbed. */
+  log: string[];
+};
+
+export type ShipInfo = {
+  kind: "frontend" | "fullstack" | "backend" | null;
+  target: "vercel" | "render" | null;
+  /** "react + fastapi + postgres" */
+  stack: string;
+  frontend: string | null;
+  /** Complete and has code: deploying is allowed. */
+  ready: boolean;
+  render: { asks_for: string[]; free_postgres: boolean; has_frontend: boolean } | null;
+  github_repo: string | null;
+  github_branch: string | null;
+  github_pushed_at: string | null;
+  deploy: DeployState;
+  connections: { github: GithubStatus; vercel: VercelConnection };
+};
+
+export type DeployStart = {
+  target: "vercel" | "render";
+  deploy: DeployState;
+  handoff_url?: string;
+  push?: GithubPushResult;
 };
 
 export type RouterStatus = {
