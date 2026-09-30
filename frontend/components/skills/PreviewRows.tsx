@@ -26,6 +26,7 @@ export default function PreviewRows({
       {preview.phases.map((p) => {
         const agent = AGENT_BY_KEY[p.phase];
         const over = p.over_cap ?? [];
+        const pinnedFull = p.skills.length > 0 && p.skills.every((s) => s.pinned);
         return (
           <li
             key={p.phase}
@@ -49,8 +50,11 @@ export default function PreviewRows({
               {over.length > 0 && (
                 <span className="dryrun-over">
                   <span className="dryrun-over-label">
-                    Also matched, left out — all {preview.max_per_phase} places went to
-                    stronger matches:
+                    {preview.max_per_phase === 0
+                      ? "Matched, but this backend gives each phase no skills (SKILLS_MAX_PER_PHASE is 0):"
+                      : pinnedFull
+                        ? `Also matched, left out — pinned skills took all ${preview.max_per_phase} places:`
+                        : `Also matched, left out — the phase takes ${preview.max_per_phase}, and these ranked lower:`}
                   </span>
                   <span className="dryrun-picks">
                     {over.map((s) => (
@@ -68,11 +72,13 @@ export default function PreviewRows({
 }
 
 function Pick({ pick, dropped }: { pick: SkillPick; dropped?: boolean }) {
+  // A skill here with nothing matched and no pin has no keywords at all — it is
+  // relevant to every build it serves, which is its whole reason for being here.
   const why = pick.matched.length
     ? pick.matched.join(" · ")
     : pick.pinned
       ? ""
-      : "bound to this phase";
+      : "no keywords";
   return (
     <span
       className={"pick" + (pick.pinned ? " pick-pinned" : "") + (dropped ? " pick-dropped" : "")}
@@ -80,7 +86,7 @@ function Pick({ pick, dropped }: { pick: SkillPick; dropped?: boolean }) {
       <span className="pick-title">{pick.title}</span>
       {why && (
         <span className="pick-why">
-          <span className="sr-only">matched </span>
+          {pick.matched.length > 0 && <span className="sr-only">matched </span>}
           {why}
         </span>
       )}

@@ -229,7 +229,10 @@ function DryRun() {
     }
   }
 
-  const empty = result?.phases.filter((p) => p.skills.length === 0) ?? [];
+  // "No skills" and "more than it can take" are different advice, so a phase whose
+  // matches were all cut by the cap is counted as crowded, never as a miss.
+  const empty =
+    result?.phases.filter((p) => p.skills.length === 0 && (p.over_cap ?? []).length === 0) ?? [];
   const crowded = result?.phases.filter((p) => (p.over_cap ?? []).length > 0) ?? [];
 
   return (
@@ -287,9 +290,9 @@ function DryRun() {
               {crowded.length === 1
                 ? `${AGENT_BY_KEY[crowded[0].phase]?.codename ?? crowded[0].label} matched more skills than it can take.`
                 : `${crowded.length} phases matched more skills than they can take.`}{" "}
-              Each phase gets at most {result.max_per_phase}, strongest match first, so the
-              ones listed as left out never reach the model. Pin one on the build to put it
-              first, or tighten a stronger skill&apos;s keywords.
+              Each phase gets at most {result.max_per_phase} — pinned first, then the
+              strongest match — so the ones listed as left out never reach the model. Pin
+              one on the build to put it first, or tighten another skill&apos;s keywords.
             </p>
           )}
           <p className="field-hint" style={{ marginTop: 8 }}>
@@ -377,8 +380,13 @@ function SkillRow({
             .join(" · "),
     [skill.agents],
   );
-  const everywhere = useMemo(
-    () => (lib ? alwaysMatching(skill.keywords, skill.agents, lib.phases) : []),
+  const always = useMemo(
+    () =>
+      lib
+        ? Array.from(
+            new Set(alwaysMatching(skill.keywords, skill.agents, lib.phases).flatMap((h) => h.who)),
+          )
+        : [],
     [lib, skill.keywords, skill.agents],
   );
 
@@ -448,6 +456,12 @@ function SkillRow({
           <span className="skill-meta">
             <span className="skill-serves">{serves}</span>
             <span className="mono">{skill.chars.toLocaleString()} chars</span>
+            {/* Most of the bundled library means this — accessibility belongs on every
+                frontend — so it is stated, not flagged. What matters is that the
+                reader can see which skills take a place on every build of a phase. */}
+            {always.length > 0 && (
+              <span className="skill-always">always reaches {always.join(" · ")}</span>
+            )}
           </span>
         </button>
 
@@ -497,16 +511,6 @@ function SkillRow({
               {k}
             </span>
           ))}
-        </p>
-      )}
-
-      {everywhere.length > 0 && (
-        <p className="skill-warn">
-          {Icon.alert}
-          <span>
-            <EverywhereText hits={everywhere} /> It arrives whether or not the idea has
-            anything to do with it.
-          </span>
         </p>
       )}
 
@@ -581,9 +585,9 @@ function EverywhereText({ hits }: { hits: { keyword: string; who: string[] }[] }
           <span className="mono">{w}</span>
         </span>
       ))}{" "}
-      {words.length === 1 ? "is" : "are"} in {who.join(" and ")}&apos;s own phase name,
-      so {words.length === 1 ? "it matches" : "they match"} every build{" "}
-      {who.length === 1 ? "that phase runs" : "those phases run"}.
+      {words.length === 1 ? "is" : "are"} part of{" "}
+      {who.length === 1 ? `${who[0]}'s phase name` : `the ${who.join(" and ")} phase names`}, so
+      this skill reaches every build {who.length === 1 ? `${who[0]} runs` : "they run"}.
     </>
   );
 }
@@ -815,13 +819,12 @@ function Editor({
             aria-describedby={"sk-keys-hint" + (everywhere.length ? " sk-keys-warn" : "")}
           />
           {everywhere.length > 0 && (
-            <p className="field-warn" id="sk-keys-warn" aria-live="polite">
-              {Icon.alert}
-              <span>
-                <EverywhereText hits={everywhere} /> {everywhere.length === 1 ? "It says" : "They say"}{" "}
-                nothing about the idea — drop {everywhere.length === 1 ? "it" : "them"}, or
-                leave the skill with no keywords if it really belongs on every build.
-              </span>
+            <p className="field-hint field-note" id="sk-keys-warn" aria-live="polite">
+              <EverywhereText hits={everywhere} /> Keep{" "}
+              {everywhere.length === 1 ? "it" : "them"} if the skill belongs on all of
+              those builds. If it should only arrive for some ideas, use words about the
+              product instead — each phase takes a limited number of skills, and one that
+              always matches takes a place every time.
             </p>
           )}
           <p className="field-hint" id="sk-keys-hint">

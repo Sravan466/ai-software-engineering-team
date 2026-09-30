@@ -74,7 +74,10 @@ class Selected:
             )
         if self.matched:
             return f"Matched {', '.join(self.matched)}"
-        return "Bound to this phase"
+        # Only a skill with no keywords gets here: it is relevant to every build of
+        # the phases it serves. "Bound to this phase" said so wrongly for a skill
+        # that serves every phase and is bound to none.
+        return "No keywords, so every build it serves"
 
 
 @dataclass(frozen=True)

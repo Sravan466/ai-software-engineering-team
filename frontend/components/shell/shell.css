@@ -1531,19 +1531,11 @@ kbd {
   line-height: 1.5;
 }
 
-/* A keyword that is a word of the phase's own name: it matches every build. */
-.skill-warn {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin: 8px 0 0 54px;
-  font-size: var(--t-xs);
-  line-height: 1.5;
-  color: var(--warn);
-  max-width: 72ch;
-}
-.skill-warn svg { width: 13px; height: 13px; flex: none; margin-top: 2px; }
-.skill-warn .mono { color: var(--ink); }
+/* Takes a place on every build of these phases: a keyword is a word of the
+   phase's own name. Stated in the meta line, not flagged. */
+.skill-always { color: var(--ink-3); }
+.skill-always::before { content: "·"; margin-right: 10px; color: var(--ink-4); }
+.field-note .mono { color: var(--ink-2); }
 .skills-readonly { margin: -4px 0 8px; max-width: 72ch; }
 
 .skill-problem {
@@ -1639,7 +1631,7 @@ kbd {
   .skill-main { grid-template-columns: 34px minmax(0, 1fr); }
   .skill-acts { grid-column: 2 / -1; justify-content: flex-start; }
   .skill-acts .btn { opacity: 1; }
-  .skill-keys, .skill-problem, .skill-warn, .skill-body { margin-left: 0; }
+  .skill-keys, .skill-problem, .skill-body { margin-left: 0; }
   .skill-form { grid-template-columns: minmax(0, 1fr); }
   .dryrun-row { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
   .dryrun-ask { flex-direction: column; }

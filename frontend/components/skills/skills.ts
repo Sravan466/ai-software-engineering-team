@@ -62,13 +62,16 @@ export function useSkillTitles(): Record<string, string> {
   useEffect(() => {
     let live = true;
     if (!titles) {
-      titles = api
+      const mine: Promise<Record<string, string>> = api
         .listSkills()
         .then((lib) => Object.fromEntries(lib.skills.map((s) => [s.name, s.title])))
         .catch(() => {
-          titles = null; // try again next time rather than remembering a failure
+          // Try again next time rather than remembering a failure — but only if
+          // nothing newer has been asked for since; that one is not ours to drop.
+          if (titles === mine) titles = null;
           return {};
         });
+      titles = mine;
     }
     titles.then((m) => live && setMap(m));
     return () => {
