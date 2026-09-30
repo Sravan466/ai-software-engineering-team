@@ -228,12 +228,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   const clearJump = useCallback(() => setJump(null), []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Whether the error on screen is a control's refusal, which the status poll must
+  // leave alone — it is cleared by the next action, not by the next reload.
+  const actionFailed = useRef(false);
+
   const load = useCallback(async () => {
     try {
       const p = await api.getProject(id);
       setProject(p);
       setAnalytics(await api.analytics(id));
-      setError("");
+      if (!actionFailed.current) setError("");
     } catch (e: any) {
       setError(e.message);
     }
@@ -287,7 +291,9 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     async (fn: () => Promise<RunResponse | unknown>): Promise<boolean> => {
       setBusy(true);
       setError("");
+      actionFailed.current = false;
       let ok = false;
+      let failure = "";
       try {
         const result = (await fn()) as RunResponse | undefined;
         ok = true;
@@ -298,9 +304,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
           setProject((p) => (p ? { ...p, status: result.status } : p));
         }
       } catch (e: any) {
-        setError(e.message);
+        failure = e.message;
       } finally {
         await load();
+        // After the reload, and marked as a control's: a successful `load` (and the
+        // status poll after it) used to clear the error, which wiped every refusal —
+        // a 409 from another tab, a credential in a note — the moment it arrived.
+        if (failure) {
+          actionFailed.current = true;
+          setError(failure);
+        }
         setBusy(false);
       }
       return ok;
