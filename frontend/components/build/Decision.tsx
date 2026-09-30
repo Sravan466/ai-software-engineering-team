@@ -22,6 +22,7 @@ import CharterPanel, { StackViolations } from "./Charter";
 import SecurityFindings from "./SecurityFindings";
 import { NeedsHelp, trackEntries } from "./AutoFix";
 import { DatabaseGate } from "./DatabaseConnect";
+import { databaseUnconnected } from "@/lib/database";
 import BuildProblems from "./BuildProblems";
 import BuildLine from "./BuildLine";
 import BuildProgress from "@/components/preview/BuildProgress";
@@ -131,14 +132,6 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
 };
 
 const rowFor = (project: Project, key: string) => latestRow(project.phases, key);
-
-/** Asked about, and not connected: a build that reads a database nobody gave it. */
-export function databaseUnconnected(project: Project): boolean {
-  return (
-    Boolean(project.charter?.env?.length) &&
-    (project.database_status === "later" || project.database_status === "failed")
-  );
-}
 
 export default function Decision({
   project,

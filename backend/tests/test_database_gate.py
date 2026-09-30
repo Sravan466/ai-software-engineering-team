@@ -79,6 +79,13 @@ def test_the_run_parks_on_the_database_in_every_mode(client, mode):
     assert "PostgreSQL" in project["gate_note"]
     assert project["database_status"] is None
     assert project["charter"]["env"] == ["DATABASE_URL"]
+    state = client.get(f"/api/projects/{pid}/database").json()
+    assert state["provider"] == "generic" and state["saved"] == []
+    assert state["contract"]["variables"][0]["name"] == "DATABASE_URL"
+    # Looking at another host before saving shows that host's fields.
+    supa = client.get(f"/api/projects/{pid}/database?provider=supabase").json()
+    assert supa["provider"] == "supabase"
+    assert [v["name"] for v in supa["contract"]["variables"]][:2] == ["SUPABASE_URL", "SUPABASE_ANON_KEY"]
 
 
 def test_later_resumes_and_the_plan_review_still_parks(client):
@@ -416,9 +423,13 @@ def test_no_value_reaches_a_prompt_the_charter_logs_artifacts_or_the_default_zip
     assert "backend/.env" not in default.namelist()
     assert not any(SENTINEL in default.read(n).decode("utf-8", "ignore") for n in default.namelist())
 
+    # Asked for from somewhere this backend isn't served at: refused.
+    assert client.get(f"/api/projects/{pid}/download?include_credentials=true").status_code == 403
     # Asked for, it is there — and only there.
     opted = zipfile.ZipFile(
-        io.BytesIO(client.get(f"/api/projects/{pid}/download?include_credentials=true").content)
+        io.BytesIO(
+            client.get(f"/api/projects/{pid}/download?include_credentials=true", headers=LOCAL).content
+        )
     )
     env = opted.read("backend/.env").decode()
     assert f"DATABASE_URL={uri}" in env and "Never commit" in env
@@ -438,3 +449,95 @@ def test_the_new_column_migrates_onto_an_existing_database(tmp_path):
     with engine.begin() as conn:
         assert conn.execute(text("SELECT database_status FROM projects")).scalar() is None
     assert run_migrations(engine) == []
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+def test_switching_host_at_the_gate_repoints_the_names_the_crew_reads(client, monkeypatch):
+    from app.orchestration.graph import graph
+    from app.orchestration.runner import _config
+
+    monkeypatch.setattr(
+        dbconnect, "check_connection",
+        lambda *a: dbconnect.CheckResult(dbconnect.CONNECTED, "ok", reason="ok", host="abcdefghijklmnop.supabase.co"),
+    )
+    pid = _to_gate(client)
+    r = client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"provider": "supabase", "values": {
+            "SUPABASE_URL": "https://abcdefghijklmnop.supabase.co",
+            "SUPABASE_ANON_KEY": "sb_publishable_abcdefghijklmnop",
+        }},
+        headers=LOCAL,
+    ).json()
+    assert r["ok"], r
+    names = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "DATABASE_URL"]
+    assert client.get(f"/api/projects/{pid}").json()["charter"]["env"] == names
+    # The checkpoint the agents read agrees with the row.
+    assert graph.get_state(_config(pid)).values["charter"]["env"] == names
+    assert client.post(f"/api/projects/{pid}/database/continue").status_code == 200
+    # Past the gate, the host is what the code was written against.
+    state = client.get(f"/api/projects/{pid}/database").json()
+    assert [p["provider"] for p in state["providers"]] == ["supabase"]
+    moved = client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"provider": "neon", "values": {"DATABASE_URL": "postgresql://u:p@h.neon.tech/app"}},
+        headers=LOCAL,
+    )
+    assert moved.status_code == 409
+
+
+def test_only_secret_parts_are_scrubbed(monkeypatch):
+    contract = dbconnect.contract_for("postgres", "supabase")
+    parts = dbconnect.secret_parts(contract, {
+        "SUPABASE_URL": "https://qwrtypsdvbnmzxcl.supabase.co",
+        "SUPABASE_ANON_KEY": "sb_publishable_Zq9Kx2Lm7Np4Rt",
+        "DATABASE_URL": "postgresql://postgres.ref:My%40Passw0rd@pooler.supabase.com:5432/postgres",
+    })
+    assert "sb_publishable_Zq9Kx2Lm7Np4Rt" in parts
+    assert "My%40Passw0rd" in parts and "My@Passw0rd" in parts
+    assert not any("supabase.co" in p or p.startswith("postgres") for p in parts)
+    pid = "e" * 32
+    project_secrets.save(TEST_USER_ID, pid, contract, {
+        "SUPABASE_URL": "https://qwrtypsdvbnmzxcl.supabase.co",
+        "SUPABASE_ANON_KEY": "sb_publishable_Zq9Kx2Lm7Np4Rt",
+    }, dbconnect.CheckResult(dbconnect.CONNECTED, "ok"))
+    try:
+        # Ordinary words in a redo note are not a credential.
+        assert not dbconnect.looks_like_credential("use postgres migrations over https://example.com")
+        assert scrub.scrub("GET https://qwrtypsdvbnmzxcl.supabase.co/rest") == "GET https://qwrtypsdvbnmzxcl.supabase.co/rest"
+        # Reading it back many times registers it once; removing forgets it.
+        for _ in range(3):
+            project_secrets.reveal(TEST_USER_ID, pid)
+        assert scrub.holds_known("sb_publishable_Zq9Kx2Lm7Np4Rt")
+    finally:
+        project_secrets.remove(TEST_USER_ID, pid)
+    # (The unique tail: `sb_publi…` is a prefix every publishable key shares.)
+    assert not scrub.holds_known("Zq9Kx2Lm7Np4Rt")
+
+
+def test_env_values_survive_every_dotenv_reader():
+    from app.core.artifacts import _env_value, env_file
+
+    assert _env_value("mongodb://u:p@h/db") == "mongodb://u:p@h/db"
+    assert _env_value('p"a$s#s') == "'p\"a$s#s'"
+    assert _env_value("it's") == '"it\'s"'
+    body = env_file("# x\nDATABASE_URL=postgresql://localhost/app\nPORT=8000\n", {"DATABASE_URL": "postgres://u:p@h/db"})
+    assert "DATABASE_URL=postgres://u:p@h/db" in body and "PORT=8000" in body
+
+
+def test_the_architects_name_is_not_a_host():
+    charter = freeze({"tech_stack": {"backend": ["Express"], "database": ["MongoDB"]}},
+                     {"decision": "Atlas recommends MongoDB on our own server"})
+    assert charter.database_provider == "generic"
+    long = "MongoDB Atlas " + "x" * 2000
+    assert freeze({"tech_stack": {"backend": ["Express"], "database": ["MongoDB"]}}, {"decision": long}).database_provider == "generic"
+
+
+def test_no_route_that_claims_a_build_releases_the_gate(client):
+    from app.api.routes import projects as routes
+
+    pid = _to_gate(client)
+    project = SimpleNamespace(status="awaiting_approval", gate_kind="database", id=pid)
+    with pytest.raises(Exception) as refused:
+        routes._claim(None, project, {"awaiting_approval"})
+    assert getattr(refused.value, "status_code", None) == 409

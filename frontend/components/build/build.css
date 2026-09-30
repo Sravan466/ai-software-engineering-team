@@ -1517,3 +1517,4 @@ textarea.db-input { min-height: 132px; white-space: pre; overflow-x: auto; }
 @media (prefers-reduced-motion: reduce) {
   .db-disclosure, .db-choice, .db-choice-chev, .db-steps li { transition: none; }
 }
+.db-notices { margin: -6px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }

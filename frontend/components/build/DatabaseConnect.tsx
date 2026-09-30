@@ -206,9 +206,16 @@ export function DatabaseGate({
         <div className="decision-headings">
           <h2 id="decision-title">Connect your database</h2>
           <p>
-            Atlas picked <b className="db-strong">{label}</b>
-            {provider && provider !== label ? <> on <b className="db-strong">{provider}</b></> : null} for
-            this build. Connect yours now so the crew builds against it, or keep going and add it
+            Atlas picked{" "}
+            {provider && provider !== label && provider.includes(label) ? (
+              <b className="db-strong">{provider}</b>
+            ) : (
+              <>
+                <b className="db-strong">{label}</b>
+                {provider && provider !== label ? <> on <b className="db-strong">{provider}</b></> : null}
+              </>
+            )}{" "}
+            for this build. Connect yours now so the crew builds against it, or keep going and add it
             any time.
           </p>
         </div>
@@ -562,6 +569,9 @@ function DatabaseForm({
                 onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
                   setValues((prev) => ({ ...prev, [v.name]: e.target.value }));
                   if (blur[v.name]) setBlur((prev) => ({ ...prev, [v.name]: {} }));
+                  // An edit answers the last failure; keeping it on screen would hide
+                  // what the new value says about itself.
+                  if (outcome.kind === "failed" || outcome.kind === "invalid") setOutcome({ kind: "idle" });
                 },
                 onBlur: () => setBlur((prev) => ({ ...prev, [v.name]: blurCheck(v, values[v.name] ?? "") })),
               };
@@ -666,6 +676,17 @@ function DatabaseForm({
               <StatusLine state={state} />
             ) : null}
           </div>
+
+          {outcome.kind === "saved" && outcome.notices.length > 0 && (
+            <ul className="db-notices">
+              {outcome.notices.map((n, i) => (
+                <li key={i} className="db-msg db-msg-warn">
+                  {Icon.info}
+                  <span>{n.message}</span>
+                </li>
+              ))}
+            </ul>
+          )}
 
           <div className="db-actions">
             {hasSaved ? (

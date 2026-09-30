@@ -335,6 +335,21 @@ class PipelineRunner:
         )
 
     @staticmethod
+    def set_database_provider(project: Project, charter: Charter) -> None:
+        """Re-point the charter at another host's variables, at the database gate.
+
+        The person said "it's on Supabase" where Atlas wrote plain Postgres, before
+        any code exists. Written to the checkpoint the agents read their charter
+        from as well as to the row, attributed to System Design exactly as a redo
+        of it is, so the run still resumes at the Backend Engineer. The caller commits.
+        """
+        data = charter.as_dict()
+        with _checkpoint_lock(project.id):
+            graph.update_state(_config(project.id), {"charter": data}, as_node=Phase.SYSTEM_DESIGN.value)
+        project.charter = data
+        log.info("Database host for %s set to %s; the crew reads %s", project.id, charter.database_provider, ", ".join(charter.env))
+
+    @staticmethod
     def settle_database(project: Project, before: object) -> None:
         """After the charter is (re)frozen: ask again if the database changed.
 

@@ -27,6 +27,7 @@ from app.core.logging import get_logger
 from app.db.base import get_db
 from app.db.models import Project
 from app.orchestration.charter import Charter
+from app.orchestration.runner import runner
 from app.router.keycheck import RateLimiter
 from app.schemas.project import RunResponse
 
@@ -43,11 +44,7 @@ router = APIRouter(prefix="/api/projects", tags=["database"])
 limiter = RateLimiter()
 
 #: Statuses that mean something is saved.
-_SAVED = {
-    DatabaseStatus.CONNECTED.value,
-    DatabaseStatus.UNCHECKED.value,
-    DatabaseStatus.FAILED.value,
-}
+_SAVED = {DatabaseStatus.CONNECTED.value, DatabaseStatus.UNCHECKED.value}
 
 
 class DatabaseValues(BaseModel):
@@ -68,9 +65,23 @@ def _contract(project: Project, provider: Optional[str] = None) -> dbconnect.Con
         )
     if provider and provider not in dbconnect.PROVIDERS[choice.token]:
         raise HTTPException(422, f"'{provider}' isn't a host for {choice.label}.")
-    stored = project_secrets.load(project.owner_id, project.id).get("provider") if project.owner_id else None
-    chosen = provider or (stored if stored in dbconnect.PROVIDERS[choice.token] else None)
-    return dbconnect.contract_for(choice.token, chosen or charter.database_provider)  # type: ignore[return-value]
+    if provider and provider != charter.database_provider and not _at_gate(project):
+        # The crew has written code that reads the charter's variable names. Values
+        # saved under another host's names would leave that code reading nothing.
+        current = dbconnect.contract_for(choice.token, charter.database_provider)
+        raise HTTPException(
+            409,
+            f"The crew already built against {current.label if current else 'another host'}'s "
+            "variables, so the host can't change now. Redo the architecture to change it.",
+        )
+    return dbconnect.contract_for(choice.token, provider or charter.database_provider)  # type: ignore[return-value]
+
+
+def _at_gate(project: Project) -> bool:
+    return (
+        project.status == PipelineStatus.AWAITING_APPROVAL.value
+        and project.gate_kind == GateKind.DATABASE.value
+    )
 
 
 def _guard_write(request: Request) -> None:
@@ -91,31 +102,36 @@ def _state(project: Project, want: Optional[str] = None) -> dict:
     charter = Charter.from_dict(project.charter)
     choice = charter.get("database") if charter else None
     needed = bool(choice and choice.token in dbconnect.NEEDS_CREDENTIALS)
+    at_gate = _at_gate(project)
     out: dict = {
         "needed": needed,
         "status": project.database_status,
         "database": choice.token if choice else None,
         "database_label": choice.label if choice else None,
-        "at_gate": project.status == PipelineStatus.AWAITING_APPROVAL.value
-        and project.gate_kind == GateKind.DATABASE.value,
+        "at_gate": at_gate,
     }
     if not needed:
         return out
-    record = project_secrets.load(project.owner_id, project.id) if project.owner_id else {}
-    stored_provider = record.get("provider") if record.get("database") == choice.token else None
-    provider = stored_provider if stored_provider in dbconnect.PROVIDERS[choice.token] else charter.database_provider
-    if want in dbconnect.PROVIDERS[choice.token]:
+    # The charter's host is the one the code reads. Another is only for looking at,
+    # and only while the question is still open.
+    provider = charter.database_provider
+    if at_gate and want in dbconnect.PROVIDERS[choice.token]:
         provider = want
     contract = dbconnect.contract_for(choice.token, provider)
+    saved = project_secrets.summary(project.owner_id, project.id, contract)
     out.update(
         {
+            # The stored record's provider is already folded into `contract`; the
+            # summary's own `provider` (None when nothing is saved) must not win.
+            "saved": saved["saved"],
+            "check": saved["check"],
             "provider": contract.provider,
+            # A choice only while the build hasn't been written against one yet.
             "providers": [
                 {"provider": p, "label": dbconnect.contract_for(choice.token, p).label}
-                for p in dbconnect.PROVIDERS[choice.token]
+                for p in (dbconnect.PROVIDERS[choice.token] if at_gate else (provider,))
             ],
             "contract": contract.as_dict(),
-            **project_secrets.summary(project.owner_id, project.id, contract),
         }
     )
     return out
@@ -158,6 +174,11 @@ def _save(project: Project, body: DatabaseValues, db: Session) -> dict:
         project_secrets.save(project.owner_id, project.id, contract, parsed.values, result)
     except secretbox.SecretsLocked as e:
         raise HTTPException(503, str(e))
+    charter = Charter.from_dict(project.charter)
+    if charter is not None and charter.database_provider != contract.provider:
+        # Only reachable at the gate (see `_contract`): the code isn't written yet,
+        # so it is told to read the names that were actually saved.
+        runner.set_database_provider(project, charter.with_provider(contract.provider))
     project.database_status = (
         DatabaseStatus.CONNECTED.value
         if result.status == dbconnect.CONNECTED
@@ -233,7 +254,7 @@ def _resume(
     status: Optional[str] = None,
 ) -> RunResponse:
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}, answers_database=True):
         raise _conflict(project, "continue")
     # After the claim, so a second tab that lost the race records nothing.
     if status is not None:

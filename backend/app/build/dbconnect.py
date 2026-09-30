@@ -192,9 +192,11 @@ PROVIDERS: dict[str, tuple[str, ...]] = {
 NEEDS_CREDENTIALS = frozenset(PROVIDERS)
 
 #: Aliases that name a provider in Atlas's prose, longest first where it matters.
+#: Never a bare "atlas": that is also the architect's own name, and "Atlas recommends
+#: MongoDB" says nothing about where it is hosted.
 _PROVIDER_ALIASES: tuple[tuple[str, str, str], ...] = (
     ("mongodb", "mongodb atlas", "atlas"),
-    ("mongodb", "atlas", "atlas"),
+    ("mongodb", "atlas cluster", "atlas"),
     ("postgres", "supabase", "supabase"),
     ("postgres", "neon", "neon"),
     ("mysql", "planetscale", "planetscale"),
@@ -237,10 +239,10 @@ def contract_for(database: Optional[str], provider: Optional[str] = None) -> Opt
 
 
 def env_names(database: Optional[str], provider: Optional[str]) -> tuple[str, ...]:
-    """Every variable name any provider of this database may use, contract first.
+    """The variable names this provider's contract uses — what the charter carries.
 
-    The charter carries the names so the code reads them. Supabase's optional
-    `DATABASE_URL` is included: code that talks to Postgres directly reads it.
+    Supabase's optional `DATABASE_URL` is included: code that talks to Postgres
+    directly reads it.
     """
     contract = contract_for(database, provider)
     return contract.names if contract else ()
@@ -475,6 +477,31 @@ def parse(contract: Contract, values: dict[str, object]) -> Parsed:
         else:
             out.values[var.name] = text.rstrip("/") if var.kind == "url" else text
     return out
+
+
+# ── what counts as secret in a saved value ───────────────────────────────────
+def secret_parts(contract: Contract, values: dict[str, str]) -> list[str]:
+    """The pieces of `values` that are actually secret, for the scrubber.
+
+    Not a whole connection string — every fragment of `postgresql://…` would then
+    read as a secret, and "https://" would be redacted from every log line — and
+    not a value that is public by design (a Supabase URL, a region, a project id).
+    For a URI it is the password, as pasted and as decoded.
+    """
+    parts: list[str] = []
+    for name, value in values.items():
+        var = contract.var(name)
+        if var is None or not value:
+            continue
+        if var.kind == "uri":
+            split = _split_uri(value)
+            password = split[1].partition(":")[2] if split else ""
+            for form in {password, unquote(password)}:
+                if form:
+                    parts.append(form)
+        elif var.secret:
+            parts.append(value)
+    return parts
 
 
 # ── showing a saved value back, without showing it ───────────────────────────
@@ -739,8 +766,11 @@ def _ping_supabase(contract: Contract, values: dict[str, str]) -> CheckResult:
     key = values["SUPABASE_ANON_KEY"]
     started = time.monotonic()
     try:
+        # Auth's settings answer any valid publishable (or legacy anon) key, and
+        # refuse a wrong one. The REST root is no good for this: it serves the
+        # schema, which a project may deliberately keep from anonymous keys.
         r = httpx.get(
-            f"{url}/rest/v1/",
+            f"{url}/auth/v1/settings",
             headers={"apikey": key, "Authorization": f"Bearer {key}"},
             timeout=TIMEOUT_SECONDS,
         )

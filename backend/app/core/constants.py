@@ -75,9 +75,8 @@ class DatabaseStatus(str, Enum):
     #: Tested against the real database, and it answered.
     CONNECTED = "connected"
     #: Saved, but nothing here could sign in to check it (no driver installed).
+    #: A test that fails saves nothing, so there is no "failed" status to record.
     UNCHECKED = "unchecked"
-    #: Saved, and the last test failed.
-    FAILED = "failed"
     #: "Continue, I'll add it later."
     LATER = "later"
     #: The database needs nothing: SQLite, or no database at all.

@@ -204,7 +204,7 @@ export type Project = {
   gate_kind: GateKind | null;
   /** One line on why the run stopped here — a severe finding, a cost overrun. */
   gate_note: string | null;
-  /** connected | unchecked | failed | later | none — or null until asked. Never a value. */
+  /** connected | unchecked | later | none — or null until asked. Never a value. */
   database_status?: DatabaseStatus | null;
 
   /**
@@ -1424,7 +1424,8 @@ export type DeviceModelInfo = {
 };
 
 // ── the build's database ─────────────────────────────────────────────────────
-export type DatabaseStatus = "connected" | "unchecked" | "failed" | "later" | "none";
+/** A failed test saves nothing, so "failed" is never a status — only a check result. */
+export type DatabaseStatus = "connected" | "unchecked" | "later" | "none";
 
 export type DatabaseVar = {
   name: string;

@@ -18,7 +18,7 @@ from typing import Optional
 import io
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from app.connector.hub import hub
 from app.api.deps import current_user, get_project
 from app.build import dbconnect
-from app.core import artifacts, model_roles, project_secrets
+from app.core import artifacts, model_roles, project_secrets, secretbox
 from app.core.config import settings
 from app.core.constants import (
     PHASE_ORDER,
@@ -236,19 +236,34 @@ def get_artifacts(project: Project = Depends(get_project)) -> dict:
 
 
 @router.get("/{project_id}/download")
-def download_project(include_credentials: bool = False, project: Project = Depends(get_project)):
+def download_project(
+    request: Request,
+    include_credentials: bool = False,
+    project: Project = Depends(get_project),
+):
     """Stream the generated project as a .zip (code + docs + README).
 
     `include_credentials` adds a real `backend/.env` with the saved database values —
     only here, only when asked. The preview, `/artifacts` and the GitHub push always
     carry `.env.example` with placeholders.
     """
+    env = None
+    if include_credentials and project.owner_id:
+        # The one response that carries a credential in the clear: held to the same
+        # rule as saving one.
+        from app.api.routes.settings import _trusted_host
+
+        if not _trusted_host(request):
+            raise HTTPException(
+                403,
+                "Credentials can only be downloaded from an address this backend is "
+                "served at (localhost, or BACKEND_PUBLIC_URL).",
+            )
+        try:
+            env = project_secrets.reveal(project.owner_id, project.id)
+        except secretbox.SecretsLocked as e:
+            raise HTTPException(503, str(e))
     assembled = artifacts.assemble(project)
-    env = (
-        project_secrets.reveal(project.owner_id, project.id)
-        if include_credentials and project.owner_id
-        else None
-    )
     data = artifacts.build_zip(project, assembled, env=env)
     filename = artifacts.slug(project.name or project.idea) + ".zip"
     return StreamingResponse(
@@ -259,12 +274,20 @@ def download_project(include_credentials: bool = False, project: Project = Depen
 
 
 # ── Pipeline control ─────────────────────────────────────────────────────────
-def _claim(db: Session, project: Project, allowed: set[str]) -> bool:
+def _claim(
+    db: Session, project: Project, allowed: set[str], *, answers_database: bool = False
+) -> bool:
     """Atomically move the project into `running` — but only from `allowed`.
 
     Returns False when someone else got there first (a second tab, a double click),
     which is the whole point: the phase is handed to a background task exactly once.
+
+    A build parked on its database question is released only by an answer to it
+    (`answers_database`) — not by approve, a redo, a finding's fix, or anything else
+    that claims a waiting build. Checked here, once, so no route can forget it.
     """
+    if not answers_database:
+        _refuse_at_database_gate(project)
     result = db.execute(
         update(Project)
         .where(Project.id == project.id, Project.status.in_(allowed))
@@ -554,7 +577,6 @@ def approve_phase(
             "The crew is stuck on a serious problem, and approving would ship it. Keep "
             "trying, stop the build, or waive each finding with a reason.",
         )
-    _refuse_at_database_gate(project)
     _require_findings_settled(db, project)
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
@@ -587,7 +609,6 @@ def reject_phase(
     if not payload.feedback or not payload.feedback.strip():
         raise HTTPException(400, "Feedback is required when rejecting a phase.")
     _refuse_credentials(payload.feedback)
-    _refuse_at_database_gate(project)
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "reject")
@@ -880,7 +901,6 @@ def redo_phase(
     if not payload.feedback.strip():
         raise HTTPException(400, "Say what to change — an agent cannot act on blank feedback.")
     _refuse_credentials(payload.feedback)
-    _refuse_at_database_gate(project)
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "redo")

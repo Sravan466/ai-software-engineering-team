@@ -36,6 +36,9 @@ log = get_logger(__name__)
 _NAME = "secrets.local.json"
 _PROJECT_ID = re.compile(r"^[0-9a-f]{32}$")
 _LOCK = threading.Lock()
+#: What this process has told the scrubber, per project — so a value is registered
+#: once however many times it is read, and forgotten exactly once when replaced.
+_REGISTERED: dict[str, list[str]] = {}
 
 
 def _dir(owner_id: str, project_id: str) -> Path:
@@ -76,13 +79,11 @@ def save(
         "check": _check_record(check),
     }
     with _LOCK:
-        previous = load(owner_id, project_id)
         target = _path(owner_id, project_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         write_private(target, json.dumps(record, indent=2))
-    _forget(previous)
-    for value in values.values():
-        scrub.register(value)
+    _forget(project_id)
+    _register(project_id, dbconnect.secret_parts(contract, values))
     # Names only. The values are never in a log line.
     log.info(
         "Database credentials saved for project %s: %s (%s)",
@@ -103,23 +104,30 @@ def _check_record(check: dbconnect.CheckResult) -> dict:
     }
 
 
-def _forget(record: dict) -> None:
-    for sealed in (record.get("values") or {}).values():
-        try:
-            scrub.forget(secretbox.decrypt(sealed))
-        except secretbox.SecretsLocked:
-            pass
+def _register(project_id: str, parts: list[str]) -> None:
+    with _LOCK:
+        if project_id in _REGISTERED:
+            return
+        _REGISTERED[project_id] = parts
+    for part in parts:
+        scrub.register(part)
+
+
+def _forget(project_id: str) -> None:
+    with _LOCK:
+        parts = _REGISTERED.pop(project_id, [])
+    for part in parts:
+        scrub.forget(part)
 
 
 def remove(owner_id: str, project_id: str) -> bool:
     """Delete the saved credentials. True if there were any."""
     with _LOCK:
-        previous = load(owner_id, project_id)
         path = _path(owner_id, project_id)
         existed = path.exists()
         if existed:
             path.unlink()
-    _forget(previous)
+    _forget(project_id)
     if existed:
         log.info("Database credentials removed for project %s", project_id)
     return existed
@@ -139,13 +147,19 @@ def remove_project(owner_id: Optional[str], project_id: str) -> None:
 
 
 def reveal(owner_id: str, project_id: str) -> dict[str, str]:
-    """The saved values, decrypted — for the opt-in download only."""
+    """The saved values, decrypted — for the opt-in download only.
+
+    Raises `secretbox.SecretsLocked` when the encryption key can't open them.
+    """
+    record = load(owner_id, project_id)
     out: dict[str, str] = {}
-    for name, sealed in (load(owner_id, project_id).get("values") or {}).items():
+    for name, sealed in (record.get("values") or {}).items():
         value = secretbox.decrypt(sealed)
         if value:
-            scrub.register(value)
             out[name] = value
+    contract = dbconnect.contract_for(record.get("database"), record.get("provider"))
+    if contract is not None:
+        _register(project_id, dbconnect.secret_parts(contract, out))
     return out
 
 

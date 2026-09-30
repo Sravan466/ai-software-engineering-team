@@ -124,7 +124,7 @@ class Project(Base):
     gate_kind: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     gate_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: How the person answered "connect your database": `connected`, `unchecked`,
-    #: `failed`, `later`, or `none` when the database needs nothing. Null until the
+    #: `later`, or `none` when the database needs nothing. Null until the
     #: question has been asked (and on every build from before it was). The values
     #: themselves are never in the database — see `app.core.project_secrets`.
     database_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)

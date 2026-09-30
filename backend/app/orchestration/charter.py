@@ -167,6 +167,12 @@ class Charter:
         )
         return cls(choices, provider, names)
 
+    def with_provider(self, provider: str) -> "Charter":
+        """The same stack, hosted somewhere else — and so read from other names."""
+        database = self.choices.get("database")
+        token = database.token if database else None
+        return Charter(self.choices, provider, dbconnect.env_names(token, provider))
+
     def as_dict(self) -> dict:
         out: dict = {category: choice.as_dict() for category, choice in self.choices.items()}
         if self.database_provider:
@@ -346,6 +352,9 @@ def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Cha
     provider: Optional[str] = None
     if database is not None:
         spoken = debate.get("decision") if isinstance(debate, dict) else None
+        # The same guard the verdict gets above: a transcript is not a verdict.
+        if not isinstance(spoken, str) or len(spoken.strip()) > _MAX_VERDICT_CHARS:
+            spoken = None
         provider = dbconnect.provider_for(
             database.token,
             [*tech.get("database", ()), *tech.get("backend", ()), *tech.get("infra", ()), spoken or ""],

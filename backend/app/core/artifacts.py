@@ -312,8 +312,19 @@ def env_file(example: str, values: dict[str, str]) -> str:
 
 
 def _env_value(value: str) -> str:
-    # Quoted when a dotenv reader would otherwise cut it at a space or a #.
-    return f'"{value}"' if any(c in value for c in " #\"'") else value
+    """A value every common dotenv reader gives back unchanged.
+
+    Bare when nothing in it is special. Single-quoted otherwise, which both
+    python-dotenv and Node's dotenv read literally — no `$` expansion, no escapes.
+    Only a value that itself holds a single quote is double-quoted, with its
+    backslashes and double quotes escaped.
+    """
+    if not re.search(r"[\s#\"'\\$`]", value):
+        return value
+    if "'" not in value:
+        return f"'{value}'"
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
 
 
 def build_zip(project: Project, assembled: dict, env: Optional[dict[str, str]] = None) -> bytes:
