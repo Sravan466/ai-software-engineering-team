@@ -5,6 +5,7 @@ provided: sk-qVL45***…D1Vi` — and that text used to reach the log, the proje
 `last_error` and the page. One step, `scrub`, is applied wherever such text goes:
 
 - known key shapes (`sk-…`, `sk-proj-…`, `sk-ant-…`, `AIza…`), whole or masked;
+- the password in a connection string (`postgres://user:<password>@host`);
 - the text after "API key provided:", whatever shape it is;
 - any run of 8+ characters of a key this process holds (`register`).
 
@@ -33,6 +34,9 @@ _PATTERNS = (
     re.compile(r"AIza[0-9A-Za-z_\-]{10,}"),
     # Bearer / x-api-key header values quoted in an error.
     re.compile(r"(?i)((?:bearer|x-api-key|x-goog-api-key)[\s:=']+)[A-Za-z0-9_\-\.]{8,}"),
+    # The password in a connection string: scheme://user:<password>@host. Only the
+    # password goes; the user and host stay, so the line still says which database.
+    re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+(?=@)", re.IGNORECASE),
     # A masked token on its own: "abcd****wxyz".
     re.compile(r"[A-Za-z0-9_\-]{2,}\*{3,}[.…]*[A-Za-z0-9_\-]*"),
 )
@@ -101,6 +105,13 @@ def _known_fragments(text: str) -> str:
             text = text.replace(secret[i:end], REDACTED)
             i = end
     return text
+
+
+def holds_known(text: object) -> bool:
+    """Whether `text` contains a run of 8+ characters of a secret this process holds."""
+    with _KNOWN_LOCK:
+        anchors = _ANCHORS
+    return bool(anchors is not None and text and anchors.search(str(text)))
 
 
 def scrub(text: object) -> str:

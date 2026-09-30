@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, type Artifacts, type Project, type RunResponse } from "@/lib/api";
+import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
 import { APPROVAL_BY_ID, PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
 import { AGENT_BY_KEY, type Persona } from "@/components/agents/personas";
@@ -15,7 +15,8 @@ import SchemaBadge from "@/components/build/SchemaBadge";
 import PhaseArtifact from "@/components/build/PhaseArtifact";
 import FileBrowser from "@/components/build/FileBrowser";
 import BuildLine from "@/components/build/BuildLine";
-import Decision from "@/components/build/Decision";
+import Decision, { databaseUnconnected } from "@/components/build/Decision";
+import { DatabasePanel } from "@/components/build/DatabaseConnect";
 import { FixingPanel } from "@/components/build/AutoFix";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
@@ -372,6 +373,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                 : project.preferred_model || project.routing_mode}
             </span>
             <ReviewPolicy project={project} id={id} onChanged={load} />
+            {databaseUnconnected(project) && (
+              <button
+                type="button"
+                className="badge badge-warn db-head-badge"
+                onClick={() => setTab("summary")}
+                title="Connect it on the Deliver tab"
+              >
+                {Icon.database} Database not connected
+              </button>
+            )}
           </div>
         </div>
         {/* Actions belong to the view that owns them. The header used to carry a
@@ -495,7 +506,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
           />
         )}
         {tab === "preview" && <PreviewTab id={id} />}
-        {tab === "summary" && <SummaryTab id={id} analytics={analytics} />}
+        {tab === "summary" && <SummaryTab id={id} analytics={analytics} onDatabaseChanged={load} />}
       </div>
     </div>
   );
@@ -1052,9 +1063,29 @@ function stillRunning(status: string): boolean {
   return status === "created" || status === "running" || status === "awaiting_approval";
 }
 
-function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
+function SummaryTab({
+  id,
+  analytics,
+  onDatabaseChanged,
+}: {
+  id: string;
+  analytics: any;
+  onDatabaseChanged: () => void;
+}) {
   const [art, setArt] = useState<Artifacts | null>(null);
   const [error, setError] = useState("");
+  // Whether a database is saved, and whether this download should carry it.
+  const [dbSaved, setDbSaved] = useState(false);
+  const [withEnv, setWithEnv] = useState(false);
+  const onDb = useCallback(
+    (s: DatabaseState) => {
+      const saved = Boolean(s.saved?.length);
+      setDbSaved(saved);
+      if (!saved) setWithEnv(false);
+      onDatabaseChanged();
+    },
+    [onDatabaseChanged],
+  );
 
   useEffect(() => {
     api.getArtifacts(id).then(setArt).catch((e) => setError(e.message));
@@ -1211,6 +1242,8 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
         )}
       </div>
 
+      <DatabasePanel id={id} onChange={onDb} />
+
       {/* The one download control in the app. The header carried a second copy
           of this button, which is how the same archive came to be offered twice. */}
       <div className="card">
@@ -1232,11 +1265,29 @@ function SummaryTab({ id, analytics }: { id: string; analytics: any }) {
             )}
           </p>
           {hasOutput && (
-            <a className="btn btn-primary" href={api.downloadUrl(id)} download>
+            <a className="btn btn-primary" href={api.downloadUrl(id, withEnv)} download>
               {Icon.download} Download .zip
             </a>
           )}
         </div>
+        {hasOutput && dbSaved && (
+          <div className="db-include">
+            <label className="db-check">
+              <input
+                type="checkbox"
+                checked={withEnv}
+                onChange={(e) => setWithEnv(e.target.checked)}
+                aria-describedby="db-include-hint"
+              />
+              <span>Include my database credentials in the download</span>
+            </label>
+            <p className="field-hint" id="db-include-hint">
+              {withEnv
+                ? "This download has a real backend/.env with your credentials. Never commit it — it is already in .gitignore."
+                : "This download has backend/.env.example with placeholders only. GitHub always gets placeholders."}
+            </p>
+          </div>
+        )}
       </div>
 
       <GithubPublish id={id} defaultName={art.name || art.idea} disabled={!hasOutput} />

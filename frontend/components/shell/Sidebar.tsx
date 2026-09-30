@@ -242,6 +242,12 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
                     title={STATUS_TEXT[state] || state}
                   />
                   <span className="sb-item-title">{title}</span>
+                  {Boolean(p.charter?.env?.length) &&
+                    (p.database_status === "later" || p.database_status === "failed") && (
+                      <span className="sb-db" role="img" aria-label="Database not connected" title="Database not connected">
+                        {Icon.database}
+                      </span>
+                    )}
                   <span className="sb-item-time">{timeAgo(p.updated_at || p.created_at)}</span>
                 </Link>
                 <button

@@ -218,6 +218,8 @@ class ProjectOut(BaseModel):
     #: Which review to render, and the one line saying why the run stopped here.
     gate_kind: Optional[str] = None
     gate_note: Optional[str] = None
+    #: How the database question was answered — see `DatabaseStatus`. Never a value.
+    database_status: Optional[str] = None
 
     #: The technology decisions frozen after the architecture was approved, which
     #: every phase after it is written against and checked against. `None` on a run

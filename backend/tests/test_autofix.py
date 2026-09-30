@@ -7,7 +7,7 @@ import pytest
 
 from app.core.config import settings
 from app.orchestration import autofix, remediation
-from tests.conftest import _fake_complete, stub
+from tests.conftest import _fake_complete, stub, through_database_gate
 
 SECRET = {
     "title": "Hardcoded MongoDB connection string",
@@ -64,6 +64,7 @@ def _build(client, monkeypatch, audits, mode="unattended"):
         json={"idea": "A group expenses app", "routing_mode": "local_only", "approval_mode": mode},
     ).json()["id"]
     client.post(f"/api/projects/{pid}/run")
+    through_database_gate(client, pid)
     return pid, crew
 
 
@@ -262,6 +263,7 @@ def test_a_fix_round_that_never_generated_is_not_judged(client, monkeypatch):
         json={"idea": "A group expenses app", "routing_mode": "local_only", "approval_mode": "unattended"},
     ).json()["id"]
     client.post(f"/api/projects/{pid}/run")
+    through_database_gate(client, pid)
     project = client.get(f"/api/projects/{pid}").json()
     assert project["status"] == "failed"
     assert project["auto_fix"]["tracks"]["security"]["rounds"] == []
@@ -337,6 +339,7 @@ def test_a_compile_fix_that_works_closes_its_round_and_frees_the_budget(client, 
         json={"idea": "An API", "routing_mode": "local_only", "approval_mode": "unattended"},
     ).json()["id"]
     client.post(f"/api/projects/{pid}/run")
+    through_database_gate(client, pid)
     project = client.get(f"/api/projects/{pid}").json()
     assert project["status"] == "completed", project["gate_note"]
     track = project["auto_fix"]["tracks"]["build:backend_engineer"]

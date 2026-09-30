@@ -21,6 +21,7 @@ import FileBrowser from "./FileBrowser";
 import CharterPanel, { StackViolations } from "./Charter";
 import SecurityFindings from "./SecurityFindings";
 import { NeedsHelp, trackEntries } from "./AutoFix";
+import { DatabaseGate } from "./DatabaseConnect";
 import BuildProblems from "./BuildProblems";
 import BuildLine from "./BuildLine";
 import BuildProgress from "@/components/preview/BuildProgress";
@@ -47,6 +48,8 @@ import { artifactFiles, latestRow, type PayloadFile } from "./payload";
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
  *   needs_help — the crew could not fix a serious problem by itself. Not a judgement
  *              call: Keep trying or Stop, with waiving as the exception.
+ *   database — Atlas picked a database that needs credentials: paste them, or carry
+ *              on and add them later. Its own card, in `DatabaseConnect`.
  *
  * Whatever the shape, the rule is the same: the work is above the buttons, in the
  * same panel, and sending it back reaches the agent that produced it.
@@ -113,6 +116,12 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
     approve: "Keep trying",
     after: "",
   },
+  database: {
+    title: "Connect your database",
+    blurb: "Atlas picked a database for this build.",
+    approve: "Continue build",
+    after: "",
+  },
   phase: {
     title: "Handoff",
     blurb: "One agent has finished and is passing its work on.",
@@ -122,6 +131,14 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
 };
 
 const rowFor = (project: Project, key: string) => latestRow(project.phases, key);
+
+/** Asked about, and not connected: a build that reads a database nobody gave it. */
+export function databaseUnconnected(project: Project): boolean {
+  return (
+    Boolean(project.charter?.env?.length) &&
+    (project.database_status === "later" || project.database_status === "failed")
+  );
+}
 
 export default function Decision({
   project,
@@ -266,6 +283,10 @@ export default function Decision({
     }
   }
 
+  if (kind === "database") {
+    return <DatabaseGate project={project} id={id} busy={busy} act={act} />;
+  }
+
   if (kind === "needs_help") {
     return (
       <section className="decision decision-needs_help" aria-labelledby="decision-title">
@@ -317,6 +338,22 @@ export default function Decision({
       )}
 
       <div className="decision-body">
+        {wantsBuild && databaseUnconnected(project) && (
+          <p className="db-reminder" role="note">
+            {Icon.database}
+            <span>
+              <b>Database not connected.</b> This build reads{" "}
+              {(project.charter?.env ?? []).map((n, i) => (
+                <span key={n}>
+                  {i > 0 && ", "}
+                  <code className="db-var">{n}</code>
+                </span>
+              ))}{" "}
+              and the download has placeholders for {project.charter?.env?.length === 1 ? "it" : "them"}. Connect it
+              on the Deliver tab after shipping.
+            </span>
+          </p>
+        )}
         {kind === "plan" && <PlanReview project={project} onRedo={aim} />}
         {kind === "build" && art?.build?.problems?.length ? (
           <div className="artifact-pad build-review">

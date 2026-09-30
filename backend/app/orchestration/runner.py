@@ -30,10 +30,12 @@ from sqlalchemy.orm import Session
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
-from app.core import artifacts, identity
+from app.build import dbconnect
+from app.core import artifacts, identity, project_secrets
 from app.core.config import settings
 from app.core.constants import (
     PHASE_ORDER,
+    DatabaseStatus,
     FindingStatus,
     GateKind,
     Phase,
@@ -51,7 +53,7 @@ from app.preview import history as preview_history
 from app.memory.store import memory_store
 from app.orchestration import autofix, remediation
 from app.orchestration.approval import Gate, decide_gate
-from app.orchestration.charter import binding_on
+from app.orchestration.charter import Charter, binding_on
 from app.orchestration.graph import graph, gather_skills
 from app.orchestration.state import PipelineState
 from app.preview import service as mockup
@@ -298,6 +300,13 @@ class PipelineRunner:
     # ── the crew fixing its own serious problems ──────────────────────────────
     def gate_for(self, project: Project, row: PhaseResult) -> Optional[Gate]:
         """`decide_gate` for a finished row, minus what a person already accepted."""
+        if row.phase == Phase.SYSTEM_DESIGN.value:
+            # Before any review policy: only the person can hand over a database's
+            # credentials, so this is asked in unattended mode too, and ahead of the
+            # Plan review, which still parks once it is answered.
+            asked = self.database_question(project)
+            if asked is not None:
+                return asked
         data = autofix.load(project)
         stack = None if autofix.accepted(data, autofix.build_track(row.phase)) else row.stack_note
         return decide_gate(
@@ -308,6 +317,49 @@ class PipelineRunner:
             stack,
             self.build_problems(project),
         )
+
+    @staticmethod
+    def database_question(project: Project) -> Optional[Gate]:
+        """The "connect your database" gate, while it is still unanswered."""
+        if project.database_status is not None:
+            return None
+        charter = Charter.from_dict(project.charter)
+        choice = charter.get("database") if charter else None
+        if choice is None or choice.token not in dbconnect.NEEDS_CREDENTIALS:
+            return None
+        contract = dbconnect.contract_for(choice.token, charter.database_provider)
+        on = f" on {contract.label}" if contract and contract.label != choice.label else ""
+        return Gate(
+            GateKind.DATABASE.value,
+            f"Atlas picked {choice.label}{on}. Connect it now, or continue and add it later.",
+        )
+
+    @staticmethod
+    def settle_database(project: Project, before: object) -> None:
+        """After the charter is (re)frozen: ask again if the database changed.
+
+        Credentials saved for MongoDB are no use to a build that now uses Postgres,
+        so they are removed rather than kept beside a database they don't open. A
+        database that needs nothing — SQLite, or none — is recorded as `none`.
+        """
+        def token(data: object) -> Optional[str]:
+            charter = Charter.from_dict(data)
+            choice = charter.get("database") if charter else None
+            return choice.token if choice else None
+
+        old, new = token(before), token(project.charter)
+        if new not in dbconnect.NEEDS_CREDENTIALS:
+            if old in dbconnect.NEEDS_CREDENTIALS and project.owner_id:
+                project_secrets.remove(project.owner_id, project.id)
+            project.database_status = DatabaseStatus.NONE.value
+            return
+        if project.database_status == DatabaseStatus.NONE.value:
+            # It needed nothing before, and it does now: that is a new question.
+            project.database_status = None
+        elif old is not None and old != new:
+            if project.owner_id:
+                project_secrets.remove(project.owner_id, project.id)
+            project.database_status = None
 
     @staticmethod
     def build_problems(project: Project) -> list[dict]:
@@ -790,7 +842,9 @@ class PipelineRunner:
 
         self._complete_row(db, project, row, last_result)
         if charter_update is not None:
+            before = project.charter
             project.charter = charter_update or None
+            self.settle_database(project, before)
             db.commit()
             log.info("Stack charter re-frozen for %s after redoing the architecture", project.id)
         if phase_key == Phase.FRONTEND_ENGINEER.value:
@@ -980,7 +1034,9 @@ class PipelineRunner:
             # Mirrored out of the graph's own state rather than re-derived here, so
             # there is exactly one charter and the row cannot drift from the
             # checkpoint the agents are actually reading.
+            before = project.charter
             project.charter = state.get("charter") or None
+            self.settle_database(project, before)
             db.commit()
         self._raise_if_cancelled(db, project)
 

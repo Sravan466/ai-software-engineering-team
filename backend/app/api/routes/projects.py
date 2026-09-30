@@ -25,7 +25,8 @@ from sqlalchemy.orm import Session
 
 from app.connector.hub import hub
 from app.api.deps import current_user, get_project
-from app.core import artifacts, model_roles
+from app.build import dbconnect
+from app.core import artifacts, model_roles, project_secrets
 from app.core.config import settings
 from app.core.constants import (
     PHASE_ORDER,
@@ -145,8 +146,9 @@ def _rederive_gate(db: Session, project: Project) -> None:
     if project.status != PipelineStatus.AWAITING_APPROVAL.value or not project.current_phase:
         return
     # "Needs help" is not a policy's gate: the crew stopped on something it could not
-    # fix, and no review mode makes that go away.
-    if project.gate_kind == GateKind.NEEDS_HELP.value:
+    # fix, and no review mode makes that go away. Nor is the database question — only
+    # the person's answer releases it.
+    if project.gate_kind in (GateKind.NEEDS_HELP.value, GateKind.DATABASE.value):
         return
     # The runner's own definition of "latest", so this cannot re-derive the gate from
     # a different row than the one the loop parked on.
@@ -212,8 +214,11 @@ def delete_project(project: Project = Depends(get_project), db: Session = Depend
     """
     project.cancel_requested = True
     db.commit()
+    owner_id, project_id = project.owner_id, project.id
     db.delete(project)
     db.commit()
+    # The database credentials go with it: nothing is left for a project that isn't.
+    project_secrets.remove_project(owner_id, project_id)
 
 
 # ── Generated-project artifacts (preview + download) ─────────────────────────
@@ -231,10 +236,20 @@ def get_artifacts(project: Project = Depends(get_project)) -> dict:
 
 
 @router.get("/{project_id}/download")
-def download_project(project: Project = Depends(get_project)):
-    """Stream the generated project as a .zip (code + docs + README)."""
+def download_project(include_credentials: bool = False, project: Project = Depends(get_project)):
+    """Stream the generated project as a .zip (code + docs + README).
+
+    `include_credentials` adds a real `backend/.env` with the saved database values —
+    only here, only when asked. The preview, `/artifacts` and the GitHub push always
+    carry `.env.example` with placeholders.
+    """
     assembled = artifacts.assemble(project)
-    data = artifacts.build_zip(project, assembled)
+    env = (
+        project_secrets.reveal(project.owner_id, project.id)
+        if include_credentials and project.owner_id
+        else None
+    )
+    data = artifacts.build_zip(project, assembled, env=env)
     filename = artifacts.slug(project.name or project.idea) + ".zip"
     return StreamingResponse(
         io.BytesIO(data),
@@ -496,6 +511,31 @@ def _require_findings_settled(db: Session, project: Project) -> None:
     )
 
 
+def _refuse_at_database_gate(project: Project) -> None:
+    if (
+        project.status == PipelineStatus.AWAITING_APPROVAL.value
+        and project.gate_kind == GateKind.DATABASE.value
+    ):
+        raise HTTPException(
+            409,
+            "This build is waiting on its database. Connect it, or choose \"Continue, "
+            "I'll add it later\".",
+        )
+
+
+#: Said when a reviewer's note carries something that looks like a credential.
+_CREDENTIAL_IN_FEEDBACK = (
+    "Don't paste credentials here — this note goes to a model. Use Connect database "
+    "instead; the crew only ever sees the variable names."
+)
+
+
+def _refuse_credentials(text: str) -> None:
+    if dbconnect.looks_like_credential(text):
+        # Not logged with the text, for the obvious reason.
+        raise HTTPException(422, _CREDENTIAL_IN_FEEDBACK)
+
+
 @router.post("/{project_id}/approve", response_model=RunResponse)
 def approve_phase(
     background: BackgroundTasks,
@@ -514,6 +554,7 @@ def approve_phase(
             "The crew is stuck on a serious problem, and approving would ship it. Keep "
             "trying, stop the build, or waive each finding with a reason.",
         )
+    _refuse_at_database_gate(project)
     _require_findings_settled(db, project)
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
@@ -545,6 +586,8 @@ def reject_phase(
     """
     if not payload.feedback or not payload.feedback.strip():
         raise HTTPException(400, "Feedback is required when rejecting a phase.")
+    _refuse_credentials(payload.feedback)
+    _refuse_at_database_gate(project)
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "reject")
@@ -836,6 +879,8 @@ def redo_phase(
         raise HTTPException(400, f"'{payload.phase}' is not a phase of this pipeline.")
     if not payload.feedback.strip():
         raise HTTPException(400, "Say what to change — an agent cannot act on blank feedback.")
+    _refuse_credentials(payload.feedback)
+    _refuse_at_database_gate(project)
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "redo")

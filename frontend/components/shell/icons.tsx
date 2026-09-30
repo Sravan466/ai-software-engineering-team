@@ -61,7 +61,9 @@ export type IconName =
   | "redo"
   | "layers"
   | "arrowUp"
-  | "close";
+  | "close"
+  | "database"
+  | "lock";
 
 export const Icon: Record<IconName, ReactNode> = {
   menu: svg(<path d="M4 6h16M4 12h16M4 18h16" />),
@@ -142,4 +144,11 @@ export const Icon: Record<IconName, ReactNode> = {
   layers: svg(<path d="M12 4 3.5 8.5 12 13l8.5-4.5zM3.5 12.5 12 17l8.5-4.5M3.5 16.5 12 21l8.5-4.5" />),
   arrowUp: svg(<path d="M12 19.5v-15m0 0-5.5 5.5M12 4.5l5.5 5.5" />),
   close: svg(<path d="M6 6l12 12M18 6 6 18" />),
+  database: svg(
+    <>
+      <ellipse cx="12" cy="6" rx="7.5" ry="2.8" />
+      <path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8" />
+    </>,
+  ),
+  lock: svg(<path d="M6.5 10.5h11a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7.5a1 1 0 0 1 1-1zM8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5M12 14.5v2" />),
 };

@@ -85,6 +85,7 @@ from app.api.routes import (  # noqa: E402
     analytics,
     auth as auth_routes,
     connector as connector_routes,
+    database as database_routes,
     devices,
     github,
     models,
@@ -97,6 +98,7 @@ from app.api.routes import (  # noqa: E402
 
 app.include_router(auth_routes.router)
 app.include_router(projects.router)
+app.include_router(database_routes.router)
 app.include_router(preview.router)
 app.include_router(models.router)
 app.include_router(rag.router)

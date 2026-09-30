@@ -288,8 +288,41 @@ def slug(text: str) -> str:
     return s or "project"
 
 
-def build_zip(project: Project, assembled: dict) -> bytes:
-    """A real, unzippable project archive: README + code files + docs."""
+def env_file(example: str, values: dict[str, str]) -> str:
+    """`.env.example` with the saved values filled in, and any it lacks appended."""
+    lines: list[str] = []
+    placed: set[str] = set()
+    for line in (example or "").splitlines():
+        name = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else ""
+        if name in values:
+            lines.append(f"{name}={_env_value(values[name])}")
+            placed.add(name)
+        else:
+            lines.append(line)
+    missing = [n for n in values if n not in placed]
+    if missing:
+        lines += ["", "# Your database connection."]
+        lines += [f"{n}={_env_value(values[n])}" for n in missing]
+    header = [
+        "# Real credentials, added because you asked for them in this download.",
+        "# Never commit this file. It is in .gitignore.",
+        "",
+    ]
+    return "\n".join(header + lines) + "\n"
+
+
+def _env_value(value: str) -> str:
+    # Quoted when a dotenv reader would otherwise cut it at a space or a #.
+    return f'"{value}"' if any(c in value for c in " #\"'") else value
+
+
+def build_zip(project: Project, assembled: dict, env: Optional[dict[str, str]] = None) -> bytes:
+    """A real, unzippable project archive: README + code files + docs.
+
+    `env` — the saved database values — adds a real `backend/.env`. Only the
+    download does this, and only when the person asked; `assemble` never does,
+    because `/artifacts` and the GitHub push both send what it returns.
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("README.md", readme_md(project, assembled))
@@ -300,4 +333,10 @@ def build_zip(project: Project, assembled: dict) -> bytes:
             z.writestr(path, f["content"])
         for d in assembled["docs"]:
             z.writestr(d["path"], d["content"])
+        if env:
+            example = next(
+                (f["content"] for f in assembled["files"] if f["path"] == "backend/.env.example"),
+                "",
+            )
+            z.writestr("backend/.env", env_file(example, env))
     return buf.getvalue()

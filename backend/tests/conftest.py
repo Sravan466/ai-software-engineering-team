@@ -183,6 +183,21 @@ def stub(monkeypatch, name: str, fn) -> None:
     monkeypatch.setattr(ModelRouter, name, staticmethod(fn))
 
 
+def through_database_gate(c: TestClient, pid: str) -> dict:
+    """Answer "Continue, I'll add it later" if the run is parked on its database.
+
+    The stub architecture picks PostgreSQL, which needs credentials, so every full run
+    now stops there once — in every review mode. Tests about something else answer it
+    here, the same way a person would, and carry on.
+    """
+    project = c.get(f"/api/projects/{pid}").json()
+    if project.get("gate_kind") == "database":
+        r = c.post(f"/api/projects/{pid}/database/later")
+        assert r.status_code == 200, r.text
+        project = c.get(f"/api/projects/{pid}").json()
+    return project
+
+
 def sign_in(c: TestClient, email: str = TEST_EMAIL, password: str = TEST_PASSWORD) -> TestClient:
     r = c.post("/api/auth/signin", json={"email": email, "password": password})
     assert r.status_code == 200, r.text

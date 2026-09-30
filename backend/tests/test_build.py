@@ -11,6 +11,7 @@ from app.build.check import check_tree
 from app.build.scaffold import build as scaffold_build, initial_migration, platform_owned
 from app.orchestration.approval import decide_gate
 from app.orchestration.charter import Charter
+from tests.conftest import through_database_gate
 
 _parser = toolchain.typescript() is not None and toolchain.node() is not None
 needs_parser = pytest.mark.skipif(not _parser, reason="no TypeScript parser available here")
@@ -207,7 +208,7 @@ def test_a_phase_that_writes_broken_code_is_sent_back_and_recorded(client, monke
                                            "approval_mode": "unattended"})
     pid = r.json()["id"]
     client.post(f"/api/projects/{pid}/run")
-    project = client.get(f"/api/projects/{pid}").json()
+    project = through_database_gate(client, pid)
 
     # Its own repair round names the file and the error; then the crew's fix loop
     # re-runs the phase with the problems as its note. That round fixed nothing, so

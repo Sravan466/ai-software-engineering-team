@@ -1259,3 +1259,261 @@
   .fixing-mark svg,
   .fix-rail-seg { animation: none !important; }
 }
+
+/* ===========================================================================
+   DATABASE — "Connect your database", right after Atlas picks the stack.
+
+   Same amber frame as every gate: this is the pipeline needing you, not an
+   alarm. Two equal answers, side by side; the paste one opens in place (no
+   modal) into a guide on the left and the fields on the right. Mono is only
+   for what is literally data here — variable names, hosts, URIs.
+   =========================================================================== */
+.db-strong { color: var(--ink); font-weight: 600; }
+.db-token { display: inline-flex; align-items: center; gap: 6px; }
+.db-token svg { width: 13px; height: 13px; }
+
+.db-var,
+.db-code,
+.db-host {
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.db-var { color: var(--accent); }
+
+/* ── the two answers ── */
+.db-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 18px;
+}
+@media (max-width: 639px) {
+  .db-choices { grid-template-columns: 1fr; }
+}
+.db-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 72px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--tr), background var(--tr);
+}
+.db-choice:hover:not(:disabled) { border-color: var(--line-3); background: var(--line); }
+.db-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.db-choice:disabled { opacity: 0.5; cursor: not-allowed; }
+.db-choice-paste { border-color: var(--accent-line); }
+.db-choice-paste:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.db-choice-paste[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.db-choice-icon {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  background: var(--bg);
+  color: var(--ink-2);
+}
+.db-choice-paste .db-choice-icon { border-color: var(--accent-line); color: var(--accent); }
+.db-choice-icon svg { width: 16px; height: 16px; }
+.db-choice-icon .btn-spinner { margin: 0; }
+.db-choice-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.db-choice-title { font-size: var(--t-md); font-weight: 600; line-height: 1.35; }
+.db-choice-sub { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.5; }
+.db-choice-chev { flex: none; align-self: center; color: var(--ink-3); transition: transform var(--tr); }
+.db-choice-chev svg { width: 16px; height: 16px; }
+.db-choice-paste[aria-expanded="true"] .db-choice-chev { transform: rotate(90deg); color: var(--accent); }
+
+/* ── the disclosure: 0fr → 1fr, so the height is the content's own ── */
+.db-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--tr-slow);
+}
+.db-disclosure[data-open="true"] { grid-template-rows: 1fr; }
+.db-disclosure-inner { min-height: 0; overflow: hidden; }
+.db-disclosure[data-open="true"] .db-disclosure-inner { border-top: 1px solid var(--line); }
+.db-pad { padding: 16px 18px; }
+
+.db-form { display: flex; flex-direction: column; gap: 16px; padding: 16px 18px 18px; }
+.decision .db-form { background: var(--bg-panel); }
+.db-card .db-form { padding: 4px 0 0; }
+.db-providers { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.db-providers .seg-btn { min-height: 36px; }
+
+.db-grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
+@media (min-width: 900px) {
+  .db-grid { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 24px; }
+}
+
+/* ── the guide ── */
+.db-guide {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-sunken);
+}
+.db-guide-title { margin: 0; font-size: var(--t-sm); font-weight: 600; color: var(--ink-2); }
+.db-steps { margin: 0; padding: 0; list-style: none; counter-reset: db-step; display: flex; flex-direction: column; gap: 10px; }
+.db-steps li {
+  counter-increment: db-step;
+  position: relative;
+  padding: 4px 6px 4px 34px;
+  margin-left: -6px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  color: var(--ink-2);
+  transition: background var(--tr-slow);
+}
+.db-steps li::before {
+  content: counter(db-step);
+  position: absolute;
+  left: 6px;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line-3);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  color: var(--ink);
+}
+.db-steps li b { color: var(--ink); font-weight: 600; }
+.db-steps li.db-step-flash { background: var(--accent-soft); }
+.db-steps li.db-step-flash::before { border-color: var(--accent); color: var(--accent); }
+.db-path { display: inline; }
+.db-path-sep { margin: 0 5px; color: var(--ink-3); }
+.db-anatomy {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+.db-anatomy [data-part] { color: var(--ink); }
+.db-anatomy [data-part="password"] { color: var(--accent); }
+.db-guide .btn svg { width: 13px; height: 13px; }
+
+/* ── the fields ── */
+.db-fields { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.db-field > label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.db-optional { font-size: var(--t-xs); color: var(--ink-3); font-weight: 400; }
+.db-input-row { display: flex; gap: 8px; min-width: 0; }
+.db-input { flex: 1; min-width: 0; min-height: 44px; }
+.db-input[aria-invalid="true"] { border-color: var(--bad); }
+textarea.db-input { min-height: 132px; white-space: pre; overflow-x: auto; }
+.db-reveal { flex: none; min-height: 44px; gap: 6px; }
+.db-reveal[aria-pressed="true"] { color: var(--ink); }
+.db-under { min-height: 20px; }
+
+.db-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink);
+}
+.db-msg > svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.db-msg-bad > svg { color: var(--bad); }
+.db-msg-warn > svg { color: var(--warn); }
+.db-msg-ok > svg { color: var(--ok); }
+.db-msg-run { color: var(--ink-2); }
+.db-msg-run .btn-spinner { margin: 3px 0 0; }
+.db-steplink {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.db-steplink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+/* Reserved, so "Testing connection…" appearing never moves the buttons. */
+.db-status { min-height: 22px; }
+.db-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.db-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--bg-raised);
+}
+.db-saved-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.db-saved-list li { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.db-hint { font-size: var(--t-sm); color: var(--ink-2); overflow-wrap: anywhere; min-width: 0; }
+.db-saved-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── the promise, under everything ── */
+.db-lock {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.db-lock > svg { width: 15px; height: 15px; flex: none; margin-top: 2px; color: var(--ink-3); }
+.db-lock-inline { padding: 12px 0 0; margin-top: 14px; background: none; }
+
+/* ── the project page ── */
+.db-card-lede { margin: 0 0 14px; font-size: var(--t-base); line-height: 1.6; max-width: 76ch; }
+.db-head-badge { cursor: pointer; font: inherit; font-size: var(--t-xs); gap: 6px; }
+.db-head-badge svg { width: 12px; height: 12px; }
+.db-head-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.db-reminder {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--warn-soft);
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--ink);
+}
+.db-reminder > svg { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--accent); }
+.db-include { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.db-check { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-size: var(--t-base); color: var(--ink); cursor: pointer; }
+.db-check input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) {
+  .db-disclosure, .db-choice, .db-choice-chev, .db-steps li { transition: none; }
+}
