@@ -316,20 +316,25 @@ _BARE = re.compile(r"^[A-Za-z0-9_./:@%+=,~?&!*()\[\]{}^|;<>-]*$")
 
 
 def _env_value(value: str) -> str:
-    """A value python-dotenv and Node's dotenv both read back unchanged.
+    """A value python-dotenv and Node's dotenv both read back unchanged, when one exists.
 
-    Bare when every character is ordinary. Otherwise single-quoted, which both read
-    literally as long as the value holds no backslash, single quote or `${` (python-
-    dotenv still unescapes the first two, and expands the third, inside them). Connection strings never get
-    that far: their user and password are fully percent-encoded when saved.
+    Bare when every character is ordinary; single-quoted when it holds no backslash,
+    single quote or `${` — both readers take that literally. Connection strings always
+    land here: their user and password are fully percent-encoded when saved.
+
+    Past that no quoting means the same thing to both (python-dotenv expands `${…}`
+    even in single quotes and unescapes `\\'`, Node's dotenv does neither), so the
+    line says so rather than pretending: python-dotenv's form, and a comment.
     """
     if _BARE.match(value) and "${" not in value:
         return value
     if "\\" not in value and "'" not in value and "${" not in value:
         return f"'{value}'"
-    # No quoting means the same thing to both readers here; this is python-dotenv's.
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
-    return f"'{escaped}'  # check this value survived your dotenv reader"
+    return (
+        f"'{escaped}'  # holds a quote, backslash or ${{ — check it survived your dotenv "
+        "reader (python-dotenv: load with interpolate=False)"
+    )
 
 
 def build_zip(project: Project, assembled: dict, env: Optional[dict[str, str]] = None) -> bytes:

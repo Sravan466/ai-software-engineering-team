@@ -38,7 +38,8 @@ _PATTERNS = (
     # password goes; the user and host stay, so the line still says which database.
     re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]*:)[^\s@/]+(?=@)", re.IGNORECASE),
     # …or in its query: ?password=…, &sslpassword=….
-    re.compile(r"([?&][a-z_]*(?:password|pwd)=)[^&\s#]+", re.IGNORECASE),
+    # (Same key endings as `dbconnect.QUERY_SECRET_KEY`; never a `%s` placeholder.)
+    re.compile(r"([?&][a-z_]*(?:pass(?:word)?|pwd|secret|token)=)(?!%)[^&\s#]+", re.IGNORECASE),
     # A masked token on its own: "abcd****wxyz".
     re.compile(r"[A-Za-z0-9_\-]{2,}\*{3,}[.…]*[A-Za-z0-9_\-]*"),
 )
@@ -69,6 +70,18 @@ def register(secret: "str | None") -> None:
             _KNOWN[secret] = _KNOWN.get(secret, 0) + 1
             if _KNOWN[secret] == 1:
                 _rebuild()
+
+
+def register_many(secrets: "list[str]") -> None:
+    """Several at once, with one rebuild — startup registers every saved secret."""
+    added = False
+    with _KNOWN_LOCK:
+        for secret in secrets:
+            if secret and len(secret) >= _MIN_FRAGMENT:
+                _KNOWN[secret] = _KNOWN.get(secret, 0) + 1
+                added = added or _KNOWN[secret] == 1
+        if added:
+            _rebuild()
 
 
 def forget(secret: "str | None") -> None:

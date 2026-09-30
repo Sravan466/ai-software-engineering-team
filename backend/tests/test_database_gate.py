@@ -627,3 +627,75 @@ def test_approve_at_the_gate_names_the_gate_first(client, monkeypatch):
     pid = _to_gate(client)
     r = client.post(f"/api/projects/{pid}/approve")
     assert r.status_code == 409 and "database" in r.text
+
+
+# ── final review round ───────────────────────────────────────────────────────
+def test_a_redo_that_names_another_host_changes_it(client, monkeypatch):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+
+    monkeypatch.setattr(
+        dbconnect, "check_connection",
+        lambda *a: dbconnect.CheckResult(dbconnect.CONNECTED, "ok", reason="ok", host="h"),
+    )
+    pid = _to_gate(client)
+    client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"provider": "neon", "values": {"DATABASE_URL": "postgresql://u:pw12345678@ep-x.neon.tech/app?sslmode=require"}},
+        headers=LOCAL,
+    )
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        before = dict(project.charter)
+        project.charter = Charter.from_dict(before).with_provider("supabase").as_dict()
+        runner.settle_database(project, before)
+        assert Charter.from_dict(project.charter).database_provider == "supabase"
+        assert project.database_status is None
+    assert project_secrets.load(TEST_USER_ID, pid) == {}
+
+
+def test_a_common_password_does_not_refuse_ordinary_notes(client, monkeypatch):
+    monkeypatch.setattr(dbconnect, "check_connection", lambda *a: dbconnect.CheckResult(dbconnect.UNCHECKED, "saved"))
+    pid = _to_gate(client)
+    client.post(
+        f"/api/projects/{pid}/database/check",
+        json={"values": {"DATABASE_URL": "postgresql://postgres:postgres@localhost:5432/app"}},
+        headers=LOCAL,
+    )
+    client.post(f"/api/projects/{pid}/database/later")
+    assert not project_secrets.holds_saved_secret(TEST_USER_ID, pid, "use postgres full-text search")
+    assert "postgres" in scrub.scrub("the postgres migrations ran")
+    # In a connection string it is still scrubbed where it sits.
+    assert "postgres:postgres@" not in scrub.scrub("dial postgresql://postgres:postgres@localhost/app")
+
+
+def test_a_failed_commit_puts_the_old_credentials_back(client, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    monkeypatch.setattr(dbconnect, "check_connection", lambda *a: dbconnect.CheckResult(dbconnect.UNCHECKED, "saved"))
+    pid = _to_gate(client)
+    first = "postgresql://app:FirstPassw0rd@db.example.com/app"
+    client.post(f"/api/projects/{pid}/database/check", json={"values": {"DATABASE_URL": first}}, headers=LOCAL)
+    before = project_secrets.snapshot(TEST_USER_ID, pid)
+
+    def broken(self):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(Session, "commit", broken)
+    with pytest.raises(Exception):
+        client.post(
+            f"/api/projects/{pid}/database/check",
+            json={"provider": "neon", "values": {"DATABASE_URL": "postgresql://u:SecondPassw0rd@ep-x.neon.tech/app"}},
+            headers=LOCAL,
+        )
+    monkeypatch.undo()
+    assert project_secrets.snapshot(TEST_USER_ID, pid) == before
+    assert project_secrets.reveal(TEST_USER_ID, pid) == {"DATABASE_URL": first}
+
+
+def test_query_secrets_every_form_and_log_templates_survive():
+    contract = dbconnect.contract_for("mongodb", "generic")
+    parts = dbconnect.secret_parts(contract, {"MONGODB_URI": "mongodb://h/db?authToken=abc+def123xyz"})
+    assert "abc+def123xyz" in parts and "abc def123xyz" in parts
+    assert "abc+def123xyz" not in scrub.scrub("GET mongodb://h/db?authToken=abc+def123xyz")
+    assert scrub.scrub("connecting to %s?password=%s") == "connecting to %s?password=%s"

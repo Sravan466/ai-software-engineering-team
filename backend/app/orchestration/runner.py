@@ -385,8 +385,6 @@ class PipelineRunner:
                 project_secrets.remove(project.owner_id, project.id)
             project.database_status = None
         elif project.owner_id:
-            # Same database, re-frozen: the host the person chose and saved values
-            # under outlives Atlas's prose, or the code would read names never saved.
             saved = project_secrets.load(project.owner_id, project.id).get("provider")
             charter = Charter.from_dict(project.charter)
             if (
@@ -394,7 +392,16 @@ class PipelineRunner:
                 and saved in dbconnect.PROVIDERS.get(new or "", ())
                 and saved != charter.database_provider
             ):
-                cls.set_database_provider(project, charter.with_provider(saved))
+                if charter.database_provider == dbconnect.default_provider(new):
+                    # Same database, and the architecture names no host: the one the
+                    # person chose and saved values under stands, or the code would
+                    # read names that were never saved.
+                    cls.set_database_provider(project, charter.with_provider(saved))
+                else:
+                    # The redo named another host on purpose — which is how the host
+                    # is changed after the gate. What was saved is for the old one.
+                    project_secrets.remove(project.owner_id, project.id)
+                    project.database_status = None
 
     @staticmethod
     def build_problems(project: Project) -> list[dict]:

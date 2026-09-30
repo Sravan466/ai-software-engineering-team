@@ -168,6 +168,7 @@ def _save(project: Project, body: DatabaseValues, db: Session) -> dict:
         }
     charter = Charter.from_dict(project.charter)
     moved = charter is not None and charter.database_provider != contract.provider
+    previous = project_secrets.snapshot(project.owner_id, project.id)
     try:
         if moved:
             # Only reachable at the gate (see `_contract`): the code isn't written
@@ -181,9 +182,13 @@ def _save(project: Project, body: DatabaseValues, db: Session) -> dict:
         )
         db.commit()
     except Exception as e:
-        # All three agree or none changes: the checkpoint goes back to the charter
-        # the row still holds, and the row is rolled back.
+        # All three agree or none changes: the file goes back to what it held, the
+        # checkpoint to the charter the row still holds, and the row is rolled back.
         db.rollback()
+        try:
+            project_secrets.restore(project.owner_id, project.id, previous)
+        except Exception:  # noqa: BLE001
+            log.exception("Couldn't restore the saved credentials after a failed save on %s", project.id)
         if moved:
             try:
                 runner.set_database_provider(project, charter)

@@ -112,8 +112,7 @@ def _register(project_id: str, parts: list[str]) -> None:
         if project_id in _REGISTERED:
             return
         _REGISTERED[project_id] = parts
-        for part in parts:
-            scrub.register(part)
+        scrub.register_many(parts)
 
 
 def _forget(project_id: str) -> None:
@@ -159,14 +158,17 @@ def holds_saved_secret(owner_id: Optional[str], project_id: str, text: str) -> b
     """
     if not owner_id or not text:
         return False
-    record = load(owner_id, project_id)
-    try:
-        values = _decrypted(record)
-    except secretbox.SecretsLocked:
-        return False
-    parts = _parts(record, values)
-    _register(project_id, parts)
-    return any(len(p) >= 6 and p in text for p in parts)
+    # Under the lock, so a remove() landing between the read and the register can't
+    # leave a deleted secret registered for the rest of the process.
+    with _LOCK:
+        record = load(owner_id, project_id)
+        try:
+            values = _decrypted(record)
+        except secretbox.SecretsLocked:
+            return False
+        parts = _parts(record, values)
+        _register(project_id, parts)
+    return any(p in text for p in parts)
 
 
 def register_all() -> int:
@@ -186,6 +188,31 @@ def register_all() -> int:
         except (secretbox.SecretsLocked, ValueError, OSError):
             log.warning("Couldn't read the saved database credentials for project %s.", project_id)
     return count
+
+
+def snapshot(owner_id: str, project_id: str) -> Optional[str]:
+    """The file as it is now (None if absent) — to put back if a save's transaction fails."""
+    try:
+        return _path(owner_id, project_id).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def restore(owner_id: str, project_id: str, previous: Optional[str]) -> None:
+    """Put back what `snapshot` returned, and the scrubber's view of it."""
+    with _LOCK:
+        path = _path(owner_id, project_id)
+        _forget(project_id)
+        if previous is None:
+            if path.exists():
+                path.unlink()
+            return
+        write_private(path, previous)
+        try:
+            record = json.loads(previous)
+            _register(project_id, _parts(record, _decrypted(record)))
+        except (ValueError, secretbox.SecretsLocked):
+            pass
 
 
 def remove(owner_id: str, project_id: str) -> bool:
