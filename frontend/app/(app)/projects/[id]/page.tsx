@@ -10,7 +10,7 @@ import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { Skeleton, SkeletonLines } from "@/components/ui/Skeleton";
 import VisualPreview from "@/components/preview/VisualPreview";
-import GithubPublish from "@/components/github/GithubPublish";
+import ShipCard, { type ShipIntent } from "@/components/deploy/ShipCard";
 import SchemaBadge from "@/components/build/SchemaBadge";
 import PhaseArtifact from "@/components/build/PhaseArtifact";
 import FileBrowser from "@/components/build/FileBrowser";
@@ -220,6 +220,10 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("build");
+  // "Deploy it" / "Connect to GitHub" from the completion banner: open Deliver on
+  // that flow. Cleared once the card has taken it, so a tab switch doesn't re-open it.
+  const [shipIntent, setShipIntent] = useState<ShipIntent | null>(null);
+  const clearShipIntent = useCallback(() => setShipIntent(null), []);
   // Which phase the relay is sending you to. A pending instruction, not a
   // record of where you last went: PhaseList clears it the moment it acts, or a
   // tab round-trip — which unmounts and remounts that list with the same value
@@ -247,10 +251,11 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     load();
   }, [load]);
 
-  // Returning from the GitHub OAuth round-trip? Land on Summary where the
-  // publish controls live (GithubPublish reads the ?github= param itself).
+  // Returning from the GitHub OAuth round-trip? Land on Deliver, where the ship
+  // card lives (it reads ?github= and ?next= itself).
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("github")) setTab("summary");
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get("github") || sp.get("next")) setTab("summary");
   }, []);
 
   // Poll while anything can still change under us — at a cadence matched to how
@@ -387,6 +392,30 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                 : project.preferred_model || project.routing_mode}
             </span>
             <ReviewPolicy project={project} id={id} onChanged={load} />
+            {(project.deploy_url || project.github_repo) && (
+              <span className="ship-badges">
+                {project.deploy_url && (
+                  <a href={project.deploy_url} target="_blank" rel="noreferrer" title={project.deploy_url}>
+                    <span className="badge badge-ok">
+                      <span className="dot dot-ok" aria-hidden="true" />
+                      Live {Icon.external}
+                    </span>
+                  </a>
+                )}
+                {project.github_repo && (
+                  <a
+                    href={`https://github.com/${project.github_repo}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={project.github_repo}
+                  >
+                    <span className="badge badge-mono">
+                      {Icon.github} {project.github_repo}
+                    </span>
+                  </a>
+                )}
+              </span>
+            )}
             {databaseUnconnected(project) && (
               <button
                 type="button"
@@ -516,11 +545,22 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             id={id}
             jump={jump}
             onJumpDone={clearJump}
-            onDeliver={() => setTab("summary")}
+            onDeliver={(intent) => {
+              setShipIntent(intent ?? null);
+              setTab("summary");
+            }}
           />
         )}
         {tab === "preview" && <PreviewTab id={id} />}
-        {tab === "summary" && <SummaryTab id={id} analytics={analytics} onDatabaseChanged={load} />}
+        {tab === "summary" && (
+          <SummaryTab
+            id={id}
+            analytics={analytics}
+            onDatabaseChanged={load}
+            shipIntent={shipIntent}
+            onShipIntentUsed={clearShipIntent}
+          />
+        )}
       </div>
     </div>
   );
@@ -754,7 +794,7 @@ function BuildTab({
   /** A phase the relay is asking us to go to, if any. */
   jump: { key: string } | null;
   onJumpDone: () => void;
-  onDeliver: () => void;
+  onDeliver: (intent?: ShipIntent) => void;
 }) {
   const pct = localPct(project);
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
@@ -810,11 +850,17 @@ function BuildTab({
                 : `This build is finished — ${doneCount} of ${PHASES.length} phases approved`}
             </span>
             <span className="notice-text">
-              The generated source, the setup steps and the ways of taking this away —
-              a .zip, or a repository on your own GitHub — are in Deliver.
+              Put it online in your own account, push it to your GitHub, or take a .zip —
+              all from Deliver.
             </span>
             <div className="notice-actions">
-              <button className="btn btn-sm btn-primary" onClick={onDeliver}>
+              <button className="btn btn-sm btn-primary" onClick={() => onDeliver("deploy")}>
+                Deploy it
+              </button>
+              <button className="btn btn-sm" onClick={() => onDeliver("github")}>
+                {Icon.github} Connect to GitHub
+              </button>
+              <button className="btn btn-sm btn-ghost" onClick={() => onDeliver()}>
                 Open Deliver {Icon.arrowRight}
               </button>
             </div>
@@ -1081,10 +1127,14 @@ function SummaryTab({
   id,
   analytics,
   onDatabaseChanged,
+  shipIntent,
+  onShipIntentUsed,
 }: {
   id: string;
   analytics: any;
   onDatabaseChanged: () => void;
+  shipIntent: ShipIntent | null;
+  onShipIntentUsed: () => void;
 }) {
   const [art, setArt] = useState<Artifacts | null>(null);
   const [error, setError] = useState("");
@@ -1130,10 +1180,17 @@ function SummaryTab({
   const silent = PHASES.filter((ph) => !produced.has(ph.key));
 
   return (
-    /* Ordered by how much each step commits you: read what is here, run it on
-       your own machine, take a copy, and only then create a repository on a real
-       GitHub account. Publishing used to come first. */
+    /* Shipping first: once a build is finished, putting it online (or into the
+       person's GitHub) is what they came here for. Then what is here, how to run
+       it, and a copy to take away. */
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <ShipCard
+        id={id}
+        defaultName={art.name || art.idea}
+        intent={shipIntent}
+        onIntentUsed={onShipIntentUsed}
+        onShipped={onDatabaseChanged}
+      />
       <div className="card">
         <div className="sec-head">
           <h2 className="label">Your project</h2>
@@ -1304,7 +1361,6 @@ function SummaryTab({
         )}
       </div>
 
-      <GithubPublish id={id} defaultName={art.name || art.idea} disabled={!hasOutput} />
     </div>
   );
 }

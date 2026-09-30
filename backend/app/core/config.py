@@ -304,6 +304,16 @@ class Settings(BaseSettings):
     # URL (backend + /api/github/oauth/callback) must match the OAuth App exactly.
     backend_public_url: str = "http://localhost:8000"
     frontend_base_url: str = "http://localhost:3000"
+    #: Where GitHub's API and its OAuth pages are. Only ever changed to point a test
+    #: run at a stand-in; every real deployment leaves both alone.
+    github_api_url: str = "https://api.github.com"
+    github_oauth_url: str = "https://github.com"
+
+    # ── Deploying a finished build (always into the user's own accounts) ──
+    #: Vercel's API. Changed only to point a test run at a stand-in.
+    vercel_api_url: str = "https://api.vercel.com"
+    #: Deploys (Vercel uploads and Render hand-offs) one account may start per hour.
+    deploys_per_hour: BlankTolerantInt(10) = 10
 
     # ── Accounts ──
     #: Where each account's settings files live (cloud keys, sources, which model

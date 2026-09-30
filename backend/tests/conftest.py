@@ -66,6 +66,11 @@ from app.router import keycheck as _keycheck  # noqa: E402
 # No test reaches a real provider. A key check that nobody stubbed finds the provider
 # "unreachable" — unverified, which leaves routing as it was before checks existed.
 _keycheck.transport = httpx.MockTransport(lambda request: httpx.Response(503, json={}))
+# Nor GitHub or Vercel: a push or deploy nobody stubbed finds them unreachable.
+from app.core import github_publish as _github_publish, vercel as _vercel  # noqa: E402
+
+_github_publish.transport = httpx.MockTransport(lambda request: httpx.Response(503, json={}))
+_vercel.transport = httpx.MockTransport(lambda request: httpx.Response(503, json={}))
 from app.core import auth as _auth, identity  # noqa: E402
 from app.db.base import SessionLocal, init_db  # noqa: E402
 from app.db.models import User  # noqa: E402
@@ -215,4 +220,7 @@ def client(stub_router):
 def _fresh_key_check_limit():
     """The key-check rate limit is per account, and the whole suite is one account."""
     _keycheck.limiter.reset()
+    from app.api.routes import deploy as _deploy_routes
+
+    _deploy_routes.limiter.reset()
     yield

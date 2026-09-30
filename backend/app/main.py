@@ -26,12 +26,16 @@ async def lifespan(app: FastAPI):
     secrets_store.migrate_all()
     # Saved database credentials are scrubbed from logs from the first line on, not
     # only once someone happens to read them again.
-    from app.core import project_secrets
+    from app.core import deploy_store, project_secrets
 
     try:
         project_secrets.register_all()
     except Exception:  # noqa: BLE001 - never block startup on this
         log.exception("Couldn't register saved database credentials with the log scrubber")
+    try:
+        deploy_store.register_all()
+    except Exception:  # noqa: BLE001 - never block startup on this
+        log.exception("Couldn't register saved deploy tokens with the log scrubber")
     # The compile gate reads JavaScript with TypeScript's parser; fetch it now rather
     # than inside the first Frontend phase that needs it.
     from app.build import toolchain
@@ -94,6 +98,7 @@ from app.api.routes import (  # noqa: E402
     auth as auth_routes,
     connector as connector_routes,
     database as database_routes,
+    deploy as deploy_routes,
     devices,
     github,
     models,
@@ -114,6 +119,7 @@ app.include_router(skills.router)
 app.include_router(analytics.router)
 app.include_router(settings_routes.router)
 app.include_router(github.router)
+app.include_router(deploy_routes.router)
 app.include_router(devices.router)
 app.include_router(connector_routes.router)
 

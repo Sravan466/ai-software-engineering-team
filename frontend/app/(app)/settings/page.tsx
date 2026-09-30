@@ -25,6 +25,7 @@ import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { CheckDetail, VerdictChip } from "@/components/models/ModelCheck";
 import ModelTune from "@/components/models/ModelTune";
+import DeploySettings from "@/components/deploy/DeploySettings";
 import { ago, useNow } from "@/components/setup/parts";
 
 const PROVIDERS: {
@@ -84,6 +85,7 @@ export default function SettingsPage() {
         <LocalSourcesCard onModelsChanged={() => setChanged((n) => n + 1)} />
         <RoleModelCard refreshKey={changed} />
         <ApiKeysCard />
+        <DeploySettings />
       </div>
     </div>
   );

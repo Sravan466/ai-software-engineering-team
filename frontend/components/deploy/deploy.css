@@ -1,0 +1,302 @@
+/* ===========================================================================
+   SHIP IT — deploy the finished build, or push it to GitHub (#55).
+   Extends the .card / .notice / .btn language: no new surfaces, tokens only.
+   Accent (amber) marks the one primary action, as it does across the app.
+   =========================================================================== */
+
+.ship-lead {
+  margin: 0 0 16px;
+  max-width: 62ch;
+  font-size: var(--t-md);
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.ship-live {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 16px;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+/* ── the two doors ─────────────────────────────────────────────────────── */
+.ship-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 640px) {
+  .ship-tiles { grid-template-columns: 1fr; }
+}
+
+.ship-tile {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 72px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  color: var(--ink);
+  font-family: var(--sans);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--tr), background var(--tr);
+}
+.ship-tile:hover:not(:disabled) { border-color: var(--line-3); background: var(--line); }
+.ship-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ship-tile:disabled { opacity: 0.5; cursor: not-allowed; }
+.ship-tile[aria-expanded="true"] { border-color: var(--line-3); background: var(--bg-sunken); }
+
+.ship-tile-accent { border-color: var(--accent-line); }
+.ship-tile-accent:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.ship-tile-accent[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.ship-tile-accent .ship-tile-mark { color: var(--accent); }
+
+.ship-tile-mark {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r);
+  border: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  color: var(--ink);
+}
+.ship-tile-mark svg { width: 16px; height: 16px; }
+.ship-tile-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.ship-tile-title { font-size: var(--t-md); font-weight: 600; }
+.ship-tile-sub { font-size: var(--t-sm); color: var(--ink-3); overflow-wrap: anywhere; }
+.ship-tile-chev { color: var(--ink-3); display: grid; transition: transform var(--tr); }
+.ship-tile-chev svg { width: 16px; height: 16px; }
+.ship-tile[aria-expanded="true"] .ship-tile-chev { transform: rotate(90deg); }
+
+/* ── the drawer each door opens: grows in place, never a modal ─────────── */
+.ship-drawer {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--tr-slow);
+}
+.ship-drawer[data-open="true"] { grid-template-rows: 1fr; }
+.ship-drawer-inner { min-height: 0; overflow: hidden; }
+.ship-drawer[data-open="true"] .ship-drawer-inner {
+  margin-top: 12px;
+  padding: 18px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-sunken);
+}
+.ship-panel {
+  padding: 16px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-sunken);
+}
+@media (max-width: 640px) {
+  .ship-drawer[data-open="true"] .ship-drawer-inner, .ship-panel { padding: 14px; }
+}
+
+.ship-stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.ship-copy { margin: 0; max-width: 62ch; font-size: var(--t-base); line-height: 1.6; color: var(--ink-2); }
+.ship-copy b { color: var(--ink); font-weight: 600; }
+
+/* A connected account: who it is, and the ways out. */
+.ship-conn {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-panel);
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.ship-conn b { color: var(--ink); font-weight: 600; }
+.ship-conn-mark { display: grid; color: var(--ink); }
+.ship-conn-mark svg { width: 14px; height: 14px; }
+.ship-conn-text { flex: 1; min-width: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.ship-conn-text .badge { margin-left: 8px; vertical-align: 1px; }
+.ship-conn-actions { display: inline-flex; gap: 4px; }
+.ship-avatar { width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line-2); }
+
+/* The "how to get a token" guide. Counted, because the order is the point. */
+.ship-guide {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.ship-guide b { color: var(--ink); font-weight: 600; }
+.ship-guide li::marker { color: var(--ink-3); font-family: var(--mono); }
+
+/* Field + action on one line, stacked on a phone. */
+.ship-token, .ship-repo { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.ship-token-field, .ship-repo-name { flex: 1 1 240px; min-width: 0; }
+.ship-secret { position: relative; }
+.ship-secret .input { padding-right: 44px; width: 100%; }
+.ship-reveal { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
+.ship-switch { min-height: 44px; }
+.ship-go { min-height: 44px; }
+.ship-back { align-self: flex-start; }
+@media (max-width: 640px) {
+  .ship-token .ship-go, .ship-repo .ship-go { width: 100%; justify-content: center; }
+}
+
+.ship-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--bad);
+}
+.ship-error svg { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+.ship-hint-bad { color: var(--bad); }
+
+.ship-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.ship-actions .field-hint { flex: 1 1 220px; }
+
+/* ── deploy progress: every step keeps its row, so nothing jumps ───────── */
+.ship-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ship-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-base);
+  color: var(--ink-3);
+}
+.ship-step-mark { width: 18px; height: 18px; display: grid; place-items: center; flex: none; }
+.ship-step-mark svg { width: 16px; height: 16px; }
+.ship-step-label { flex: 1; }
+.ship-step-time { font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.ship-step[data-state="run"] { color: var(--ink); background: var(--run-soft); }
+.ship-step[data-state="run"] .ship-step-mark { color: var(--run); }
+.ship-step[data-state="done"] { color: var(--ink-2); }
+.ship-step[data-state="done"] .ship-step-mark { color: var(--ok); }
+.ship-step[data-state="bad"] { color: var(--ink); background: var(--bad-soft); }
+.ship-step[data-state="bad"] .ship-step-mark { color: var(--bad); }
+
+.ship-url { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t-base); overflow-wrap: anywhere; }
+.ship-url svg { width: 14px; height: 14px; flex: none; }
+
+.ship-log summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.ship-log summary:hover { color: var(--ink); }
+.ship-log pre {
+  margin: 8px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg);
+  font-size: var(--t-xs);
+  line-height: 1.6;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── GitHub → Push → Render: the whole path shown up front ─────────────── */
+.ship-stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: var(--t-sm);
+  color: var(--ink-3);
+}
+.ship-stepper li { display: inline-flex; align-items: center; gap: 8px; }
+.ship-stepper li + li::before {
+  content: "";
+  width: 20px;
+  height: 1px;
+  background: var(--line-3);
+}
+.ship-stepper-n {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line-3);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+}
+.ship-stepper-n svg { width: 12px; height: 12px; }
+.ship-stepper li[data-state="current"] { color: var(--ink); font-weight: 600; }
+.ship-stepper li[data-state="current"] .ship-stepper-n { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.ship-stepper li[data-state="done"] { color: var(--ink-2); }
+.ship-stepper li[data-state="done"] .ship-stepper-n { border-color: rgba(61, 214, 140, 0.45); color: var(--ok); background: var(--ok-soft); }
+
+.ship-repo-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--t-base);
+  overflow-wrap: anywhere;
+}
+.ship-repo-line svg { width: 14px; height: 14px; flex: none; color: var(--ink-3); }
+.ship-repo-line .dim { font-size: var(--t-sm); }
+
+.ship-checklist {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--t-sm);
+  line-height: 1.55;
+  color: var(--ink-2);
+  max-width: 68ch;
+}
+.ship-checklist li::marker { color: var(--ink-4); }
+
+.ship-live-form { display: flex; flex-direction: column; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+
+/* ── the promise under the doors ───────────────────────────────────────── */
+.ship-trust {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 16px 0 0;
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+.ship-trust svg { width: 14px; height: 14px; flex: none; margin-top: 1px; }
+.ship-foot { margin: 12px 0 0; }
+
+/* The header's reminder of where this build lives. */
+.ship-badges { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.ship-badges a { text-decoration: none; }
+.ship-badges a:hover .badge { border-color: var(--line-3); }
+.ship-badges .badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.ship-badges svg { width: 12px; height: 12px; flex: none; }
