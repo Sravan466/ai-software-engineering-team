@@ -42,7 +42,7 @@ SKILL_FILE = "SKILL.md"
 
 #: What a skill may be called: a slug, because it is also a directory name, a URL
 #: path segment and the token a build pins or excludes by.
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
 
 #: Phrases that tell a model how to *shape its reply*. Deliberately narrow: a skill
 #: about API design has every right to say "JSON body" or "the response envelope",
@@ -189,8 +189,8 @@ def check(name: str, title: str, description: str, body: str, max_chars: int) ->
     if not NAME_RE.match(name or ""):
         problems.append(
             "The name has to be a slug — lowercase letters, digits and hyphens, "
-            "2–64 characters — because it is also a folder name and the token a "
-            "build pins or excludes by."
+            "2–64 characters, starting and ending with a letter or digit — because it "
+            "is also a folder name and the token a build pins or excludes by."
         )
     if not title.strip():
         problems.append("It has no title, so nothing can say what it is in a list.")

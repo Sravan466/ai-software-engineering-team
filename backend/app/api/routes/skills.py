@@ -24,14 +24,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.api.deps import require_owner
+from app.api.deps import current_user, require_owner
 from app.core.config import settings
 from app.core.constants import PHASE_LABELS, PHASE_ORDER
 from app.core.logging import get_logger
 from app.db.models import User
 from app.skills import registry
 from app.skills.loader import Skill, check, to_markdown
-from app.skills.selection import Overrides, select
+from app.skills.selection import Overrides, Selected, phase_text, rank
 
 log = get_logger(__name__)
 
@@ -81,15 +81,25 @@ def _as_dict(skill: Skill, disabled: set[str]) -> dict:
 
 
 @router.get("")
-def list_skills() -> dict:
+def list_skills(user: User = Depends(current_user)) -> dict:
     """The whole library, plus what the selector needs to be understood."""
     disabled = registry.disabled_names()
     skills = registry.library()
     return {
         "skills": [_as_dict(s, disabled) for s in skills],
         "phases": [
-            {"key": p.value, "label": PHASE_LABELS.get(p.value, p.value)} for p in PHASE_ORDER
+            {
+                "key": p.value,
+                "label": PHASE_LABELS.get(p.value, p.value),
+                # The words every build's phase is matched on. A keyword found here
+                # is not evidence about a build — it is true of all of them.
+                "match_text": phase_text(p.value),
+            }
+            for p in PHASE_ORDER
         ],
+        # Reading is open to every account; changing is the owner's. The page asks
+        # rather than guessing, so it never offers a form whose Save can only fail.
+        "can_edit": bool(user.is_owner),
         "enabled": settings.skills_enabled,
         "max_per_phase": settings.skills_max_per_phase,
         "max_chars": settings.skill_body_max_chars,
@@ -172,6 +182,10 @@ def _save(name: str, payload: SkillBody, created: bool) -> dict:
         raise HTTPException(
             500, f"The skill could not be written to {registry.user_dir()}: {e}"
         )
+    if created and saved.name in registry.disabled_names():
+        # A switch left behind by a skill of this name deleted before deleting
+        # cleared it. A new skill starts on, like every other new skill.
+        registry.set_enabled(saved.name, True)
     log.info("Skill %s %s", saved.name, "added" if created else "updated")
     return _as_dict(saved, registry.disabled_names())
 
@@ -233,28 +247,33 @@ def preview(payload: PreviewRequest) -> dict:
     # itself re-parses every file on disk eight times for one answer — and, worse,
     # would let a file changed mid-request give two phases different libraries.
     candidates = registry.library()
+    cap = max(settings.skills_max_per_phase, 0)
     phases = []
     for phase in PHASE_ORDER:
-        chosen = select(phase.value, payload.idea, {}, overrides, candidates=candidates)
+        ranked = rank(phase.value, payload.idea, {}, overrides, candidates=candidates)
         phases.append(
             {
                 "phase": phase.value,
                 "label": PHASE_LABELS.get(phase.value, phase.value),
-                "skills": [
-                    {
-                        "name": s.skill.name,
-                        "title": s.skill.title,
-                        "score": round(s.score, 2),
-                        "pinned": s.pinned,
-                        "matched": list(s.matched),
-                        "reason": s.reason,
-                        "chars": s.skill.chars,
-                    }
-                    for s in chosen
-                ],
+                "skills": [_pick(s) for s in ranked[:cap]],
+                # Matched, and still left out: the cap had already been filled by
+                # stronger matches. Nothing in a build says so, so the preview does.
+                "over_cap": [_pick(s) for s in ranked[cap:]],
             }
         )
-    return {"idea": payload.idea, "phases": phases}
+    return {"idea": payload.idea, "max_per_phase": cap, "phases": phases}
+
+
+def _pick(s: Selected) -> dict:
+    return {
+        "name": s.skill.name,
+        "title": s.skill.title,
+        "score": round(s.score, 2),
+        "pinned": s.pinned,
+        "matched": list(s.matched),
+        "reason": s.reason,
+        "chars": s.skill.chars,
+    }
 
 
 @router.get("/{name}/markdown")

@@ -985,8 +985,11 @@ function PhaseList({
         const isGate = ns === "gate";
         const hasDoc = Boolean(row && row.status !== "running" && (row.content_md || row.output));
         // Closed by default now: the phase under review is already open, in full,
-        // in the decision panel above. Opening it here would say it twice.
-        const isOpen = open[ph.key] ?? false;
+        // in the decision panel above. Opening it here would say it twice. The one
+        // exception is "The crew needs a hand": that panel shows the fix rounds, not
+        // the phase's work, so the work — and what it worked from — opens here.
+        const isOpen =
+          open[ph.key] ?? (isGate && project.gate_kind === "needs_help");
         const agent = AGENT_BY_KEY[ph.key];
 
         return (

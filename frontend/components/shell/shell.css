@@ -1423,7 +1423,12 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.dryrun-result { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .dryrun-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Matched, and cut by the per-phase cap. Dashed and quiet: these never reach the
+   model, and the row says so in words rather than asking the reader to decode it. */
+.dryrun-over { display: flex; flex-direction: column; gap: 5px; }
+.dryrun-over-label { font-size: var(--t-xs); color: var(--warn); line-height: 1.45; }
 .dryrun-none { font-size: var(--t-xs); color: var(--ink-3); font-style: italic; }
 
 /* One chip for a skill that would arrive. Amber only when it was pinned — the
@@ -1442,6 +1447,17 @@ kbd {
 }
 .pick-pinned { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
 .pick-pinned::before { content: "pinned"; font-size: 10px; opacity: 0.75; }
+/* Why it is here, printed: the matched keywords. A tooltip is not an answer on a
+   keyboard or a phone. */
+.pick-why {
+  padding-left: 6px;
+  border-left: 1px solid var(--line-2);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+.pick-pinned .pick-why { border-left-color: var(--accent-line); }
+.pick-dropped { border-style: dashed; background: transparent; color: var(--ink-3); }
 
 /* ── one skill in the library ──────────────────────────────────────────────── */
 .skill-rows { display: flex; flex-direction: column; margin: 6px 0 0; padding: 0; list-style: none; }
@@ -1514,6 +1530,13 @@ kbd {
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* Takes a place on every build of these phases: a keyword is a word of the
+   phase's own name. Stated in the meta line, not flagged. */
+.skill-always { color: var(--ink-3); }
+.skill-always::before { content: "·"; margin-right: 10px; color: var(--ink-4); }
+.field-note .mono { color: var(--ink-2); }
+.skills-readonly { margin: -4px 0 8px; max-width: 72ch; }
 
 .skill-problem {
   margin: 10px 0 0 54px;

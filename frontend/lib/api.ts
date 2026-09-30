@@ -767,7 +767,10 @@ export type SkillDraft = {
 
 export type SkillLibrary = {
   skills: Skill[];
-  phases: { key: string; label: string }[];
+  /** `match_text` is what the selector matches every build's phase on, verbatim. */
+  phases: { key: string; label: string; match_text: string }[];
+  /** Whether this account may change the library: the install owner only. */
+  can_edit: boolean;
   /** False when skills are switched off for this backend entirely. */
   enabled: boolean;
   max_per_phase: number;
@@ -790,7 +793,14 @@ export type SkillPick = {
 
 export type SkillPreview = {
   idea: string;
-  phases: { phase: string; label: string; skills: SkillPick[] }[];
+  max_per_phase: number;
+  phases: {
+    phase: string;
+    label: string;
+    skills: SkillPick[];
+    /** Matched this phase, and left out because the cap was already full. */
+    over_cap: SkillPick[];
+  }[];
 };
 
 export type RunResponse = {

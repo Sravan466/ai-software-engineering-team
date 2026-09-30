@@ -74,7 +74,10 @@ class Selected:
             )
         if self.matched:
             return f"Matched {', '.join(self.matched)}"
-        return "Bound to this phase"
+        # Only a skill with no keywords gets here: it is relevant to every build of
+        # the phases it serves. "Bound to this phase" said so wrongly for a skill
+        # that serves every phase and is bound to none.
+        return "No keywords, so every build it serves"
 
 
 @dataclass(frozen=True)
@@ -105,13 +108,22 @@ class Overrides:
         return bool(self.pinned or self.excluded)
 
 
+def phase_text(phase: str) -> str:
+    """What a keyword is matched against for the phase itself, on every build.
+
+    Handed to the Skills page as it is, so the warning there — "this keyword is in
+    Prism's own phase name, so it matches every build Prism runs" — is checked
+    against the same words the selector reads rather than a copy of them.
+    """
+    return f"{phase} {PHASE_LABELS.get(phase, phase)}".lower()
+
+
 def _parts(idea: str, phase: str, prior_outputs: Optional[dict]) -> list[tuple[str, float]]:
     """The three texts a skill's keywords are scored against, and what each is worth.
 
     Three rather than one blob so a hit on the idea can outweigh one buried in a file
     the back end generated four phases ago.
     """
-    label = PHASE_LABELS.get(phase, phase).lower()
     prior = ""
     if prior_outputs:
         try:
@@ -120,7 +132,7 @@ def _parts(idea: str, phase: str, prior_outputs: Optional[dict]) -> list[tuple[s
             prior = ""
     return [
         ((idea or "").lower(), _WEIGHT_IDEA),
-        (f"{phase} {label}".lower(), _WEIGHT_PHASE),
+        (phase_text(phase), _WEIGHT_PHASE),
         (prior, _WEIGHT_PRIOR),
     ]
 
@@ -158,7 +170,25 @@ def select(
     limit: Optional[int] = None,
     candidates: Optional[Iterable[Skill]] = None,
 ) -> list[Selected]:
-    """The skills this phase should receive, best first.
+    """The skills this phase should receive, best first, held to the per-phase cap."""
+    # Zero means none. Reading it as "uncapped" would turn the most obvious way
+    # to ask for no skills into the one that delivers every one of them.
+    cap = settings.skills_max_per_phase if limit is None else limit
+    return rank(phase, idea, prior_outputs, overrides, candidates)[: max(cap, 0)]
+
+
+def rank(
+    phase: str,
+    idea: str,
+    prior_outputs: Optional[dict] = None,
+    overrides: Optional[Overrides] = None,
+    candidates: Optional[Iterable[Skill]] = None,
+) -> list[Selected]:
+    """Every skill that qualifies for this phase, best first, before the cap.
+
+    `select` is this cut to the cap. The preview wants the whole list, because a
+    skill that matched and then lost its place to four stronger ones is the same
+    silent miss as one that never matched — and the only place it can be seen.
 
     1. Anything switched off in the library, or excluded on this build, is dropped.
     2. Anything not bound to this phase is dropped.
@@ -200,7 +230,4 @@ def select(
     # same idea select the same skills in the same order, which is what makes
     # "which skills did this phase get?" a question with one answer.
     chosen.sort(key=lambda s: (not s.pinned, -s.score, s.skill.name))
-    # Zero means none. Reading it as "uncapped" would turn the most obvious way
-    # to ask for no skills into the one that delivers every one of them.
-    cap = settings.skills_max_per_phase if limit is None else limit
-    return chosen[: max(cap, 0)]
+    return chosen
