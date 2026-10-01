@@ -171,7 +171,8 @@ export function ConnectForm({
   function switchToTest() {
     setValues({});
     setOutcome({ kind: "idle" });
-    window.setTimeout(() => document.getElementById(`${base}-${fields[0]?.name}`)?.focus(), 0);
+    // After the panel unmounts, so focus lands on the first key field, not on <body>.
+    window.requestAnimationFrame(() => document.getElementById(`${base}-${fields[0]?.name}`)?.focus());
   }
 
   function showStep(step: number | null | undefined) {
@@ -352,10 +353,7 @@ export function ConnectForm({
               {Icon.alert}
               <div className="notice-body">
                 <span className="notice-title">This is a live key</span>
-                <span className="notice-text">
-                  {outcome.message} Real charges and real emails happen with it. Test mode is safer while
-                  you build.
-                </span>
+                <span className="notice-text">{outcome.message} Test mode is safer while you build.</span>
                 <div className="notice-actions">
                   <button type="button" className="btn btn-sm btn-accent" onClick={() => save(true)} disabled={testing}>
                     Use live key

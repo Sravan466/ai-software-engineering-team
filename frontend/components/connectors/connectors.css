@@ -324,6 +324,12 @@ a.cx-card:hover .cx-card-go svg { transform: translateX(2px); }
 .cx-panel .cx-row-form .db-form { padding: 12px 0 16px; background: none; }
 .cx-panel-add { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 
+/* Touch: every chip and pill clears 44px. A mouse keeps the denser 36px. */
+@media (pointer: coarse) {
+  .cx-chip, .cx-pick, .cx-need, .cx-back, .cx-usedby a { min-height: 44px; }
+  .cx-need .btn { min-height: 38px; }
+}
+
 @media (max-width: 639px) {
   .cx-wrap { padding: 18px 16px 64px; }
   .cx-row-main { padding: 12px 14px; }
