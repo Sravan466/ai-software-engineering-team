@@ -83,8 +83,14 @@ def cloud_error(provider: str, label: str, error: Exception) -> ProviderError:
             technical=technical,
         )
     advice = keyerrors.advice(failure.kind, provider, status=failure.status, code=failure.code)
+    # Retryable kinds only surface once the retries ran out — say that, not "retried
+    # by themselves".
+    message = (
+        f"{advice.title}, and the call still failed after retrying. Try again in a few minutes."
+        if failure.retryable else advice.sentence()
+    )
     return ProviderError(
-        advice.sentence(),
+        message,
         retryable=failure.retryable,
         status=failure.status,
         kind=failure.kind,

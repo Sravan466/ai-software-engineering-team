@@ -406,3 +406,31 @@ def test_only_a_blocking_kind_reaches_the_project():
     assert p.last_error_kind is None and p.last_error_help is None
     runner._fail(_Db(), p, "no credit", kind=K.NO_CREDIT, provider="openai")
     assert p.last_error_kind == K.NO_CREDIT
+
+
+def test_an_ip_allowlist_refusal_keeps_its_own_fix(monkeypatch):
+    _provider(monkeypatch, {("GET", "/models/m-1"): (401, {"error": {"message": "Your IP 1.2.3.4 is not authorized"}})})
+    found = keycheck.check("openai", "sk-ipblocked-0000000", "m-1")
+    assert found.reason == "network_not_allowed" and keycheck.kind_of(found) is None
+    assert ModelRouter._advice("openai", found) is None
+
+
+def test_a_rate_limit_that_outlasts_the_retries_says_so():
+    e = cloud_error("openai", "OpenAI", _SdkError(429, {"code": "rate_limit_exceeded"}, {"retry-after": "1"}))
+    assert "still failed after retrying" in str(e) and "by themselves" not in str(e)
+
+
+def test_the_credit_probe_uses_a_chat_completions_model(respond):
+    posted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            import json as _json
+            posted.append(_json.loads(request.content)["model"])
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"data": [{"id": m} for m in (
+            "gpt-5", "gpt-5-pro", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-mini", "sora-2-pro", "o4-mini")]})
+
+    respond(handler)
+    integrations.check(integrations.REGISTRY["openai"], {"OPENAI_API_KEY": "sk-proj-abcdefghijklmnopqrst"})
+    assert posted == ["gpt-5.1-mini"]

@@ -1075,6 +1075,7 @@ _CREDIT_CHECKED = ("openai", "anthropic", "gemini")
 #: preference for the probe, not a model name: whichever such model the account lists
 #: newest is used, and the user's chosen model always wins.
 _CHAT_FAMILY = {"openai": "gpt", "anthropic": "claude", "gemini": "gemini"}
+_NOT_PROBED = re.compile(r"codex|-pro\b|o\d-pro|deep-research|computer-use|-preview-tts|nano", re.I)
 
 
 def _credit(integration: Integration, values: dict[str, str], models: list[str]) -> Optional[Checked]:
@@ -1088,9 +1089,12 @@ def _credit(integration: Integration, values: dict[str, str], models: list[str])
     key = values.get(spec.key_var, "")
     chosen = next((values.get(v.name) for v in integration.variables if not v.secret and v.name.endswith("_MODEL")), "")
     family = _CHAT_FAMILY.get(integration.id, "")
+    # Not the Responses-only or premium variants (`-codex`, `-pro`, deep research):
+    # they refuse a chat call, which would leave the probe saying nothing. A small
+    # model is preferred — it costs least, and the account's credit is the question.
     chat = sorted(
-        (m for m in models if not keycheck._NOT_CHAT.search(m)),
-        key=lambda m: (m.startswith(family), m),
+        (m for m in models if not keycheck._NOT_CHAT.search(m) and not _NOT_PROBED.search(m)),
+        key=lambda m: (m.startswith(family), "mini" in m or "flash" in m or "haiku" in m, m),
         reverse=True,
     )
     model = chosen if chosen and (chosen in models or not models) else (chat[0] if chat else "")

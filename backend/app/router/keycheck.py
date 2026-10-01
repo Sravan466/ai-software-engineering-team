@@ -315,7 +315,8 @@ def kind_of(found: KeyCheck) -> Optional[str]:
         REJECTED_DURING_BUILD: keyerrors.INVALID,
         "region_not_supported": keyerrors.REGION,
         "restricted": keyerrors.NOT_PERMITTED,
-        "network_not_allowed": keyerrors.NOT_PERMITTED,
+        # `network_not_allowed` has no kind on purpose: its own sentence (allow this
+        # server's IP) is the fix, and "check the key's permissions" would hide it.
     }.get(found.reason)
 
 
