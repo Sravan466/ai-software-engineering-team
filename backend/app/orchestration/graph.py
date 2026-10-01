@@ -111,6 +111,71 @@ def _gather_context(state: PipelineState, phase_key: str) -> tuple[str, str]:
     return rag, mem
 
 
+def _account_connectors() -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """(connected ids, capability defaults, when each was connected) for the build's
+    owner. Best effort: a store that can't be read reads as nothing connected."""
+    from app.core import connectors_store, identity
+
+    uid = identity.current_user_id()
+    if not uid:
+        return [], {}, {}
+    try:
+        store = connectors_store.for_user(uid)
+        return store.connected_ids(), store.defaults(), store.recent()
+    except Exception as e:  # noqa: BLE001 - connectors must never fail a phase
+        log.warning("Couldn't read the account's connectors (continuing without): %s", e)
+        return [], {}, {}
+
+
+def build_integrations(state: PipelineState, design_output: object) -> tuple[str, ...]:
+    """Which app connectors this build uses: what the person chose before the start,
+    plus what the idea and Atlas's design need, less what they switched off (#59)."""
+    from app.build import integrations
+
+    choice = state.get("integrations_choice") or {}
+    connected, defaults, recent = _account_connectors()
+    try:
+        found = integrations.relevant(
+            state.get("idea") or "",
+            integrations.design_texts(design_output),
+            connected,
+            use=choice.get("use") or (),
+            skip=choice.get("skip") or (),
+            defaults=defaults,
+            recent=recent,
+        )
+    except Exception as e:  # noqa: BLE001 - detection must never fail a phase
+        log.warning("Connector detection failed (continuing without): %s", e)
+        return ()
+    return tuple(m.iid for m in found)
+
+
+def connectors_note() -> str:
+    """What System Design is told about the account's connectors — names only."""
+    from app.build import integrations
+
+    connected, _, _ = _account_connectors()
+    return integrations.available_note(connected)
+
+
+def _connector_pins(state: PipelineState) -> frozenset[str]:
+    """The bundled skill of every connector the charter says this build uses.
+
+    Pinned the same way a person pins one, so keyword scoring can't drop the one
+    procedure that knows a service's traps — Stripe's raw webhook body, say.
+    """
+    from app.build import integrations
+
+    charter = state.get("charter") or {}
+    used = charter.get("integrations") if isinstance(charter, dict) else None
+    names = set()
+    for iid in used or ():
+        found = integrations.get(iid)
+        if found is not None and found.skill:
+            names.add(found.skill)
+    return frozenset(names)
+
+
 def gather_skills(state: PipelineState, phase_key: str) -> tuple:
     """The procedures this phase should be working from, best first.
 
@@ -124,12 +189,16 @@ def gather_skills(state: PipelineState, phase_key: str) -> tuple:
     it never stops a run.
     """
     try:
+        overrides = skills.Overrides.from_dict(state.get("skill_overrides"))
+        pins = _connector_pins(state) - overrides.excluded
+        if pins:
+            overrides = skills.Overrides(pinned=overrides.pinned | pins, excluded=overrides.excluded)
         return tuple(
             skills.select(
                 phase_key,
                 state["idea"],
                 state.get("prior_outputs", {}),
-                skills.Overrides.from_dict(state.get("skill_overrides")),
+                overrides,
             )
         )
     except Exception as e:  # noqa: BLE001 - skills must never fail a phase
@@ -187,6 +256,10 @@ def _make_node(phase: Phase):
             verdict, extra = run_debate(state)
             if verdict is not None:
                 updates["debates"] = [*state.get("debates", []), verdict]
+            # Names and capabilities of what the person has connected. Never a key.
+            note = connectors_note()
+            if note:
+                extra = f"{extra}\n\n{note}" if extra else note
 
         ctx = AgentContext(
             idea=state["idea"],
@@ -213,7 +286,11 @@ def _make_node(phase: Phase):
             # Frozen here and never rewritten by a later phase. A charter a phase
             # could edit on its way past is a charter that says whatever the last
             # agent to run believed, which is the situation this replaces.
-            charter = freeze(result.output, verdict or _last_debate(state))
+            charter = freeze(
+                result.output,
+                verdict or _last_debate(state),
+                build_integrations(state, result.output),
+            )
             updates["charter"] = charter.as_dict() if charter else {}
 
         updates.update(

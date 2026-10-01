@@ -60,6 +60,10 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # Nullable: a build from before the database question was never asked it,
         # and "later" would claim an answer nobody gave.
         "database_status",
+        # Both nullable: a build from before #59 was never asked about connectors,
+        # and an empty choice or status would claim an answer nobody gave.
+        "integrations_choice",
+        "integrations_status",
         # All nullable: a build from before #55 was never pushed or deployed from
         # here, and any value would claim somewhere it went.
         "github_repo",

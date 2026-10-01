@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
 
-from app.build import dbconnect
+from app.build import dbconnect, integrations as integration_registry
 
 from app.core.constants import Phase
 from app.core.logging import get_logger
@@ -132,6 +132,9 @@ class Charter:
     #: at the gate — so a later re-freeze can tell "Atlas said the same thing again"
     #: from "Atlas changed its mind".
     frozen_provider: Optional[str] = None
+    #: The app connectors this build uses — `stripe`, `resend`, … (#59). Their
+    #: variable names are in `env` beside the database's. Names only, like `env`.
+    integrations: tuple[str, ...] = ()
 
     # ── construction ─────────────────────────────────────────────────────────
     @classmethod
@@ -155,7 +158,12 @@ class Charter:
                 label=str(entry.get("label") or stack.label_for(token)),
                 source=str(entry.get("source") or SOURCE_DESIGN),
             )
-        if not choices:
+        raw = data.get("integrations")
+        # A charter from before connectors existed has none.
+        used = tuple(
+            i for i in (raw if isinstance(raw, list) else []) if isinstance(i, str) and integration_registry.get(i)
+        )
+        if not choices and not used:
             return None
         database = choices.get("database")
         token = database.token if database else None
@@ -167,18 +175,36 @@ class Charter:
         names = (
             tuple(n for n in env if isinstance(n, str) and n)
             if isinstance(env, list)
-            else dbconnect.env_names(token, provider)
+            else _env(token, provider, used)
         )
         frozen = data.get("database_provider_frozen")
-        return cls(choices, provider, names, frozen if isinstance(frozen, str) and frozen else provider)
+        return cls(choices, provider, names, frozen if isinstance(frozen, str) and frozen else provider, used)
 
     def with_provider(self, provider: str) -> "Charter":
         """The same stack, hosted somewhere else — and so read from other names."""
         database = self.choices.get("database")
         token = database.token if database else None
         return Charter(
-            self.choices, provider, dbconnect.env_names(token, provider), self.frozen_provider
+            self.choices, provider, _env(token, provider, self.integrations), self.frozen_provider, self.integrations
         )
+
+    def with_integrations(self, used: tuple[str, ...]) -> "Charter":
+        """The same stack, using another set of app connectors — and their names."""
+        database = self.choices.get("database")
+        token = database.token if database else None
+        return Charter(
+            self.choices,
+            self.database_provider,
+            _env(token, self.database_provider, used),
+            self.frozen_provider,
+            tuple(used),
+        )
+
+    @property
+    def database_env(self) -> tuple[str, ...]:
+        """The names the database is read from — `env` without the connectors'."""
+        theirs = set(integration_registry.env_names(self.integrations))
+        return tuple(n for n in self.env if n not in theirs)
 
     def as_dict(self) -> dict:
         out: dict = {category: choice.as_dict() for category, choice in self.choices.items()}
@@ -188,10 +214,12 @@ class Charter:
             out["env"] = list(self.env)
         if self.frozen_provider and self.frozen_provider != self.database_provider:
             out["database_provider_frozen"] = self.frozen_provider
+        if self.integrations:
+            out["integrations"] = list(self.integrations)
         return out
 
     def __bool__(self) -> bool:
-        return bool(self.choices)
+        return bool(self.choices or self.integrations)
 
     def get(self, category: str) -> Optional[Choice]:
         return self.choices.get(category)
@@ -205,7 +233,8 @@ class Charter:
         has to read as the constraint it is.
         """
         if not self.choices:
-            return ""
+            # Only connectors: nothing to hold the stack to, but the names still bind.
+            return self._integrations_block().strip()
         lines = [
             f"- {stack.CATEGORY_LABELS[category]}: {self.choices[category].label}"
             for category, _ in stack.CATEGORIES
@@ -224,14 +253,46 @@ class Charter:
         )
 
     def _env_block(self) -> str:
-        if not self.env:
+        out = ""
+        database = self.database_env
+        if database:
+            names = ", ".join(database)
+            out += (
+                f"\n\nDATABASE CONNECTION — read it from exactly these environment variables: "
+                f"{names}. Use these names verbatim (os.getenv / process.env) and never "
+                "hardcode a connection string, host, user or password in any file. The "
+                "values are supplied at run time from .env; you will never be shown them."
+            )
+        return out + self._integrations_block()
+
+    def _integrations_block(self) -> str:
+        """Each connector the build uses, its variable names, and which side reads each."""
+        lines: list[str] = []
+        for iid in self.integrations:
+            found = integration_registry.get(iid)
+            if found is None:
+                continue
+            parts = []
+            for var in found.variables:
+                where = (
+                    "client — read in the browser bundle, publishable only"
+                    if var.side == "client"
+                    else "server only"
+                )
+                optional = ", optional" if not var.required else ""
+                parts.append(f"{var.name} ({where}{optional})")
+            lines.append(f"- {found.label}: " + "; ".join(parts))
+        if not lines:
             return ""
-        names = ", ".join(self.env)
         return (
-            f"\n\nDATABASE CONNECTION — read it from exactly these environment variables: "
-            f"{names}. Use these names verbatim (os.getenv / process.env) and never "
-            "hardcode a connection string, host, user or password in any file. The "
-            "values are supplied at run time from .env; you will never be shown them."
+            "\n\nAPP SERVICES — this build uses these services. Read each one's keys from "
+            "exactly these environment variables:\n"
+            + "\n".join(lines)
+            + "\nUse the names verbatim. A server-only variable is read only in server code "
+            "(API routes, route handlers, server actions, the backend) — never in a client "
+            "component or anything shipped to the browser, and never renamed with a "
+            "NEXT_PUBLIC_ or VITE_ prefix. Never hardcode a key, and handle a missing one "
+            "with a clear error rather than a crash. You will never be shown the values."
         )
 
     def summary_line(self) -> str:
@@ -271,7 +332,18 @@ def _tech_stack(design: object) -> dict[str, list[str]]:
     }
 
 
-def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Charter]:
+def _env(token: Optional[str], provider: Optional[str], used: tuple[str, ...]) -> tuple[str, ...]:
+    """The database's names, then every connector's — one list, no repeats."""
+    out = list(dbconnect.env_names(token, provider))
+    out += [n for n in integration_registry.env_names(used) if n not in out]
+    return tuple(out)
+
+
+def freeze(
+    design_output: object,
+    debate: Optional[dict] = None,
+    integrations: tuple[str, ...] = (),
+) -> Optional[Charter]:
     """Derive the charter from the settled architecture, plus the debate's verdict.
 
     Order of authority, highest first:
@@ -349,7 +421,7 @@ def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Cha
         for implied_category, token in stack.implications(source).items():
             record(implied_category, stack.BY_TOKEN.get(token), SOURCE_IMPLIED)
 
-    if not chosen:
+    if not chosen and not integrations:
         log.warning(
             "The architecture named no technology this pipeline recognises, so no "
             "stack charter was frozen and nothing downstream will be checked against "
@@ -369,8 +441,13 @@ def freeze(design_output: object, debate: Optional[dict] = None) -> Optional[Cha
             [*tech.get("database", ()), *tech.get("backend", ()), *tech.get("infra", ()), spoken or ""],
         )
     token = database.token if database else None
-    charter = Charter(chosen, provider, dbconnect.env_names(token, provider), provider)
-    log.info("Stack charter frozen — %s", charter.summary_line())
+    used = tuple(dict.fromkeys(i for i in integrations if integration_registry.get(i)))
+    charter = Charter(chosen, provider, _env(token, provider, used), provider, used)
+    log.info(
+        "Stack charter frozen — %s%s",
+        charter.summary_line(),
+        f" · connectors: {', '.join(used)}" if used else "",
+    )
     return charter
 
 

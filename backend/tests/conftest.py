@@ -71,6 +71,10 @@ from app.core import github_publish as _github_publish, vercel as _vercel  # noq
 
 _github_publish.transport = httpx.MockTransport(lambda request: httpx.Response(503, json={}))
 _vercel.transport = httpx.MockTransport(lambda request: httpx.Response(503, json={}))
+# Nor Stripe, Resend, Clerk or OpenAI: a connector check nobody stubbed is "saved, not tested".
+from app.build import integrations as _integrations  # noqa: E402
+
+_integrations.transport = httpx.MockTransport(lambda request: httpx.Response(503, json={}))
 from app.core import auth as _auth, identity  # noqa: E402
 from app.db.base import SessionLocal, init_db  # noqa: E402
 from app.db.models import User  # noqa: E402
@@ -203,6 +207,17 @@ def through_database_gate(c: TestClient, pid: str) -> dict:
     return project
 
 
+def through_question_gates(c: TestClient, pid: str) -> dict:
+    """Answer both questions only the person can — the database, then the services —
+    with "later", the way a person who wants to see the build first would."""
+    project = through_database_gate(c, pid)
+    if project.get("gate_kind") == "integrations":
+        r = c.post(f"/api/projects/{pid}/integrations/later")
+        assert r.status_code == 200, r.text
+        project = c.get(f"/api/projects/{pid}").json()
+    return project
+
+
 def sign_in(c: TestClient, email: str = TEST_EMAIL, password: str = TEST_PASSWORD) -> TestClient:
     r = c.post("/api/auth/signin", json={"email": email, "password": password})
     assert r.status_code == 200, r.text
@@ -223,4 +238,7 @@ def _fresh_key_check_limit():
     from app.api.routes import deploy as _deploy_routes
 
     _deploy_routes.limiter.reset()
+    from app.api.routes import connectors as _connectors_routes
+
+    _connectors_routes.limiter.reset()
     yield

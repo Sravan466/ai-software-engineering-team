@@ -122,6 +122,11 @@ NPM: dict[str, str] = {
     "pino": "^9.3.0",
     "node-cron": "^3.0.3",
     "stripe": "^16.6.0",
+    # App connectors (#59): the SDKs the bundled skills write against.
+    "@stripe/stripe-js": "^4.1.0",
+    "resend": "^4.0.0",
+    "openai": "^4.56.0",
+    "@clerk/nextjs": "^6.0.0",
     # data stores
     "pg": "^8.12.0",
     "mysql2": "^3.11.0",
@@ -250,6 +255,8 @@ PIP: dict[str, tuple[str, str]] = {
     "aiohttp": ("aiohttp", ">=3.9,<4"),
     "celery": ("celery", ">=5.3,<6"),
     "stripe": ("stripe", ">=9,<12"),
+    "resend": ("resend", ">=2,<3"),
+    "openai": ("openai", ">=1.40,<2"),
     "boto3": ("boto3", ">=1.34,<2"),
     "jinja2": ("Jinja2", ">=3.1,<4"),
     "marshmallow": ("marshmallow", ">=3.21,<4"),
@@ -335,7 +342,7 @@ _SERVER_ONLY = frozenset(
         "sqlite3", "better-sqlite3", "mongoose", "mongodb", "redis", "ioredis", "prisma",
         "sequelize", "knex", "typeorm", "drizzle-orm", "@nestjs/common", "@nestjs/core",
         "@nestjs/platform-express", "reflect-metadata", "rxjs", "passport", "passport-jwt",
-        "passport-local", "bcrypt", "jsonwebtoken", "stripe", "joi",
+        "passport-local", "bcrypt", "jsonwebtoken", "stripe", "joi", "resend", "openai",
     }
 )
 

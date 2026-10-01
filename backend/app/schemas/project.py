@@ -46,6 +46,17 @@ class SkillOverrides(BaseModel):
     excluded: list[str] = Field(default_factory=list)
 
 
+class ConnectorChoice(BaseModel):
+    """Which app connectors a build uses, over what detection picks (#59).
+
+    `skip` always wins: a connector the person switched off is never used, whatever
+    the idea or the design says.
+    """
+
+    use: list[str] = Field(default_factory=list)
+    skip: list[str] = Field(default_factory=list)
+
+
 class ProjectCreate(BaseModel):
     idea: str = Field(..., min_length=3, description="The product idea to build.")
     name: Optional[str] = None
@@ -75,6 +86,13 @@ class ProjectCreate(BaseModel):
         description=(
             "Skills to force on or off for this build, over what keyword scoring "
             "would choose. Omit to let the automatic choice stand."
+        ),
+    )
+    connectors: Optional[ConnectorChoice] = Field(
+        None,
+        description=(
+            "App connectors to add to or keep out of this build, over what the idea and "
+            "the design pick. Omit to let the automatic choice stand."
         ),
     )
     #: Legacy switch, still honoured when `approval_mode` is absent.
@@ -220,6 +238,10 @@ class ProjectOut(BaseModel):
     gate_note: Optional[str] = None
     #: How the database question was answered — see `DatabaseStatus`. Never a value.
     database_status: Optional[str] = None
+    #: App connectors (#59): what the person chose before the start, and how the
+    #: connectors question was answered. Names only — never a value.
+    integrations_choice: Optional[dict] = None
+    integrations_status: Optional[dict] = None
     #: Where the finished build went: its GitHub repo and its live deploy (#55).
     #: Names and URLs only — never a token.
     github_repo: Optional[str] = None

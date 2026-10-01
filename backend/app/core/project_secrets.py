@@ -271,3 +271,161 @@ def summary(owner_id: str, project_id: str, contract: Optional[dbconnect.Contrac
         "provider": record.get("provider") if same else None,
         "check": record.get("check") if same and saved else None,
     }
+
+
+# ── app connectors given for this project only (#59) ─────────────────────────
+#
+# A sibling file, not a section of `secrets.local.json`: that file is the database
+# record and is replaced whole on every database save, and its format is what the
+# database gate's tests pin down. This one holds a project's own connector keys —
+# given at the build's question without saving them to the account, or a per-build
+# override ("use a different key for this build") — and wins over the account's.
+#
+#     data/users/<user id>/projects/<project id>/integrations.local.json
+#
+#     {"stripe": {"values": {"STRIPE_SECRET_KEY": "enc:v1:…"}, "check": {…}, "mode": "test"}}
+
+_INTEGRATIONS = "integrations.local.json"
+
+
+def _integrations_path(owner_id: str, project_id: str) -> Path:
+    return _dir(owner_id, project_id) / _INTEGRATIONS
+
+
+def _scrub_key(project_id: str) -> str:
+    return f"{project_id}:integrations"
+
+
+def integrations_load(owner_id: Optional[str], project_id: str) -> dict[str, dict]:
+    """Every connector saved for this project, still encrypted. Empty when none."""
+    if not owner_id:
+        return {}
+    try:
+        data = json.loads(_integrations_path(owner_id, project_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        log.warning("The connector keys file for project %s can't be read.", project_id)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _integration_parts(data: dict[str, dict]) -> list[str]:
+    from app.build import integrations
+
+    parts: list[str] = []
+    for iid, entry in data.items():
+        values = _decrypted(entry)
+        parts += integrations.secret_parts(integrations.get(iid), values)
+    return parts
+
+
+def integration_values(owner_id: Optional[str], project_id: str, iid: str) -> dict[str, str]:
+    """One connector's project values, decrypted. Raises `SecretsLocked` like `reveal`."""
+    entry = integrations_load(owner_id, project_id).get(iid) or {}
+    values = _decrypted(entry)
+    if values:
+        from app.build import integrations
+
+        scrub.register_many(integrations.secret_parts(integrations.get(iid), values))
+    return values
+
+
+def save_integration(
+    owner_id: str,
+    project_id: str,
+    iid: str,
+    values: dict[str, str],
+    check: dict,
+    mode: Optional[str],
+) -> None:
+    from app.build import integrations
+
+    with _LOCK:
+        data = integrations_load(owner_id, project_id)
+        data[iid] = {
+            "values": {n: secretbox.encrypt(v) for n, v in values.items() if v},
+            "check": check,
+            "mode": mode,
+        }
+        path = _integrations_path(owner_id, project_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_private(path, json.dumps(data, indent=2))
+        scrub.register_many(integrations.secret_parts(integrations.get(iid), values))
+    log.info(
+        "Connector %s saved for project %s: %s",
+        iid,
+        project_id,
+        ", ".join(sorted(n for n, v in values.items() if v)),
+    )
+
+
+def remove_integration(owner_id: Optional[str], project_id: str, iid: str) -> bool:
+    """Drop one connector's project values. True if there were any."""
+    if not owner_id:
+        return False
+    with _LOCK:
+        data = integrations_load(owner_id, project_id)
+        if iid not in data:
+            return False
+        data.pop(iid)
+        path = _integrations_path(owner_id, project_id)
+        if data:
+            write_private(path, json.dumps(data, indent=2))
+        elif path.exists():
+            path.unlink()
+    log.info("Connector %s removed from project %s", iid, project_id)
+    return True
+
+
+def integrations_snapshot(owner_id: str, project_id: str) -> Optional[str]:
+    try:
+        return _integrations_path(owner_id, project_id).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def integrations_restore(owner_id: str, project_id: str, previous: Optional[str]) -> None:
+    with _LOCK:
+        path = _integrations_path(owner_id, project_id)
+        if previous is None:
+            if path.exists():
+                path.unlink()
+            return
+        write_private(path, previous)
+
+
+def register_integrations_all() -> int:
+    """At startup: every project's connector keys go to the scrubber too."""
+    root = userdata.ROOT
+    if not root.is_dir():
+        return 0
+    count = 0
+    for path in root.glob(f"*/projects/*/{_INTEGRATIONS}"):
+        project_id = path.parent.name
+        owner_id = path.parent.parent.parent.name
+        try:
+            scrub.register_many(_integration_parts(integrations_load(owner_id, project_id)))
+            count += 1
+        except (secretbox.SecretsLocked, ValueError, OSError):
+            log.warning("Couldn't read the saved connector keys for project %s.", project_id)
+    return count
+
+
+def holds_integration_secret(owner_id: Optional[str], project_id: str, text: str) -> bool:
+    """Whether `text` holds a connector key saved for this project or its account."""
+    if not owner_id or not text:
+        return False
+    from app.build import integrations
+    from app.core import connectors_store
+
+    try:
+        parts = _integration_parts(integrations_load(owner_id, project_id))
+        store = connectors_store.for_user(owner_id)
+        for iid in store.connected_ids():
+            parts += integrations.secret_parts(integrations.get(iid), store.values(iid))
+    except (secretbox.SecretsLocked, ValueError, OSError):
+        return False
+    return any(p in text for p in parts)

@@ -67,6 +67,11 @@ class GateKind(str, Enum):
     #: them — or say they will add them later. Asked in every review mode, unattended
     #: included, right after the architecture, before the Plan review.
     DATABASE = "database"
+    #: The design uses app connectors (Stripe, Resend, …) that aren't connected in
+    #: the account's Connectors yet. Asked right after the database question, in
+    #: every review mode, and only for those — one already connected is linked and
+    #: never asked about.
+    INTEGRATIONS = "integrations"
 
 
 class DatabaseStatus(str, Enum):

@@ -42,5 +42,9 @@ class PipelineState(TypedDict, total=False):
     #: JavaScript. Empty until System Design has run; rewritten only when it re-runs.
     charter: dict
 
+    #: App connectors the person added or switched off before the start —
+    #: `{"use": [...], "skip": [...]}` — mirrored in from the project row (#59).
+    integrations_choice: dict
+
     #: Phases the fix loop's current round asks to run on the most capable model.
     escalate: list[str]

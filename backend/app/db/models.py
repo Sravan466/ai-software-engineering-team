@@ -128,6 +128,14 @@ class Project(Base):
     #: question has been asked (and on every build from before it was). The values
     #: themselves are never in the database — see `app.core.project_secrets`.
     database_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: What the person said about app connectors before the build started:
+    #: `{"use": [...], "skip": [...]}`. Null when they said nothing (#59).
+    integrations_choice: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: How the connectors question was answered, per connector: `{"stripe": "later"}`.
+    #: A connector connected in the account, or saved for this build, needs no entry —
+    #: that is read live, so a key rotated in Connectors reaches every build. Null
+    #: until asked, and on every build from before connectors existed.
+    integrations_status: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # ── where the finished build went (#55) ──────────────────────────────────
     #: The repository in the user's own GitHub (`owner/name`) this build was pushed

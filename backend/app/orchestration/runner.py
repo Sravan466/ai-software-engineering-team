@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
-from app.build import dbconnect
+from app.build import dbconnect, integrations
 from app.core import artifacts, identity, project_secrets
 from app.core.config import settings
 from app.core.constants import (
@@ -51,10 +51,10 @@ from app.db.base import SessionLocal
 from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
 from app.preview import history as preview_history
 from app.memory.store import memory_store
-from app.orchestration import autofix, remediation
+from app.orchestration import autofix, connectors, remediation
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import Charter, binding_on
-from app.orchestration.graph import graph, gather_skills
+from app.orchestration.graph import connectors_note, graph, gather_skills
 from app.orchestration.state import PipelineState
 from app.preview import service as mockup
 from app.preview.jobs import jobs as mockup_jobs
@@ -145,6 +145,7 @@ def _initial_state(project: Project) -> PipelineState:
         # a run resumed in a new process. Set when the build is created, because a
         # pin is a statement about the work this build is about to do.
         skill_overrides=project.skill_overrides or {},
+        integrations_choice=project.integrations_choice or {},
     )
 
 
@@ -304,7 +305,7 @@ class PipelineRunner:
             # Before any review policy: only the person can hand over a database's
             # credentials, so this is asked in unattended mode too, and ahead of the
             # Plan review, which still parks once it is answered.
-            asked = self.database_question(project)
+            asked = self.database_question(project) or self.integrations_question(project)
             if asked is not None:
                 return asked
         data = autofix.load(project)
@@ -334,6 +335,72 @@ class PipelineRunner:
             GateKind.DATABASE.value,
             f"Atlas picked {choice.label}{on}. Connect it now, or continue and add it later.",
         )
+
+    @staticmethod
+    def integrations_question(project: Project) -> Optional[Gate]:
+        """The "connect your services" gate, for connectors nobody has answered.
+
+        One already connected in the account's Connectors is linked, not asked about:
+        when every connector the design uses is connected, there is no stop at all.
+        """
+        waiting = connectors.unanswered(project)
+        if not waiting:
+            return None
+        labels = [integrations.get(i).label for i in waiting if integrations.get(i)]
+        named = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + f" and {labels[-1]}"
+        it = "it" if len(labels) == 1 else "them"
+        return Gate(
+            GateKind.INTEGRATIONS.value,
+            f"The design uses {named}. Connect {it} now so the crew builds against {it}, or "
+            "continue and add it later.",
+        )
+
+    @staticmethod
+    def at_integrations_gate(project: Project) -> bool:
+        return (
+            project.status == PipelineStatus.AWAITING_APPROVAL.value
+            and project.gate_kind == GateKind.INTEGRATIONS.value
+        )
+
+    @classmethod
+    def at_question_gate(cls, project: Project) -> bool:
+        """Parked on a question only the person can answer: the database or the services."""
+        return cls.at_database_gate(project) or cls.at_integrations_gate(project)
+
+    @staticmethod
+    def before_code(project: Project) -> bool:
+        """Parked right after the architecture, before any code was written — the only
+        time the set of connectors (and so the names the code reads) can change."""
+        return (
+            project.status == PipelineStatus.AWAITING_APPROVAL.value
+            and project.current_phase == Phase.SYSTEM_DESIGN.value
+        )
+
+    @staticmethod
+    def set_integrations(project: Project, charter: Charter) -> None:
+        """Re-point the charter at another set of connectors, before any code exists.
+
+        The same write as `set_database_provider`: to the checkpoint the agents read
+        their charter from, attributed to System Design so the run still resumes at
+        the Backend Engineer. The caller commits.
+        """
+        data = charter.as_dict()
+        with _checkpoint_lock(project.id):
+            graph.update_state(_config(project.id), {"charter": data}, as_node=Phase.SYSTEM_DESIGN.value)
+        project.charter = data
+        log.info("Connectors for %s set to %s", project.id, ", ".join(charter.integrations) or "none")
+
+    @staticmethod
+    def settle_integrations(project: Project, before: object) -> None:
+        """After the charter is (re)frozen: a connector the build no longer uses has
+        its answer and its project keys removed. The account's connection stays."""
+        old = Charter.from_dict(before)
+        new = Charter.from_dict(project.charter)
+        dropped = [i for i in (old.integrations if old else ()) if i not in (new.integrations if new else ())]
+        stale = [i for i in (project.integrations_status or {}) if i not in (new.integrations if new else ())]
+        gone = list(dict.fromkeys(dropped + stale))
+        if gone:
+            connectors.forget(project, gone)
 
     @staticmethod
     def set_database_provider(project: Project, charter: Charter) -> None:
@@ -789,6 +856,11 @@ class PipelineRunner:
                         # exception lives rather than here.
                         charter=binding_on(phase_key, values.get("charter")),
                         escalate=phase_key in escalate,
+                        # The architect is told what the person has connected, on a
+                        # redo exactly as on the first run. Names only.
+                        extra_context=(
+                            connectors_note() if phase_key == Phase.SYSTEM_DESIGN.value else ""
+                        ),
                     )
                     # Inside the lock, model call and all. This is a read-modify-write:
                     # the patch below is built from the snapshot above, so a write to this
@@ -798,7 +870,7 @@ class PipelineRunner:
                     # second driver existing — see `_checkpoint_lock`.
                     result = agent.run(ctx)
 
-                    from app.orchestration.graph import _last_debate, _serialize_result
+                    from app.orchestration.graph import _last_debate, _serialize_result, build_integrations
                     from app.orchestration.charter import freeze
 
                     last_result = _serialize_result(phase_key, agent.title, result)
@@ -833,7 +905,9 @@ class PipelineRunner:
                         # The architecture was rewritten, so the charter frozen from
                         # the old one describes a build that no longer exists. Every
                         # phase after this is about to re-run against the new one.
-                        rewritten = freeze(result.output, _last_debate(values))
+                        rewritten = freeze(
+                            result.output, _last_debate(values), build_integrations(values, result.output)
+                        )
                         patch["charter"] = rewritten.as_dict() if rewritten else {}
                         charter_update = patch["charter"]
                     graph.update_state(
@@ -891,6 +965,7 @@ class PipelineRunner:
             before = project.charter
             project.charter = charter_update or None
             self.settle_database(project, before)
+            self.settle_integrations(project, before)
             db.commit()
             log.info("Stack charter re-frozen for %s after redoing the architecture", project.id)
         if phase_key == Phase.FRONTEND_ENGINEER.value:
@@ -1083,6 +1158,7 @@ class PipelineRunner:
             before = project.charter
             project.charter = state.get("charter") or None
             self.settle_database(project, before)
+            self.settle_integrations(project, before)
             db.commit()
         self._raise_if_cancelled(db, project)
 
