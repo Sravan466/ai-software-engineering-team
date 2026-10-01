@@ -62,7 +62,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.core import identity, model_roles, model_settings, secrets_store
+from app.core import identity, keyerrors, model_roles, model_settings, secrets_store
 from app.core.config import settings
 from app.core.constants import RoutingMode
 from app.core.logging import get_logger
@@ -647,6 +647,7 @@ class ModelRouter:
             found = self.key_check(name)
             if (
                 found.status in keycheck.UNSETTLED
+                or found.during_build
                 or found.reason == keycheck.REJECTED_DURING_BUILD
                 or found.age_seconds() > settings.key_recheck_seconds
             ):
@@ -669,7 +670,11 @@ class ModelRouter:
         prov = self._cloud.get(provider)
         if prov is None or not prov.has_key:
             return
-        found = keycheck.verdict_from_error(provider, getattr(error, "status", None), str(error), model)
+        kind = getattr(error, "kind", None)
+        if kind is not None:
+            found = keycheck.verdict_for(provider, kind, model)
+        else:
+            found = keycheck.verdict_from_error(provider, getattr(error, "status", None), str(error), model)
         if found is None:
             return
         found.key_id = keycheck.key_id(prov.secret() or "")
@@ -874,8 +879,18 @@ class ModelRouter:
                 "checked_at": found.checked_at or None,
                 "checked_model": found.model,
                 "models": list(found.models),
+                "during_build": found.during_build,
+                # The badge, sentence and one action for a refused key (#63).
+                "advice": self._advice(name, found),
             }
         return out
+
+    @staticmethod
+    def _advice(provider: str, found: KeyCheck) -> Optional[dict]:
+        kind = keycheck.kind_of(found)
+        if kind is None or found.status not in (keycheck.INVALID, keycheck.BILLING, keycheck.RATE_LIMITED, keycheck.UNVERIFIED):
+            return None
+        return keyerrors.advice(kind, provider).as_dict()
 
     def store_error(self) -> Optional[str]:
         """Whether the settings file can be read — asked of the file now, not remembered."""
@@ -1440,8 +1455,9 @@ class ModelRouter:
                 # rather than falling through to a model nobody picked. Connected
                 # but its runtime down, that is an error to fix there, not a pause.
                 raise prov.unavailable_error()
-            if prov is None or not prov.available() or self._refuses(pname, model):
-                attempts.append({"provider": pname, "model": model, "error": "unavailable"})
+            refused = self._refuses(pname, model) if prov is not None and prov.available() else None
+            if prov is None or not prov.available() or refused is not None:
+                attempts.append(self._skipped(pname, model, refused))
                 continue
             try:
                 resp = self._generate(prov, messages, model, options)
@@ -1449,6 +1465,15 @@ class ModelRouter:
                 resp.attempts = attempts
                 if resp.is_local is None:
                     resp.is_local = prov.is_local_model(model)
+                refused = next((a for a in attempts if a.get("kind") in keyerrors.BLOCKING), None)
+                if refused is not None:
+                    # "OpenAI has no credit left; continued on Gemini." — the fallback
+                    # the person configured worked, and they should know why it ran.
+                    resp.fallback_note = (
+                        f"{_label(refused['provider'])}: {refused['why']}; continued on "
+                        f"{_label(pname)} ({model})."
+                    )
+                    log.warning("%s", resp.fallback_note)
                 if idx > 0:
                     # The caller sized its prompt against the head of this chain, and
                     # this is not that model. Nothing here can re-size a prompt that
@@ -1469,7 +1494,10 @@ class ModelRouter:
                 raise  # a Stop, or a computer to wait for: never the next link's job
             except ProviderError as e:
                 log.warning("Provider %s/%s failed: %s", pname, model, e)
-                attempts.append({"provider": pname, "model": model, "error": str(e)})
+                attempts.append({
+                    "provider": pname, "model": model, "error": str(e),
+                    "kind": getattr(e, "kind", None), "why": _short(getattr(e, "kind", None)),
+                })
                 last_error = e
                 if pname in CLOUD_PROVIDERS:
                     self._note_failure(pname, model, e)
@@ -1478,10 +1506,42 @@ class ModelRouter:
             # One model was ever in play: its own words are the whole story, and
             # "all providers failed" would only bury them.
             raise last_error
+        # Every model failed: name each one's reason in plain words, and carry the
+        # first cloud refusal's kind so the page can offer its fix.
+        # A refusal that needs the person (no credit, expired) beats a rate limit.
+        first = next((a for a in attempts if a.get("kind") in keyerrors.BLOCKING), None)
         raise ProviderError(
-            "All providers in the routing chain failed. Attempts: "
-            + "; ".join(f"{a['provider']}:{a['model']} -> {a['error']}" for a in attempts)
+            "No model in this build's chain could answer. "
+            + "; ".join(
+                f"{_label(a['provider'])} ({a['model']}): {a.get('why') or a['error']}" for a in attempts
+            )
+            + ".",
+            retryable=False,
+            kind=first["kind"] if first else None,
+            provider=first["provider"] if first else None,
         )
+
+    def _skipped(self, pname: str, model: str, refused: Optional[KeyCheck]) -> dict:
+        """An attempt not made, and why — "openai:gpt-x → out of credit", not "unavailable"."""
+        prov = self.provider(pname)
+        if refused is None and pname in CLOUD_PROVIDERS and prov is not None and getattr(prov, "has_key", False):
+            # Ruled out earlier (not `available()`): its standing still says why.
+            standing = self.key_check(pname)
+            if standing.status in keycheck.REJECTED:
+                refused = standing
+        if refused is not None:
+            kind = keycheck.kind_of(refused)
+            return {
+                "provider": pname, "model": model, "error": refused.message,
+                "kind": kind, "why": _short(kind) if kind else refused.message.rstrip("."),
+            }
+        if pname in CLOUD_PROVIDERS and prov is not None and not getattr(prov, "has_key", True):
+            why = "no API key saved"
+        elif pname in CLOUD_PROVIDERS:
+            why = "its key failed a check"
+        else:
+            why = "not running"
+        return {"provider": pname, "model": model, "error": "unavailable", "kind": None, "why": why}
 
     # ── embeddings ───────────────────────────────────────────────────────────
     def embedding_target(self) -> Optional[tuple[str, str]]:
@@ -1764,6 +1824,14 @@ class ModelRouter:
 #: models is a table that is wrong the week after it is written, and would put a
 #: hardcoded model name back into the routing layer by the back door.
 _CODER_HINTS = ("coder", "code", "codestral", "starcoder", "devstral")
+
+
+def _short(kind: Optional[str]) -> Optional[str]:
+    return keyerrors.SHORT.get(kind) if kind else None
+
+
+def _label(provider: str) -> str:
+    return keyerrors.LABELS.get(provider, provider)
 
 
 def _looks_like_a_coder(model: str) -> bool:

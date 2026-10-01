@@ -630,7 +630,20 @@ function RunInterrupted({
       action: "Resume from checkpoint",
     },
   };
+  // A cloud provider refused the key (#63): its own words and its own fix, never
+  // the local-runtime advice — which is wrong for every part of that case.
+  // Only a refusal the person must act on: a rate limit or an outage that outlasted
+  // the retries keeps the ordinary failed copy (and its "Check runtime").
+  const help = state === "failed" && project.last_error_help?.blocking ? project.last_error_help : null;
+  if (help) {
+    copy.failed = {
+      title: help.title,
+      text: `${help.body} Or choose another model for this build's agents in Settings, then resume — everything approved so far is kept.`,
+      action: "Resume from checkpoint",
+    };
+  }
   const { title, text, action } = copy[state] ?? copy.failed;
+  const fix = help && help.blocking && help.action_url ? help : null;
 
   return (
     <div
@@ -641,12 +654,29 @@ function RunInterrupted({
       <div className="notice-body">
         <span className="notice-title">{title}</span>
         <span className="notice-text">{text}</span>
-        {project.last_error && state !== "cancelled" && (
+        {project.last_error && state !== "cancelled" && state !== "failed" && (
           <span className="notice-detail mono">{project.last_error}</span>
         )}
+        {project.last_error && state === "failed" && (
+          // The raw error is for whoever reports a bug, not the headline.
+          <details className="notice-tech">
+            <summary>Technical details</summary>
+            <span className="notice-detail mono">{project.last_error}</span>
+          </details>
+        )}
         <div className="notice-actions">
+          {fix && (
+            <a className="btn btn-sm btn-primary" href={fix.action_url} target="_blank" rel="noreferrer">
+              {fix.action_label} {Icon.external}
+            </a>
+          )}
+          {help && (
+            <a className="btn btn-sm" href="/settings#agent-models">
+              Change model
+            </a>
+          )}
           <button
-            className="btn btn-sm btn-primary"
+            className={"btn btn-sm" + (fix ? "" : " btn-primary")}
             disabled={busy}
             onClick={() => act(() => api.resume(id))}
           >
@@ -658,7 +688,7 @@ function RunInterrupted({
               My computers
             </a>
           )}
-          {state === "failed" && (
+          {state === "failed" && !help && (
             <a className="btn btn-sm" href="/settings">
               Check runtime
             </a>
@@ -1058,8 +1088,14 @@ function PhaseList({
                   </span>
                 ) : null}
                 {row?.provider_used && row?.model_used && (
-                  <span className="phase-model">
+                  <span className="phase-model" title={row.fallback_note ?? undefined}>
                     {row.provider_used}/{row.model_used}
+                    {row.fallback_note && (
+                      // A refused key made this phase run elsewhere: say so, and why.
+                      <span className="phase-fallback">
+                        {" "}· fell back<span className="sr-only">: {row.fallback_note}</span>
+                      </span>
+                    )}
                   </span>
                 )}
                 {hasDoc && (

@@ -30,6 +30,9 @@ class ProviderError(RuntimeError):
         retryable: bool = True,
         unreachable: bool = False,
         status: Optional[int] = None,
+        kind: Optional[str] = None,
+        provider: Optional[str] = None,
+        technical: Optional[str] = None,
     ) -> None:
         # Scrubbed here, once: this text goes on to the log, the attempts list, the
         # project's `last_error` and the page, and a provider may have quoted the key.
@@ -40,6 +43,60 @@ class ProviderError(RuntimeError):
         self.unreachable = unreachable
         #: The HTTP status the provider answered with, when there was one.
         self.status = status
+        #: What a cloud provider's refusal meant (`app.core.keyerrors`): `no_credit`,
+        #: `expired`, … — None for anything that isn't a provider's answer.
+        self.kind = kind
+        #: Which provider said so — the cloud one, for its links and its words.
+        self.provider = provider
+        #: The provider's own text, scrubbed: for the server log and "Technical
+        #: details", never the headline.
+        self.technical = scrub(technical) if technical else None
+
+
+def cloud_error(provider: str, label: str, error: Exception) -> ProviderError:
+    """An SDK's exception, as the sentence a person can act on.
+
+    Classified once (`app.core.keyerrors`): a 429 that means "no credit" is not
+    retried, a rate limit is. The SDK's own text — raw JSON that may quote the key —
+    goes to the server log, scrubbed, and never becomes the message.
+    """
+    from app.core import keyerrors
+    from app.core.logging import get_logger
+    from app.core.scrub import scrub
+
+    failure = keyerrors.from_exception(provider, error)
+    technical = f"{label} call failed: {error}"
+    if failure is None:
+        # No HTTP answer: a dropped connection. Its text is a socket error, not JSON.
+        return ProviderError(technical, retryable=status_is_retryable(error), status=None, provider=provider)
+    get_logger(__name__).warning("%s", scrub(technical))
+    if failure.kind not in keyerrors.BLOCKING and failure.kind not in keyerrors.RETRYABLE:
+        # Not about the key or the account — a prompt too long, a parameter the model
+        # refuses. Key advice would hide the cause, so the provider's own reason stays
+        # (scrubbed, trimmed), and no kind is claimed.
+        said = keyerrors.provider_message(error) or technical
+        return ProviderError(
+            f"{label} refused the request (HTTP {failure.status}): {said[:400]}",
+            retryable=False,
+            status=failure.status,
+            provider=provider,
+            technical=technical,
+        )
+    advice = keyerrors.advice(failure.kind, provider, status=failure.status, code=failure.code)
+    # Retryable kinds only surface once the retries ran out — say that, not "retried
+    # by themselves".
+    message = (
+        f"{advice.title}, and the call still failed after retrying. Try again in a few minutes."
+        if failure.retryable else advice.sentence()
+    )
+    return ProviderError(
+        message,
+        retryable=failure.retryable,
+        status=failure.status,
+        kind=failure.kind,
+        provider=provider,
+        technical=technical,
+    )
 
 
 class RequestCancelled(ProviderError):

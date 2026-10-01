@@ -5,7 +5,7 @@ import { useCallback, useEffect, useId, useState } from "react";
 import { api, type IntegrationRow, type IntegrationsState, type Project } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
-import { ConnectForm, ConnectorMark, LockLine, VarChips } from "./parts";
+import { ConnectForm, ConnectorMark, FixLink, LockLine, VarChips, failedText } from "./parts";
 
 /**
  * A build's app connectors: the "Connect your services" card at the question
@@ -72,7 +72,7 @@ function RowBadge({ row }: { row: IntegrationRow }) {
     return (
       <span className="badge badge-bad">
         <span className="dot dot-bad" aria-hidden="true" />
-        Key failed its last test
+        {row.check ? failedText(row.check) : "Key failed its last test"}
       </span>
     );
   }
@@ -141,6 +141,19 @@ function Row({
             <RowBadge row={row} />
           </span>
           {row.reason && <span className="cx-row-why">Used because {row.reason}.</span>}
+          {row.status === "failed" && (
+            // Which connector and why, with the way back to fixing it (#63).
+            <span className="cx-row-why cx-row-failed">
+              {row.check?.advice ? `${row.check.advice.title}. ${row.check.advice.body}` : row.check?.message}{" "}
+              {row.source === "account" ? (
+                <Link className="link" href={`/connectors/${row.id}`}>
+                  Fix in Connectors →
+                </Link>
+              ) : (
+                <FixLink check={row.check} />
+              )}
+            </span>
+          )}
           <VarChips variables={row.variables} />
         </div>
         <div className="cx-row-acts">

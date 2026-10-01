@@ -196,7 +196,8 @@ def test_a_401_mid_build_marks_the_key_instead_of_falling_back_quietly(provider,
     router.save_provider_key("openai", api_key="sk-midbuild-0000000")
     router._note_failure("openai", "gpt-test", ProviderError("OpenAI call failed: 401", retryable=False, status=401))
     row = router.provider_settings()["openai"]
-    assert row["status"] == keycheck.INVALID and row["reason"] == keycheck.REJECTED_DURING_BUILD
+    assert row["status"] == keycheck.INVALID and row["reason"] == "rejected"
+    assert router.key_check("openai").during_build
     assert row["available"] is False
 
 

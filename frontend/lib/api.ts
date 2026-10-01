@@ -17,6 +17,8 @@ export type PhaseResult = {
   content_md: string;
   model_used: string | null;
   provider_used: string | null;
+  /** Why the first model was passed over: "OpenAI: out of credit; continued on …". */
+  fallback_note?: string | null;
   /**
    * Whether the model ran on hardware the user controls — the backend's answer,
    * recorded per call. Never guessed from `provider_used`: a source's name says
@@ -246,6 +248,10 @@ export type Project = {
   heartbeat_at: string | null;
   cancel_requested: boolean;
   last_error: string | null;
+  /** Set when a cloud provider refused a key: why, which provider, and the fix. */
+  last_error_kind?: string | null;
+  last_error_provider?: string | null;
+  last_error_help?: KeyAdvice | null;
   /** `running`, but nothing is driving it. The server owns the threshold. */
   stalled: boolean;
   elapsed_seconds: number | null;
@@ -314,10 +320,28 @@ export type ConnectorVar = {
   /** Always another variable's value — never asked for. */
   copy_of?: string;
 };
+/** What a refused key means and the one thing that fixes it — the backend's words
+ * (`app/core/keyerrors.py`), the same in Settings, a build and Connectors (#63). */
+export type KeyAdvice = {
+  kind:
+    | "invalid" | "expired" | "revoked" | "no_credit" | "spend_limit" | "billing_disabled"
+    | "plan_quota" | "not_permitted" | "region" | "rate_limited" | "provider_down" | "unknown";
+  /** Two or three words for a badge: "Expired", "No credit". */
+  badge: string;
+  /** What happened, without a full stop. */
+  title: string;
+  /** What to do about it. */
+  body: string;
+  action_label: string;
+  action_url: string;
+  /** False for a rate limit or an outage: nothing for the person to do. */
+  blocking: boolean;
+};
 export type ConnectorCheck = {
   status: "connected" | "unchecked" | "failed";
   message: string;
   reason?: string;
+  advice?: KeyAdvice | null;
   name?: string | null;
   step?: number | null;
   host?: string;
@@ -1064,6 +1088,7 @@ export type KeyCheck = {
   model: string | null;
   models: string[];
   context_tokens: number | null;
+  advice?: KeyAdvice | null;
 };
 
 export type ProviderSetting = {
@@ -1078,6 +1103,9 @@ export type ProviderSetting = {
   checked_at: string | null;
   checked_model: string | null;
   models: string[];
+  /** A build's own call was refused, rather than a check. */
+  during_build?: boolean;
+  advice?: KeyAdvice | null;
 };
 
 /**

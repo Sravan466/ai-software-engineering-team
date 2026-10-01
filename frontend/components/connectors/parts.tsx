@@ -41,10 +41,33 @@ export function statusOf(c: Pick<Connector, "connected" | "check" | "mode" | "sa
   if (!c.connectable) return { cls: "cx-badge-soon", text: c.wave === 2 ? "Coming next" : "Coming soon" };
   if (!c.connected) return null;
   const hint = c.saved?.find((s) => s.hint.startsWith("…"))?.hint;
+  // A re-test that failed is failed — never "Connected" on a key that can't do
+  // anything. The badge says why when the test could tell (#63).
+  if (c.check?.status === "failed") return { cls: "badge-bad", text: failedText(c.check) };
   if (c.check?.status === "unchecked") return { cls: "badge-warn", text: "Saved, not tested" };
   if (c.mode === "live") return { cls: "badge-bad", text: "Connected · Live" };
   const mode = c.mode === "test" ? " · Test mode" : "";
   return { cls: "badge-ok", text: `Connected${mode}${hint ? ` · ${hint}` : ""}` };
+}
+
+/** "Key failed · Expired" — or just "Key failed its last test" for a check saved
+ * before failures had reasons. */
+export function failedText(check: ConnectorCheck): string {
+  return check.advice?.badge ? `Key failed · ${check.advice.badge}` : "Key failed its last test";
+}
+
+/** The one action that fixes a refused key: add credits, create a new key, … */
+export function FixLink({ check }: { check?: ConnectorCheck | null }) {
+  const a = check?.advice;
+  if (!a || !a.blocking || !a.action_url || check?.status !== "failed") return null;
+  return (
+    <>
+      {" "}
+      <a className="link cx-fix" href={a.action_url} target="_blank" rel="noreferrer">
+        {a.action_label} {Icon.external}
+      </a>
+    </>
+  );
 }
 
 export function StatusBadge({ c }: { c: Parameters<typeof statusOf>[0] }) {
@@ -445,6 +468,7 @@ export function ConnectForm({
                         <span>
                           {outcome.check.message}
                           <StepLink step={outcome.check.step} onShow={showStep} />
+                          <FixLink check={outcome.check} />
                         </span>
                       </p>
                     ) : v.help ? (
@@ -557,7 +581,10 @@ export function CheckLine({ check }: { check: ConnectorCheck }) {
     return (
       <p className="db-msg db-msg-bad">
         {Icon.alert}
-        <span>{check.message}</span>
+        <span>
+          {check.message}
+          <FixLink check={check} />
+        </span>
       </p>
     );
   }

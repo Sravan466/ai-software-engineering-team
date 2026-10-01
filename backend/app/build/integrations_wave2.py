@@ -565,7 +565,8 @@ _GEMINI = Integration(
     check=HttpCheck(
         "GET",
         "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
-        "query:key",
+        # In a header, never `?key=`: a query string ends up in access logs.
+        "header:x-goog-api-key",
         "GEMINI_API_KEY",
         ("generativelanguage.googleapis.com",),
         rules=(

@@ -32,6 +32,9 @@ class LLMResponse(BaseModel):
     is_local: Optional[bool] = None
     # Each entry: {"provider": ..., "model": ..., "error": ...}
     attempts: list[dict] = Field(default_factory=list)
+    #: Why an earlier model in the chain was passed over, when a provider refused its
+    #: key ("OpenAI: out of credit; continued on Google Gemini (…)").
+    fallback_note: Optional[str] = None
     #: What the model reasoned before answering, when it did. Kept apart from `text`
     #: so no parser ever reads a thought as the deliverable, and excluded from every
     #: serialisation so it is never stored, echoed into a prompt, or acted on.

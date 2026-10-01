@@ -96,6 +96,22 @@
 }
 .confirm-text { font-size: var(--t-sm); color: var(--ink); }
 
+/* "Technical details": the raw error, folded away under the plain sentence. */
+.notice-tech { margin-top: 2px; }
+.notice-tech > summary {
+  width: fit-content;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  cursor: pointer;
+  border-radius: var(--r-sm, 4px);
+}
+.notice-tech > summary:hover { color: var(--ink-2); }
+.notice-tech > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.notice-tech[open] > summary { margin-bottom: 4px; }
+@media (max-width: 560px) {
+  .notice-actions > .btn { flex: 1 1 100%; justify-content: center; min-height: 44px; }
+}
+
 .notice-detail {
   margin-top: 2px;
   font-size: var(--t-xs);

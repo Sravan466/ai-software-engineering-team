@@ -57,6 +57,7 @@ def check_record(checked: integrations.Checked) -> dict:
         "message": r.message,
         "host": r.host,
         "latency_ms": r.latency_ms,
+        "advice": r.advice,
         "at": _now(),
     }
 

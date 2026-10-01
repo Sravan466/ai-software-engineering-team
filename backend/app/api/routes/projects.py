@@ -334,6 +334,8 @@ def _claim(
             status=PipelineStatus.RUNNING.value,
             cancel_requested=False,
             last_error=None,
+            last_error_kind=None,
+            last_error_provider=None,
             heartbeat_at=_now(),
         )
     )
@@ -456,6 +458,8 @@ def _strand(db: Session, project_id: str, message: str) -> None:
         if project is not None and project.status == PipelineStatus.RUNNING.value:
             project.status = PipelineStatus.FAILED.value
             project.last_error = _CRASHED
+            project.last_error_kind = None
+            project.last_error_provider = None
             db.commit()
             log.error("Stranded %s: %s", project_id, message)
     except Exception:  # noqa: BLE001
