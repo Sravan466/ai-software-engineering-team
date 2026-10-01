@@ -216,6 +216,8 @@ class Charter:
             out["database_provider_frozen"] = self.frozen_provider
         if self.integrations:
             out["integrations"] = list(self.integrations)
+            # Derived, for the page: which of `env` is the database's. Never read back.
+            out["database_env"] = list(self.database_env)
         return out
 
     def __bool__(self) -> bool:

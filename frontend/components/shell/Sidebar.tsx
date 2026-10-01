@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { api, type Account, type LocalStatus, type Project } from "@/lib/api";
 import { canRunABuild } from "@/lib/capabilities";
 import { databaseUnconnected } from "@/lib/database";
+import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -74,6 +75,19 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  // How many app connectors the account has connected — refreshed on every page
+  // change, so connecting one in the tab shows here as soon as you move on.
+  const [connectorCount, setConnectorCount] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .listConnectors()
+      .then((c) => live && setConnectorCount(c.connected))
+      .catch(() => live && setConnectorCount(null));
+    return () => {
+      live = false;
+    };
+  }, [pathname]);
 
   const signOut = useCallback(async () => {
     setSigningOut(true);
@@ -248,6 +262,16 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
                         {Icon.database}
                       </span>
                     )}
+                  {connectorsUnconnected(p).length > 0 && (
+                    <span
+                      className="sb-db"
+                      role="img"
+                      aria-label={connectorsLabel(connectorsUnconnected(p).length)}
+                      title={connectorsLabel(connectorsUnconnected(p).length)}
+                    >
+                      {Icon.plug}
+                    </span>
+                  )}
                   <span className="sb-item-time">{timeAgo(p.updated_at || p.created_at)}</span>
                 </Link>
                 <button
@@ -299,6 +323,18 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
           aria-current={pathname === "/skills" ? "page" : undefined}
         >
           {Icon.book} Skills
+        </Link>
+        <Link
+          className="sb-link"
+          href="/connectors"
+          aria-current={pathname?.startsWith("/connectors") ? "page" : undefined}
+        >
+          {Icon.plug} Connectors
+          {connectorCount ? (
+            <span className="sb-link-tag" aria-label={`${connectorCount} connected`}>
+              {connectorCount}
+            </span>
+          ) : null}
         </Link>
         <Link
           className="sb-link"

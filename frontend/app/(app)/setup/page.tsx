@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Device, type OS, type RuntimeCard, type SetupGuide } from "@/lib/api";
 import { useChrome } from "@/components/shell/ShellChrome";
@@ -164,6 +166,14 @@ export default function SetupPage() {
       <p className="prose-lede" style={{ marginTop: 10 }}>
         Run the crew on a model on your own computer. The model runs on your computer. Your project and its
         files are stored on our server.
+      </p>
+      <p className="field-hint" style={{ marginTop: 8, maxWidth: "70ch" }}>
+        &ldquo;The connector&rdquo; here is the small program that lends this app your computer&apos;s models.
+        Services your generated apps use — Stripe, Resend, Clerk, OpenAI — are on the{" "}
+        <Link className="link" href="/connectors">
+          Connectors
+        </Link>{" "}
+        page instead.
       </p>
 
       <div className="tabs su-tabs" role="tablist" aria-label="Setup">

@@ -156,7 +156,8 @@ export type GateKind =
   | "stack"
   | "build"
   | "needs_help"
-  | "database";
+  | "database"
+  | "integrations";
 
 /**
  * One technology decision the whole crew is held to.
@@ -174,8 +175,12 @@ export type CharterChoice = {
 export type Charter = Partial<Record<CharterCategory, CharterChoice>> & {
   /** Which host the database lives on: supabase, neon, atlas, planetscale, firebase, aws, generic. */
   database_provider?: string;
-  /** The variable names the code reads the database from. Names only, never values. */
+  /** The variable names the code reads: the database's, then every connector's. */
   env?: string[];
+  /** The app connectors this build uses — stripe, resend, … (#59). */
+  integrations?: string[];
+  /** `env` without the connectors' names: what the database is read from. */
+  database_env?: string[];
 };
 export type CharterCategory =
   | "language"
@@ -206,6 +211,9 @@ export type Project = {
   gate_note: string | null;
   /** connected | unchecked | later | none — or null until asked. Never a value. */
   database_status?: DatabaseStatus | null;
+  /** App connectors: what was chosen before the start, and the "later" answers. */
+  integrations_choice?: { use?: string[]; skip?: string[] } | null;
+  integrations_status?: Record<string, "later"> | null;
   /** Where the finished build went: its repo (`owner/name`) and its live deploy. */
   github_repo?: string | null;
   github_pushed_at?: string | null;
@@ -284,6 +292,99 @@ export type AuthStatus = {
   signup_open: boolean;
   /** Builds and settings from before accounts are waiting for the first account. */
   has_unclaimed_work: boolean;
+};
+
+// ── App connectors (#59) ────────────────────────────────────────────────────
+export type ConnectorVar = {
+  name: string;
+  label: string;
+  secret: boolean;
+  required: boolean;
+  placeholder: string;
+  kind: string;
+  help: string;
+  /** `client` variables go in the browser bundle: publishable by design. */
+  side: "server" | "client";
+};
+export type ConnectorCheck = {
+  status: "connected" | "unchecked" | "failed";
+  message: string;
+  reason?: string;
+  name?: string | null;
+  step?: number | null;
+  host?: string;
+  latency_ms?: number | null;
+  at?: string;
+  mode?: "test" | "live" | null;
+  models?: string[];
+};
+export type ConnectorUse = { id: string; name: string; status: string };
+export type Connector = {
+  id: string;
+  label: string;
+  category: string;
+  category_label: string;
+  capability: string;
+  capability_label: string;
+  wave: number;
+  connectable: boolean;
+  blurb: string;
+  builds: string[];
+  variables: ConnectorVar[];
+  guide: { text: string; url: string }[];
+  docs_url: string;
+  dashboard_url: string;
+  has_test_mode: boolean;
+  connected: boolean;
+  saved?: { name: string; hint: string; side: string }[];
+  check?: ConnectorCheck | null;
+  mode?: "test" | "live" | null;
+  connected_at?: string | null;
+  models?: string[];
+  used_by?: ConnectorUse[];
+};
+export type ConnectorCatalog = {
+  categories: { id: string; label: string; count: number }[];
+  connectors: Connector[];
+  connected: number;
+};
+export type ConnectorProblem = { name: string; message: string; step: number | null };
+export type ConnectorSaveResult = {
+  ok: boolean;
+  status: "connected" | "unchecked" | "failed" | "invalid";
+  problems?: ConnectorProblem[];
+  check?: ConnectorCheck;
+  connector?: Connector;
+};
+export type ConnectorPick = {
+  id: string;
+  label: string;
+  reason: string;
+  source: "idea" | "design" | "user";
+  capability: string;
+  capability_label: string;
+  connected: boolean;
+  mode?: string | null;
+};
+export type ConnectorPreview = {
+  connectors: ConnectorPick[];
+  skipped: { id: string; label: string }[];
+  addable: { id: string; label: string }[];
+};
+export type IntegrationRow = Connector & {
+  status: "connected" | "unchecked" | "later" | null;
+  source: "account" | "project" | null;
+  reason?: string | null;
+  account_connected: boolean;
+};
+export type IntegrationsState = {
+  used: string[];
+  connectors: IntegrationRow[];
+  at_gate: boolean;
+  can_change: boolean;
+  unanswered: string[];
+  not_connected: string[];
+  addable: { id: string; label: string }[];
 };
 
 export class ApiError extends Error {
@@ -417,6 +518,7 @@ export const api = {
     approval_mode?: ApprovalMode;
     cost_cap_usd?: number;
     skill_overrides?: SkillOverrides;
+    connectors?: { use: string[]; skip: string[] };
   }) => req<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   // Review policy is editable while the run is in flight — the runner re-reads it
   // before every handoff.
@@ -483,6 +585,46 @@ export const api = {
     req<RunResponse>(`/api/projects/${id}/database/continue`, { method: "POST" }),
   databaseLater: (id: string) =>
     req<RunResponse>(`/api/projects/${id}/database/later`, { method: "POST" }),
+
+  // ── App connectors: the account's Connectors tab (write-only, like the database) ──
+  listConnectors: () => req<ConnectorCatalog>("/api/connectors"),
+  getConnector: (id: string) => req<Connector>(`/api/connectors/${id}`),
+  connect: (id: string, values: Record<string, string>, confirm_live = false) =>
+    req<ConnectorSaveResult>(`/api/connectors/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ values, confirm_live }),
+    }),
+  retestConnector: (id: string) =>
+    req<ConnectorSaveResult>(`/api/connectors/${id}/check`, { method: "POST" }),
+  disconnect: (id: string) =>
+    req<{ removed: boolean; affected: ConnectorUse[]; connector: Connector }>(`/api/connectors/${id}`, {
+      method: "DELETE",
+    }),
+  previewConnectors: (body: { idea: string; use: string[]; skip: string[] }) =>
+    req<ConnectorPreview>("/api/connectors/preview", { method: "POST", body: JSON.stringify(body) }),
+
+  // ── A build's connectors: at its question, or from the project ──
+  getIntegrations: (id: string) => req<IntegrationsState>(`/api/projects/${id}/integrations`),
+  saveIntegration: (
+    id: string,
+    iid: string,
+    values: Record<string, string>,
+    opts: { confirm_live?: boolean; save_to_account?: boolean } = {},
+  ) =>
+    req<ConnectorSaveResult & { state: IntegrationsState }>(`/api/projects/${id}/integrations/${iid}`, {
+      method: "PUT",
+      body: JSON.stringify({ values, confirm_live: !!opts.confirm_live, save_to_account: opts.save_to_account ?? true }),
+    }),
+  removeIntegrationKey: (id: string, iid: string) =>
+    req<IntegrationsState>(`/api/projects/${id}/integrations/${iid}`, { method: "DELETE" }),
+  integrationLater: (id: string, iid: string) =>
+    req<IntegrationsState>(`/api/projects/${id}/integrations/${iid}/later`, { method: "POST" }),
+  integrationsContinue: (id: string) =>
+    req<RunResponse>(`/api/projects/${id}/integrations/continue`, { method: "POST" }),
+  integrationsAllLater: (id: string) =>
+    req<RunResponse>(`/api/projects/${id}/integrations/later`, { method: "POST" }),
+  changeIntegrations: (id: string, body: { add?: string; remove?: string }) =>
+    req<IntegrationsState>(`/api/projects/${id}/integrations`, { method: "POST", body: JSON.stringify(body) }),
 
   // ── Visual preview (render + select-to-edit) ──
   getPreview: (id: string) => req<PreviewState>(`/api/projects/${id}/preview`),

@@ -63,7 +63,9 @@ export type IconName =
   | "arrowUp"
   | "close"
   | "database"
-  | "lock";
+  | "lock"
+  | "plug"
+  | "search";
 
 export const Icon: Record<IconName, ReactNode> = {
   menu: svg(<path d="M4 6h16M4 12h16M4 18h16" />),
@@ -151,4 +153,6 @@ export const Icon: Record<IconName, ReactNode> = {
     </>,
   ),
   lock: svg(<path d="M6.5 10.5h11a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-7.5a1 1 0 0 1 1-1zM8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5M12 14.5v2" />),
+  plug: svg(<path d="M9 3.5v4M15 3.5v4M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0zM12 16v4.5" />),
+  search: svg(<path d="M10.5 4.5a6 6 0 1 1 0 12 6 6 0 0 1 0-12zM15 15l4.5 4.5" />),
 };

@@ -18,6 +18,8 @@ import BuildLine from "@/components/build/BuildLine";
 import Decision from "@/components/build/Decision";
 import { databaseUnconnected } from "@/lib/database";
 import { DatabasePanel } from "@/components/build/DatabaseConnect";
+import { IntegrationsPanel } from "@/components/connectors/Integrations";
+import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { FixingPanel } from "@/components/build/AutoFix";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
@@ -424,6 +426,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                 title="Connect it on the Deliver tab"
               >
                 {Icon.database} Database not connected
+              </button>
+            )}
+            {connectorsUnconnected(project).length > 0 && (
+              <button
+                type="button"
+                className="badge badge-warn db-head-badge"
+                onClick={() => setTab("summary")}
+                title="Connect them on the Deliver tab"
+              >
+                {Icon.plug} {connectorsLabel(connectorsUnconnected(project).length)}
               </button>
             )}
           </div>
@@ -1317,6 +1329,8 @@ function SummaryTab({
       </div>
 
       <DatabasePanel id={id} onChange={onDb} />
+
+      <IntegrationsPanel id={id} />
 
       {/* The one download control in the app. The header carried a second copy
           of this button, which is how the same archive came to be offered twice. */}

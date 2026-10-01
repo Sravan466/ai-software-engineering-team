@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
+import { databaseEnv } from "@/lib/database";
 
 /**
  * Connecting the database Atlas picked — at the gate right after the architecture,
@@ -188,7 +189,7 @@ export function DatabaseGate({
     state?.provider && state.provider !== "generic"
       ? state.providers?.find((p) => p.provider === state.provider)?.label
       : undefined;
-  const names = state?.contract?.variables.map((v) => v.name) ?? project.charter?.env ?? [];
+  const names = state?.contract?.variables.map((v) => v.name) ?? databaseEnv(project);
   const saved = Boolean(state?.saved?.length) &&
     (project.database_status === "connected" || project.database_status === "unchecked" ||
       state?.status === "connected" || state?.status === "unchecked");

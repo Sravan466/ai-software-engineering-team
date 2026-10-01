@@ -22,7 +22,9 @@ import CharterPanel, { StackViolations } from "./Charter";
 import SecurityFindings from "./SecurityFindings";
 import { NeedsHelp, trackEntries } from "./AutoFix";
 import { DatabaseGate } from "./DatabaseConnect";
-import { databaseUnconnected } from "@/lib/database";
+import { IntegrationsGate } from "@/components/connectors/Integrations";
+import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
+import { databaseEnv, databaseUnconnected } from "@/lib/database";
 import BuildProblems from "./BuildProblems";
 import BuildLine from "./BuildLine";
 import BuildProgress from "@/components/preview/BuildProgress";
@@ -115,6 +117,12 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
       "Something serious is still wrong after the crew's own fix rounds. Here is " +
       "what each round tried and what is left.",
     approve: "Keep trying",
+    after: "",
+  },
+  integrations: {
+    title: "Connect your services",
+    blurb: "Atlas's design uses app connectors that aren't connected yet.",
+    approve: "Continue build",
     after: "",
   },
   database: {
@@ -280,6 +288,10 @@ export default function Decision({
     return <DatabaseGate project={project} id={id} busy={busy} act={act} />;
   }
 
+  if (kind === "integrations") {
+    return <IntegrationsGate project={project} id={id} busy={busy} act={act} />;
+  }
+
   if (kind === "needs_help") {
     return (
       <section className="decision decision-needs_help" aria-labelledby="decision-title">
@@ -336,14 +348,23 @@ export default function Decision({
             {Icon.database}
             <span>
               <b>Database not connected.</b> This build reads{" "}
-              {(project.charter?.env ?? []).map((n, i) => (
+              {databaseEnv(project).map((n, i) => (
                 <span key={n}>
                   {i > 0 && ", "}
                   <code className="db-var">{n}</code>
                 </span>
               ))}{" "}
-              and the download has placeholders for {project.charter?.env?.length === 1 ? "it" : "them"}. Connect it
+              and the download has placeholders for {databaseEnv(project).length === 1 ? "it" : "them"}. Connect it
               on the Deliver tab after shipping.
+            </span>
+          </p>
+        )}
+        {wantsBuild && connectorsUnconnected(project).length > 0 && (
+          <p className="db-reminder" role="note">
+            {Icon.plug}
+            <span>
+              <b>{connectorsLabel(connectorsUnconnected(project).length)}.</b> The download has placeholders for their
+              keys. Connect them on the Deliver tab, or in Connectors, after shipping.
             </span>
           </p>
         )}

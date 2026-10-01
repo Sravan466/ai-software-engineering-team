@@ -96,6 +96,7 @@ def _state(project: Project) -> dict:
         saved: list[dict] = []
         check = None
         mode = None
+        models: list[str] = []
         if source == connectors.PROJECT:
             entry = project_secrets.integrations_load(project.owner_id, project.id).get(iid) or {}
             try:
@@ -106,6 +107,7 @@ def _state(project: Project) -> dict:
         elif source == connectors.ACCOUNT and store is not None:
             info = store.public(iid)
             saved, check, mode = info.get("saved") or [], info.get("check"), info.get("mode")
+            models = info.get("models") or []
         rows.append(
             {
                 **found.as_dict(),
@@ -114,6 +116,8 @@ def _state(project: Project) -> dict:
                 "saved": saved,
                 "check": check,
                 "mode": mode,
+                "models": models,
+                "connected": status in ("connected", "unchecked"),
                 "reason": (reasons.get(iid) or {}).get("reason"),
                 "account_connected": bool(store and store.entry(iid).get("values")),
             }
