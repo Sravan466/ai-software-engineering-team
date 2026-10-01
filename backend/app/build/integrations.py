@@ -925,7 +925,9 @@ _NEGATION = re.compile(
 def _norm(text: object) -> str:
     # Apostrophes go first, so "don't" stays one word for the negation check.
     low = re.sub(r"['’]", "", str(text or "").lower())
-    return " " + re.sub(r"[^a-z0-9+.\-]+", " ", low).strip() + " "
+    # Commas and the like are kept (spaced out) so a negation stops at its clause.
+    low = re.sub(r"([,;:!?])", r" \1 ", low)
+    return " " + re.sub(r"[^a-z0-9+.,;:!?\-]+", " ", low).strip() + " "
 
 
 def _find(phrase: str, haystack: str) -> Optional[int]:
@@ -938,21 +940,19 @@ def _negated(haystack: str, at: int) -> bool:
     """Whether a negation sits just before `at`, within the same clause."""
     window = haystack[max(0, at - 32):at]
     # A clause break between the negation and the phrase ends it.
-    window = re.split(r"\b(but|and then|however|although)\b", window)[-1]
+    window = re.split(r"\b(?:but|and then|however|although)\b|[,;:!?]|\.\s", window)[-1]
     return bool(_NEGATION.search(window))
 
 
 _NEGATION_AFTER = re.compile(
-    r"^\s*(?:is |are |isnt |arent )?(?:not |no longer )?(?:needed|required|necessary|wanted|needed)\b"
-    r"|^\s*(?:is |are )?(?:not|isnt|arent|unnecessary|optional)\b"
+    r"^\s*(?:is |are )?(?:not|no longer|isnt|arent)\s+(?:needed|required|necessary|wanted|used)\b"
+    r"|^\s*(?:is |are )?(?:unnecessary|unwanted)\b"
 )
 
 
 def _negated_after(haystack: str, end: int) -> bool:
-    """"Clerk is not needed", "Stripe isn't required": a negation just after it."""
-    window = haystack[end:end + 32]
-    m = _NEGATION_AFTER.match(window)
-    return bool(m) and not window.lstrip().startswith(("is needed", "are needed", "is required"))
+    """"Clerk is not needed", "Stripe isn't required": a negation right after it."""
+    return bool(_NEGATION_AFTER.match(haystack[end:end + 32]))
 
 
 def _hit(phrases: Iterable[str], haystack: str) -> Optional[str]:
@@ -964,11 +964,17 @@ def _hit(phrases: Iterable[str], haystack: str) -> Optional[str]:
     return None
 
 
+_REFUSED_BEFORE = re.compile(r"\b(?:without|no|not|never|skip|skipping|minus)\s+(?:using\s+|the\s+|any\s+)?$")
+
+
 def _refused(phrases: Iterable[str], haystack: str) -> bool:
-    """Named, and negated: "without Stripe", "Clerk is not needed"."""
+    """Named, and refused right beside the name: "without Stripe", "no Clerk",
+    "Clerk is not needed". A "no" further back is about something else."""
     for phrase in phrases:
         at = _find(phrase, haystack)
-        if at is not None and (_negated(haystack, at) or _negated_after(haystack, at + len(phrase))):
+        if at is None:
+            continue
+        if _REFUSED_BEFORE.search(haystack[max(0, at - 24):at]) or _negated_after(haystack, at + len(phrase)):
             return True
     return False
 

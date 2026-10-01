@@ -359,10 +359,15 @@ def change(
         runner.set_integrations(project, charter.with_integrations(tuple(used)))
         runner.settle_integrations(project, before)
         asked = runner.integrations_question(project)
-        if asked is not None and project.gate_kind != GateKind.DATABASE.value:
+        if asked is not None and project.gate_kind in (
+            GateKind.PLAN.value,
+            GateKind.PHASE.value,
+            GateKind.INTEGRATIONS.value,
+        ):
             # A connector added at the Plan review is asked about like any other:
-            # the build waits on it here rather than building against no key. (At the
-            # database question it is asked right after, as usual.)
+            # the build waits on it here rather than building against no key. Never
+            # over the database question (asked right after it, as usual) or a
+            # "needs help" stop, which only its own answer releases.
             project.gate_kind, project.gate_note = asked.kind, asked.note
         elif asked is None and runner.at_integrations_gate(project):
             # Nothing left to ask: the note would name services the build no longer uses.

@@ -37,6 +37,7 @@ _NAME = "connectors.local.json"
 
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
+_WARNED: set[str] = set()
 
 
 class StoreUnreadable(RuntimeError):
@@ -89,7 +90,11 @@ class ConnectorsStore:
                 f"The saved connectors ({_NAME}) can't be read, so nothing is being saved "
                 f"over them: {type(e).__name__}. Move the file aside to start again."
             )
-            log.error("%s", message)
+            # Once per file per process: a page polls, and the same line every few
+            # seconds buries everything else in the log.
+            if strict or str(self.path) not in _WARNED:
+                _WARNED.add(str(self.path))
+                log.error("%s", message)
             if strict:
                 raise StoreUnreadable(message) from e
             return {}

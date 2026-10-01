@@ -178,6 +178,20 @@ def test_a_negation_after_a_named_connector_counts():
     assert integrations.relevant("A blog. Sign in with Clerk is not needed", (), ["clerk"]) == []
 
 
+@pytest.mark.parametrize(
+    "idea, expect",
+    [
+        ("Clerk needed for sign in", ["clerk"]),
+        ("Stripe and Clerk are required", ["stripe", "clerk"]),
+        ("Use Stripe, necessary for paid plans", ["stripe"]),
+        ("A shop with no login, checkout with Stripe", ["stripe"]),
+        ("No ads. Payments via Stripe", ["stripe"]),
+    ],
+)
+def test_a_negation_nearby_doesnt_refuse_a_named_connector(idea, expect):
+    assert [m.iid for m in integrations.relevant(idea, (), ["stripe", "clerk"])] == expect
+
+
 def test_a_strong_phrase_picks_one_that_isnt_connected_so_the_build_asks():
     [match] = integrations.relevant("A store with checkout", (), [])
     assert match.iid == "stripe" and "checkout" in match.reason
