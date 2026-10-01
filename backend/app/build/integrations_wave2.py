@@ -481,7 +481,10 @@ _GEMINI = Integration(
     builds=("Chat and text generation on Gemini, server-side", "Image understanding", "The model is a setting (GEMINI_MODEL)"),
     variables=(Var("GEMINI_API_KEY", "API key", placeholder="AIza…"), _model_var("GEMINI_MODEL")),
     # Not a bare "gemini": that's also a star sign.
-    names=("google gemini", "gemini api", "gemini model", "gemini models", "gemini ai", "gemini pro", "gemini flash"),
+    names=(
+        "google gemini", "gemini api", "gemini model", "gemini models", "gemini ai", "gemini pro",
+        "gemini flash", "built with gemini", "using gemini", "on gemini", "with gemini", "powered by gemini",
+    ),
     soft=_LLM,
     formats=(("GEMINI_API_KEY", r"^AIza[0-9A-Za-z_\-]{30,}$", "A Gemini API key starts with AIza."),),
     check=HttpCheck(

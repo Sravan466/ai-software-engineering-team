@@ -368,3 +368,16 @@ def test_check_never_raises_on_an_unparseable_stored_url():
 def test_temporary_aws_keys_need_their_session_token():
     parsed = integrations.parse(integrations.REGISTRY["s3"], {**GOOD["s3"], "AWS_ACCESS_KEY_ID": "ASIA" + "A" * 16})
     assert parsed.problems and parsed.problems[0].name == "AWS_SESSION_TOKEN"
+
+
+@pytest.mark.parametrize(
+    "idea, connected, expect",
+    [
+        ("A SaaS on Clerk with sign in with Google", ["clerk"], ["clerk"]),
+        ("Auth0 login plus Google login", [], ["auth0"]),
+        ("Newsletter emails via SendGrid, with a resend link button", [], ["sendgrid"]),
+        ("A chatbot built with Gemini", ["gemini"], ["gemini"]),
+    ],
+)
+def test_one_job_one_connector_unless_a_known_pair(idea, connected, expect):
+    assert [m.iid for m in integrations.relevant(idea, (), connected)] == expect

@@ -190,6 +190,8 @@ class Integration:
     formats: tuple[tuple[str, str, str], ...] = ()
     #: Pastes that hold several fields at once — `cloudinary://key:secret@cloud`.
     expand: Optional[Callable[[dict], dict]] = None
+    #: Phrases where a name is an ordinary word, not the service: "resend a link".
+    name_traps: tuple[str, ...] = ()
     #: Cross-field rules after each field is fine on its own: a message, or None.
     cross: Optional[Callable[[dict], Optional[tuple[str, str]]]] = None
     #: Whether the service has a test mode at all. Resend and OpenAI don't.
@@ -338,6 +340,11 @@ _RESEND = Integration(
         ),
     ),
     names=("resend",),
+    name_traps=(
+        "resend link", "resend a link", "resend the link", "resend code", "resend the code",
+        "resend email", "resend the email", "resend verification", "resend otp", "resend button",
+        "resend invite", "resend invitation",
+    ),
     strong=(
         "transactional email", "transactional emails", "email confirmation",
         "email confirmations", "confirmation email", "confirmation emails",
@@ -1070,6 +1077,10 @@ class Match:
         return {"id": self.iid, "reason": self.reason, "source": self.source}
 
 
+#: Connectors one build may use together for one job: they sit side by side as
+#: sign-in buttons. Anything else named twice is one job done twice.
+_TOGETHER = frozenset({"google-signin", "github-signin"})
+
 _NEGATION = re.compile(
     r"\b(no|not|without|dont|do not|doesnt|does not|never|wont|will not|isnt|zero|skip|skipping)\b"
 )
@@ -1176,17 +1187,25 @@ def relevant(
         members = [i for i in members if not _refused(i.names, idea_text)]
         if not members:
             continue
-        # 1. named outright, idea first. Two named in the idea ("sign in with Google
-        #    and GitHub") is the idea asking for both — the one case a job gets two.
-        both = [i for i in members if _hit(i.names, idea_text)]
-        if len(both) > 1:
+        # 1. named outright, idea first. Only a pair that works side by side — Google
+        #    and GitHub sign-in — is the idea asking for both; otherwise one job gets
+        #    one connector: the connected one, then the first in the catalog.
+        def says(i: Integration, text: str) -> bool:
+            for trap in i.name_traps:
+                text = text.replace(f" {trap} ", " ")
+            return bool(_hit(i.names, text))
+
+        both = [i for i in members if says(i, idea_text)]
+        pair = {i.id for i in both}
+        if len(both) > 1 and pair <= _TOGETHER:
             for n, i in enumerate(both):
                 chosen[f"{capability}:{n}"] = Match(i.id, f"your idea names {i.label}", "idea")
             continue
+        both.sort(key=lambda i: i.id not in on)
         named = both[0] if both else None
         source = "idea"
         if named is None:
-            named = next((i for i in members if _hit(i.names, design_text)), None)
+            named = next((i for i in members if says(i, design_text)), None)
             source = "design"
         if named is not None:
             who = "your idea" if source == "idea" else "Atlas's design"

@@ -144,7 +144,13 @@ export function ConnectForm({
       if (r.status === "invalid") {
         setOutcome({ kind: "invalid", problems: r.problems ?? [] });
         const first = r.problems?.[0]?.name;
-        if (first) document.getElementById(`${base}-${first}`)?.focus();
+        // A choice's own id is on its options: focus the checked one (or the first).
+        if (first)
+          (
+            document.getElementById(`${base}-${first}`) ??
+            document.querySelector<HTMLElement>(`[aria-labelledby="${base}-${first}-label"] [aria-checked="true"]`) ??
+            document.getElementById(`${base}-${first}-0`)
+          )?.focus();
       } else if (r.ok && r.check) {
         setOutcome({ kind: "saved", check: r.check });
         setValues({});
