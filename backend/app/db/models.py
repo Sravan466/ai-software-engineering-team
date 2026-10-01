@@ -137,6 +137,15 @@ class Project(Base):
     #: until asked, and on every build from before connectors existed.
     integrations_status: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    @property
+    def connectors_unconnected(self) -> list[str]:
+        """App connectors this build uses that are answered and still not connected."""
+        if not (self.charter or {}).get("integrations"):
+            return []
+        from app.orchestration import connectors
+
+        return connectors.unconnected_answered(self)
+
     # ── where the finished build went (#55) ──────────────────────────────────
     #: The repository in the user's own GitHub (`owner/name`) this build was pushed
     #: to, so a second push adds a commit there instead of failing on the name.

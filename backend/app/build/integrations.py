@@ -239,10 +239,16 @@ _STRIPE = Integration(
         ),
     ),
     names=("stripe",),
+    # Payment *processing*, not the word "payments": an expense tracker that logs
+    # payments, or a list of someone's Netflix subscriptions, takes no money.
     strong=(
-        "payment", "payments", "checkout", "subscription", "subscriptions",
-        "billing", "pay online", "take payments", "accept payments", "paid plan",
-        "paid plans", "recurring billing", "invoice payments",
+        "checkout", "check out page", "accept payments", "take payments", "taking payments",
+        "online payments", "card payments", "payment processing", "process payments",
+        "pay online", "paid plan", "paid plans", "paid subscription", "paid subscriptions",
+        "subscription plan", "subscription plans", "monthly subscription", "monthly subscriptions",
+        "annual subscription", "annual subscriptions", "subscription billing", "recurring billing",
+        "recurring payments", "charge customers", "charge users", "pay invoices online",
+        "sell tickets", "buy tickets", "online store", "e-commerce", "ecommerce",
     ),
     rivals=("paypal", "razorpay", "paddle", "lemon squeezy", "lemonsqueezy", "square payments", "braintree"),
     check=HttpCheck(
@@ -299,7 +305,8 @@ _RESEND = Integration(
     strong=(
         "transactional email", "transactional emails", "email confirmation",
         "email confirmations", "confirmation email", "confirmation emails",
-        "magic link", "magic links", "newsletter", "send email", "send emails",
+        "magic link", "magic links", "send a newsletter", "send newsletters",
+        "email newsletter", "email newsletters", "newsletter signup", "send email", "send emails",
         "sends email", "sends emails", "email notification", "email notifications",
         "email receipts", "receipt email", "receipt emails", "welcome email",
         "welcome emails", "password reset email", "email reminders", "reminder emails",
@@ -935,13 +942,35 @@ def _negated(haystack: str, at: int) -> bool:
     return bool(_NEGATION.search(window))
 
 
+_NEGATION_AFTER = re.compile(
+    r"^\s*(?:is |are |isnt |arent )?(?:not |no longer )?(?:needed|required|necessary|wanted|needed)\b"
+    r"|^\s*(?:is |are )?(?:not|isnt|arent|unnecessary|optional)\b"
+)
+
+
+def _negated_after(haystack: str, end: int) -> bool:
+    """"Clerk is not needed", "Stripe isn't required": a negation just after it."""
+    window = haystack[end:end + 32]
+    m = _NEGATION_AFTER.match(window)
+    return bool(m) and not window.lstrip().startswith(("is needed", "are needed", "is required"))
+
+
 def _hit(phrases: Iterable[str], haystack: str) -> Optional[str]:
-    """The first phrase present and not negated."""
+    """The first phrase present and not negated, before or after."""
     for phrase in phrases:
         at = _find(phrase, haystack)
-        if at is not None and not _negated(haystack, at):
+        if at is not None and not _negated(haystack, at) and not _negated_after(haystack, at + len(phrase)):
             return phrase
     return None
+
+
+def _refused(phrases: Iterable[str], haystack: str) -> bool:
+    """Named, and negated: "without Stripe", "Clerk is not needed"."""
+    for phrase in phrases:
+        at = _find(phrase, haystack)
+        if at is not None and (_negated(haystack, at) or _negated_after(haystack, at + len(phrase))):
+            return True
+    return False
 
 
 def _named(phrases: Iterable[str], haystack: str) -> bool:
@@ -983,6 +1012,11 @@ def relevant(
         by_capability.setdefault(i.capability, []).append(i)
 
     for capability, members in by_capability.items():
+        # 0. named and refused ("payments without Stripe"): that one is out of the
+        #    running, whatever else the idea says.
+        members = [i for i in members if not _refused(i.names, idea_text)]
+        if not members:
+            continue
         # 1. named outright, idea first.
         named = next((i for i in members if _hit(i.names, idea_text)), None)
         source = "idea"

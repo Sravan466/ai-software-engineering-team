@@ -31,7 +31,7 @@ from app.api.routes.connectors import guard_write, require, save_checked
 from app.api.routes.projects import _claim, _conflict, _drive, _require_models
 from app.build import integrations
 from app.core import connectors_store, project_secrets, secretbox
-from app.core.constants import PipelineStatus
+from app.core.constants import GateKind, PipelineStatus
 from app.core.logging import get_logger
 from app.db.base import get_db
 from app.db.models import Project
@@ -99,6 +99,7 @@ def _state(project: Project) -> dict:
         models: list[str] = []
         if source == connectors.PROJECT:
             entry = project_secrets.integrations_load(project.owner_id, project.id).get(iid) or {}
+            models = entry.get("models") or []
             try:
                 saved = integrations.hints(found, project_secrets.integration_values(project.owner_id, project.id, iid))
             except secretbox.SecretsLocked:
@@ -174,9 +175,15 @@ def _save(project: Project, iid: str, body: ProjectConnectValues, db: Session) -
             project_secrets.remove_integration(owner, project.id, iid)
         else:
             project_secrets.save_integration(
-                owner, project.id, iid, parsed.values, connectors_store.check_record(checked), checked.mode or parsed.mode
+                owner,
+                project.id,
+                iid,
+                parsed.values,
+                connectors_store.check_record(checked),
+                checked.mode or parsed.mode,
+                checked.models,
             )
-    except connectors_store.StoreUnreadable as e:
+    except (connectors_store.StoreUnreadable, project_secrets.IntegrationsUnreadable) as e:
         raise HTTPException(503, str(e))
     except secretbox.SecretsLocked as e:
         raise HTTPException(503, str(e))
@@ -222,7 +229,10 @@ def delete_integration(
     """Drop this build's own key. It falls back to the account's connection, if any."""
     guard_write(request)
     _require_used(project, iid)
-    project_secrets.remove_integration(project.owner_id, project.id, iid)
+    try:
+        project_secrets.remove_integration(project.owner_id, project.id, iid)
+    except project_secrets.IntegrationsUnreadable as e:
+        raise HTTPException(503, str(e))
     if connectors.status_of(project, iid)[0] is None and project.integrations_status is not None:
         # Asked already, and now not connected: the same as having said "later".
         connectors.mark_later(project, [iid])
@@ -335,14 +345,29 @@ def change(
         use.discard(found.id)
     order = {i.id: n for n, i in enumerate(integrations.catalog())}
     used = sorted(dict.fromkeys(used), key=lambda i: order.get(i, 999))
-    before = project.charter
-    project.integrations_choice = {"use": sorted(use), "skip": sorted(skip)}
-    runner.set_integrations(project, charter.with_integrations(tuple(used)))
-    runner.settle_integrations(project, before)
-    if runner.at_integrations_gate(project) and not connectors.unanswered(project):
-        # Nothing left to ask: the note would name services the build no longer uses.
-        project.gate_note = "Every service this build uses is answered. Continue when you're ready."
-    db.commit()
+    from app.orchestration.runner import _checkpoint_lock
+
+    with _checkpoint_lock(project.id):
+        # Again, under the lock: a Continue in another tab may have claimed the build
+        # since the check above, and its driver must not have the checkpoint
+        # rewritten "as System Design" under it.
+        db.refresh(project)
+        if not runner.before_code(project):
+            raise HTTPException(409, "The build moved on while you were changing it. Reload to see where it is.")
+        before = project.charter
+        project.integrations_choice = {"use": sorted(use), "skip": sorted(skip)}
+        runner.set_integrations(project, charter.with_integrations(tuple(used)))
+        runner.settle_integrations(project, before)
+        asked = runner.integrations_question(project)
+        if asked is not None and project.gate_kind != GateKind.DATABASE.value:
+            # A connector added at the Plan review is asked about like any other:
+            # the build waits on it here rather than building against no key. (At the
+            # database question it is asked right after, as usual.)
+            project.gate_kind, project.gate_note = asked.kind, asked.note
+        elif asked is None and runner.at_integrations_gate(project):
+            # Nothing left to ask: the note would name services the build no longer uses.
+            project.gate_note = "Every service this build uses is answered. Continue when you're ready."
+        db.commit()
     db.refresh(project)
     return _state(project)
 

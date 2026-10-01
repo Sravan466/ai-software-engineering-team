@@ -27,6 +27,7 @@ from app.orchestration.charter import Charter
 log = get_logger(__name__)
 
 LATER = "later"
+FAILED = "failed"
 PROJECT = "project"
 ACCOUNT = "account"
 
@@ -62,8 +63,18 @@ def unanswered(project: Project) -> list[str]:
 
 
 def not_connected(project: Project) -> list[str]:
-    """The connectors still to connect: put off till later, or never answered."""
-    return [iid for iid in used(project) if status_of(project, iid)[0] in (None, LATER)]
+    """The connectors still to connect: never answered, put off till later, or whose
+    key failed its last test (a revoked key is not a connection)."""
+    return [iid for iid in used(project) if status_of(project, iid)[0] in (None, LATER, FAILED)]
+
+
+def unconnected_answered(project: Project) -> list[str]:
+    """What the "N connectors not connected" marks count: answered, and still not
+    connected. Read live, so connecting one in the Connectors tab clears it at once."""
+    try:
+        return [iid for iid in used(project) if status_of(project, iid)[0] in (LATER, FAILED)]
+    except Exception:  # noqa: BLE001 - a badge must never fail a page
+        return []
 
 
 def values_for(project: Project, *, client_only: bool = False) -> dict[str, str]:

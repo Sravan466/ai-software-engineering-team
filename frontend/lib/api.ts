@@ -214,6 +214,8 @@ export type Project = {
   /** App connectors: what was chosen before the start, and the "later" answers. */
   integrations_choice?: { use?: string[]; skip?: string[] } | null;
   integrations_status?: Record<string, "later"> | null;
+  /** Connectors answered "later" (or whose key failed), read live by the server. */
+  connectors_unconnected?: string[];
   /** Where the finished build went: its repo (`owner/name`) and its live deploy. */
   github_repo?: string | null;
   github_pushed_at?: string | null;
@@ -372,7 +374,7 @@ export type ConnectorPreview = {
   addable: { id: string; label: string }[];
 };
 export type IntegrationRow = Connector & {
-  status: "connected" | "unchecked" | "later" | null;
+  status: "connected" | "unchecked" | "later" | "failed" | null;
   source: "account" | "project" | null;
   reason?: string | null;
   account_connected: boolean;

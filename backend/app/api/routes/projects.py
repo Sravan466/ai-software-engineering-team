@@ -288,10 +288,14 @@ def download_project(
 
         try:
             env = {**project_secrets.reveal(project.owner_id, project.id), **connectors.values_for(project)}
-            client_env = connectors.values_for(project, client_only=True)
         except secretbox.SecretsLocked as e:
             raise HTTPException(503, str(e))
     assembled = artifacts.assemble(project)
+    if env is not None:
+        try:
+            client_env = artifacts.frontend_env(project, assembled)
+        except secretbox.SecretsLocked as e:
+            raise HTTPException(503, str(e))
     data = artifacts.build_zip(project, assembled, env=env, client_env=client_env)
     filename = artifacts.slug(project.name or project.idea) + ".zip"
     return StreamingResponse(

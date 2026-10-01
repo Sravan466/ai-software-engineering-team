@@ -296,16 +296,28 @@ def _scrub_key(project_id: str) -> str:
     return f"{project_id}:integrations"
 
 
-def integrations_load(owner_id: Optional[str], project_id: str) -> dict[str, dict]:
-    """Every connector saved for this project, still encrypted. Empty when none."""
+class IntegrationsUnreadable(RuntimeError):
+    """The project's connector keys file exists and can't be read. Left as it is."""
+
+
+def integrations_load(owner_id: Optional[str], project_id: str, *, strict: bool = False) -> dict[str, dict]:
+    """Every connector saved for this project, still encrypted. Empty when none.
+
+    `strict` is for writes: a file that can't be read is never saved over.
+    """
     if not owner_id:
         return {}
     try:
         data = json.loads(_integrations_path(owner_id, project_id).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
         log.warning("The connector keys file for project %s can't be read.", project_id)
+        if strict:
+            raise IntegrationsUnreadable(
+                f"This build's saved connector keys ({_INTEGRATIONS}) can't be read, so nothing is "
+                "being saved over them. Move the file aside to start again."
+            ) from e
         return {}
     if not isinstance(data, dict):
         return {}
@@ -340,15 +352,18 @@ def save_integration(
     values: dict[str, str],
     check: dict,
     mode: Optional[str],
+    models: Optional[list[str]] = None,
 ) -> None:
     from app.build import integrations
 
     with _LOCK:
-        data = integrations_load(owner_id, project_id)
+        data = integrations_load(owner_id, project_id, strict=True)
+        previous = data.get(iid) or {}
         data[iid] = {
             "values": {n: secretbox.encrypt(v) for n, v in values.items() if v},
             "check": check,
             "mode": mode,
+            "models": (models or previous.get("models") or [])[:400],
         }
         path = _integrations_path(owner_id, project_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,7 +382,7 @@ def remove_integration(owner_id: Optional[str], project_id: str, iid: str) -> bo
     if not owner_id:
         return False
     with _LOCK:
-        data = integrations_load(owner_id, project_id)
+        data = integrations_load(owner_id, project_id, strict=True)
         if iid not in data:
             return False
         data.pop(iid)
@@ -421,11 +436,21 @@ def holds_integration_secret(owner_id: Optional[str], project_id: str, text: str
     from app.build import integrations
     from app.core import connectors_store
 
+    parts: list[str] = []
+    # One unreadable value mustn't let every other key through: each is tried alone.
+    for iid, entry in integrations_load(owner_id, project_id).items():
+        try:
+            parts += integrations.secret_parts(integrations.get(iid), _decrypted(entry))
+        except secretbox.SecretsLocked:
+            continue
     try:
-        parts = _integration_parts(integrations_load(owner_id, project_id))
         store = connectors_store.for_user(owner_id)
-        for iid in store.connected_ids():
+        connected = store.connected_ids()
+    except (ValueError, OSError):
+        connected = []
+    for iid in connected:
+        try:
             parts += integrations.secret_parts(integrations.get(iid), store.values(iid))
-    except (secretbox.SecretsLocked, ValueError, OSError):
-        return False
+        except (secretbox.SecretsLocked, ValueError, OSError):
+            continue
     return any(p in text for p in parts)

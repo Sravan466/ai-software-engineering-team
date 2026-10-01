@@ -68,6 +68,14 @@ function RowBadge({ row }: { row: IntegrationRow }) {
       </span>
     );
   }
+  if (row.status === "failed") {
+    return (
+      <span className="badge badge-bad">
+        <span className="dot dot-bad" aria-hidden="true" />
+        Key failed its last test
+      </span>
+    );
+  }
   if (row.status === "later") {
     return <span className="badge badge-warn">Later · not connected</span>;
   }
@@ -94,6 +102,7 @@ function Row({
   canRemove: boolean;
   onRemoveFromBuild: () => void;
 }) {
+  // A failed key is answered but not connected: offer a new one, like an unanswered row.
   const answered = row.status === "connected" || row.status === "unchecked";
   // "different" = a key for this build only, over the account's.
   const [open, setOpen] = useState<null | "connect" | "different">(null);

@@ -185,20 +185,33 @@ class ConnectorsStore:
             checked.result.status,
         )
 
-    def record_check(self, iid: str, checked: integrations.Checked) -> None:
-        """A re-test's result, on the values already saved."""
+    def readable(self) -> None:
+        """Raise `StoreUnreadable` when the file is there and can't be read — so a
+        page says so, rather than showing nothing connected."""
+        self._read(strict=True)
+
+    def record_check(self, iid: str, checked: integrations.Checked, tested: Optional[dict[str, str]] = None) -> bool:
+        """A re-test's result, on the values already saved — and only if they are
+        still the values that were tested (a Replace may have landed meanwhile)."""
         with self._lock():
             data = self._read(strict=True)
             connections = data.get("connections") or {}
             entry = connections.get(iid)
             if not isinstance(entry, dict):
-                return
+                return False
+            if tested is not None:
+                try:
+                    if self.values(iid) != tested:
+                        return False
+                except secretbox.SecretsLocked:
+                    return False
             entry["check"] = check_record(checked)
             if checked.mode:
                 entry["mode"] = checked.mode
             if checked.models:
                 entry["models"] = checked.models[:400]
             self._write(data)
+        return True
 
     def set_default(self, capability: str, iid: Optional[str]) -> None:
         with self._lock():

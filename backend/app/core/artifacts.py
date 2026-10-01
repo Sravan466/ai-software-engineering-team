@@ -388,6 +388,19 @@ def _env_value(value: str) -> str:
     )
 
 
+def frontend_env(project: Project, assembled: dict) -> dict[str, str]:
+    """The connector values the frontend's `.env.local` gets in an opt-in download.
+
+    Publishable ones always. Server ones too when the build has no backend of its
+    own: then the frontend's API routes are the server, and a key in a
+    `backend/.env` nothing reads is a key the app never sees.
+    """
+    from app.orchestration import connectors
+
+    has_backend = any(f["path"] == "backend/.env.example" for f in assembled["files"])
+    return connectors.values_for(project, client_only=has_backend)
+
+
 def build_zip(
     project: Project,
     assembled: dict,
@@ -417,8 +430,9 @@ def build_zip(
             )
             z.writestr("backend/.env", env_file(example, env))
         if client_env:
-            # Publishable keys only — the browser bundle is public. A frontend with
-            # no `.env.example` (no frontend at all) gets nothing.
+            # The frontend's own values — chosen by the caller (`frontend_env`): the
+            # publishable ones, plus the server ones in a build whose server *is* the
+            # frontend. A build with no frontend `.env.example` has no frontend.
             example = next(
                 (f["content"] for f in assembled["files"] if f["path"] == "frontend/.env.example"),
                 None,

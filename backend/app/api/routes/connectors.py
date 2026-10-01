@@ -115,6 +115,7 @@ def _entry(found: integrations.Integration, store: connectors_store.ConnectorsSt
 def catalog(user: User = Depends(current_user)) -> dict:
     store = _store(user)
     try:
+        store.readable()
         entries = [_entry(i, store) for i in integrations.catalog()]
     except connectors_store.StoreUnreadable as e:
         raise HTTPException(503, str(e))
@@ -134,6 +135,10 @@ def one(iid: str, user: User = Depends(current_user), db: Session = Depends(get_
     found = integrations.get(iid)
     if found is None:
         raise HTTPException(404, f"There's no connector called '{iid}'.")
+    try:
+        _store(user).readable()
+    except connectors_store.StoreUnreadable as e:
+        raise HTTPException(503, str(e))
     out = _entry(found, _store(user))
     out["used_by"] = used_by(db, user.id, iid) if found.connectable else []
     return out
@@ -234,7 +239,7 @@ def check(
     if not limiter.allow(user.id):
         raise HTTPException(429, "Too many key tests in a short time. Wait a few minutes and try again.")
     checked = integrations.check(found, values, store.entry(iid).get("mode"))
-    store.record_check(iid, checked)
+    store.record_check(iid, checked, tested=values)
     return {
         "ok": checked.result.status != integrations.FAILED,
         "status": checked.result.status,

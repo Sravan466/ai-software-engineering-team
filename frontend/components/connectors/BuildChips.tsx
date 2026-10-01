@@ -69,7 +69,7 @@ export default function BuildChips({
 
   if (!preview) return null;
   const picks = preview.connectors;
-  if (!picks.length && !preview.skipped.length) return null;
+  if (!picks.length && !preview.skipped.length && !preview.addable.length) return null;
 
   const off = (id: string) =>
     onChange({ use: choice.use.filter((u) => u !== id), skip: [...new Set([...choice.skip, id])] });

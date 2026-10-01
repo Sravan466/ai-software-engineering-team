@@ -386,7 +386,13 @@ class PipelineRunner:
         """
         data = charter.as_dict()
         with _checkpoint_lock(project.id):
-            graph.update_state(_config(project.id), {"charter": data}, as_node=Phase.SYSTEM_DESIGN.value)
+            graph.update_state(
+                _config(project.id),
+                # The choice too, so a later redo of the architecture re-freezes with
+                # what the person added and switched off here.
+                {"charter": data, "integrations_choice": project.integrations_choice or {}},
+                as_node=Phase.SYSTEM_DESIGN.value,
+            )
         project.charter = data
         log.info("Connectors for %s set to %s", project.id, ", ".join(charter.integrations) or "none")
 
@@ -906,7 +912,13 @@ class PipelineRunner:
                         # the old one describes a build that no longer exists. Every
                         # phase after this is about to re-run against the new one.
                         rewritten = freeze(
-                            result.output, _last_debate(values), build_integrations(values, result.output)
+                            result.output,
+                            _last_debate(values),
+                            # The row's choice wins: it is what the person said last.
+                            build_integrations(
+                                {**values, "integrations_choice": project.integrations_choice or {}},
+                                result.output,
+                            ),
                         )
                         patch["charter"] = rewritten.as_dict() if rewritten else {}
                         charter_update = patch["charter"]

@@ -242,6 +242,9 @@ class ProjectOut(BaseModel):
     #: connectors question was answered. Names only — never a value.
     integrations_choice: Optional[dict] = None
     integrations_status: Optional[dict] = None
+    #: Connectors answered "later" (or whose key failed), read live — what every
+    #: "N connectors not connected" mark counts.
+    connectors_unconnected: list[str] = []
     #: Where the finished build went: its GitHub repo and its live deploy (#55).
     #: Names and URLs only — never a token.
     github_repo: Optional[str] = None

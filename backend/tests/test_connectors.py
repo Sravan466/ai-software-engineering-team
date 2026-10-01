@@ -156,6 +156,11 @@ CONNECTED = ["stripe", "resend", "openai"]
         ("We don't take payments — a simple reading list", []),
         ("A store with checkout, using Razorpay for UPI", []),
         ("An invoicing tool with Stripe payouts", ["stripe"]),
+        # Words, not payment processing (review finding 2).
+        ("A subscription tracker that lists my Netflix subscriptions", []),
+        ("An expense app that logs payments I make", []),
+        ("Newsletter archive viewer", []),
+        ("Take payments without Stripe", []),
     ],
 )
 def test_relevance_is_conservative(idea, expect):
@@ -167,6 +172,10 @@ def test_a_soft_phrase_picks_only_a_connected_connector():
     assert [m.iid for m in integrations.relevant("A habit tracker with sign in", (), ["clerk"])] == ["clerk"]
     # Atlas designing its own JWT login means Clerk isn't used.
     assert integrations.relevant("A habit tracker with sign in", ["custom JWT auth with bcrypt"], ["clerk"]) == []
+
+
+def test_a_negation_after_a_named_connector_counts():
+    assert integrations.relevant("A blog. Sign in with Clerk is not needed", (), ["clerk"]) == []
 
 
 def test_a_strong_phrase_picks_one_that_isnt_connected_so_the_build_asks():
@@ -434,8 +443,13 @@ def test_changing_connectors_is_only_allowed_before_code(client):
     r = client.post(f"/api/projects/{pid}/integrations", json={"add": "openai"})
     assert r.status_code == 200 and r.json()["used"] == ["stripe", "openai"]
     assert "OPENAI_API_KEY" in client.get(f"/api/projects/{pid}").json()["charter"]["env"]
+    # OpenAI isn't connected, so the build waits on it rather than building keyless.
+    assert client.get(f"/api/projects/{pid}").json()["gate_kind"] == "integrations"
     r = client.post(f"/api/projects/{pid}/integrations", json={"remove": "stripe"})
     assert r.json()["used"] == ["openai"]
+    assert client.post(f"/api/projects/{pid}/integrations/later").status_code == 200
+    # Back on the Plan review; approving it is when the code gets written.
+    assert client.get(f"/api/projects/{pid}").json()["gate_kind"] == "plan"
     client.post(f"/api/projects/{pid}/approve")
     assert client.post(f"/api/projects/{pid}/integrations", json={"add": "stripe"}).status_code == 409
 
@@ -470,3 +484,51 @@ def test_the_new_columns_migrate_onto_an_existing_database(tmp_path):
 
 def test_a_project_without_the_section_reads_as_empty(tmp_path):
     assert project_secrets.integrations_load(TEST_USER_ID, "0" * 32) == {}
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+def test_a_redo_of_the_architecture_keeps_what_was_switched_off(client):
+    _connect_stripe(client)
+    pid = _run(client, "A store with checkout", "checkpoints")
+    through_database_gate(client, pid)
+    assert client.post(f"/api/projects/{pid}/integrations", json={"remove": "stripe"}).status_code == 200
+    r = client.post(f"/api/projects/{pid}/redo", json={"phase": "system_design", "feedback": "tighter"})
+    assert r.status_code == 200, r.text
+    assert (client.get(f"/api/projects/{pid}").json()["charter"] or {}).get("integrations", []) == []
+
+
+def test_the_badge_is_live_and_a_failed_key_is_not_connected(client):
+    pid = _run(client, "A store with checkout")
+    through_database_gate(client, pid)
+    client.post(f"/api/projects/{pid}/integrations/later")
+    assert client.get(f"/api/projects/{pid}").json()["connectors_unconnected"] == ["stripe"]
+    _connect_stripe(client)  # connected in the tab: the build's mark clears at once
+    assert client.get(f"/api/projects/{pid}").json()["connectors_unconnected"] == []
+    _respond(lambda r: httpx.Response(401, json={}))
+    assert client.post("/api/connectors/stripe/check", headers=LOCAL).json()["status"] == "failed"
+    assert client.get(f"/api/projects/{pid}").json()["connectors_unconnected"] == ["stripe"]
+    assert client.get(f"/api/projects/{pid}/integrations").json()["not_connected"] == ["stripe"]
+
+
+def test_an_unreadable_store_is_an_error_not_an_empty_catalog(client):
+    path = userdata.path(TEST_USER_ID, "connectors.local.json")
+    path.write_text("{not json")
+    assert client.get("/api/connectors").status_code == 503
+
+
+def test_a_frontend_only_build_gets_its_server_keys_in_env_local(client, monkeypatch):
+    from app.core import artifacts
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+
+    _connect_stripe(client)
+    pid = _run(client, "A store with checkout")
+    through_database_gate(client, pid)
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        frontend_only = {"files": [{"path": "frontend/.env.example", "content": ""}]}
+        both = {"files": frontend_only["files"] + [{"path": "backend/.env.example", "content": ""}]}
+        # No backend: its API routes are the server, so the secret goes to the frontend.
+        assert artifacts.frontend_env(project, frontend_only)["STRIPE_SECRET_KEY"] == SENTINEL
+        # With a backend: the frontend gets publishable keys only.
+        assert artifacts.frontend_env(project, both) == {"NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY": PK}
