@@ -97,6 +97,24 @@ def _checked_model(spec: Optional[str]) -> Optional[str]:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _connector_choice(payload: ProjectCreate) -> Optional[dict]:
+    """`{use, skip}` as the person left the chips, or None when they said nothing.
+
+    Only connectors the platform can wire are kept; `skip` wins over `use`.
+    """
+    from app.build import integrations
+
+    choice = payload.connectors
+    if choice is None:
+        return None
+    skip = sorted({i for i in choice.skip if integrations.get(i)})
+    use = sorted({i for i in choice.use if integrations.connectable(i) and i not in skip})
+    unknown = sorted({*choice.use, *choice.skip} - {i.id for i in integrations.catalog()})
+    if unknown:
+        raise HTTPException(422, f"There's no connector called {', '.join(unknown)}.")
+    return {"use": use, "skip": skip} if (use or skip) else None
+
+
 @router.post("", response_model=ProjectOut, status_code=201)
 def create_project(
     payload: ProjectCreate,
@@ -123,6 +141,7 @@ def create_project(
             and (payload.skill_overrides.pinned or payload.skill_overrides.excluded)
             else None
         ),
+        integrations_choice=_connector_choice(payload),
         # Kept in step with the mode so anything still reading the old flag — a saved
         # query, an older client — never disagrees with the policy actually in force.
         require_approval=approval != ApprovalMode.UNATTENDED.value,
@@ -148,7 +167,11 @@ def _rederive_gate(db: Session, project: Project) -> None:
     # "Needs help" is not a policy's gate: the crew stopped on something it could not
     # fix, and no review mode makes that go away. Nor is the database question — only
     # the person's answer releases it.
-    if project.gate_kind in (GateKind.NEEDS_HELP.value, GateKind.DATABASE.value):
+    if project.gate_kind in (
+        GateKind.NEEDS_HELP.value,
+        GateKind.DATABASE.value,
+        GateKind.INTEGRATIONS.value,
+    ):
         return
     # The runner's own definition of "latest", so this cannot re-derive the gate from
     # a different row than the one the loop parked on.
@@ -245,9 +268,11 @@ def download_project(
 
     `include_credentials` adds a real `backend/.env` with the saved database values —
     only here, only when asked. The preview, `/artifacts` and the GitHub push always
-    carry `.env.example` with placeholders.
+    carry `.env.example` with placeholders. Connector keys (#59) ride along: server
+    ones in `backend/.env`, publishable ones in `frontend/.env.local` too.
     """
     env = None
+    client_env = None
     if include_credentials and project.owner_id:
         # The one response that carries a credential in the clear: held to the same
         # rule as saving one.
@@ -259,12 +284,19 @@ def download_project(
                 "Credentials can only be downloaded from an address this backend is "
                 "served at (localhost, or BACKEND_PUBLIC_URL).",
             )
+        from app.orchestration import connectors
+
         try:
-            env = project_secrets.reveal(project.owner_id, project.id)
+            env = {**project_secrets.reveal(project.owner_id, project.id), **connectors.values_for(project)}
         except secretbox.SecretsLocked as e:
             raise HTTPException(503, str(e))
     assembled = artifacts.assemble(project)
-    data = artifacts.build_zip(project, assembled, env=env)
+    if env is not None:
+        try:
+            client_env = artifacts.frontend_env(project, assembled)
+        except secretbox.SecretsLocked as e:
+            raise HTTPException(503, str(e))
+    data = artifacts.build_zip(project, assembled, env=env, client_env=client_env)
     filename = artifacts.slug(project.name or project.idea) + ".zip"
     return StreamingResponse(
         io.BytesIO(data),
@@ -275,18 +307,25 @@ def download_project(
 
 # ── Pipeline control ─────────────────────────────────────────────────────────
 def _claim(
-    db: Session, project: Project, allowed: set[str], *, answers_database: bool = False
+    db: Session,
+    project: Project,
+    allowed: set[str],
+    *,
+    answers_question: bool = False,
+    answers_database: bool = False,
 ) -> bool:
     """Atomically move the project into `running` — but only from `allowed`.
 
     Returns False when someone else got there first (a second tab, a double click),
     which is the whole point: the phase is handed to a background task exactly once.
 
-    A build parked on its database question is released only by an answer to it
-    (`answers_database`) — not by approve, a redo, a finding's fix, or anything else
-    that claims a waiting build. Checked here, once, so no route can forget it.
+    A build parked on a question only the person can answer — its database, or its
+    app connectors — is released only by an answer to it (`answers_question`; the
+    older `answers_database` means the same) — not by approve, a redo, a finding's
+    fix, or anything else that claims a waiting build. Checked here, once, so no
+    route can forget it.
     """
-    if not answers_database:
+    if not (answers_question or answers_database):
         _refuse_at_database_gate(project)
     result = db.execute(
         update(Project)
@@ -535,11 +574,18 @@ def _require_findings_settled(db: Session, project: Project) -> None:
 
 
 def _refuse_at_database_gate(project: Project) -> None:
+    """Refuse anything but an answer while the build waits on a question gate."""
     if runner.at_database_gate(project):
         raise HTTPException(
             409,
             "This build is waiting on its database. Connect it, or choose \"Continue, "
             "I'll add it later\".",
+        )
+    if runner.at_integrations_gate(project):
+        raise HTTPException(
+            409,
+            "This build is waiting on its services. Connect them, or choose \"Add all "
+            "later\".",
         )
 
 
@@ -551,8 +597,10 @@ _CREDENTIAL_IN_FEEDBACK = (
 
 
 def _refuse_credentials(text: str, project: Project) -> None:
-    if dbconnect.looks_like_credential(text) or project_secrets.holds_saved_secret(
-        project.owner_id, project.id, text
+    if (
+        dbconnect.looks_like_credential(text)
+        or project_secrets.holds_saved_secret(project.owner_id, project.id, text)
+        or project_secrets.holds_integration_secret(project.owner_id, project.id, text)
     ):
         # Not logged with the text, for the obvious reason.
         raise HTTPException(422, _CREDENTIAL_IN_FEEDBACK)

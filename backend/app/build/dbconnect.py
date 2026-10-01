@@ -55,6 +55,9 @@ class Var:
     #: The schemes a `uri` may use.
     schemes: tuple[str, ...] = ()
     help: str = ""
+    #: Who reads it: `server` code only, or the `client` — the browser bundle, where
+    #: anything is public. A client variable is never a secret (`app.build.integrations`).
+    side: str = "server"
 
     def as_dict(self) -> dict:
         return {
@@ -65,6 +68,7 @@ class Var:
             "placeholder": self.placeholder,
             "kind": self.kind,
             "help": self.help,
+            "side": self.side,
         }
 
 
@@ -842,6 +846,13 @@ _CREDENTIAL_SHAPES = (
     re.compile(r"\b(AKIA|ASIA)[A-Z0-9]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
     re.compile(r"\bAIza[0-9A-Za-z_\-]{30,}"),
+    # App connectors (#59): Stripe and Clerk secret, restricted and webhook keys,
+    # Resend keys, and OpenAI's project and service-account keys. Publishable keys
+    # (`pk_`) are public by design and are not on the list.
+    re.compile(r"\b(sk|rk)_(test|live)_[A-Za-z0-9]{8,}"),
+    re.compile(r"\bwhsec_[A-Za-z0-9]{8,}"),
+    re.compile(r"\bre_[A-Za-z0-9]{6,}_[A-Za-z0-9]{8,}"),
+    re.compile(r"\bsk-(proj|svcacct|admin)-[A-Za-z0-9_\-]{8,}"),
 )
 
 

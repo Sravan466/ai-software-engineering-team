@@ -252,18 +252,20 @@ class DeployRequest(BaseModel):
 
 
 def _public_env(project: Project, frontend_files: dict[str, str]) -> dict[str, str]:
-    """The saved database values the frontend reads that are public by design."""
+    """The saved values the frontend reads that are public by design: the database's
+    publishable ones, and app connectors' client variables (#59) — taken from the
+    registry, never a hardcoded list. A connector's secret never goes here."""
     if not project.owner_id:
         return {}
+    out = _public_connector_env(project, frontend_files)
     record = project_secrets.load(project.owner_id, project.id)
     if not record.get("values"):
-        return {}
+        return out
     contract = dbconnect.contract_for(record.get("database"), record.get("provider"))
     try:
         values = project_secrets.reveal(project.owner_id, project.id)
     except secretbox.SecretsLocked:
-        return {}
-    out: dict[str, str] = {}
+        return out
     for name in scaffold.env_vars(frontend_files.items()):
         base = next((name[len(p):] for p in _PUBLIC_PREFIXES if name.startswith(p)), name)
         for candidate in (name, base):
@@ -273,6 +275,19 @@ def _public_env(project: Project, frontend_files: dict[str, str]) -> dict[str, s
                 out[name] = value
                 break
     return out
+
+
+def _public_connector_env(project: Project, frontend_files: dict[str, str]) -> dict[str, str]:
+    from app.build import integrations
+    from app.orchestration import connectors
+
+    public = integrations.client_names()
+    try:
+        values = connectors.values_for(project, client_only=True)
+    except secretbox.SecretsLocked:
+        return {}
+    read = set(scaffold.env_vars(frontend_files.items()))
+    return {name: value for name, value in values.items() if name in public and name in read}
 
 
 def _claim_deploy(db: Session, project: Project, target: str, status: str) -> bool:

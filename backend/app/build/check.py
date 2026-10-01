@@ -511,4 +511,82 @@ def check_phase(prior_outputs: dict, phase_key: str, output: dict, charter=None)
     # Platform-owned files an agent wrote anyway are replaced, not checked.
     from app.build.scaffold import platform_owned
 
-    return check_tree(files, [p for p in mine if not platform_owned(p)])
+    targets = [p for p in mine if not platform_owned(p)]
+    out = check_tree(files, targets)
+    leaks = secret_leaks(files, targets, charter)
+    if leaks:
+        # Ahead of the compile problems: a key in the browser bundle is the one a
+        # build must never ship, whatever else is wrong with it.
+        out.problems = (leaks + out.problems)[:_TOTAL]
+        out.status = BuildStatus.FAILED.value
+    return out
+
+
+# ── a secret where the browser can read it (#59) ─────────────────────────────
+_ENV_READ = re.compile(
+    r"""\b(?:process\.env|import\.meta\.env)\.([A-Z][A-Z0-9_]*)|\bprocess\.env\[\s*['"]([A-Z][A-Z0-9_]*)['"]\s*\]"""
+)
+_PUBLIC_PREFIX = re.compile(r"^(NEXT_PUBLIC_|VITE_|REACT_APP_|PUBLIC_)")
+_USE_CLIENT = re.compile(r"""^\s*(?:/\*.*?\*/\s*|//[^\n]*\n\s*)*['"]use client['"]""", re.DOTALL)
+#: Frameworks whose every frontend file ends up in the browser.
+_ALL_CLIENT = frozenset({"react", "vue", "svelte", "angular"})
+
+
+def secret_leaks(files: dict[str, str], targets: Iterable[str], charter=None) -> list[Problem]:
+    """A connector's server-only key read where the browser can see it.
+
+    Two shapes, both unambiguous, so a correct build is never sent back for this:
+
+      * a public-prefixed variable built from a secret — `NEXT_PUBLIC_STRIPE_SECRET_KEY`,
+        `VITE_OPENAI_API_KEY`, or any `NEXT_PUBLIC_…SECRET…` that isn't a registry
+        client variable. Whatever reads it, the bundler inlines the value.
+      * a server-only connector variable read in a file that runs in the browser: one
+        marked "use client", or any frontend file of a framework with no server side.
+
+    A Next.js server component, route handler or server action reading
+    `STRIPE_SECRET_KEY` is correct and is not flagged.
+    """
+    from app.build import integrations
+
+    client_ok = integrations.client_names()
+    server_only = integrations.secret_names() - client_ok
+    front = charter.get("frontend_framework") if charter is not None else None
+    all_client = bool(front and front.token in _ALL_CLIENT)
+    found: list[Problem] = []
+    for path in targets:
+        if layout.side_of(path) != layout.FRONTEND or not path.endswith(_JS_EXT):
+            continue
+        content = files.get(path) or ""
+        browser = all_client or bool(_USE_CLIENT.match(content))
+        seen: set[str] = set()
+        for n, line in enumerate(content.splitlines(), start=1):
+            for m in _ENV_READ.finditer(line):
+                name = m.group(1) or m.group(2)
+                if name in seen:
+                    continue
+                base = _PUBLIC_PREFIX.sub("", name)
+                if name != base and name not in client_ok and (base in server_only or "SECRET" in base):
+                    seen.add(name)
+                    found.append(
+                        Problem(
+                            path,
+                            f"reads {name}: a {_PUBLIC_PREFIX.match(name).group(1)} variable is put in the "
+                            "browser bundle, where anyone can read it, and this one carries a secret. Read "
+                            f"{base} in server code only (an API route or server action) and call that.",
+                            "secret",
+                            n,
+                        )
+                    )
+                elif browser and name in server_only:
+                    seen.add(name)
+                    found.append(
+                        Problem(
+                            path,
+                            f"reads {name} in code that runs in the browser. It's a server-only secret: "
+                            "read it in an API route, route handler or server action, and have this "
+                            "component call that instead.",
+                            "secret",
+                            n,
+                        )
+                    )
+    return found

@@ -10,6 +10,7 @@ import AgentSprite from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { PreStartCheck } from "@/components/models/ModelCheck";
+import BuildChips, { NO_CHOICE, type ConnectorChoice } from "@/components/connectors/BuildChips";
 import RunSettings, {
   type RunConfig,
   DEFAULT_RUN_CONFIG,
@@ -37,6 +38,7 @@ export default function NewBuildPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [createdId, setCreatedId] = useState("");
+  const [connectors, setConnectors] = useState<ConnectorChoice>(NO_CHOICE);
 
   // ── runtime preflight ────────────────────────────────────────────────────
   // Start build used to be primary and enabled with nothing behind it to run on:
@@ -119,6 +121,7 @@ export default function NewBuildPage() {
           config.skills.pinned.length || config.skills.excluded.length
             ? config.skills
             : undefined,
+        connectors: connectors.use.length || connectors.skip.length ? connectors : undefined,
       });
       setCreatedId(project.id);
       // Awaited, not fire-and-forget: a rejected run is the whole reason a build
@@ -197,6 +200,8 @@ export default function NewBuildPage() {
             )}
           </div>
         </div>
+
+        <BuildChips idea={idea} choice={connectors} onChange={setConnectors} disabled={busy} />
 
         {/* What the server found about each model this build would use, right beside
             the button that starts it — a model that won't run is refused here, and

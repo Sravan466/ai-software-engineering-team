@@ -36,6 +36,14 @@ async def lifespan(app: FastAPI):
         deploy_store.register_all()
     except Exception:  # noqa: BLE001 - never block startup on this
         log.exception("Couldn't register saved deploy tokens with the log scrubber")
+    # App connectors' keys (#59), the account's and each project's own.
+    from app.core import connectors_store
+
+    try:
+        connectors_store.register_all()
+        project_secrets.register_integrations_all()
+    except Exception:  # noqa: BLE001 - never block startup on this
+        log.exception("Couldn't register saved connector keys with the log scrubber")
     # The compile gate reads JavaScript with TypeScript's parser; fetch it now rather
     # than inside the first Frontend phase that needs it.
     from app.build import toolchain
@@ -97,10 +105,12 @@ from app.api.routes import (  # noqa: E402
     analytics,
     auth as auth_routes,
     connector as connector_routes,
+    connectors as connectors_routes,
     database as database_routes,
     deploy as deploy_routes,
     devices,
     github,
+    integrations as integrations_routes,
     models,
     preview,
     projects,
@@ -112,6 +122,8 @@ from app.api.routes import (  # noqa: E402
 app.include_router(auth_routes.router)
 app.include_router(projects.router)
 app.include_router(database_routes.router)
+app.include_router(integrations_routes.router)
+app.include_router(connectors_routes.router)
 app.include_router(preview.router)
 app.include_router(models.router)
 app.include_router(rag.router)

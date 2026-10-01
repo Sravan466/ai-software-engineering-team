@@ -291,8 +291,10 @@ def project_kind(assembled: dict) -> Optional[str]:
 
 
 def saved_env_names(project: Project) -> tuple[str, ...]:
-    """The names (never the values) of the database variables saved for this project."""
+    """The names (never the values) of the variables saved for this project: its
+    database's, and its app connectors' (from the account or the project)."""
     from app.core import project_secrets
+    from app.orchestration import connectors
 
     if not project.owner_id:
         return ()
@@ -300,7 +302,12 @@ def saved_env_names(project: Project) -> tuple[str, ...]:
         record = project_secrets.load(project.owner_id, project.id)
     except ValueError:
         return ()
-    return tuple(sorted((record.get("values") or {}).keys()))
+    names = set((record.get("values") or {}).keys())
+    try:
+        names |= set(connectors.saved_names(project))
+    except (ValueError, OSError):
+        pass
+    return tuple(sorted(names))
 
 
 def ship_files(project: Project, assembled: dict) -> dict[str, str]:
@@ -345,7 +352,7 @@ def env_file(example: str, values: dict[str, str]) -> str:
             lines.append(line)
     missing = [n for n in values if n not in placed]
     if missing:
-        lines += ["", "# Your database connection."]
+        lines += ["", "# Your saved connections."]
         lines += [f"{n}={_env_value(values[n])}" for n in missing]
     header = [
         "# Real credentials, added because you asked for them in this download.",
@@ -381,7 +388,25 @@ def _env_value(value: str) -> str:
     )
 
 
-def build_zip(project: Project, assembled: dict, env: Optional[dict[str, str]] = None) -> bytes:
+def frontend_env(project: Project, assembled: dict) -> dict[str, str]:
+    """The connector values the frontend's `.env.local` gets in an opt-in download.
+
+    Publishable ones always. Server ones too when the build has no backend of its
+    own: then the frontend's API routes are the server, and a key in a
+    `backend/.env` nothing reads is a key the app never sees.
+    """
+    from app.orchestration import connectors
+
+    has_backend = any(f["path"] == "backend/.env.example" for f in assembled["files"])
+    return connectors.values_for(project, client_only=has_backend)
+
+
+def build_zip(
+    project: Project,
+    assembled: dict,
+    env: Optional[dict[str, str]] = None,
+    client_env: Optional[dict[str, str]] = None,
+) -> bytes:
     """A real, unzippable project archive: README + code files + docs.
 
     `env` — the saved database values — adds a real `backend/.env`. Only the
@@ -404,4 +429,14 @@ def build_zip(project: Project, assembled: dict, env: Optional[dict[str, str]] =
                 "",
             )
             z.writestr("backend/.env", env_file(example, env))
+        if client_env:
+            # The frontend's own values — chosen by the caller (`frontend_env`): the
+            # publishable ones, plus the server ones in a build whose server *is* the
+            # frontend. A build with no frontend `.env.example` has no frontend.
+            example = next(
+                (f["content"] for f in assembled["files"] if f["path"] == "frontend/.env.example"),
+                None,
+            )
+            if example is not None:
+                z.writestr("frontend/.env.local", env_file(example, client_env))
     return buf.getvalue()
