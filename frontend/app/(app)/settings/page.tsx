@@ -8,6 +8,7 @@ import {
   LocalStatus,
   ModelCheck,
   ModelProfile,
+  KeyAdvice,
   KeyStatus,
   ProviderSetting,
   RoleRow,
@@ -1359,7 +1360,7 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
   const chosen = state?.roles.filter((r) => r.assigned).length ?? 0;
 
   return (
-    <section className="card">
+    <section className="card" id="agent-models">
       <div className="sec-head">
         <h2 className="label">Which model each agent runs on</h2>
         <span className="rule" />
@@ -1615,18 +1616,27 @@ const KEY_BADGE: Record<KeyStatus, { tone: "ok" | "warn" | "bad" | ""; label: st
   none: { tone: "", label: "Not configured", icon: null },
 };
 
-function KeyBadge({ status }: { status: KeyStatus }) {
+function KeyBadge({ status, advice }: { status: KeyStatus; advice?: KeyAdvice | null }) {
   const b = KEY_BADGE[status] ?? KEY_BADGE.unverified;
+  // A refused key says *why* on its badge — "Expired", "No credit" — not one
+  // "Rejected" for every cause. Rate-limited keeps its "Working" reading.
+  const named = advice && advice.blocking && (status === "invalid" || status === "billing" || status === "unverified");
   return (
     <span className={`badge key-badge${b.tone ? ` badge-${b.tone}` : ""}`}>
-      {b.icon}
-      {b.label}
+      {named ? Icon.alert : b.icon}
+      {named ? advice.badge : b.label}
     </span>
   );
 }
 
-/** Where to go next for each outcome, per provider. */
-function keyAdvice(p: (typeof PROVIDERS)[number], status: KeyStatus): { href: string; text: string } | null {
+/** The one next step for a key's state: the backend's advice first, then the old
+ * per-status fallback for a check saved before reasons had kinds. */
+function keyAdvice(
+  p: (typeof PROVIDERS)[number],
+  status: KeyStatus,
+  advice?: KeyAdvice | null,
+): { href: string; text: string } | null {
+  if (advice) return advice.action_url && advice.blocking ? { href: advice.action_url, text: advice.action_label } : null;
   if (status === "billing") return { href: p.billing, text: `Open ${p.company} billing` };
   if (status === "invalid") return { href: p.console, text: `Create a key at ${p.company}` };
   return null;
@@ -1664,7 +1674,15 @@ function ApiKeysCard() {
   const [outcome, setOutcome] = useState<
     Record<
       string,
-      { tone: "ok" | "warn" | "bad"; text: string; revoke?: boolean; models?: string[] } | undefined
+      | {
+          tone: "ok" | "warn" | "bad";
+          text: string;
+          revoke?: boolean;
+          models?: string[];
+          /** The one action that fixes a refused key (#63). */
+          fix?: { href: string; text: string };
+        }
+      | undefined
     >
   >({});
   const [error, setError] = useState("");
@@ -1730,6 +1748,9 @@ function ApiKeysCard() {
         say(provider, {
           tone: check.status === "invalid" ? "bad" : "warn",
           text: key ? `Not saved — ${check.message}${kept}` : `Model not changed — ${check.message}`,
+          fix: check.advice?.blocking && check.advice.action_url
+            ? { href: check.advice.action_url, text: check.advice.action_label }
+            : undefined,
           // A refused change leaves the row as it was, so the models this key can use
           // travel with the outcome instead.
           models: check.models,
@@ -1777,7 +1798,7 @@ function ApiKeysCard() {
   }
 
   return (
-    <section className="card">
+    <section className="card" id="api-keys">
       <div className="sec-head">
         <h2 className="label">Cloud API keys</h2>
         <span className="rule" />
@@ -1829,7 +1850,7 @@ function ApiKeysCard() {
           const locked = busy !== null && busy.provider === p.key;
           const status: KeyStatus = info?.status ?? "none";
           const said = outcome[p.key];
-          const advice = keyAdvice(p, status);
+          const advice = keyAdvice(p, status, info?.advice);
           const statusId = `key-status-${p.key}`;
           const unchanged = !draft.key.trim() && (!draft.model.trim() || draft.model.trim() === info?.default_model);
           const troubled = status === "invalid" || status === "billing" || status === "model_unavailable" || status === "locked";
@@ -1837,7 +1858,7 @@ function ApiKeysCard() {
             <div key={p.key} className="provider">
               <div className="provider-head">
                 <span className="provider-name">{p.label}</span>
-                <KeyBadge status={status} />
+                <KeyBadge status={status} advice={info?.advice} />
               </div>
 
               {(info?.configured || status === "locked") && (
@@ -1890,12 +1911,23 @@ function ApiKeysCard() {
                 >
                   {troubled ? Icon.alert : Icon.info}
                   <div className="notice-body">
-                    <span className="notice-text">
-                      {info.message}
-                      {troubled && status !== "locked" && " Builds won't use this key until it passes a check."}
-                    </span>
+                    {troubled && info.advice ? (
+                      <>
+                        <span className="notice-title">{info.advice.title}</span>
+                        <span className="notice-text">
+                          {info.advice.body}
+                          {info.during_build && " A build's own call was refused with this."}
+                          {status !== "locked" && " Builds won't use this key until it passes a check."}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="notice-text">
+                        {info.message}
+                        {troubled && status !== "locked" && " Builds won't use this key until it passes a check."}
+                      </span>
+                    )}
                     {advice && (
-                      <a className="link notice-link" href={advice.href} target="_blank" rel="noreferrer">
+                      <a className="btn btn-sm key-fix" href={advice.href} target="_blank" rel="noreferrer">
                         {advice.text} {Icon.external}
                       </a>
                     )}
@@ -1955,6 +1987,14 @@ function ApiKeysCard() {
                 {said ? (
                   <span className={`key-outcome key-outcome-${said.tone}`}>
                     {said.text}
+                    {said.fix && (
+                      <>
+                        {" "}
+                        <a className="link" href={said.fix.href} target="_blank" rel="noreferrer">
+                          {said.fix.text} {Icon.external}
+                        </a>
+                      </>
+                    )}
                     {said.models && said.models.length > 0 && (
                       <KeyModels models={said.models} picked={draft.model} onPick={(m) => pick(p.key, m)} />
                     )}

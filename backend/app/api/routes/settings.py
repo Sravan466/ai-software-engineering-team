@@ -30,7 +30,8 @@ from app.core.config import settings
 from app.router import keycheck
 from app.router.runtimes.detect import is_loopback
 from app.router.runtimes.sources import SourceError, normalise_url
-from app.router.router import router as model_router
+from app.router.keycheck import KeyCheck
+from app.router.router import ModelRouter, router as model_router
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -145,7 +146,15 @@ def set_provider(provider: str, body: ProviderKeyUpdate, request: Request) -> di
         raise _unreadable(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {**result, "provider": model_router.provider_settings()[provider]}
+    return {**result, "check": _with_advice(provider, result.get("check")), "provider": model_router.provider_settings()[provider]}
+
+
+def _with_advice(provider: str, check: Optional[dict]) -> Optional[dict]:
+    """A check as the page reads it: with the badge, sentence and action for its reason."""
+    found = KeyCheck.from_dict(check) if check else None
+    if found is None:
+        return check
+    return {**check, "advice": ModelRouter._advice(provider, found)}
 
 
 @router.post("/providers/{provider}/check")
@@ -156,7 +165,7 @@ def check_provider(provider: str, request: Request) -> dict:
         found = model_router.recheck_provider_key(provider)
     except (secrets_store.StoreUnreadable, secretbox.SecretsLocked) as e:
         raise _unreadable(e)
-    return {"check": found.to_dict(), "provider": model_router.provider_settings()[provider]}
+    return {"check": _with_advice(provider, found.to_dict()), "provider": model_router.provider_settings()[provider]}
 
 
 @router.delete("/providers/{provider}")

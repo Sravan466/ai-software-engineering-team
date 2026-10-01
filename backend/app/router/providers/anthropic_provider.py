@@ -11,7 +11,7 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError, status_is_retryable, status_of
+from app.router.base import LLMProvider, ProviderError, cloud_error
 from app.router.providers.cloud_key import CloudKey
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
@@ -35,7 +35,9 @@ class AnthropicProvider(CloudKey, LLMProvider):
         if self._client is None:
             import anthropic  # imported lazily so the package is optional at runtime
 
-            self._client = anthropic.Anthropic(api_key=self.secret())
+            # Tenacity (`ModelRouter._generate`) is the one retry layer: the SDK's own
+            # would retry a spend-limit 429 as if it were a rate limit.
+            self._client = anthropic.Anthropic(api_key=self.secret(), max_retries=0)
         return self._client
 
     def generate(
@@ -80,9 +82,7 @@ class AnthropicProvider(CloudKey, LLMProvider):
             client = self._get_client()
             resp = client.messages.create(**kwargs)
         except Exception as e:  # noqa: BLE001 - normalise SDK/network errors
-            raise ProviderError(
-                f"Anthropic call failed: {e}", retryable=status_is_retryable(e), status=status_of(e)
-            ) from e
+            raise cloud_error(self.name, "Anthropic", e) from e
 
         latency = int((time.perf_counter() - started) * 1000)
         text = "".join(

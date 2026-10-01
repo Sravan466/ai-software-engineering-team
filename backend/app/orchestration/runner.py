@@ -295,7 +295,7 @@ class PipelineRunner:
                 # Stop landed while the call was failing; the Stop is what happened.
                 self._settle_cancelled(db, project)
             else:
-                self._fail(db, project, str(e))
+                self._fail(db, project, str(e), kind=e.kind, provider=e.provider)
             return project
 
     # ── the crew fixing its own serious problems ──────────────────────────────
@@ -969,7 +969,7 @@ class PipelineRunner:
                 # again — and it can be sent back once the computer is here.
                 self._pause(db, project, e)
             else:
-                self._fail(db, project, str(e))
+                self._fail(db, project, str(e), kind=e.kind, provider=e.provider)
             return project
 
         self._complete_row(db, project, row, last_result)
@@ -1557,12 +1557,24 @@ class PipelineRunner:
         if link is not None and link.approved and not error.paused_there:
             hub.notify_ready(project.owner_id, error.device_id)
 
-    def _fail(self, db: Session, project: Project, message: str) -> None:
+    def _fail(
+        self,
+        db: Session,
+        project: Project,
+        message: str,
+        *,
+        kind: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> None:
         from app.core.scrub import scrub
 
         project.status = PipelineStatus.FAILED.value
         # Shown on the page and kept in the database: never a key a provider quoted.
         project.last_error = scrub(message)
+        # Only a cloud provider's refusal has a kind; anything else keeps the page's
+        # local-runtime advice.
+        project.last_error_kind = kind if kind and provider else None
+        project.last_error_provider = provider if kind and provider else None
         db.commit()
         log.warning("Run failed: %s — %s", project.id, message)
 
@@ -1578,6 +1590,8 @@ class PipelineRunner:
         project.current_phase = None
         project.phase_started_at = None
         project.last_error = None
+        project.last_error_kind = None
+        project.last_error_provider = None
         project.gate_kind = None
         project.gate_note = None
         db.commit()

@@ -277,6 +277,11 @@ class ProjectOut(BaseModel):
     heartbeat_at: Optional[UtcDatetime] = None
     cancel_requested: bool = False
     last_error: Optional[str] = None
+    #: Set when a cloud provider refused a key: `no_credit`, `expired`, … and which
+    #: provider, with the words and the one action for it (`app.core.keyerrors`).
+    last_error_kind: Optional[str] = None
+    last_error_provider: Optional[str] = None
+    last_error_help: Optional[dict] = None
     #: `running` but nothing is driving it — the run died with its process. Computed
     #: server-side so the client never has to guess a threshold.
     stalled: bool = False

@@ -7,7 +7,7 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError, status_is_retryable, status_of
+from app.router.base import LLMProvider, ProviderError, cloud_error, status_of
 from app.router.providers.cloud_key import CloudKey
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
@@ -104,9 +104,7 @@ class GeminiProvider(CloudKey, LLMProvider):
             if pinned:
                 resp = gmodel.generate_content(contents)
         except Exception as e:  # noqa: BLE001
-            raise ProviderError(
-                f"Gemini call failed: {e}", retryable=status_is_retryable(e), status=_http_status(e)
-            ) from e
+            raise cloud_error(self.name, "Gemini", e) from e
 
         latency = int((time.perf_counter() - started) * 1000)
         text = getattr(resp, "text", "") or ""

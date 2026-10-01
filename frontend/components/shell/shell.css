@@ -1182,6 +1182,13 @@ kbd {
 .key-notice .notice-text { overflow-wrap: anywhere; }
 .notice-link { display: inline-flex; align-items: center; gap: 4px; width: fit-content; font-size: var(--t-sm); }
 .notice-link svg { width: 13px; height: 13px; }
+/* A refused key's one fix (#63): a real button, not a buried link. Full width and
+   a 44px target on a phone, where it sits under a wrapped sentence. */
+.key-fix { width: fit-content; margin-top: 4px; text-decoration: none; }
+.key-fix svg { width: 13px; height: 13px; }
+@media (max-width: 560px) {
+  .key-fix { width: 100%; justify-content: center; min-height: 44px; }
+}
 .key-models { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .key-model { cursor: pointer; transition: border-color var(--tr), color var(--tr); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .key-model:hover { border-color: var(--ink-3); color: var(--ink); }

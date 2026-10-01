@@ -38,6 +38,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.build.dbconnect import CONNECTED, FAILED, UNCHECKED, CheckResult, Problem, Var, hint
+from app.core import keyerrors
 from app.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -974,12 +975,20 @@ def check(integration: Integration, values: dict[str, str], mode: Optional[str] 
         latency = int((time.monotonic() - started) * 1000)
         data, text = _body(response)
         status = response.status_code
+        failure = (
+            keyerrors.classify(integration.id, status, data or None, response.headers, text=text)
+            if status >= 400 else None
+        )
         for rule in spec.rules:
             if status in rule.statuses and (rule.body is None or rule.body in text):
                 if rule.outcome in ("ok", "restricted"):
-                    return _connected(integration, spec, data, host, latency, mode, rule.message)
+                    return _connected(integration, spec, data, host, latency, mode, rule.message, values)
                 if rule.outcome == "unchecked":
                     return _unchecked(host, rule.message, mode)
+                if rule.outcome == "invalid" and failure is not None and failure.kind in keyerrors.BLOCKING - {keyerrors.INVALID}:
+                    # The rule knows the key was refused; the answer says *why* — an
+                    # expired, suspended or unpaid key is not a typo.
+                    return _key_refused(integration, spec, failure, host, latency, mode)
                 field_name = rule.field or (spec.id_var if rule.outcome == "id_wrong" else spec.key_var)
                 return Checked(
                     CheckResult(
@@ -996,22 +1005,14 @@ def check(integration: Integration, values: dict[str, str], mode: Optional[str] 
         if 200 <= status < 300:
             if spec.partial:
                 return _unchecked(host, spec.partial, mode)
-            return _connected(integration, spec, data, host, latency, mode, "")
-        if status == 429:
+            return _connected(integration, spec, data, host, latency, mode, "", values)
+        if failure is None:  # a redirect, or anything else that isn't an answer
+            failure = keyerrors.Failure(kind=keyerrors.UNKNOWN, retryable=False, status=status)
+        if failure.kind == keyerrors.RATE_LIMITED:
             return _unchecked(host, f"{integration.label} is rate limiting checks right now.", mode)
-        if status >= 500:
+        if failure.kind == keyerrors.PROVIDER_DOWN:
             return _unchecked(host, f"{integration.label} had a problem of its own (HTTP {status}).", mode)
-        return Checked(
-            CheckResult(
-                FAILED,
-                f"{integration.label} refused it (HTTP {status}). " + _fix_for(integration),
-                reason="other",
-                name=spec.key_var,
-                host=host,
-                latency_ms=latency,
-            ),
-            mode=mode,
-        )
+        return _key_refused(integration, spec, failure, host, latency, mode)
     except Exception:  # noqa: BLE001 - a check must never take the save down with it
         log.exception("Connector check failed unexpectedly for %s", integration.label)
         return _unchecked(host, "The check itself failed.", mode)
@@ -1032,6 +1033,71 @@ def _public_models(url: str) -> list[str]:
         return []
 
 
+def connector_advice(integration: Integration, kind: str, *, status: Optional[int] = None, code: Optional[str] = None) -> keyerrors.Advice:
+    """`keyerrors.advice` with this connector's name and its own dashboard as the
+    fallback link for anything the shared table doesn't list."""
+    links = {"keys": integration.dashboard_url} if integration.id not in keyerrors.LINKS else None
+    return keyerrors.advice(kind, integration.id, label=integration.label, links=links, status=status, code=code)
+
+
+def _key_refused(
+    integration: Integration,
+    spec: HttpCheck,
+    failure: keyerrors.Failure,
+    host: str,
+    latency: Optional[int],
+    mode: Optional[str],
+) -> Checked:
+    """A key the service refused, saying why and what fixes it."""
+    found = connector_advice(integration, failure.kind, status=failure.status, code=failure.code)
+    message = found.sentence()
+    if failure.kind == keyerrors.INVALID:
+        message = f"{found.title}. " + _fix_for(integration)
+    return Checked(
+        CheckResult(
+            FAILED,
+            message,
+            reason=failure.kind,
+            name=spec.key_var,
+            step=_guide_step(integration, "secret") if failure.kind in keyerrors.KEY_KINDS else None,
+            host=host,
+            latency_ms=latency,
+            advice=found.as_dict(),
+        ),
+        mode=mode,
+    )
+
+
+#: The AI connectors whose credit is proven with one generated token — the same
+#: check Settings runs on a cloud model key (`app.router.keycheck`).
+_CREDIT_CHECKED = ("openai", "anthropic", "gemini")
+
+
+def _credit(integration: Integration, values: dict[str, str], models: list[str]) -> Optional[Checked]:
+    """Listing models is free, so it can't see an empty balance. One token can: a key
+    on an account with no credit fails here instead of showing "Connected"."""
+    from app.router import keycheck
+
+    spec = integration.check
+    if integration.id not in _CREDIT_CHECKED or spec is None:
+        return None
+    key = values.get(spec.key_var, "")
+    chosen = next((values.get(v.name) for v in integration.variables if not v.secret and v.name.endswith("_MODEL")), "")
+    chat = sorted((m for m in models if not keycheck._NOT_CHAT.search(m)), reverse=True)
+    model = chosen if chosen and (chosen in models or not models) else (chat[0] if chat else "")
+    if not key or not model:
+        return None
+    found = keycheck.check(integration.id, key, model, via=transport)
+    kind = keycheck.kind_of(found)
+    if found.status not in (keycheck.INVALID, keycheck.BILLING) or kind is None:
+        # Working, rate-limited, a model it can't use, or unreachable: the listing
+        # already proved the key, and a model is picked later.
+        return None
+    return _key_refused(
+        integration, spec, keyerrors.Failure(kind=kind, retryable=False), urlsplit(spec.url).hostname or "", None, None,
+    )
+
+
 def _connected(
     integration: Integration,
     spec: HttpCheck,
@@ -1040,8 +1106,14 @@ def _connected(
     latency: int,
     mode: Optional[str],
     note: str,
+    values: Optional[dict[str, str]] = None,
 ) -> Checked:
     models = spec.models(data) if spec.models else []
+    refused = _credit(integration, values or {}, models)
+    if refused is not None:
+        refused.mode = mode
+        refused.models = models
+        return refused
     if not models and spec.models_url:
         models = _public_models(spec.models_url)
     if spec.live is not None and integration.has_test_mode:

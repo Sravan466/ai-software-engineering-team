@@ -101,6 +101,11 @@ class Project(Base):
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Why the last run stopped, in words a person can act on.
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: What kind of failure that was, when a cloud provider refused a key
+    #: (`app.core.keyerrors`: `no_credit`, `expired`, …), and which provider — so the
+    #: page offers that fix instead of blaming the local runtime. Null otherwise.
+    last_error_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_error_provider: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     #: The paired computer a `paused` build is waiting for. Set when the build
     #: pauses, cleared when it resumes; when that computer reconnects, the build
     #: picks itself back up. Not a foreign key: a computer forgotten meanwhile
@@ -241,6 +246,16 @@ class Project(Base):
         if beat is None:
             return True
         return (_now() - beat).total_seconds() > settings.stall_after_seconds
+
+    @property
+    def last_error_help(self) -> Optional[dict]:
+        """The words and the one action for `last_error_kind` — from the one place
+        they live, so the page never writes its own."""
+        if not self.last_error_kind or not self.last_error_provider:
+            return None
+        from app.core import keyerrors
+
+        return keyerrors.advice(self.last_error_kind, self.last_error_provider).as_dict()
 
     @property
     def elapsed_seconds(self) -> Optional[float]:

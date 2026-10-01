@@ -6,7 +6,7 @@ import time
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import LLMProvider, ProviderError, status_is_retryable, status_of
+from app.router.base import LLMProvider, ProviderError, cloud_error
 from app.router.providers.cloud_key import CloudKey
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 
@@ -27,7 +27,9 @@ class OpenAIProvider(CloudKey, LLMProvider):
         if self._client is None:
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=self.secret())
+            # Tenacity (`ModelRouter._generate`) is the one retry layer: the SDK's own
+            # would retry a no-credit 429 as if it were a rate limit.
+            self._client = OpenAI(api_key=self.secret(), max_retries=0)
         return self._client
 
     def generate(
@@ -55,9 +57,7 @@ class OpenAIProvider(CloudKey, LLMProvider):
         try:
             resp = self._get_client().chat.completions.create(**kwargs)
         except Exception as e:  # noqa: BLE001
-            raise ProviderError(
-                f"OpenAI call failed: {e}", retryable=status_is_retryable(e), status=status_of(e)
-            ) from e
+            raise cloud_error(self.name, "OpenAI", e) from e
 
         latency = int((time.perf_counter() - started) * 1000)
         text = resp.choices[0].message.content or ""

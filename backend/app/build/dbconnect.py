@@ -580,6 +580,9 @@ class CheckResult:
     step: Optional[int] = None
     host: str = ""
     latency_ms: Optional[int] = None
+    #: For a refused key: the badge, the sentence and the one action that fixes it
+    #: (`app.core.keyerrors.Advice`). None when there is nothing more to say.
+    advice: Optional[dict] = None
 
     def as_dict(self) -> dict:
         return {
@@ -590,6 +593,7 @@ class CheckResult:
             "step": self.step,
             "host": self.host,
             "latency_ms": self.latency_ms,
+            "advice": self.advice,
         }
 
 

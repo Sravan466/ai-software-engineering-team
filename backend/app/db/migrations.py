@@ -43,6 +43,10 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "heartbeat_at",
         "cancel_requested",
         "last_error",
+        # Both nullable (#63): a build that failed before failures had kinds has none,
+        # and its page falls back to the plain `last_error`.
+        "last_error_kind",
+        "last_error_provider",
         "approval_mode",
         "cost_cap_usd",
         "gate_kind",

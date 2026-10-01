@@ -25,10 +25,11 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 import httpx
 
+from app.core import keyerrors
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -90,6 +91,9 @@ class KeyCheck:
     context_tokens: Optional[int] = None
     #: Which key this is about: a truncated hash, so a verdict never outlives its key.
     key_id: Optional[str] = None
+    #: Set when a build's own call, not a check, gave this verdict — checked again
+    #: before the next build.
+    during_build: bool = False
 
     @property
     def rejected(self) -> bool:
@@ -199,91 +203,131 @@ def _context_tokens(provider: str, body: object) -> Optional[int]:
 
 
 # ── classifying an answer ─────────────────────────────────────────────────────
-def _error_text(response: httpx.Response) -> str:
-    """The provider's error type, code and message, lowercased — read, never kept."""
+def _answer(response: httpx.Response) -> tuple[object, str]:
+    """The provider's error body (parsed, when it is JSON) and its raw text — read
+    by the classifier, never kept."""
     try:
-        body = response.json()
+        return response.json(), ""
     except ValueError:
-        return response.text[:500].lower()
-    err = body.get("error") if isinstance(body, dict) else None
-    if isinstance(err, dict):
-        parts = [err.get("type"), err.get("code"), err.get("status"), err.get("message")]
-        for detail in err.get("details") or []:
-            if isinstance(detail, dict):
-                parts.append(detail.get("reason"))
-        return " ".join(str(p) for p in parts if p).lower()
-    return str(body)[:500].lower()
+        return None, response.text[:500]
 
 
 def _says(text: str, *words: str) -> bool:
     return any(w in text for w in words)
 
 
-def _verdict(provider: str, status: int, text: str, model: str) -> KeyCheck:
-    """What an error answer means for this key. `text` is only read here."""
+#: The status a key is given for each kind the shared classifier can return.
+_STATUS_FOR = {
+    keyerrors.INVALID: INVALID,
+    keyerrors.EXPIRED: INVALID,
+    keyerrors.REVOKED: INVALID,
+    keyerrors.REGION: INVALID,
+    keyerrors.NOT_PERMITTED: INVALID,
+    keyerrors.NO_CREDIT: BILLING,
+    keyerrors.SPEND_LIMIT: BILLING,
+    keyerrors.BILLING_DISABLED: BILLING,
+    keyerrors.PLAN_QUOTA: BILLING,
+}
+#: The reason code the page reads. `rejected` stays the mistyped key's, as before.
+_REASON_FOR = {
+    keyerrors.INVALID: "rejected",
+    keyerrors.REGION: "region_not_supported",
+    keyerrors.NOT_PERMITTED: "not_permitted",
+}
+
+
+def _verdict(
+    provider: str,
+    status: int,
+    body: object,
+    model: str,
+    *,
+    headers: Optional[Mapping[str, str]] = None,
+    text: str = "",
+) -> KeyCheck:
+    """What an error answer means for this key. `body` and `text` are only read here."""
     who = LABEL.get(provider, provider)
+    failure = keyerrors.classify(provider, status, body, headers, text=text)
+    words = keyerrors.signals(body, text)
 
     def made(state: str, reason: str, message: str) -> KeyCheck:
         return KeyCheck(status=state, reason=reason, message=message, model=model)
 
-    # Only words that say the money ran out. Gemini's ordinary rate limit says
-    # "exceeded your current quota … check your plan and billing details", and a
-    # rate limit must not disable a key; OpenAI's no-credit answer carries the
-    # `insufficient_quota` code, which is what tells the two apart.
-    billing = status == 402 or _says(
-        text, "credit balance", "insufficient_quota", "spend limit", "billing_hard_limit", "payment required",
-    ) or (status in (400, 403) and _says(text, "billing"))
-    if billing and status in (400, 402, 403, 429):
-        return made(BILLING, "no_credit", f"The key works, but the {who} account has no credit or has reached its spend limit.")
-    if status in (400, 403) and _says(
-        text, "country", "region", "territory", "unsupported_country", "location is not supported",
-    ):
-        # Gemini says this as a 400 FAILED_PRECONDITION, OpenAI as a 403.
-        return made(INVALID, "region_not_supported", f"{who} doesn't serve requests from the country or region this server is in.")
-    if status in (401, 403) and _says(text, "scope", "insufficient permissions", "model.request"):
-        return made(INVALID, "restricted", "This key can't make requests — it is restricted. Give it permission to use models, or create a key that can.")
-    if status == 401 or (provider == "gemini" and _says(text, "api_key_invalid", "api key not valid", "api key expired")):
-        if re.search(r"\bip\b", text) and "invalid_api_key" not in text:
+    kind = failure.kind
+    if kind in (keyerrors.INVALID, keyerrors.NOT_PERMITTED) and status in (401, 403):
+        # Two shapes of "not allowed" that aren't about the key's spelling.
+        if _says(words, "scope", "insufficient permissions", "model.request"):
+            return made(INVALID, "restricted", "This key can't make requests — it is restricted. Give it permission to use models, or create a key that can.")
+        if re.search(r"\bip\b", words) and "invalid_api_key" not in words:
             return made(INVALID, "network_not_allowed", f"{who} refused this key from this network (its IP allowlist doesn't include this server).")
-        return made(INVALID, "rejected", f"{who} rejected this key. Check it was copied completely, or create a new one.")
-    if status == 403:
-        if _says(text, "model"):
-            return made(MODEL_UNAVAILABLE, "model_not_permitted", f"This key isn't allowed to use {model}.")
-        return made(INVALID, "not_permitted", f"{who} says this key isn't allowed to do that. Check the key's permissions.")
+    if kind == keyerrors.NOT_PERMITTED and status == 403 and _says(words, "model"):
+        return made(MODEL_UNAVAILABLE, "model_not_permitted", f"This key isn't allowed to use {model}.")
+    if kind in _STATUS_FOR:
+        advice = keyerrors.advice(kind, provider, label=who)
+        return made(_STATUS_FOR[kind], _REASON_FOR.get(kind, kind), advice.sentence())
     if status == 404:
         return made(MODEL_UNAVAILABLE, "model_not_found", f"{model} isn't available to this key.")
-    if status == 429:
-        return made(RATE_LIMITED, "rate_limited", f"The key works; {who} is limiting requests right now.")
-    if status == 400 and _says(text, "model") and _says(
-        text, "not found", "does not exist", "not supported", "not a chat model", "invalid model", "unknown model",
+    if status == 400 and _says(words, "model") and _says(
+        words, "not found", "does not exist", "not supported", "not a chat model", "invalid model", "unknown model",
     ):
         return made(MODEL_UNAVAILABLE, "model_not_supported", f"{model} can't be used for chat with this key.")
-    if status >= 500:
+    if kind == keyerrors.RATE_LIMITED:
+        return made(RATE_LIMITED, "rate_limited", f"The key works; {who} is limiting requests right now.")
+    if kind == keyerrors.PROVIDER_DOWN:
         return made(UNVERIFIED, "provider_error", f"{who} had a problem answering. The key is saved but not verified yet.")
-    # Any other 4xx came from past authentication: the key was accepted, and it was
-    # the request's shape the provider disliked. That is ours to fix, not the user's.
-    return made(VALID, "accepted", "The key works.")
+    # Nothing we recognise. Not "the key works" — that turned every new error shape
+    # into a green badge — but not a verdict on the key either: saved, unverified,
+    # and checked again before a build, with what little the answer did say.
+    advice = keyerrors.advice(keyerrors.UNKNOWN, provider, label=who, status=status, code=failure.code)
+    return made(UNVERIFIED, "unknown", f"{advice.title}. The key is saved but not verified — check it in your {who} dashboard.")
+
+
+def verdict_for(provider: str, kind: Optional[str], model: str) -> Optional[KeyCheck]:
+    """A build's own failed call, already classified — only when it condemns the key."""
+    if kind not in _STATUS_FOR or kind == keyerrors.NOT_PERMITTED:
+        # Not permitted mid-build is about what was asked, not the key everywhere.
+        return None
+    advice = keyerrors.advice(kind, provider, label=LABEL.get(provider, provider))
+    return KeyCheck(
+        status=_STATUS_FOR[kind],
+        reason=_REASON_FOR.get(kind, kind),
+        message=f"{advice.title} — a build's call was refused. {advice.body}",
+        model=model,
+        checked_at=_now(),
+        during_build=True,
+    )
 
 
 def verdict_from_error(provider: str, status: Optional[int], text: str, model: str) -> Optional[KeyCheck]:
-    """A build's own failed call, read the same way — only when it condemns the key."""
+    """A failed call known only by its status and text — classified, then as above."""
     if status is None:
         return None
-    found = _verdict(provider, status, (text or "").lower(), model)
-    if found.status in (INVALID, BILLING):
-        found.reason = REJECTED_DURING_BUILD if found.status == INVALID else found.reason
-        if found.status == INVALID:
-            found.message = f"{LABEL.get(provider, provider)} rejected this key during a build."
-        found.checked_at = _now()
-        return found
-    return None
+    return verdict_for(provider, keyerrors.classify(provider, status, None, None, text=text or "").kind, model)
 
 
 # ── the check ────────────────────────────────────────────────────────────────
-def check(provider: str, key: str, model: str) -> KeyCheck:
-    """Check `key` against `model`. Never raises; never waits past the timeout per step."""
+def kind_of(found: KeyCheck) -> Optional[str]:
+    """A check's reason as a `keyerrors` kind, when it is one."""
+    if found.reason in keyerrors.KINDS:
+        return found.reason
+    return {
+        "rejected": keyerrors.INVALID,
+        REJECTED_DURING_BUILD: keyerrors.INVALID,
+        "region_not_supported": keyerrors.REGION,
+        "restricted": keyerrors.NOT_PERMITTED,
+        "network_not_allowed": keyerrors.NOT_PERMITTED,
+    }.get(found.reason)
+
+
+def check(
+    provider: str, key: str, model: str, *, via: Optional[httpx.BaseTransport] = None
+) -> KeyCheck:
+    """Check `key` against `model`. Never raises; never waits past the timeout per step.
+
+    `via` is another module's test transport (the connectors'), when it has one.
+    """
     started = time.perf_counter()
-    result = _check(provider, key, model)
+    result = _check(provider, key, model, via)
     result.checked_at = _now()
     result.model = model
     result.key_id = key_id(key)
@@ -294,7 +338,7 @@ def check(provider: str, key: str, model: str) -> KeyCheck:
     return result
 
 
-def _check(provider: str, key: str, model: str) -> KeyCheck:
+def _check(provider: str, key: str, model: str, via: Optional[httpx.BaseTransport] = None) -> KeyCheck:
     who = LABEL.get(provider, provider)
     if provider not in _BASE:
         return KeyCheck(status=INVALID, reason="unknown_provider", message=f"'{provider}' isn't a cloud provider.")
@@ -306,13 +350,14 @@ def _check(provider: str, key: str, model: str) -> KeyCheck:
             base_url=_BASE[provider],
             headers=_headers(provider, key),
             timeout=timeout,
-            transport=transport,
+            transport=via if via is not None else transport,
             follow_redirects=False,
         ) as client:
             # 1 — free: does the key authenticate, and is the model there for it?
             r = client.get(_model_path(provider, model))
             if r.status_code != 200:
-                found = _verdict(provider, r.status_code, _error_text(r), model)
+                body, raw = _answer(r)
+                found = _verdict(provider, r.status_code, body, model, headers=r.headers, text=raw)
                 if found.status == MODEL_UNAVAILABLE:
                     found.models = _list_models(client, provider)
                 # A key restricted to making requests may not be allowed to *read*
@@ -328,7 +373,8 @@ def _check(provider: str, key: str, model: str) -> KeyCheck:
             r = client.post(path, json=body)
             if r.status_code == 200:
                 return KeyCheck(status=VALID, reason="ok", message=f"The key works with {model}.", context_tokens=context)
-            found = _verdict(provider, r.status_code, _error_text(r), model)
+            body, raw = _answer(r)
+            found = _verdict(provider, r.status_code, body, model, headers=r.headers, text=raw)
             if found.status == MODEL_UNAVAILABLE:
                 found.models = _list_models(client, provider)
             found.context_tokens = context

@@ -304,6 +304,11 @@ a.cx-card:hover .cx-card-go svg { transform: translateX(2px); }
 .cx-row-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .cx-row-name { font-size: var(--t-md); font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cx-row-why { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.5; }
+/* A connector whose key failed: the reason in the bad tone's ink, wrapped, and its fix. */
+.cx-row-failed { color: var(--bad); overflow-wrap: anywhere; }
+.cx-row-failed .link { white-space: nowrap; }
+.cx-fix { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.cx-fix svg { width: 13px; height: 13px; }
 .cx-row-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .cx-row-acts .btn { min-height: 40px; }
 .cx-row-form { border-top: 1px solid var(--line); }
