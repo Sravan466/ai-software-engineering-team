@@ -206,6 +206,9 @@ a.cx-card:hover .cx-card-go svg { transform: translateX(2px); }
 .cx-form .db-guide li { overflow-wrap: anywhere; }
 .cx-model .select { min-height: 44px; }
 .cx-choice { align-self: flex-start; }
+.cx-flabel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--t-sm); font-weight: 500; color: var(--ink-2); }
+.cx-choice .seg-btn[aria-checked="true"] { background: var(--bg); color: var(--ink); box-shadow: var(--shadow-1); }
+.cx-choice .seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cx-choice .seg-btn { min-height: 40px; min-width: 72px; }
 .cx-live, .cx-confirm { margin: 0; }
 .cx-save-account { display: flex; flex-direction: column; gap: 2px; }

@@ -168,7 +168,16 @@ export function ConnectForm({
     }
   }
 
-  const sent = () => Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
+  // A choice that is saved shows as saved, not as the default — and the one shown is
+  // always sent, so "replace" never checks new keys against an old environment.
+  const savedChoice = (v: ConnectorVar) =>
+    v.options?.includes(saved.find((s) => s.name === v.name)?.hint ?? "") ? saved.find((s) => s.name === v.name)!.hint : undefined;
+  const choiceOf = (v: ConnectorVar) => values[v.name] || savedChoice(v) || v.options![0];
+  const sent = () => {
+    const out = Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
+    for (const v of fields) if (v.options?.length) out[v.name] = choiceOf(v);
+    return out;
+  };
 
   // A model setting typed by hand, for a provider whose key check lists no models.
   const [typedModel, setTypedModel] = useState("");
@@ -255,7 +264,12 @@ export function ConnectForm({
                       type="button"
                       className="btn"
                       disabled={lockedOut || !typedModel.trim()}
-                      onClick={() => run(() => onSave({ [modelVar.name]: typedModel.trim() }, false)).then(() => setTypedModel(""))}
+                      onClick={() =>
+                        run(() => onSave({ [modelVar.name]: typedModel.trim() }, false)).then((r) => {
+                          // Kept on a refusal, so it can be corrected rather than retyped.
+                          if (r?.ok) setTypedModel("");
+                        })
+                      }
                     >
                       Save
                     </button>
@@ -316,16 +330,43 @@ export function ConnectForm({
               const masked = v.secret && !shown[v.name];
               return (
                 <div className="field db-field" key={v.name}>
-                  <label htmlFor={fieldId}>
-                    {v.label}
-                    {!v.required && <span className="db-optional">optional</span>}
-                    {v.side === "client" && <span className="cx-public">public — goes in the browser</span>}
-                    <code className="db-var">{v.name}</code>
-                  </label>
+                  {/* A choice is a radio group, labelled by this — a <label> would click its first option. */}
+                  {(() => {
+                    const inner = (
+                      <>
+                        {v.label}
+                        {!v.required && <span className="db-optional">optional</span>}
+                        {v.side === "client" && <span className="cx-public">public — goes in the browser</span>}
+                        <code className="db-var">{v.name}</code>
+                      </>
+                    );
+                    return v.options?.length ? (
+                      <span className="cx-flabel" id={`${fieldId}-label`}>{inner}</span>
+                    ) : (
+                      <label htmlFor={fieldId}>{inner}</label>
+                    );
+                  })()}
                   {v.options?.length ? (
-                    <div className="seg cx-choice" role="radiogroup" aria-label={v.label} aria-describedby={hintId}>
+                    <div
+                      className="seg cx-choice"
+                      role="radiogroup"
+                      aria-labelledby={`${fieldId}-label`}
+                      aria-describedby={hintId}
+                      onKeyDown={(e) => {
+                        const keys = ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"];
+                        if (!keys.includes(e.key)) return;
+                        e.preventDefault();
+                        const opts = v.options!;
+                        const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1;
+                        const next = opts[(opts.indexOf(choiceOf(v)) + step + opts.length) % opts.length];
+                        setValues((prev) => ({ ...prev, [v.name]: next }));
+                        window.requestAnimationFrame(() =>
+                          document.getElementById(`${fieldId}-${opts.indexOf(next)}`)?.focus(),
+                        );
+                      }}
+                    >
                       {v.options.map((o, i) => {
-                        const on = (values[v.name] || v.options![0]) === o;
+                        const on = choiceOf(v) === o;
                         return (
                           <button
                             key={o}
@@ -333,8 +374,9 @@ export function ConnectForm({
                             role="radio"
                             className="seg-btn"
                             aria-checked={on}
-                            aria-pressed={on}
-                            id={i === 0 ? fieldId : undefined}
+                            // One Tab stop for the group: the checked option; arrows move within.
+                            tabIndex={on ? 0 : -1}
+                            id={`${fieldId}-${i}`}
                             disabled={testing}
                             onClick={() => {
                               setValues((prev) => ({ ...prev, [v.name]: o }));

@@ -315,11 +315,14 @@ _MAILGUN = Integration(
     ),
     check=HttpCheck(
         "GET",
-        "https://{mg_host}/v3/domains",
+        "https://{mg_host}/v3/domains/{MAILGUN_DOMAIN}",
         "basic_user:api",
         "MAILGUN_API_KEY",
         ("api.mailgun.net", "api.eu.mailgun.net"),
-        rules=(Rule((401, 403), "invalid", message="Mailgun didn't recognise that API key (or it's for the other region)."),),
+        rules=(
+            Rule((401, 403), "invalid", message="Mailgun didn't recognise that API key (or it's for the other region)."),
+            Rule((404,), "id_wrong", message="That domain isn't on this Mailgun account (or it's in the other region).", field="MAILGUN_DOMAIN"),
+        ),
         derive=lambda v: {"mg_host": "api.eu.mailgun.net" if v.get("MAILGUN_REGION") == "eu" else "api.mailgun.net"},
     ),
     guide=_guide(
@@ -390,7 +393,7 @@ _GOOGLE_SIGNIN = Integration(
         Var("GOOGLE_CLIENT_SECRET", "Client secret", placeholder="GOCSPX-…"),
         _auth_secret(),
     ),
-    names=("google sign-in", "google signin", "sign in with google", "google login", "google oauth", "login with google"),
+    names=("google sign-in", "google signin", "sign in with google", "google login", "google oauth", "login with google", "google and github", "github and google"),
     formats=(
         ("GOOGLE_CLIENT_ID", r"^\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com$", "A Google client ID ends in .apps.googleusercontent.com."),
         ("GOOGLE_CLIENT_SECRET", r"^GOCSPX-[A-Za-z0-9_\-]{20,}$", "A Google client secret starts with GOCSPX-."),
@@ -419,7 +422,7 @@ _GITHUB_SIGNIN = Integration(
         Var("GITHUB_CLIENT_SECRET", "Client secret", placeholder="40 characters"),
         _auth_secret(),
     ),
-    names=("github sign-in", "github signin", "sign in with github", "github login", "github oauth", "login with github"),
+    names=("github sign-in", "github signin", "sign in with github", "github login", "github oauth", "login with github", "google and github", "github and google"),
     formats=(
         ("GITHUB_CLIENT_ID", r"^(Ov2[0-9][A-Za-z0-9]{16}|Iv1\.[a-f0-9]{16}|Iv23[A-Za-z0-9]{16}|[a-f0-9]{20})$", "A GitHub client ID starts with Ov23 (or Iv1.)."),
         ("GITHUB_CLIENT_SECRET", r"^[a-f0-9]{40}$", "A GitHub client secret is 40 hexadecimal characters."),
@@ -450,7 +453,7 @@ _ANTHROPIC = Integration(
     formats=(("ANTHROPIC_API_KEY", r"^sk-ant-[A-Za-z0-9_\-]{20,}$", "An Anthropic API key starts with sk-ant-."),),
     check=HttpCheck(
         "GET",
-        "https://api.anthropic.com/v1/models",
+        "https://api.anthropic.com/v1/models?limit=1000",
         "header:x-api-key",
         "ANTHROPIC_API_KEY",
         ("api.anthropic.com",),
@@ -477,12 +480,13 @@ _GEMINI = Integration(
     blurb="Gemini models for text and images",
     builds=("Chat and text generation on Gemini, server-side", "Image understanding", "The model is a setting (GEMINI_MODEL)"),
     variables=(Var("GEMINI_API_KEY", "API key", placeholder="AIza…"), _model_var("GEMINI_MODEL")),
-    names=("gemini", "google gemini"),
+    # Not a bare "gemini": that's also a star sign.
+    names=("google gemini", "gemini api", "gemini model", "gemini models", "gemini ai", "gemini pro", "gemini flash"),
     soft=_LLM,
     formats=(("GEMINI_API_KEY", r"^AIza[0-9A-Za-z_\-]{30,}$", "A Gemini API key starts with AIza."),),
     check=HttpCheck(
         "GET",
-        "https://generativelanguage.googleapis.com/v1beta/models",
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
         "query:key",
         "GEMINI_API_KEY",
         ("generativelanguage.googleapis.com",),
@@ -654,7 +658,9 @@ _CLOUDINARY = Integration(
         Var("CLOUDINARY_API_SECRET", "API secret"),
     ),
     names=("cloudinary",),
-    strong=("image upload", "image uploads", "photo upload", "photo uploads", "image hosting", "profile pictures", "avatar upload", "upload photos", "upload images"),
+    strong=("image upload", "image uploads", "photo upload", "photo uploads", "image hosting", "upload photos", "upload images"),
+    # Generic enough to turn up in any design's notes: only a connected Cloudinary.
+    soft=("profile pictures", "avatar upload", "avatars"),
     expand=_expand_cloudinary,
     formats=(
         ("CLOUDINARY_CLOUD_NAME", r"^[A-Za-z0-9_\-]{2,}$", "The cloud name is the short name at the top of your Cloudinary dashboard."),
@@ -668,6 +674,7 @@ _CLOUDINARY = Integration(
         "CLOUDINARY_API_SECRET",
         ("api.cloudinary.com",),
         rules=(
+            Rule((401,), "id_wrong", body="cloud_name", message="Cloudinary has no cloud by that name. Check the Cloud name.", field="CLOUDINARY_CLOUD_NAME"),
             Rule((401,), "invalid", message="Cloudinary didn't accept that API key and secret together."),
             Rule((404,), "id_wrong", message="Cloudinary has no cloud by that name. Check the Cloud name.", field="CLOUDINARY_CLOUD_NAME"),
         ),
@@ -703,7 +710,8 @@ _UPLOADTHING = Integration(
     builds=("A file router with size and type limits per route", "Upload buttons and drop zones", "Who uploaded what, kept with your data"),
     variables=(Var("UPLOADTHING_TOKEN", "Token", placeholder="eyJhcGlLZXkiOi…"),),
     names=("uploadthing", "upload thing"),
-    strong=("file upload", "file uploads", "upload files", "document upload", "document uploads", "pdf upload"),
+    strong=("document upload", "document uploads", "pdf upload", "upload documents"),
+    soft=("file upload", "file uploads", "upload files"),
     formats=(("UPLOADTHING_TOKEN", r"^[A-Za-z0-9+/=]{40,}$", "An UploadThing token is a long base64 string (eyJ…)."),),
     cross=lambda v: None if _uploadthing_key(v.get("UPLOADTHING_TOKEN", "")) else (
         "UPLOADTHING_TOKEN",
@@ -742,6 +750,7 @@ def _s3_check(values: dict) -> Checked:
     session = boto3.session.Session(
         aws_access_key_id=values.get("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=values.get("AWS_SECRET_ACCESS_KEY"),
+        aws_session_token=values.get("AWS_SESSION_TOKEN") or None,
         region_name=values.get("AWS_REGION"),
     )
     from botocore.config import Config  # type: ignore
@@ -780,6 +789,7 @@ _S3 = Integration(
         Var("AWS_ACCESS_KEY_ID", "Access key ID", placeholder="AKIA…"),
         Var("AWS_SECRET_ACCESS_KEY", "Secret access key", placeholder="40 characters"),
         Var("S3_BUCKET", "Bucket", secret=False, placeholder="my-app-uploads", kind="text"),
+        Var("AWS_SESSION_TOKEN", "Session token", required=False, help="Only for temporary keys (ASIA…). Leave blank for an IAM user's keys."),
     ),
     names=("s3", "amazon s3", "aws s3"),
     soft=("file storage", "object storage"),
@@ -788,7 +798,14 @@ _S3 = Integration(
         ("AWS_ACCESS_KEY_ID", r"^(AKIA|ASIA)[A-Z0-9]{16}$", "An access key ID is 20 characters and starts with AKIA."),
         ("AWS_SECRET_ACCESS_KEY", r"^[A-Za-z0-9/+=]{40}$", "A secret access key is 40 characters long."),
         ("S3_BUCKET", r"^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$", "A bucket name is 3–63 lowercase letters, digits, dots and dashes."),
+        ("AWS_SESSION_TOKEN", r"^[A-Za-z0-9/+=]{100,}$", "A session token is a long string from the same place as the temporary keys."),
     ),
+    cross=lambda v: (
+        "AWS_SESSION_TOKEN",
+        "Keys starting ASIA are temporary and need their session token too.",
+    )
+    if v.get("AWS_ACCESS_KEY_ID", "").startswith("ASIA") and not v.get("AWS_SESSION_TOKEN")
+    else None,
     custom=_s3_check,
     guide=_guide(
         ("Open the S3 console and create a bucket (or pick one).", "https://s3.console.aws.amazon.com/s3/buckets"),
@@ -906,6 +923,9 @@ _GOOGLE_MAPS = Integration(
         rules=(
             # A key restricted to your site's address is refused from this server: valid, and right.
             Rule((200,), "restricted", body="referer restrictions", message="Connected with a key restricted to your site."),
+            # Restricted to the Maps JavaScript API only, as Google recommends: valid, and
+            # Geocoding simply isn't one of its APIs.
+            Rule((200,), "restricted", body="not authorized to use this service", message="Connected with a key restricted to certain Maps APIs."),
             # A bad key is a 200 with REQUEST_DENIED in the body.
             Rule((200,), "invalid", body="REQUEST_DENIED", message="Google refused that key for the Maps APIs (or Geocoding isn't enabled)."),
         ),
@@ -943,6 +963,8 @@ _MAPBOX = Integration(
             Rule((200, 401), "invalid", body="TokenMalformed", message="Mapbox couldn't read that token."),
             Rule((200, 401), "invalid", body="TokenExpired", message="That Mapbox token has expired."),
             Rule((200,), "ok", body="TokenValid"),
+            # Revoked, or anything else that isn't a valid token, is not "connected".
+            Rule((200, 401), "invalid", message="Mapbox didn't confirm that token as valid."),
         ),
     ),
     guide=_guide(
@@ -995,7 +1017,9 @@ _SENTRY = Integration(
         Var("SENTRY_AUTH_TOKEN", "Auth token", required=False, placeholder="sntrys_…", help="Optional. Only for uploading source maps at build time."),
     ),
     names=("sentry",),
-    strong=("error tracking", "crash reporting", "error monitoring", "exception tracking"),
+    strong=("crash reporting",),
+    # Every security note mentions these; they pick Sentry only once it's connected.
+    soft=("error tracking", "error monitoring", "exception tracking"),
     formats=(
         ("NEXT_PUBLIC_SENTRY_DSN", r"^https://[a-f0-9]{32}@o\d+\.ingest\.([a-z]{2}\.)?sentry\.io/\d+$", "A DSN looks like https://…@o123.ingest.sentry.io/456."),
         ("SENTRY_AUTH_TOKEN", r"^sntr[yu]s_[A-Za-z0-9_=+/\-]{20,}$", "A Sentry auth token starts with sntrys_."),
@@ -1006,7 +1030,11 @@ _SENTRY = Integration(
         "bearer",
         "SENTRY_AUTH_TOKEN",
         ("sentry.io",),
-        rules=(Rule((401, 403), "invalid", message="Sentry didn't recognise that auth token."),),
+        rules=(
+            Rule((401,), "invalid", message="Sentry didn't recognise that auth token."),
+            # An org token for source maps (org:ci) can't list organizations: real, just narrow.
+            Rule((403,), "unchecked", message="The token is scoped for uploads only, so it couldn't be read back — that's normal."),
+        ),
         optional_key=True,
     ),
     guide=_guide(
@@ -1081,8 +1109,8 @@ _UPSTASH = Integration(
         Var("UPSTASH_REDIS_REST_TOKEN", "REST token"),
     ),
     names=("upstash",),
-    strong=("rate limiting", "rate limit", "rate-limit", "redis cache"),
-    soft=("caching", "cache"),
+    strong=("redis cache",),
+    soft=("rate limiting", "rate limit", "rate-limit", "caching", "cache"),
     formats=(
         ("UPSTASH_REDIS_REST_URL", r"^https://[a-z0-9\-]+\.upstash\.io/?$", "The REST URL looks like https://your-db.upstash.io."),
         ("UPSTASH_REDIS_REST_TOKEN", r"^[A-Za-z0-9_=\-]{20,}$", "The REST token is a long string — copy it from the REST API section."),

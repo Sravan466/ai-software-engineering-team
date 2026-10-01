@@ -293,7 +293,11 @@ def test_paypal_live_needs_confirmation(client):
         ("An AI chatbot on Claude", ["openai", "anthropic"], ["anthropic"]),
         ("A store with checkout", ["razorpay"], ["razorpay"]),
         ("Sign in with Google for a recipe box", [], ["google-signin"]),
-        ("A dashboard with error tracking and product analytics", [], ["posthog", "sentry"]),
+        # "Error tracking" is in every security note: Sentry only once it's connected.
+        ("A dashboard with error tracking and product analytics", [], ["posthog"]),
+        ("A dashboard with error tracking and product analytics", ["sentry"], ["posthog", "sentry"]),
+        ("Sign in with Google and GitHub for a recipe box", [], ["github-signin", "google-signin"]),
+        ("A daily horoscope for Gemini and Leo", ["openai"], []),
         ("A todo app", ["twilio", "anthropic", "cloudinary"], []),
     ],
 )
@@ -319,3 +323,48 @@ def test_new_build_check_rule_catches_wave2_secrets():
         "frontend/lib/c.ts": "const k = process.env.NEXT_PUBLIC_ALGOLIA_SEARCH_KEY",
     }
     assert {p.path for p in secret_leaks(files, files)} == {"frontend/app/a/page.tsx", "frontend/lib/b.ts"}
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+def test_routine_design_notes_dont_ask_for_services():
+    design = ['{"security": "rate limiting on login, error tracking, file uploads, profile pictures"}']
+    assert integrations.relevant("A notes app", design, []) == []
+
+
+@pytest.mark.parametrize(
+    "iid, status, body, expect",
+    [
+        ("google-maps", 200, {"status": "REQUEST_DENIED", "error_message": "This API key is not authorized to use this service or API."}, "connected"),
+        ("sentry", 403, {"detail": "You do not have permission"}, "unchecked"),
+        ("mapbox", 200, {"code": "TokenRevoked"}, "failed"),
+        ("mailgun", 404, {"message": "Domain not found"}, "failed"),
+    ],
+)
+def test_review_status_mappings(iid, status, body, expect):
+    _respond(status, body)
+    values = {**GOOD[iid], "SENTRY_AUTH_TOKEN": "sntrys_" + "a" * 40} if iid == "sentry" else GOOD[iid]
+    assert integrations.check(integrations.REGISTRY[iid], values).result.status == expect
+
+
+def test_a_wrong_cloud_name_points_at_the_cloud_name():
+    _respond(401, {"error": {"message": "Invalid cloud_name demo"}})
+    result = integrations.check(integrations.REGISTRY["cloudinary"], GOOD["cloudinary"]).result
+    assert result.name == "CLOUDINARY_CLOUD_NAME"
+
+
+def test_mailgun_checks_the_domain_itself():
+    seen = []
+    integrations.transport = httpx.MockTransport(lambda r: seen.append(str(r.url)) or httpx.Response(200, json={}))
+    integrations.check(integrations.REGISTRY["mailgun"], GOOD["mailgun"])
+    assert seen[0].endswith("/v3/domains/mg.example.com")
+
+
+def test_check_never_raises_on_an_unparseable_stored_url():
+    found = integrations.REGISTRY["upstash"]
+    result = integrations.check(found, {**GOOD["upstash"], "UPSTASH_REDIS_REST_URL": "https://evil.com\uff0f.upstash.io"})
+    assert result.result.status in ("failed", "unchecked")
+
+
+def test_temporary_aws_keys_need_their_session_token():
+    parsed = integrations.parse(integrations.REGISTRY["s3"], {**GOOD["s3"], "AWS_ACCESS_KEY_ID": "ASIA" + "A" * 16})
+    assert parsed.problems and parsed.problems[0].name == "AWS_SESSION_TOKEN"

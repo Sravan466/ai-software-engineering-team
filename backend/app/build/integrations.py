@@ -894,10 +894,11 @@ def check(integration: Integration, values: dict[str, str], mode: Optional[str] 
     key = values.get(spec.key_var, "")
     if spec.optional_key and not key:
         return _unchecked("", f"Add {spec.key_var} to have it tested; the rest can't be checked from here.", mode)
-    filled = {**values, **(spec.derive(values) if spec.derive else {})}
-    url = _fill(spec.url, filled)
-    host = urlsplit(url).hostname or ""
+    host = ""
     try:
+        filled = {**values, **(spec.derive(values) if spec.derive else {})}
+        url = _fill(spec.url, filled)
+        host = urlsplit(url).hostname or ""
         if urlsplit(url).scheme != "https" or not host_allowed(host, spec.hosts):
             # A field that names the host (a domain, an app id, a URL) is format-
             # checked first; this is the last word, so a pasted 127.0.0.1 or
@@ -1175,8 +1176,14 @@ def relevant(
         members = [i for i in members if not _refused(i.names, idea_text)]
         if not members:
             continue
-        # 1. named outright, idea first.
-        named = next((i for i in members if _hit(i.names, idea_text)), None)
+        # 1. named outright, idea first. Two named in the idea ("sign in with Google
+        #    and GitHub") is the idea asking for both — the one case a job gets two.
+        both = [i for i in members if _hit(i.names, idea_text)]
+        if len(both) > 1:
+            for n, i in enumerate(both):
+                chosen[f"{capability}:{n}"] = Match(i.id, f"your idea names {i.label}", "idea")
+            continue
+        named = both[0] if both else None
         source = "idea"
         if named is None:
             named = next((i for i in members if _hit(i.names, design_text)), None)
