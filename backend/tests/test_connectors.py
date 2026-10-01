@@ -154,7 +154,8 @@ CONNECTED = ["stripe", "resend", "openai"]
         ("A SaaS for yoga studios with monthly subscriptions and booking confirmation emails", ["stripe", "resend"]),
         ("A todo app", []),
         ("We don't take payments — a simple reading list", []),
-        ("A store with checkout, using Razorpay for UPI", []),
+        # Named, and connectable since Wave 2: Razorpay, not Stripe.
+        ("A store with checkout, using Razorpay for UPI", ["razorpay"]),
         ("An invoicing tool with Stripe payouts", ["stripe"]),
         # Words, not payment processing (review finding 2).
         ("A subscription tracker that lists my Netflix subscriptions", []),
@@ -236,7 +237,7 @@ def test_connecting_encrypts_hints_and_keeps_the_file_owner_only(client):
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     catalog = client.get("/api/connectors").json()
     assert catalog["connected"] == 1
-    assert len(catalog["categories"]) == 12
+    assert len(catalog["categories"]) == 13  # 12 + "Backend & data" (Supabase)
 
 
 def test_an_unreadable_store_is_never_saved_over(client):

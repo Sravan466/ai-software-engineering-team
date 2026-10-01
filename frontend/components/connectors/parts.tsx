@@ -127,7 +127,8 @@ export function ConnectForm({
   const saved = connector.saved ?? [];
   const hasSaved = connector.connected && saved.length > 0 && !replacing;
   // The model is chosen from the key's own list, after it's tested — not typed blind.
-  const fields = connector.variables.filter((v) => !isModelVar(v));
+  // A mirrored variable (the browser's copy of a public id) is filled by the server.
+  const fields = connector.variables.filter((v) => !isModelVar(v) && !v.copy_of);
   const modelVar = connector.variables.find(isModelVar);
   const models = connector.models ?? [];
 
@@ -143,7 +144,13 @@ export function ConnectForm({
       if (r.status === "invalid") {
         setOutcome({ kind: "invalid", problems: r.problems ?? [] });
         const first = r.problems?.[0]?.name;
-        if (first) document.getElementById(`${base}-${first}`)?.focus();
+        // A choice's own id is on its options: focus the checked one (or the first).
+        if (first)
+          (
+            document.getElementById(`${base}-${first}`) ??
+            document.querySelector<HTMLElement>(`[aria-labelledby="${base}-${first}-label"] [aria-checked="true"]`) ??
+            document.getElementById(`${base}-${first}-0`)
+          )?.focus();
       } else if (r.ok && r.check) {
         setOutcome({ kind: "saved", check: r.check });
         setValues({});
@@ -167,7 +174,19 @@ export function ConnectForm({
     }
   }
 
-  const sent = () => Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
+  // A choice that is saved shows as saved, not as the default — and the one shown is
+  // always sent, so "replace" never checks new keys against an old environment.
+  const savedChoice = (v: ConnectorVar) =>
+    v.options?.includes(saved.find((s) => s.name === v.name)?.hint ?? "") ? saved.find((s) => s.name === v.name)!.hint : undefined;
+  const choiceOf = (v: ConnectorVar) => values[v.name] || savedChoice(v) || v.options![0];
+  const sent = () => {
+    const out = Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
+    for (const v of fields) if (v.options?.length) out[v.name] = choiceOf(v);
+    return out;
+  };
+
+  // A model setting typed by hand, for a provider whose key check lists no models.
+  const [typedModel, setTypedModel] = useState("");
   const save = (confirmLive = false) => run(() => onSave(sent(), confirmLive));
 
   function switchToTest() {
@@ -231,6 +250,39 @@ export function ConnectForm({
                   </li>
                 ))}
               </ul>
+              {modelVar && models.length === 0 && (
+                <div className="field cx-model">
+                  <label htmlFor={`${base}-model-typed`}>
+                    {modelVar.label} <code className="db-var">{modelVar.name}</code>
+                  </label>
+                  <div className="db-input-row">
+                    <input
+                      id={`${base}-model-typed`}
+                      className="input input-mono db-input"
+                      value={typedModel}
+                      placeholder={saved.find((s) => s.name === modelVar.name)?.hint || "The model id the app calls"}
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={lockedOut}
+                      onChange={(e) => setTypedModel(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={lockedOut || !typedModel.trim()}
+                      onClick={() =>
+                        run(() => onSave({ [modelVar.name]: typedModel.trim() }, false)).then((r) => {
+                          // Kept on a refusal, so it can be corrected rather than retyped.
+                          if (r?.ok) setTypedModel("");
+                        })
+                      }
+                    >
+                      Save
+                    </button>
+                  </div>
+                  <p className="field-hint">This key&apos;s check doesn&apos;t list models, so type the id. The app reads it from {modelVar.name}.</p>
+                </div>
+              )}
               {modelVar && models.length > 0 && (
                 <ModelPicker
                   id={`${base}-model`}
@@ -284,12 +336,65 @@ export function ConnectForm({
               const masked = v.secret && !shown[v.name];
               return (
                 <div className="field db-field" key={v.name}>
-                  <label htmlFor={fieldId}>
-                    {v.label}
-                    {!v.required && <span className="db-optional">optional</span>}
-                    {v.side === "client" && <span className="cx-public">public — goes in the browser</span>}
-                    <code className="db-var">{v.name}</code>
-                  </label>
+                  {/* A choice is a radio group, labelled by this — a <label> would click its first option. */}
+                  {(() => {
+                    const inner = (
+                      <>
+                        {v.label}
+                        {!v.required && <span className="db-optional">optional</span>}
+                        {v.side === "client" && <span className="cx-public">public — goes in the browser</span>}
+                        <code className="db-var">{v.name}</code>
+                      </>
+                    );
+                    return v.options?.length ? (
+                      <span className="cx-flabel" id={`${fieldId}-label`}>{inner}</span>
+                    ) : (
+                      <label htmlFor={fieldId}>{inner}</label>
+                    );
+                  })()}
+                  {v.options?.length ? (
+                    <div
+                      className="seg cx-choice"
+                      role="radiogroup"
+                      aria-labelledby={`${fieldId}-label`}
+                      aria-describedby={hintId}
+                      onKeyDown={(e) => {
+                        const keys = ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"];
+                        if (!keys.includes(e.key)) return;
+                        e.preventDefault();
+                        const opts = v.options!;
+                        const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1;
+                        const next = opts[(opts.indexOf(choiceOf(v)) + step + opts.length) % opts.length];
+                        setValues((prev) => ({ ...prev, [v.name]: next }));
+                        window.requestAnimationFrame(() =>
+                          document.getElementById(`${fieldId}-${opts.indexOf(next)}`)?.focus(),
+                        );
+                      }}
+                    >
+                      {v.options.map((o, i) => {
+                        const on = choiceOf(v) === o;
+                        return (
+                          <button
+                            key={o}
+                            type="button"
+                            role="radio"
+                            className="seg-btn"
+                            aria-checked={on}
+                            // One Tab stop for the group: the checked option; arrows move within.
+                            tabIndex={on ? 0 : -1}
+                            id={`${fieldId}-${i}`}
+                            disabled={testing}
+                            onClick={() => {
+                              setValues((prev) => ({ ...prev, [v.name]: o }));
+                              if (outcome.kind !== "idle" && outcome.kind !== "saved") setOutcome({ kind: "idle" });
+                            }}
+                          >
+                            {choiceLabel(o)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
                   <div className="db-input-row">
                     <input
                       id={fieldId}
@@ -324,6 +429,7 @@ export function ConnectForm({
                       </button>
                     )}
                   </div>
+                  )}
                   <div id={hintId} className="db-under">
                     {bad ? (
                       <p className="db-msg db-msg-bad" role="alert">
@@ -413,6 +519,14 @@ export function ConnectForm({
       </div>
     </div>
   );
+}
+
+/** `https://eu.i.posthog.com` → `EU`, `sandbox` → `Sandbox`: a choice in words. */
+function choiceLabel(option: string): string {
+  const region = option.match(/^https:\/\/(us|eu)\./);
+  if (region) return region[1].toUpperCase();
+  if (/^(us|eu)$/.test(option)) return option.toUpperCase();
+  return option.charAt(0).toUpperCase() + option.slice(1);
 }
 
 function StepLink({ step, onShow }: { step?: number | null; onShow: (n: number) => void }) {

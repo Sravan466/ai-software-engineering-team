@@ -307,6 +307,12 @@ export type ConnectorVar = {
   help: string;
   /** `client` variables go in the browser bundle: publishable by design. */
   side: "server" | "client";
+  /** A fixed choice (`sandbox`/`live`): a picker, first is the default. */
+  options?: string[];
+  /** Left blank, a random secret is generated for it. */
+  generate?: boolean;
+  /** Always another variable's value — never asked for. */
+  copy_of?: string;
 };
 export type ConnectorCheck = {
   status: "connected" | "unchecked" | "failed";
