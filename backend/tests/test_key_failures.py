@@ -315,3 +315,94 @@ def test_no_unknown_4xx_reads_as_working(monkeypatch):
     _provider(monkeypatch, {("GET", "/models/m-1"): (200, {}), ("POST", "/chat/completions"): (422, {})})
     found = keycheck.check("openai", "sk-whatever-00000000", "m-1")
     assert found.status != keycheck.VALID and found.message != "The key works."
+
+
+# ── the review's findings ────────────────────────────────────────────────────
+def test_a_zero_free_tier_quota_is_a_limit_even_beside_a_per_minute_one():
+    body = {"error": {"status": "RESOURCE_EXHAUSTED", "details": [{"violations": [
+        {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "quotaValue": "0"},
+        {"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "quotaValue": "0"},
+    ]}]}}
+    assert K.classify("gemini", 429, body).kind == K.SPEND_LIMIT
+    minute = {"error": {"status": "RESOURCE_EXHAUSTED", "details": [{"violations": [
+        {"quotaId": "GenerateRequestsPerMinutePerProjectPerModel", "quotaValue": "15"}]}]}}
+    assert K.classify("gemini", 429, minute).kind == K.RATE_LIMITED
+
+
+def test_a_request_shape_400_is_never_a_key_verdict():
+    body = {"error": {"code": "unsupported_value", "message": "Not allowed to use system messages with this model"}}
+    assert K.classify("openai", 400, body).kind == K.UNKNOWN
+
+
+def test_a_google_sdk_quota_error_keeps_its_window():
+    Err = type("ResourceExhausted", (Exception,), {"__module__": "google.api_core.exceptions"})
+    e = Err("429 quota")
+    e.code, e.message = 429, "Quota exceeded"
+    e.details = ['violations { quota_id: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }']
+    assert K.from_exception("gemini", e).kind == K.SPEND_LIMIT
+
+
+def test_an_error_that_isnt_about_the_key_keeps_its_own_reason():
+    e = cloud_error("openai", "OpenAI", _SdkError(400, {"message": "This model's maximum context length is 8192 tokens",
+                                                       "code": "context_length_exceeded"}))
+    assert e.kind is None and "maximum context length" in str(e) and "dashboard" not in str(e)
+
+
+def _two_link_router(monkeypatch, attempts_kinds):
+    router = ModelRouter(uuid.uuid4().hex, owner=False)
+    chain = [("anthropic", "a-1"), ("openai", "o-1")]
+    monkeypatch.setattr(router, "_resolve_chain", lambda *a, **k: chain)
+    errors = iter(attempts_kinds)
+
+    class P(LLMProvider):
+        def available(self):
+            return True
+
+        def generate(self, messages, model, options):
+            kind = next(errors)
+            raise ProviderError("x", retryable=False, kind=kind, provider=self.name)
+
+    provs = {}
+    for name in ("anthropic", "openai"):
+        p = P()
+        p.name = name
+        provs[name] = p
+    monkeypatch.setattr(router, "provider", lambda n: provs.get(n))
+    monkeypatch.setattr(router, "_refuses", lambda *a: None)
+    monkeypatch.setattr(router, "_note_failure", lambda *a: None)
+    return router
+
+
+def test_every_model_failing_carries_the_blocking_refusal_not_a_rate_limit(monkeypatch):
+    router = _two_link_router(monkeypatch, [K.RATE_LIMITED, K.NO_CREDIT])
+    with pytest.raises(ProviderError) as caught:
+        router.complete([ChatMessage(role="user", content="hi")])
+    e = caught.value
+    assert (e.kind, e.provider) == (K.NO_CREDIT, "openai")
+    assert "out of credit" in str(e) and "rate-limited" in str(e)
+
+
+def test_a_key_ruled_out_earlier_still_says_why_when_skipped(monkeypatch):
+    _provider(monkeypatch, {("GET", "/models/gpt-x"): (200, {}), ("POST", "/chat/completions"): (429, {"error": {"code": "insufficient_quota"}})})
+    router = ModelRouter(uuid.uuid4().hex, owner=False)
+    router.set_default_model("openai", "gpt-x")
+    router.save_provider_key("openai", api_key="sk-nocredit-11111111")
+    assert not router.provider("openai").available()
+    skipped = router._skipped("openai", "gpt-x", None)
+    assert skipped["kind"] == K.NO_CREDIT and skipped["why"] == "out of credit"
+
+
+def test_only_a_blocking_kind_reaches_the_project():
+    from app.db.models import Project
+    from app.orchestration.runner import PipelineRunner
+
+    class _Db:
+        def commit(self):
+            pass
+
+    p = Project()
+    runner = PipelineRunner.__new__(PipelineRunner)
+    runner._fail(_Db(), p, "slow down", kind=K.RATE_LIMITED, provider="openai")
+    assert p.last_error_kind is None and p.last_error_help is None
+    runner._fail(_Db(), p, "no credit", kind=K.NO_CREDIT, provider="openai")
+    assert p.last_error_kind == K.NO_CREDIT

@@ -162,6 +162,8 @@ class PhaseResultOut(BaseModel):
     content_md: str
     model_used: Optional[str] = None
     provider_used: Optional[str] = None
+    #: Why the chain's first model was passed over, when a provider refused its key.
+    fallback_note: Optional[str] = None
     #: Whether the model ran on the user's own hardware — the backend's answer, so
     #: the page never guesses it from a provider's name. Rows written before calls
     #: recorded it are answered from the provider: only the cloud ones were not.

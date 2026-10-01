@@ -632,7 +632,9 @@ function RunInterrupted({
   };
   // A cloud provider refused the key (#63): its own words and its own fix, never
   // the local-runtime advice — which is wrong for every part of that case.
-  const help = state === "failed" ? project.last_error_help ?? null : null;
+  // Only a refusal the person must act on: a rate limit or an outage that outlasted
+  // the retries keeps the ordinary failed copy (and its "Check runtime").
+  const help = state === "failed" && project.last_error_help?.blocking ? project.last_error_help : null;
   if (help) {
     copy.failed = {
       title: help.title,
@@ -1086,8 +1088,14 @@ function PhaseList({
                   </span>
                 ) : null}
                 {row?.provider_used && row?.model_used && (
-                  <span className="phase-model">
+                  <span className="phase-model" title={row.fallback_note ?? undefined}>
                     {row.provider_used}/{row.model_used}
+                    {row.fallback_note && (
+                      // A refused key made this phase run elsewhere: say so, and why.
+                      <span className="phase-fallback">
+                        {" "}· fell back<span className="sr-only">: {row.fallback_note}</span>
+                      </span>
+                    )}
                   </span>
                 )}
                 {hasDoc && (

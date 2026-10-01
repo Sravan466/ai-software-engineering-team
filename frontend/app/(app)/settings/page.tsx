@@ -1620,7 +1620,7 @@ function KeyBadge({ status, advice }: { status: KeyStatus; advice?: KeyAdvice | 
   const b = KEY_BADGE[status] ?? KEY_BADGE.unverified;
   // A refused key says *why* on its badge — "Expired", "No credit" — not one
   // "Rejected" for every cause. Rate-limited keeps its "Working" reading.
-  const named = advice && advice.blocking && (status === "invalid" || status === "billing" || status === "unverified");
+  const named = advice && advice.blocking && (status === "invalid" || status === "billing");
   return (
     <span className={`badge key-badge${b.tone ? ` badge-${b.tone}` : ""}`}>
       {named ? Icon.alert : b.icon}

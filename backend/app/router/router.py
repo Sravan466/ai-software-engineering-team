@@ -1508,7 +1508,8 @@ class ModelRouter:
             raise last_error
         # Every model failed: name each one's reason in plain words, and carry the
         # first cloud refusal's kind so the page can offer its fix.
-        first = next((a for a in attempts if a.get("kind")), None)
+        # A refusal that needs the person (no credit, expired) beats a rate limit.
+        first = next((a for a in attempts if a.get("kind") in keyerrors.BLOCKING), None)
         raise ProviderError(
             "No model in this build's chain could answer. "
             + "; ".join(
@@ -1523,6 +1524,11 @@ class ModelRouter:
     def _skipped(self, pname: str, model: str, refused: Optional[KeyCheck]) -> dict:
         """An attempt not made, and why — "openai:gpt-x → out of credit", not "unavailable"."""
         prov = self.provider(pname)
+        if refused is None and pname in CLOUD_PROVIDERS and prov is not None and getattr(prov, "has_key", False):
+            # Ruled out earlier (not `available()`): its standing still says why.
+            standing = self.key_check(pname)
+            if standing.status in keycheck.REJECTED:
+                refused = standing
         if refused is not None:
             kind = keycheck.kind_of(refused)
             return {

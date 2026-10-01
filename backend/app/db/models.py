@@ -295,6 +295,9 @@ class PhaseResult(Base):
 
     # Which model actually produced it (after routing/fallback).
     model_used: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    #: Why an earlier model in the chain was passed over, when a provider refused its
+    #: key: "OpenAI: out of credit; continued on Google Gemini (…)" (#63).
+    fallback_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     provider_used: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     #: Whether that model ran on hardware the user controls, as the provider that
     #: served it said at the time. A source's id says nothing about that — a local

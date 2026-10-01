@@ -17,6 +17,8 @@ export type PhaseResult = {
   content_md: string;
   model_used: string | null;
   provider_used: string | null;
+  /** Why the first model was passed over: "OpenAI: out of credit; continued on …". */
+  fallback_note?: string | null;
   /**
    * Whether the model ran on hardware the user controls — the backend's answer,
    * recorded per call. Never guessed from `provider_used`: a source's name says

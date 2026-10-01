@@ -67,7 +67,7 @@ LABEL = {"openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Google"}
 #: How many of the models a key can use are kept, to show.
 _MAX_MODELS = 60
 _NOT_CHAT = re.compile(
-    r"embed|tts|whisper|dall-e|davinci|babbage|moderation|audio|transcribe|image|realtime|search|aqa|imagen|veo",
+    r"embed|tts|whisper|sora|dall-e|davinci|babbage|moderation|audio|transcribe|image|realtime|search|aqa|imagen|veo",
     re.I,
 )
 

@@ -1236,6 +1236,7 @@ class PipelineRunner:
         row.content_md = lr["content_md"]
         row.model_used = lr.get("model_used")
         row.provider_used = lr.get("provider_used")
+        row.fallback_note = lr.get("fallback_note")
         row.is_local = lr.get("is_local")
         row.latency_ms = int(lr.get("latency_ms") or 0)
         row.total_tokens = int(usage.get("total_tokens") or 0)
@@ -1573,8 +1574,11 @@ class PipelineRunner:
         project.last_error = scrub(message)
         # Only a cloud provider's refusal has a kind; anything else keeps the page's
         # local-runtime advice.
-        project.last_error_kind = kind if kind and provider else None
-        project.last_error_provider = provider if kind and provider else None
+        from app.core import keyerrors
+
+        keyed = bool(kind and provider and kind in keyerrors.BLOCKING)
+        project.last_error_kind = kind if keyed else None
+        project.last_error_provider = provider if keyed else None
         db.commit()
         log.warning("Run failed: %s — %s", project.id, message)
 

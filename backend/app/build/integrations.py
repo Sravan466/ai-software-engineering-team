@@ -1071,6 +1071,10 @@ def _key_refused(
 #: The AI connectors whose credit is proven with one generated token — the same
 #: check Settings runs on a cloud model key (`app.router.keycheck`).
 _CREDIT_CHECKED = ("openai", "anthropic", "gemini")
+#: Each provider's own chat family, by the word its chat models' ids start with — a
+#: preference for the probe, not a model name: whichever such model the account lists
+#: newest is used, and the user's chosen model always wins.
+_CHAT_FAMILY = {"openai": "gpt", "anthropic": "claude", "gemini": "gemini"}
 
 
 def _credit(integration: Integration, values: dict[str, str], models: list[str]) -> Optional[Checked]:
@@ -1083,7 +1087,12 @@ def _credit(integration: Integration, values: dict[str, str], models: list[str])
         return None
     key = values.get(spec.key_var, "")
     chosen = next((values.get(v.name) for v in integration.variables if not v.secret and v.name.endswith("_MODEL")), "")
-    chat = sorted((m for m in models if not keycheck._NOT_CHAT.search(m)), reverse=True)
+    family = _CHAT_FAMILY.get(integration.id, "")
+    chat = sorted(
+        (m for m in models if not keycheck._NOT_CHAT.search(m)),
+        key=lambda m: (m.startswith(family), m),
+        reverse=True,
+    )
     model = chosen if chosen and (chosen in models or not models) else (chat[0] if chat else "")
     if not key or not model:
         return None

@@ -138,9 +138,9 @@ _TEXT: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 #: Google's quota violations name the window they count: a per-minute one resets in
-#: seconds (a rate limit), a per-day one or a free-tier `limit: 0` doesn't.
-_DAILY_QUOTA = re.compile(r"perday|daily|perproject(?!perminute)|freetier.*limit0|billing")
-_MINUTE_QUOTA = re.compile(r"perminute|persecond")
+#: seconds (a rate limit); a per-day one, or any quota whose limit is 0 (a free tier
+#: that doesn't cover this model), doesn't — and one such violation is enough.
+_LASTING_QUOTA = re.compile(r"perday|daily|limit0\b|limit0$|quotavalue0\b|billing")
 
 
 @dataclass
@@ -186,8 +186,11 @@ def _codes(body: object) -> tuple[list[str], str, str]:
             found.append(str(detail["reason"]))
         for v in detail.get("violations") or []:
             if isinstance(v, dict):
-                quota += " " + " ".join(str(v.get(k, "")) for k in ("quotaMetric", "quotaId", "subject"))
-                quota += " limit" + str((v.get("quotaValue") if "quotaValue" in v else ""))
+                # One line per violation, so each is judged on its own.
+                one = " ".join(str(v.get(k, "")) for k in ("quotaMetric", "quotaId", "subject"))
+                if "quotaValue" in v:
+                    one += " limit" + str(v.get("quotaValue"))
+                quota += "|" + one
     for key in ("code", "reason", "name", "type", "status"):
         value = err.get(key)
         if isinstance(value, str) and value:
@@ -201,7 +204,7 @@ def _codes(body: object) -> tuple[list[str], str, str]:
         if _norm(value) not in ("error", ""):
             shown = value
             break
-    return found, shown[:60], _norm(quota)
+    return found, shown[:60], "|".join(_norm(q) for q in quota.split("|") if q.strip())
 
 
 def _message(body: object, fallback: str) -> str:
@@ -267,7 +270,7 @@ def classify(
     normalized = {_norm(c) for c in codes}
     if "resourceexhausted" in normalized or (provider == "gemini" and status == 429):
         # Google: per-minute is a rate limit; per-day, free-tier zero, or billing isn't.
-        if quota and _DAILY_QUOTA.search(quota) and not _MINUTE_QUOTA.search(quota):
+        if any(_LASTING_QUOTA.search(v) for v in quota.split("|") if v):
             return made(SPEND_LIMIT)
         if any(w in words for w in dict(_TEXT)[NO_CREDIT]):
             return made(NO_CREDIT)
@@ -298,6 +301,10 @@ def classify(
     # 3 — text, for answers that carry no code we know.
     if status is not None and status >= 400:
         for kind, phrases in _TEXT:
+            if kind in (NOT_PERMITTED, INVALID) and status not in (401, 403):
+                # A 400 that says "not allowed to use system" is about the request's
+                # shape, not the key: only an auth status makes these key verdicts.
+                continue
             if any(p in words for p in phrases):
                 return made(kind)
 
@@ -311,6 +318,18 @@ def classify(
             return made(SPEND_LIMIT)
         return made(RATE_LIMITED)
     return made(UNKNOWN)
+
+
+def provider_message(error: BaseException) -> str:
+    """An SDK error's own message, without the JSON around it — for an error that
+    isn't about the key, where the provider's reason is the only useful thing.
+    The caller scrubs it."""
+    body = getattr(error, "body", None)
+    err = _error_dict(body)
+    if err is not None and isinstance(err.get("message"), str):
+        return err["message"]
+    message = getattr(error, "message", None)
+    return message if isinstance(message, str) else ""
 
 
 def from_exception(provider: str, error: BaseException) -> Optional[Failure]:
@@ -336,7 +355,13 @@ def from_exception(provider: str, error: BaseException) -> Optional[Failure]:
                 body = None
     if body is None and type(error).__module__.startswith("google.api_core"):
         # Google's client keeps the pieces as attributes, not a body.
-        details = [{"reason": getattr(error, "reason", None)}] if getattr(error, "reason", None) else []
+        details: list = [{"reason": getattr(error, "reason", None)}] if getattr(error, "reason", None) else []
+        # QuotaFailure and friends arrive as protobuf messages; their text names the
+        # quota (`quota_id: "GenerateRequestsPerDay…"`) — enough to tell a day from a minute.
+        for d in getattr(error, "details", None) or []:
+            text_d = str(d)
+            if text_d:
+                details.append({"violations": [{"quotaId": text_d[:400]}]})
         body = {
             "error": {
                 "status": type(error).__name__,

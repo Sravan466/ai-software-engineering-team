@@ -70,6 +70,18 @@ def cloud_error(provider: str, label: str, error: Exception) -> ProviderError:
         # No HTTP answer: a dropped connection. Its text is a socket error, not JSON.
         return ProviderError(technical, retryable=status_is_retryable(error), status=None, provider=provider)
     get_logger(__name__).warning("%s", scrub(technical))
+    if failure.kind not in keyerrors.BLOCKING and failure.kind not in keyerrors.RETRYABLE:
+        # Not about the key or the account — a prompt too long, a parameter the model
+        # refuses. Key advice would hide the cause, so the provider's own reason stays
+        # (scrubbed, trimmed), and no kind is claimed.
+        said = keyerrors.provider_message(error) or technical
+        return ProviderError(
+            f"{label} refused the request (HTTP {failure.status}): {said[:400]}",
+            retryable=False,
+            status=failure.status,
+            provider=provider,
+            technical=technical,
+        )
     advice = keyerrors.advice(failure.kind, provider, status=failure.status, code=failure.code)
     return ProviderError(
         advice.sentence(),

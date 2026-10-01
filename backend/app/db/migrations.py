@@ -81,6 +81,8 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "deploy_error",
     ),
     "phase_results": (
+        # Nullable (#63): only a phase that fell back past a refused key has one.
+        "fallback_note",
         "started_at",
         "completed_at",
         "total_tokens",
