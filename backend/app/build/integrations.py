@@ -56,6 +56,7 @@ CATEGORIES: tuple[tuple[str, str], ...] = (
     ("payments", "Payments"),
     ("email", "Email"),
     ("auth", "Auth"),
+    ("backend", "Backend & data"),
     ("ai", "AI & LLMs"),
     ("storage", "Storage & media"),
     ("messaging", "Messaging"),
@@ -77,7 +78,9 @@ CAPABILITY_LABELS: dict[str, str] = {
     "media_ai": "AI images & media",
     "voice": "voice",
     "storage": "file storage",
-    "sms": "messages",
+    "sms": "text messages",
+    "team_chat": "team notifications",
+    "baas": "a hosted backend",
     "maps": "maps",
     "analytics": "analytics",
     "errors": "error tracking",
@@ -537,7 +540,7 @@ _LATER: tuple[Integration, ...] = (
     _soon("vercel-blob", "Vercel Blob", "storage", "storage", 3, "File storage on Vercel", "BLOB_READ_WRITE_TOKEN"),
     _soon("mux", "Mux", "storage", "storage", 3, "Video upload and streaming", "MUX_TOKEN_ID MUX_TOKEN_SECRET"),
     # Messaging
-    _soon("discord", "Discord", "messaging", "sms", 3, "Post to a Discord channel by webhook", "DISCORD_WEBHOOK_URL"),
+    _soon("discord", "Discord", "messaging", "team_chat", 3, "Post to a Discord channel by webhook", "DISCORD_WEBHOOK_URL"),
     _soon("telegram", "Telegram", "messaging", "sms", 3, "A Telegram bot for your app", "TELEGRAM_BOT_TOKEN"),
     # Maps
     # Analytics
@@ -679,7 +682,7 @@ _MODEL_FORMAT = (
 
 #: Shapes that are secret wherever they're pasted — never in a browser variable.
 _SECRET_SHAPE = re.compile(
-    r"^(sk|rk)_(test|live)_|^whsec_|^re_|^sk-|^gsk_|^r8_|^SG\.|^xox[bap]-|^GOCSPX-|^sntr[yu]s_|^sk\."
+    r"^(sk|rk)_(test|live)_|^whsec_|^re_|^sk-|^gsk_|^r8_|^SG\.|^xox[bap]-|^GOCSPX-|^sntr[yu]s_|^sk\.|^sb_secret_"
 )
 _PUBLISHABLE_SHAPE = re.compile(r"^pk_(test|live)_")
 

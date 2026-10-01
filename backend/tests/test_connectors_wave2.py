@@ -52,6 +52,7 @@ GOOD: dict[str, dict[str, str]] = {
     "sentry": {"NEXT_PUBLIC_SENTRY_DSN": "https://" + "a" * 32 + "@o123.ingest.sentry.io/456"},
     "algolia": {"NEXT_PUBLIC_ALGOLIA_APP_ID": "ABC123DEF4", "NEXT_PUBLIC_ALGOLIA_SEARCH_KEY": "a" * 32, "ALGOLIA_ADMIN_KEY": "b" * 32},
     "upstash": {"UPSTASH_REDIS_REST_URL": "https://eu1-good-db.upstash.io", "UPSTASH_REDIS_REST_TOKEN": "A" * 40},
+    "supabase": {"NEXT_PUBLIC_SUPABASE_URL": "https://abcdefghijklmnop.supabase.co", "NEXT_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_" + "a" * 30},
 }
 
 #: What each provider answered an obviously fake key with (the issue's table).
@@ -77,6 +78,7 @@ BAD_KEY: dict[str, tuple[int, object]] = {
     "mapbox": (200, {"code": "TokenInvalid"}),
     "algolia": (403, {"message": "Invalid Application-ID or API key", "status": 403}),
     "upstash": (401, {"error": "Unauthorized"}),
+    "supabase": (401, {"message": "Invalid API key"}),
 }
 
 
@@ -103,7 +105,7 @@ def _clean():
 
 def test_every_wave2_connector_is_connectable_and_complete():
     lib = {s.name for s in registry.library() if s.usable}
-    assert len(WAVE2) == 26
+    assert len(WAVE2) == 27  # the 26 in the issue, plus Supabase
     for found in WAVE2:
         assert found.connectable, found.id
         assert found.guide and found.blurb and found.builds, found.id
@@ -286,6 +288,8 @@ def test_paypal_live_needs_confirmation(client):
     "idea, connected, expect",
     [
         ("Appointment reminders by SMS", [], ["twilio"]),
+        # Texting customers and posting to the team are two jobs.
+        ("Reminders by SMS, and new bookings posted to Slack", [], ["slack", "twilio"]),
         ("A storybook app that reads aloud with text to speech", [], ["elevenlabs"]),
         ("A portfolio site with image uploads", [], ["cloudinary"]),
         ("A store locator for our cafes", [], ["google-maps"]),
@@ -381,3 +385,23 @@ def test_temporary_aws_keys_need_their_session_token():
 )
 def test_one_job_one_connector_unless_a_known_pair(idea, connected, expect):
     assert [m.iid for m in integrations.relevant(idea, (), connected)] == expect
+
+
+def test_supabase_keeps_the_secret_key_out_of_the_browser():
+    found = integrations.REGISTRY["supabase"]
+    secret_in_browser = integrations.parse(found, {**GOOD["supabase"], "NEXT_PUBLIC_SUPABASE_ANON_KEY": "sb_secret_" + "a" * 30})
+    assert "browser" in secret_in_browser.problems[0].message
+    swapped = integrations.parse(found, {**GOOD["supabase"], "SUPABASE_SERVICE_ROLE_KEY": "sb_publishable_" + "b" * 30})
+    assert swapped.problems and swapped.problems[0].name == "SUPABASE_SERVICE_ROLE_KEY"
+    ok = integrations.parse(found, {**GOOD["supabase"], "SUPABASE_SERVICE_ROLE_KEY": "sb_secret_" + "b" * 30})
+    assert not ok.problems
+    assert "SUPABASE_SERVICE_ROLE_KEY" in integrations.secret_names()
+    assert {"NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY"} <= integrations.client_names()
+
+
+def test_supabase_is_detected_and_its_project_url_is_checked():
+    assert [m.iid for m in integrations.relevant("A team todo app on Supabase", (), [])] == ["supabase"]
+    assert integrations.relevant("A todo app on Firebase", (), ["supabase"]) == []
+    _respond(404, {})
+    result = integrations.check(integrations.REGISTRY["supabase"], GOOD["supabase"]).result
+    assert result.status == "failed" and result.name == "NEXT_PUBLIC_SUPABASE_URL"

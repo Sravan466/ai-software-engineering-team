@@ -237,7 +237,7 @@ def test_connecting_encrypts_hints_and_keeps_the_file_owner_only(client):
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     catalog = client.get("/api/connectors").json()
     assert catalog["connected"] == 1
-    assert len(catalog["categories"]) == 12
+    assert len(catalog["categories"]) == 13  # 12 + "Backend & data" (Supabase)
 
 
 def test_an_unreadable_store_is_never_saved_over(client):

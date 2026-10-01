@@ -20,8 +20,6 @@ import { ConnectorMark, StatusBadge } from "@/components/connectors/parts";
  * the program that lends this app a computer's models; the copy keeps them apart.
  */
 
-const REPO_ISSUES = "https://github.com/Sravan466/ai-software-engineering-team/issues/new";
-
 export default function ConnectorsPage() {
   useChrome({ sub: "Connectors" }, []);
   const [data, setData] = useState<ConnectorCatalog | null>(null);
@@ -176,9 +174,6 @@ export default function ConnectorsPage() {
                   "Nothing connected yet in this category."
                 )}
               </p>
-              <a className="btn btn-sm" href={requestUrl(query.trim())} target="_blank" rel="noopener noreferrer">
-                Request {q ? `“${query.trim()}”` : "a connector"} {Icon.external}
-              </a>
             </div>
           ) : (
             groups.map((g) => (
@@ -199,16 +194,6 @@ export default function ConnectorsPage() {
               </section>
             ))
           )}
-          {groups.length > 0 && (
-            <a className="cx-request" href={requestUrl("")} target="_blank" rel="noopener noreferrer">
-              {Icon.plus}
-              <span>
-                <b>Request a connector</b>
-                <span className="dim">Opens a GitHub issue with the details filled in.</span>
-              </span>
-              {Icon.external}
-            </a>
-          )}
         </div>
       ) : null}
     </div>
@@ -217,13 +202,6 @@ export default function ConnectorsPage() {
 
 function rank(c: Connector) {
   return c.connected ? 0 : c.connectable ? 1 : 2;
-}
-
-function requestUrl(name: string) {
-  const title = `Connector request: ${name || "<service>"}`;
-  const body =
-    "**Service:** " + (name || "") + "\n\n**What the crew should build with it:**\n\n**Docs link:**\n";
-  return `${REPO_ISSUES}?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=enhancement`;
 }
 
 function Chip({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count: number }) {

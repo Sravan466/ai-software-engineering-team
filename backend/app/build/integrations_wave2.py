@@ -19,7 +19,7 @@ import json
 import re
 from typing import Optional
 
-from app.build.dbconnect import CONNECTED, FAILED, CheckResult, Var
+from app.build.dbconnect import CONNECTED, FAILED, CheckResult, Var, _jwt_role
 from app.build.integrations import (
     _OPENAI,
     _RESEND,
@@ -438,6 +438,81 @@ _GITHUB_SIGNIN = Integration(
     skill="oauth-signin",
 )
 
+# ── backend & data ───────────────────────────────────────────────────────────
+def _supabase_keys(v: dict) -> Optional[tuple[str, str]]:
+    """The publishable key in the browser field, the secret one on the server — and
+    never the other way round: the service-role key bypasses every security rule."""
+    anon = v.get("NEXT_PUBLIC_SUPABASE_ANON_KEY", "")
+    if anon.startswith("sb_secret_") or _jwt_role(anon) == "service_role":
+        return (
+            "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+            "That's the secret (service_role) key — it bypasses your security rules, and this field goes "
+            "in the browser. Paste the publishable (anon) key here.",
+        )
+    if not (anon.startswith("sb_publishable_") or _jwt_role(anon) == "anon"):
+        return (
+            "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+            "This doesn't look like a publishable key. It starts with sb_publishable_ (or eyJ for a legacy anon key).",
+        )
+    service = v.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if service and not (service.startswith("sb_secret_") or _jwt_role(service) == "service_role"):
+        return (
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "This isn't the secret key. It starts with sb_secret_ (or is the legacy service_role key).",
+        )
+    return None
+
+
+_SUPABASE = Integration(
+    id="supabase",
+    label="Supabase",
+    category="backend",
+    capability="baas",
+    wave=2,
+    blurb="Postgres, auth, storage and realtime in one",
+    builds=(
+        "Sign-in with Supabase Auth, sessions kept in cookies by @supabase/ssr",
+        "Tables read and written from the app, guarded by row-level security",
+        "File storage buckets and realtime updates",
+    ),
+    variables=(
+        Var("NEXT_PUBLIC_SUPABASE_URL", "Project URL", secret=False, side="client", placeholder="https://abcdefghijklmnop.supabase.co", kind="url"),
+        Var("NEXT_PUBLIC_SUPABASE_ANON_KEY", "Publishable key", secret=False, side="client", placeholder="sb_publishable_…", help="The publishable (anon) key. Never the secret or service_role key."),
+        Var("SUPABASE_SERVICE_ROLE_KEY", "Secret key", required=False, placeholder="sb_secret_…", help="Optional, server only: for admin jobs that bypass row-level security."),
+    ),
+    names=("supabase",),
+    soft=("realtime database", "row level security", "row-level security"),
+    rivals=("firebase", "appwrite", "pocketbase", "convex"),
+    formats=(
+        ("NEXT_PUBLIC_SUPABASE_URL", r"^https://[a-z0-9]{10,40}\.supabase\.(co|in)$", "The Project URL looks like https://abcdefghijklmnop.supabase.co."),
+        ("NEXT_PUBLIC_SUPABASE_ANON_KEY", r"^(sb_publishable_[A-Za-z0-9_\-]{10,}|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)$", "A publishable key starts with sb_publishable_ (or eyJ for a legacy anon key)."),
+        ("SUPABASE_SERVICE_ROLE_KEY", r"^(sb_secret_[A-Za-z0-9_\-]{10,}|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)$", "A secret key starts with sb_secret_ (or is the legacy service_role key)."),
+    ),
+    cross=_supabase_keys,
+    check=HttpCheck(
+        "GET",
+        # Auth's settings answer any valid publishable key and refuse a wrong one —
+        # the same check the database question uses for a Supabase project.
+        "{NEXT_PUBLIC_SUPABASE_URL}/auth/v1/settings",
+        "header:apikey",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+        ("*.supabase.co", "*.supabase.in"),
+        rules=(
+            Rule((401, 403), "invalid", message="Supabase didn't accept that publishable key for this project."),
+            Rule((404,), "id_wrong", message="There's no Supabase project at that URL. Check the Project URL.", field="NEXT_PUBLIC_SUPABASE_URL"),
+        ),
+        id_var="NEXT_PUBLIC_SUPABASE_URL",
+    ),
+    guide=_guide(
+        ("Open the Supabase dashboard and pick (or create) a project.", "https://supabase.com/dashboard/projects"),
+        "Project Settings → Data API: copy the Project URL.",
+        "Project Settings → API Keys: copy the publishable key. The secret key is optional, for server-only admin jobs.",
+    ),
+    docs_url="https://supabase.com/docs/guides/getting-started/quickstarts/nextjs",
+    dashboard_url="https://supabase.com/dashboard/projects",
+    skill="supabase-client",
+)
+
 # ── AI & LLMs ────────────────────────────────────────────────────────────────
 _ANTHROPIC = Integration(
     id="anthropic",
@@ -678,7 +753,9 @@ _CLOUDINARY = Integration(
         ("api.cloudinary.com",),
         rules=(
             Rule((401,), "id_wrong", body="cloud_name", message="Cloudinary has no cloud by that name. Check the Cloud name.", field="CLOUDINARY_CLOUD_NAME"),
-            Rule((401,), "invalid", message="Cloudinary didn't accept that API key and secret together."),
+            # Cloudinary answers "api_secret mismatch" whether the secret or the cloud
+            # name is wrong, so the message names all three rather than guessing.
+            Rule((401,), "invalid", message="Cloudinary didn't accept that cloud name, API key and secret together — check all three are from the same account."),
             Rule((404,), "id_wrong", message="Cloudinary has no cloud by that name. Check the Cloud name.", field="CLOUDINARY_CLOUD_NAME"),
         ),
     ),
@@ -866,7 +943,9 @@ _SLACK = Integration(
     id="slack",
     label="Slack",
     category="messaging",
-    capability="sms",
+    # Its own job: posting to your team's channels is not texting your customers, so
+    # a build can use Slack and Twilio together.
+    capability="team_chat",
     wave=2,
     blurb="Post to Slack channels from your app",
     builds=("Notifications posted to a channel when something happens", "Rich messages with blocks", "The channel is a setting, not hardcoded"),
@@ -1150,6 +1229,7 @@ WAVE2: tuple[Integration, ...] = (
     _MAILGUN,
     _AUTH0,
     _GOOGLE_SIGNIN,
+    _SUPABASE,
     _GITHUB_SIGNIN,
     _ANTHROPIC,
     _GEMINI,
