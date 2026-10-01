@@ -3,7 +3,7 @@
 import { useId, useState, type ReactNode } from "react";
 import { ApiError, type Connector, type ConnectorCheck, type ConnectorProblem, type ConnectorSaveResult, type ConnectorVar } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
-import { BRAND_PATHS } from "./brand";
+import { BRAND_MARKS } from "./brand";
 
 /**
  * The pieces every connector surface shares — the Connectors tab, the build's
@@ -17,12 +17,14 @@ import { BRAND_PATHS } from "./brand";
 
 // ── marks ────────────────────────────────────────────────────────────────────
 export function ConnectorMark({ id, label, size = "md" }: { id: string; label: string; size?: "sm" | "md" | "lg" }) {
-  const d = BRAND_PATHS[id];
+  const mark = BRAND_MARKS[id];
   return (
     <span className={`cx-mark cx-mark-${size}`} aria-hidden="true">
-      {d ? (
-        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
-          <path d={d} />
+      {mark ? (
+        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" fillRule={mark.evenodd ? "evenodd" : undefined}>
+          {mark.paths.map((d, i) => (
+            <path key={i} d={d} />
+          ))}
         </svg>
       ) : (
         <span className="cx-mono">{label.replace(/[^A-Za-z0-9]/g, "").slice(0, 2)}</span>
