@@ -154,7 +154,8 @@ CONNECTED = ["stripe", "resend", "openai"]
         ("A SaaS for yoga studios with monthly subscriptions and booking confirmation emails", ["stripe", "resend"]),
         ("A todo app", []),
         ("We don't take payments — a simple reading list", []),
-        ("A store with checkout, using Razorpay for UPI", []),
+        # Named, and connectable since Wave 2: Razorpay, not Stripe.
+        ("A store with checkout, using Razorpay for UPI", ["razorpay"]),
         ("An invoicing tool with Stripe payouts", ["stripe"]),
         # Words, not payment processing (review finding 2).
         ("A subscription tracker that lists my Netflix subscriptions", []),

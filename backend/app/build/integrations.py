@@ -48,9 +48,9 @@ TIMEOUT_SECONDS = 5.0
 #: Tests swap in an `httpx.MockTransport`; nothing else sets it.
 transport: Optional[httpx.BaseTransport] = None
 
-#: Waves: 1 is wired end to end, 2 is next, 3 is on the roadmap. Only wave 1 can be
-#: connected; the rest are shown so a search finds them and says when.
-CONNECTABLE_WAVE = 1
+#: Waves: 1 and 2 are wired end to end, 3 is on the roadmap. Waves 1 and 2 can be
+#: connected; wave 3 is shown so a search finds it and says when.
+CONNECTABLE_WAVE = 2
 
 CATEGORIES: tuple[tuple[str, str], ...] = (
     ("payments", "Payments"),
@@ -74,6 +74,8 @@ CAPABILITY_LABELS: dict[str, str] = {
     "email": "email",
     "auth": "sign-in",
     "llm": "AI",
+    "media_ai": "AI images & media",
+    "voice": "voice",
     "storage": "file storage",
     "sms": "messages",
     "maps": "maps",
@@ -96,28 +98,52 @@ class Rule:
 
     statuses: tuple[int, ...]
     #: `ok`, `restricted` (a valid key with fewer rights — still connected),
-    #: `invalid` (the key is wrong) or `id_wrong` (an account or app id is).
+    #: `invalid` (the key is wrong), `id_wrong` (an account or app id is), or
+    #: `unchecked` (the answer can't say either way — saved, not tested).
     outcome: str
     #: A substring the body must contain, for providers that answer an error with
     #: a 200 or reuse one status for two meanings (Resend's 401).
     body: Optional[str] = None
     message: str = ""
+    #: Which variable the outcome is about, when it isn't the key (`id_wrong`).
+    field: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class HttpCheck:
     method: str
+    #: May name other fields — `{TWILIO_ACCOUNT_SID}` — and `derive`'s keys. Every
+    #: field is format-checked by `parse` before it gets here, and the host the
+    #: finished URL names must still be on `hosts`.
     url: str
-    #: `basic` (key as user), `bearer`, or `header:<Name>`.
+    #: `basic` (key as user), `basic_pair:<USER_VAR>` (that var as user, key as
+    #: password), `basic_user:<literal>` (Mailgun's `api`), `bearer`,
+    #: `header:<Name>`, `query:<param>`, or `none`.
     auth: str
     #: Which variable carries the credential.
     key_var: str
+    #: Allowed hosts. `*.algolia.net` allows any subdomain of it, nothing else.
     hosts: tuple[str, ...]
     rules: tuple[Rule, ...] = ()
     #: Pull the model list out of a 200, for the AI connectors' model picker.
     models: Optional[Callable[[dict], list[str]]] = None
     #: Read the mode from a 200 when the key alone can't say it.
     live: Optional[Callable[[dict], Optional[bool]]] = None
+    #: More headers, as templates like the URL: `(("anthropic-version", "2023-06-01"),)`.
+    headers: tuple[tuple[str, str], ...] = ()
+    #: A request body (a template), and its type: `form` or `json`.
+    body: Optional[str] = None
+    body_type: str = "form"
+    #: Extra template values worked out from the fields — PayPal's sandbox host.
+    derive: Optional[Callable[[dict], dict]] = None
+    #: A public list of models to offer once the key checks out (OpenRouter's).
+    models_url: str = ""
+    #: The key is optional (Sentry's auth token): without it, saved, not tested.
+    optional_key: bool = False
+    #: The field a DNS failure points at — the app id or URL that names the host.
+    id_var: Optional[str] = None
+    #: Said when the request succeeded but proves only part of it (Auth0's domain).
+    partial: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,6 +182,16 @@ class Integration:
     dashboard_url: str = ""
     #: Value prefixes that mean "live mode" — real money, real email.
     live_prefixes: tuple[str, ...] = ()
+    #: A (variable, value) that means live mode: PayPal's `PAYPAL_ENV=live`.
+    live_choice: Optional[tuple[str, str]] = None
+    #: A check that isn't one HTTP request (S3's signed call). Never raises.
+    custom: Optional[Callable[[dict], "Checked"]] = None
+    #: Format rules for this connector's fields: NAME -> (pattern, message).
+    formats: tuple[tuple[str, str, str], ...] = ()
+    #: Pastes that hold several fields at once — `cloudinary://key:secret@cloud`.
+    expand: Optional[Callable[[dict], dict]] = None
+    #: Cross-field rules after each field is fine on its own: a message, or None.
+    cross: Optional[Callable[[dict], Optional[tuple[str, str]]]] = None
     #: Whether the service has a test mode at all. Resend and OpenAI don't.
     has_test_mode: bool = False
     #: The bundled skill the crew gets when a build uses it.
@@ -478,26 +514,11 @@ def _soon(
 
 _LATER: tuple[Integration, ...] = (
     # Payments
-    _soon("paypal", "PayPal", "payments", "payments", 2, "PayPal checkout and payouts", "PAYPAL_CLIENT_ID PAYPAL_CLIENT_SECRET PAYPAL_ENV"),
-    _soon("razorpay", "Razorpay", "payments", "payments", 2, "UPI, cards and netbanking in India", "RAZORPAY_KEY_ID RAZORPAY_KEY_SECRET +NEXT_PUBLIC_RAZORPAY_KEY_ID"),
-    _soon("lemonsqueezy", "Lemon Squeezy", "payments", "payments", 2, "Merchant of record for digital products", "LEMONSQUEEZY_API_KEY LEMONSQUEEZY_STORE_ID LEMONSQUEEZY_WEBHOOK_SECRET"),
     _soon("paddle", "Paddle", "payments", "payments", 3, "Subscriptions with tax handled for you", "PADDLE_API_KEY +NEXT_PUBLIC_PADDLE_CLIENT_TOKEN PADDLE_ENV"),
     # Email
-    _soon("sendgrid", "SendGrid", "email", "email", 2, "Transactional and marketing email", "SENDGRID_API_KEY EMAIL_FROM"),
-    _soon("postmark", "Postmark", "email", "email", 2, "Fast transactional email", "POSTMARK_SERVER_TOKEN EMAIL_FROM"),
-    _soon("mailgun", "Mailgun", "email", "email", 2, "Email sending and routing", "MAILGUN_API_KEY MAILGUN_DOMAIN MAILGUN_REGION"),
     _soon("brevo", "Brevo", "email", "email", 3, "Email and SMS campaigns", "BREVO_API_KEY"),
     # Auth
-    _soon("auth0", "Auth0", "auth", "auth", 2, "Hosted sign-in with enterprise SSO", "AUTH0_DOMAIN AUTH0_CLIENT_ID AUTH0_CLIENT_SECRET AUTH0_SECRET APP_BASE_URL"),
-    _soon("google-signin", "Google sign-in", "auth", "auth", 2, "Sign in with Google", "GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET AUTH_SECRET"),
-    _soon("github-signin", "GitHub sign-in", "auth", "auth", 2, "Sign in with GitHub", "GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET AUTH_SECRET"),
     # AI & LLMs
-    _soon("anthropic", "Anthropic", "ai", "llm", 2, "Claude models for chat and text", "ANTHROPIC_API_KEY ANTHROPIC_MODEL"),
-    _soon("gemini", "Google Gemini", "ai", "llm", 2, "Gemini models for text and images", "GEMINI_API_KEY GEMINI_MODEL"),
-    _soon("groq", "Groq", "ai", "llm", 2, "Very fast open-model inference", "GROQ_API_KEY GROQ_MODEL"),
-    _soon("openrouter", "OpenRouter", "ai", "llm", 2, "Many models behind one key", "OPENROUTER_API_KEY OPENROUTER_MODEL"),
-    _soon("replicate", "Replicate", "ai", "llm", 2, "Image, audio and video models", "REPLICATE_API_TOKEN"),
-    _soon("elevenlabs", "ElevenLabs", "ai", "llm", 2, "Text to speech and voices", "ELEVENLABS_API_KEY"),
     _soon("mistral", "Mistral", "ai", "llm", 3, "Mistral models for chat and text", "MISTRAL_API_KEY MISTRAL_MODEL"),
     _soon("deepseek", "DeepSeek", "ai", "llm", 3, "DeepSeek models for chat and code", "DEEPSEEK_API_KEY DEEPSEEK_MODEL"),
     _soon("together", "Together AI", "ai", "llm", 3, "Open models, hosted", "TOGETHER_API_KEY TOGETHER_MODEL"),
@@ -505,29 +526,18 @@ _LATER: tuple[Integration, ...] = (
     _soon("perplexity", "Perplexity", "ai", "llm", 3, "Answers grounded in web search", "PERPLEXITY_API_KEY"),
     _soon("firecrawl", "Firecrawl", "ai", "llm", 3, "Turn websites into clean data", "FIRECRAWL_API_KEY"),
     # Storage & media
-    _soon("cloudinary", "Cloudinary", "storage", "storage", 2, "Image and video upload, resizing, delivery", "CLOUDINARY_CLOUD_NAME +NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME CLOUDINARY_API_KEY CLOUDINARY_API_SECRET"),
-    _soon("uploadthing", "UploadThing", "storage", "storage", 2, "File uploads for Next.js", "UPLOADTHING_TOKEN"),
-    _soon("s3", "AWS S3", "storage", "storage", 2, "Object storage for files", "AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY S3_BUCKET"),
     _soon("r2", "Cloudflare R2", "storage", "storage", 3, "S3-compatible storage, no egress fees", "R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET"),
     _soon("vercel-blob", "Vercel Blob", "storage", "storage", 3, "File storage on Vercel", "BLOB_READ_WRITE_TOKEN"),
     _soon("mux", "Mux", "storage", "storage", 3, "Video upload and streaming", "MUX_TOKEN_ID MUX_TOKEN_SECRET"),
     # Messaging
-    _soon("twilio", "Twilio", "messaging", "sms", 2, "SMS and WhatsApp messages", "TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_PHONE_NUMBER"),
-    _soon("slack", "Slack", "messaging", "sms", 2, "Post to Slack channels from your app", "SLACK_BOT_TOKEN SLACK_CHANNEL_ID"),
     _soon("discord", "Discord", "messaging", "sms", 3, "Post to a Discord channel by webhook", "DISCORD_WEBHOOK_URL"),
     _soon("telegram", "Telegram", "messaging", "sms", 3, "A Telegram bot for your app", "TELEGRAM_BOT_TOKEN"),
     # Maps
-    _soon("google-maps", "Google Maps", "maps", "maps", 2, "Maps, places and geocoding", "+NEXT_PUBLIC_GOOGLE_MAPS_API_KEY"),
-    _soon("mapbox", "Mapbox", "maps", "maps", 2, "Custom maps and directions", "+NEXT_PUBLIC_MAPBOX_TOKEN"),
     # Analytics
-    _soon("posthog", "PostHog", "analytics", "analytics", 2, "Product analytics and feature flags", "+NEXT_PUBLIC_POSTHOG_KEY +NEXT_PUBLIC_POSTHOG_HOST"),
-    _soon("sentry", "Sentry", "analytics", "errors", 2, "Error tracking and performance", "+NEXT_PUBLIC_SENTRY_DSN SENTRY_AUTH_TOKEN"),
     _soon("google-analytics", "Google Analytics", "analytics", "analytics", 3, "Traffic and audience reports", "+NEXT_PUBLIC_GA_MEASUREMENT_ID"),
     # Search & vector
-    _soon("algolia", "Algolia", "search", "search", 2, "Instant search for your content", "+NEXT_PUBLIC_ALGOLIA_APP_ID +NEXT_PUBLIC_ALGOLIA_SEARCH_KEY ALGOLIA_ADMIN_KEY"),
     _soon("pinecone", "Pinecone", "search", "vector", 3, "Vector search for AI features", "PINECONE_API_KEY PINECONE_INDEX"),
     # Cache & realtime
-    _soon("upstash", "Upstash Redis", "realtime", "cache", 2, "Serverless Redis for caching and rate limits", "UPSTASH_REDIS_REST_URL UPSTASH_REDIS_REST_TOKEN"),
     _soon("pusher", "Pusher", "realtime", "realtime", 3, "Realtime updates over websockets", "PUSHER_APP_ID +NEXT_PUBLIC_PUSHER_KEY PUSHER_SECRET +NEXT_PUBLIC_PUSHER_CLUSTER"),
     _soon("ably", "Ably", "realtime", "realtime", 3, "Realtime messaging and presence", "ABLY_API_KEY"),
     # CMS & content
@@ -540,9 +550,6 @@ _LATER: tuple[Integration, ...] = (
     _soon("hubspot", "HubSpot", "commerce", "crm", 3, "Contacts and deals in HubSpot", "HUBSPOT_ACCESS_TOKEN"),
 )
 
-REGISTRY: dict[str, Integration] = {
-    i.id: i for i in (_STRIPE, _RESEND, _CLERK, _OPENAI, *_LATER)
-}
 
 
 def get(iid: Optional[str]) -> Optional[Integration]:
@@ -597,7 +604,8 @@ def placeholder(name: str) -> Optional[str]:
     """The `.env.example` value for a connector variable, or None if not one of ours.
 
     Blank for every key — the example is a list of what to set, not a value to run
-    with — and the documented default for the one that has a safe one.
+    with — the first choice for a picker (`sandbox`, `us`), and the documented
+    default for the one that has a safe one.
     """
     found = var_for(name)
     if found is None:
@@ -605,6 +613,8 @@ def placeholder(name: str) -> Optional[str]:
     _, var = found
     if name == "EMAIL_FROM":
         return "onboarding@resend.dev"
+    if var.options:
+        return var.options[0]
     return ""
 
 
@@ -617,7 +627,8 @@ class Parsed:
     mode: Optional[str] = None
 
 
-#: What each variable must look like, and the message when it doesn't.
+#: What each Wave 1 variable must look like, and the message when it doesn't.
+#: Later connectors carry their own rules (`Integration.formats`).
 _FORMAT: dict[str, tuple[re.Pattern, str]] = {
     "STRIPE_SECRET_KEY": (
         re.compile(r"^(sk|rk)_(test|live)_[A-Za-z0-9]{10,}$"),
@@ -651,14 +662,18 @@ _FORMAT: dict[str, tuple[re.Pattern, str]] = {
         re.compile(r"^sk-(proj-|svcacct-|admin-)?[A-Za-z0-9_\-]{16,}$"),
         "An OpenAI API key starts with sk-proj- (or sk-).",
     ),
-    "OPENAI_MODEL": (
-        re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-/]{0,99}$"),
-        "A model id has no spaces, like the ones in the list after testing the key.",
-    ),
 }
 
-#: Shapes that are secret wherever they're pasted.
-_SECRET_SHAPE = re.compile(r"^(sk|rk)_(test|live)_|^whsec_|^re_|^sk-")
+#: Any model setting (`OPENAI_MODEL`, `GROQ_MODEL`): an id, no spaces.
+_MODEL_FORMAT = (
+    re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-/@]{0,119}$"),
+    "A model id has no spaces, like the ones in the list after testing the key.",
+)
+
+#: Shapes that are secret wherever they're pasted — never in a browser variable.
+_SECRET_SHAPE = re.compile(
+    r"^(sk|rk)_(test|live)_|^whsec_|^re_|^sk-|^gsk_|^r8_|^SG\.|^xox[bap]-|^GOCSPX-|^sntr[yu]s_|^sk\."
+)
 _PUBLISHABLE_SHAPE = re.compile(r"^pk_(test|live)_")
 
 
@@ -673,24 +688,53 @@ def _trim(value: object) -> str:
 
 
 def _mode_of(value: str) -> Optional[str]:
-    m = re.match(r"^(sk|rk|pk)_(test|live)_", value)
-    return m.group(2) if m else None
+    m = re.match(r"^(sk|rk|pk)_(test|live)_|^rzp_(test|live)_", value)
+    return (m.group(2) or m.group(3)) if m else None
+
+
+def _format_for(integration: Integration, var: Var) -> Optional[tuple[re.Pattern, str]]:
+    for name, pattern, message in integration.formats:
+        if name == var.name:
+            return re.compile(pattern), message
+    if var.name in _FORMAT:
+        return _FORMAT[var.name]
+    if var.name.endswith("_MODEL") and not var.secret:
+        return _MODEL_FORMAT
+    return None
 
 
 def parse(integration: Integration, values: dict[str, object]) -> Parsed:
     """Clean what was pasted, and say what is wrong with it — no network here."""
+    import secrets as _secrets
+
     out = Parsed()
     given = {str(k): v for k, v in (values or {}).items()}
+    if integration.expand is not None:
+        # One paste that holds several fields: `cloudinary://key:secret@cloud`.
+        given = {**given, **{k: v for k, v in integration.expand(given).items() if v}}
     for name in given:
         if integration.var(name) is None:
             out.problems.append(Problem(name, f"{name} isn't a variable {integration.label} uses."))
     for var in integration.variables:
+        if var.copy_of:
+            continue  # filled from the variable it mirrors, below
         text = _trim(given.get(var.name))
         if not text:
-            if var.required:
+            if var.generate:
+                # A signing secret nobody has to invent: generated, saved like any other.
+                out.values[var.name] = _secrets.token_hex(32)
+            elif var.options and var.required:
+                out.values[var.name] = var.options[0]
+            elif var.required:
                 out.problems.append(Problem(var.name, f"{var.label} is missing."))
             continue
-        if any(c.isspace() for c in text) and var.name != "EMAIL_FROM":
+        if var.options:
+            if text not in var.options:
+                out.problems.append(Problem(var.name, f"{var.label} is one of: {', '.join(var.options)}."))
+            else:
+                out.values[var.name] = text
+            continue
+        if any(c.isspace() for c in text) and var.kind != "text":
             out.problems.append(Problem(var.name, "There's a space or line break inside it. Copy it again, on one line."))
             continue
         if var.side == "client" and _SECRET_SHAPE.match(text):
@@ -699,7 +743,7 @@ def parse(integration: Integration, values: dict[str, object]) -> Parsed:
                 Problem(
                     var.name,
                     "That's a secret key, and this field goes in the browser where anyone can read it. "
-                    "Paste the publishable key (pk_…) here.",
+                    f"Paste the public one here{f' ({var.placeholder})' if var.placeholder else ''}.",
                     step=_guide_step(integration, "publishable"),
                 )
             )
@@ -714,18 +758,26 @@ def parse(integration: Integration, values: dict[str, object]) -> Parsed:
                 )
             )
             continue
-        rule = _FORMAT.get(var.name)
+        rule = _format_for(integration, var)
         if rule is not None and not rule[0].match(text):
             out.problems.append(Problem(var.name, rule[1], step=_guide_step(integration, "secret" if var.secret else "publishable")))
             continue
-        out.values[var.name] = text
+        out.values[var.name] = text.rstrip("/") if var.kind == "url" else text
+    for var in integration.variables:
+        if var.copy_of and out.values.get(var.copy_of):
+            out.values[var.name] = out.values[var.copy_of]
     if out.problems:
         return out
+    if integration.cross is not None:
+        found = integration.cross(out.values)
+        if found:
+            out.problems.append(Problem(found[0], found[1]))
+            return out
     modes = {m for m in (_mode_of(v) for v in out.values.values()) if m}
     if len(modes) > 1:
         out.problems.append(
             Problem(
-                next(v.name for v in integration.variables if v.side == "client"),
+                next((v.name for v in integration.variables if v.side == "client"), integration.variables[0].name),
                 "One key is a test key and the other is live. Copy both from the same mode — "
                 "Test mode while you build.",
                 step=1,
@@ -733,13 +785,20 @@ def parse(integration: Integration, values: dict[str, object]) -> Parsed:
         )
         return out
     if integration.has_test_mode:
-        out.mode = modes.pop() if modes else "test"
+        if integration.live_choice is not None:
+            name, live_value = integration.live_choice
+            out.mode = "live" if out.values.get(name) == live_value else "test"
+        else:
+            out.mode = modes.pop() if modes else "test"
     return out
 
 
 def _guide_step(integration: Integration, what: str) -> Optional[int]:
     """Which guide step fixes it, 1-based: the one that mentions the key asked for."""
-    words = {"secret": ("secret", "create api key", "create new", "api key"), "publishable": ("publishable",)}[what]
+    words = {
+        "secret": ("secret", "create api key", "create new", "api key", "token", "key"),
+        "publishable": ("publishable", "public"),
+    }[what]
     for word in words:
         for n, step in enumerate(integration.guide, start=1):
             if word in step.text.lower():
@@ -748,6 +807,10 @@ def _guide_step(integration: Integration, what: str) -> Optional[int]:
 
 
 def is_live(integration: Integration, values: dict[str, str]) -> bool:
+    if integration.live_choice is not None:
+        name, live_value = integration.live_choice
+        if values.get(name) == live_value:
+            return True
     return any(v.startswith(integration.live_prefixes) for v in values.values() if integration.live_prefixes)
 
 
@@ -786,8 +849,8 @@ class Checked:
         return {**self.result.as_dict(), "mode": self.mode, "models": self.models}
 
 
-def _unchecked(host: str, why: str) -> Checked:
-    return Checked(CheckResult(UNCHECKED, f"Saved, not tested. {why}", reason="unreachable", host=host))
+def _unchecked(host: str, why: str, mode: Optional[str] = None) -> Checked:
+    return Checked(CheckResult(UNCHECKED, f"Saved, not tested. {why}", reason="unreachable", host=host), mode=mode)
 
 
 def _body(response: httpx.Response) -> tuple[dict, str]:
@@ -799,49 +862,120 @@ def _body(response: httpx.Response) -> tuple[dict, str]:
     return (data if isinstance(data, dict) else {}), text
 
 
+def host_allowed(host: str, allowed: Iterable[str]) -> bool:
+    """`host` is on the list, or a subdomain of a `*.` entry — and never an address."""
+    host = (host or "").lower().rstrip(".")
+    if not host or re.match(r"^[\d.]+$", host) or ":" in host or host == "localhost":
+        return False
+    for pattern in allowed:
+        if pattern.startswith("*."):
+            if host.endswith(pattern[1:]) and host != pattern[2:]:
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def _fill(template: str, values: dict[str, str]) -> str:
+    return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", lambda m: values.get(m.group(1), ""), template)
+
+
 def check(integration: Integration, values: dict[str, str], mode: Optional[str] = None) -> Checked:
     """Try the key against the service, read-only. Never raises."""
+    if integration.custom is not None:
+        try:
+            return integration.custom(values)
+        except Exception:  # noqa: BLE001
+            log.exception("Connector check failed unexpectedly for %s", integration.label)
+            return _unchecked("", "The check itself failed.", mode)
     spec = integration.check
     if spec is None:
-        return _unchecked("", "There's no read-only way to test this one, so it's saved as it is.")
-    host = urlsplit(spec.url).hostname or ""
+        return _unchecked("", "There's no read-only way to test this one, so it's saved as it is.", mode)
+    key = values.get(spec.key_var, "")
+    if spec.optional_key and not key:
+        return _unchecked("", f"Add {spec.key_var} to have it tested; the rest can't be checked from here.", mode)
+    filled = {**values, **(spec.derive(values) if spec.derive else {})}
+    url = _fill(spec.url, filled)
+    host = urlsplit(url).hostname or ""
     try:
-        if host not in spec.hosts:
-            # Never reached for a fixed URL; the guard is here for the connectors
-            # whose URL is built from a field (a domain, an app id).
+        if urlsplit(url).scheme != "https" or not host_allowed(host, spec.hosts):
+            # A field that names the host (a domain, an app id, a URL) is format-
+            # checked first; this is the last word, so a pasted 127.0.0.1 or
+            # evil.example can never turn the check into a request somewhere else.
             log.warning("Refused a %s check to %s: not on its allowlist.", integration.id, host)
-            return Checked(CheckResult(FAILED, "That host isn't one this connector talks to.", reason="host", host=host))
-        key = values.get(spec.key_var, "")
+            return Checked(
+                CheckResult(
+                    FAILED,
+                    f"{host or 'That address'} isn't a {integration.label} address, so it wasn't contacted.",
+                    reason="host",
+                    name=spec.id_var or spec.key_var,
+                    host=host,
+                ),
+                mode=mode,
+            )
         headers = {"Accept": "application/json"}
         auth = None
+        params = None
         if spec.auth == "basic":
             auth = (key, "")
+        elif spec.auth.startswith("basic_pair:"):
+            auth = (filled.get(spec.auth.split(":", 1)[1], ""), key)
+        elif spec.auth.startswith("basic_user:"):
+            auth = (spec.auth.split(":", 1)[1], key)
         elif spec.auth == "bearer":
             headers["Authorization"] = f"Bearer {key}"
         elif spec.auth.startswith("header:"):
             headers[spec.auth.split(":", 1)[1]] = key
+        elif spec.auth.startswith("query:"):
+            params = {spec.auth.split(":", 1)[1]: key}
+        for name, template in spec.headers:
+            headers[name] = _fill(template, filled)
+        content = None
+        if spec.body is not None:
+            content = _fill(spec.body, filled)
+            headers["Content-Type"] = (
+                "application/json" if spec.body_type == "json" else "application/x-www-form-urlencoded"
+            )
         started = time.monotonic()
         try:
             with httpx.Client(timeout=TIMEOUT_SECONDS, transport=transport) as client:
-                response = client.request(spec.method, spec.url, headers=headers, auth=auth)
+                response = client.request(spec.method, url, headers=headers, auth=auth, params=params, content=content)
         except httpx.TimeoutException:
-            return _unchecked(host, f"{integration.label} didn't answer in time. Try Re-test in a minute.")
+            return _unchecked(host, f"{integration.label} didn't answer in time. Try Re-test in a minute.", mode)
+        except httpx.ConnectError as e:
+            if spec.id_var and _is_dns(e):
+                # The host is built from a field, and it doesn't exist: that field is wrong.
+                var = integration.var(spec.id_var)
+                return Checked(
+                    CheckResult(
+                        FAILED,
+                        f"{host} doesn't exist. Check the {var.label if var else spec.id_var} — it names the "
+                        "account, and a typo there is the usual cause.",
+                        reason="id_wrong",
+                        name=spec.id_var,
+                        host=host,
+                    ),
+                    mode=mode,
+                )
+            return _unchecked(host, f"We couldn't reach {integration.label} from this server.", mode)
         except httpx.HTTPError:
-            return _unchecked(host, f"We couldn't reach {integration.label} from this server.")
+            return _unchecked(host, f"We couldn't reach {integration.label} from this server.", mode)
         latency = int((time.monotonic() - started) * 1000)
         data, text = _body(response)
         status = response.status_code
         for rule in spec.rules:
             if status in rule.statuses and (rule.body is None or rule.body in text):
                 if rule.outcome in ("ok", "restricted"):
-                    return _connected(integration, spec, data, host, latency, mode, rule.message, values)
-                field = spec.key_var
+                    return _connected(integration, spec, data, host, latency, mode, rule.message)
+                if rule.outcome == "unchecked":
+                    return _unchecked(host, rule.message, mode)
+                field_name = rule.field or (spec.id_var if rule.outcome == "id_wrong" else spec.key_var)
                 return Checked(
                     CheckResult(
                         FAILED,
-                        rule.message + " " + _fix_for(integration),
+                        rule.message + ("" if rule.outcome == "id_wrong" else " " + _fix_for(integration)),
                         reason=rule.outcome,
-                        name=field,
+                        name=field_name,
                         step=_guide_step(integration, "secret"),
                         host=host,
                         latency_ms=latency,
@@ -849,11 +983,13 @@ def check(integration: Integration, values: dict[str, str], mode: Optional[str] 
                     mode=mode,
                 )
         if 200 <= status < 300:
-            return _connected(integration, spec, data, host, latency, mode, "", values)
+            if spec.partial:
+                return _unchecked(host, spec.partial, mode)
+            return _connected(integration, spec, data, host, latency, mode, "")
         if status == 429:
-            return _unchecked(host, f"{integration.label} is rate limiting checks right now.")
+            return _unchecked(host, f"{integration.label} is rate limiting checks right now.", mode)
         if status >= 500:
-            return _unchecked(host, f"{integration.label} had a problem of its own (HTTP {status}).")
+            return _unchecked(host, f"{integration.label} had a problem of its own (HTTP {status}).", mode)
         return Checked(
             CheckResult(
                 FAILED,
@@ -867,7 +1003,22 @@ def check(integration: Integration, values: dict[str, str], mode: Optional[str] 
         )
     except Exception:  # noqa: BLE001 - a check must never take the save down with it
         log.exception("Connector check failed unexpectedly for %s", integration.label)
-        return _unchecked(host, "The check itself failed.")
+        return _unchecked(host, "The check itself failed.", mode)
+
+
+def _is_dns(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(s in text for s in ("name or service not known", "nodename nor servname", "getaddrinfo", "no address", "name resolution", "not known"))
+
+
+def _public_models(url: str) -> list[str]:
+    """A public model list (no key sent), for a connector whose key check has none."""
+    try:
+        with httpx.Client(timeout=TIMEOUT_SECONDS, transport=transport) as client:
+            data = client.get(url).json()
+        return sorted({str(m.get("id")) for m in data.get("data") or [] if isinstance(m, dict) and m.get("id")})
+    except Exception:  # noqa: BLE001 - a picker without options still saves
+        return []
 
 
 def _connected(
@@ -878,9 +1029,10 @@ def _connected(
     latency: int,
     mode: Optional[str],
     note: str,
-    values: dict[str, str],
 ) -> Checked:
     models = spec.models(data) if spec.models else []
+    if not models and spec.models_url:
+        models = _public_models(spec.models_url)
     if spec.live is not None and integration.has_test_mode:
         live = spec.live(data)
         if live is not None:
@@ -1100,3 +1252,13 @@ def available_note(connected_ids: Iterable[str]) -> str:
         "Don't add a service the idea doesn't need. You will never see their keys — the code "
         "reads them from environment variables.\n"
     )
+
+
+# ── the registry ─────────────────────────────────────────────────────────────
+# Wave 2's rows live in their own module; it reads Wave 1's phrases from here, so it
+# is imported last, once everything it uses exists.
+from app.build.integrations_wave2 import WAVE2  # noqa: E402
+
+REGISTRY: dict[str, Integration] = {
+    i.id: i for i in (_STRIPE, _RESEND, _CLERK, _OPENAI, *WAVE2, *_LATER)
+}

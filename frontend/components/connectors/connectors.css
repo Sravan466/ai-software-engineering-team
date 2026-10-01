@@ -205,6 +205,8 @@ a.cx-card:hover .cx-card-go svg { transform: translateX(2px); }
 .cx-public { font-size: var(--t-xs); font-weight: 400; color: var(--run); }
 .cx-form .db-guide li { overflow-wrap: anywhere; }
 .cx-model .select { min-height: 44px; }
+.cx-choice { align-self: flex-start; }
+.cx-choice .seg-btn { min-height: 40px; min-width: 72px; }
 .cx-live, .cx-confirm { margin: 0; }
 .cx-save-account { display: flex; flex-direction: column; gap: 2px; }
 

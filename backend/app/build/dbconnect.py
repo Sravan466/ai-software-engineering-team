@@ -58,6 +58,13 @@ class Var:
     #: Who reads it: `server` code only, or the `client` — the browser bundle, where
     #: anything is public. A client variable is never a secret (`app.build.integrations`).
     side: str = "server"
+    #: A fixed choice (`sandbox`/`live`, `us`/`eu`): shown as a picker, first is default.
+    options: tuple[str, ...] = ()
+    #: Left blank, a random secret is generated for it (`AUTH_SECRET`).
+    generate: bool = False
+    #: Always the same value as another variable, so it is never asked for
+    #: (`NEXT_PUBLIC_RAZORPAY_KEY_ID` is `RAZORPAY_KEY_ID`, read in the browser).
+    copy_of: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -69,6 +76,9 @@ class Var:
             "kind": self.kind,
             "help": self.help,
             "side": self.side,
+            "options": list(self.options),
+            "generate": self.generate,
+            "copy_of": self.copy_of,
         }
 
 
@@ -853,6 +863,14 @@ _CREDENTIAL_SHAPES = (
     re.compile(r"\bwhsec_[A-Za-z0-9]{8,}"),
     re.compile(r"\bre_[A-Za-z0-9]{6,}_[A-Za-z0-9]{8,}"),
     re.compile(r"\bsk-(proj|svcacct|admin)-[A-Za-z0-9_\-]{8,}"),
+    # Wave 2: Anthropic, OpenRouter, Groq, Replicate, SendGrid, Slack, Google OAuth,
+    # Sentry, and a Razorpay key secret written beside its key id.
+    re.compile(r"\bsk-(ant|or-v1)-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"\b(gsk|r8)_[A-Za-z0-9]{16,}"),
+    re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"\bxox[bap]-[A-Za-z0-9\-]{16,}"),
+    re.compile(r"\bGOCSPX-[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"\bsntr[yu]s_[A-Za-z0-9_=+/\-]{16,}"),
 )
 
 
