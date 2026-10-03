@@ -256,12 +256,13 @@ def later_one(
 
 def _resume(background: BackgroundTasks, db: Session, project: Project, message: str) -> RunResponse:
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}, answers_question=True):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}, answers_question=True)
+    if not token:
         raise _conflict(project, "continue")
     project.gate_kind = None
     project.gate_note = None
     db.commit()
-    background.add_task(_drive, project.id)
+    background.add_task(_drive, project.id, token)
     return RunResponse(
         project_id=project.id,
         status=project.status,

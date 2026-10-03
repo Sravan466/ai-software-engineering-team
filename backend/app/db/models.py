@@ -99,6 +99,9 @@ class Project(Base):
     )
     # Set by Stop. The runner checks it between phases and after each agent returns.
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Which driver the build belongs to (#41). Every claim writes a fresh one; a driver
+    # whose token is no longer this one stops without writing. See `orchestration.claim`.
+    run_token: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     # Why the last run stopped, in words a person can act on.
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: What kind of failure that was, when a cloud provider refused a key

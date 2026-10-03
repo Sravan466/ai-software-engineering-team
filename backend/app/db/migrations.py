@@ -42,6 +42,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "phase_started_at",
         "heartbeat_at",
         "cancel_requested",
+        # Nullable (#41): a build with no driver holds no claim, and the first claim
+        # after the upgrade writes one.
+        "run_token",
         "last_error",
         # Both nullable (#63): a build that failed before failures had kinds has none,
         # and its page falls back to the plain `last_error`.
