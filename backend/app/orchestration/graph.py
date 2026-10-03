@@ -29,7 +29,7 @@ from app.core.constants import PHASE_ORDER, RoutingMode, Phase, PHASE_LABELS
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.memory.store import memory_store
-from app.orchestration import debate as debate_step
+from app.orchestration import claim, debate as debate_step
 from app.orchestration.charter import binding_on, freeze
 from app.orchestration.debate import conduct_debate, decision_summary
 from app.orchestration.state import PipelineState
@@ -281,6 +281,9 @@ def _make_node(phase: Phase):
             escalate=phase.value in (state.get("escalate") or []),
         )
         result = agent.run(ctx)
+        # Before LangGraph checkpoints this step: a run stopped and resumed while the
+        # agent was generating no longer owns the build, and its step must not land.
+        claim.check()
 
         outputs = {**state.get("prior_outputs", {}), phase.value: result.output}
         if phase == Phase.SYSTEM_DESIGN:

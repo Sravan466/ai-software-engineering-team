@@ -264,7 +264,8 @@ def _resume(
     status: Optional[str] = None,
 ) -> RunResponse:
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}, answers_database=True):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}, answers_database=True)
+    if not token:
         raise _conflict(project, "continue")
     # After the claim, so a second tab that lost the race records nothing.
     if status is not None:
@@ -272,7 +273,7 @@ def _resume(
     project.gate_kind = None
     project.gate_note = None
     db.commit()
-    background.add_task(_drive, project.id)
+    background.add_task(_drive, project.id, token)
     return RunResponse(
         project_id=project.id,
         status=project.status,

@@ -14,6 +14,9 @@ turns that position into something a person can watch and steer:
     background task; the routes commit `running` and return at once.
   • Stop sets a flag the loop checks between phases and after every agent returns, and
     Resume picks the run back up from the last checkpoint.
+  • Each run holds the claim that started it (`claim`). Resume claims again, so a
+    driver still waiting on a model call when it was stopped comes back to find the
+    build is no longer its own, and stops without writing (#41).
 """
 from __future__ import annotations
 from typing import Optional
@@ -25,6 +28,7 @@ import weakref
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.agents import get_agent
@@ -51,7 +55,7 @@ from app.db.base import SessionLocal
 from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
 from app.preview import history as preview_history
 from app.memory.store import memory_store
-from app.orchestration import autofix, connectors, remediation
+from app.orchestration import autofix, claim, connectors, remediation
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import Charter, binding_on
 from app.orchestration.graph import connectors_note, graph, gather_skills
@@ -78,19 +82,17 @@ log = get_logger(__name__)
 # build in the process.
 #
 # What it does not do is stop a build having two drivers. Stop marks a build
-# cancelled without interrupting the call in flight, Resume clears the flag and
-# claims it straight back, and the first driver — no longer seeing the flag — carries
-# on beside the second. The lock makes their checkpoint writes take turns; it does
-# not make the second one wait for the first to *finish*, and the two can both
-# advance the run. That race is older than this lock (the process-wide one allowed it
-# too); closing it needs a claim each driver holds and checks, not a lock.
+# cancelled without interrupting the call in flight, Resume claims it straight back,
+# and the first driver's call still returns. The lock only makes their checkpoint
+# writes take turns. What keeps the first driver from carrying on is the claim it
+# holds (`claim`): Resume minted a new one, so its writes are refused and it stops.
 #
 # The SQLite connection itself does not need this. `SqliteSaver` holds its own lock
 # around every cursor it opens, so writes from two builds cannot interleave on it.
 #
 # What this does not cover: the database rows around a phase (`_complete_row`,
-# `_delete_rows`) are written outside it, exactly as they were under the old lock,
-# and it is a lock in *this process*. Several workers would each have their own and
+# `_delete_rows`) are written outside it — the claim guards those — and it is a lock
+# in *this process*. Several workers would each have their own and
 # would share `checkpoints.sqlite` unguarded — the status claim in the routes is the
 # only thing that spans processes, and a multi-worker deployment needs a
 # checkpointer that is built for one.
@@ -169,15 +171,21 @@ def _heartbeat(project_id: str):
     and a heartbeat that only lands after the phase finishes proves nothing.
     """
     stop = threading.Event()
+    # Only while this driver still holds the build: a superseded one generating on
+    # would otherwise keep a stalled build looking alive for whoever took it over.
+    held = claim.current()
+    token = held[1] if held is not None and held[0] == project_id else None
 
     def beat() -> None:
         while not stop.wait(settings.heartbeat_interval_seconds):
             db = SessionLocal()
             try:
-                project = db.get(Project, project_id)
-                if project is None:
+                query = update(Project).where(Project.id == project_id)
+                if held is not None and held[0] == project_id:
+                    query = query.where(claim.token_is(token))
+                if db.execute(query.values(heartbeat_at=_now())).rowcount != 1:
+                    db.rollback()
                     return
-                project.heartbeat_at = _now()
                 db.commit()
             except Exception as e:  # noqa: BLE001 - a missed beat must not kill the run
                 log.debug("Heartbeat write failed for %s: %s", project_id, e)
@@ -192,6 +200,10 @@ def _heartbeat(project_id: str):
         stop.set()
 
 
+#: `claim_token` left out: drive under the build's current claim.
+_ADOPT = object()
+
+
 def _as_owner(method):
     """Run a runner entry point for the project's owner.
 
@@ -201,16 +213,35 @@ def _as_owner(method):
     """
 
     @functools.wraps(method)
-    def bound(self, db: Session, project: Project, *args, **kwargs):
+    def bound(self, db: Session, project: Project, *args, claim_token=_ADOPT, **kwargs):
         # And names the build, so every model call it makes can be cancelled by
         # Stop, and a user's computer can say what it's answering.
         # A new build has no name yet; its idea says which one it is.
         first_line = ((project.idea or "").strip().splitlines() or [""])[0]
         label = project.name or first_line[:60] or None
         with identity.acting_as(project.owner_id), inflight.building(project.id, label):
-            return method(self, db, project, *args, **kwargs)
+            if claim.held_by(db) is not None:
+                # Called from inside a run (a redo carrying on into the loop): the
+                # claim the run started with is the one it still holds.
+                return method(self, db, project, *args, **kwargs)
+            if claim_token is _ADOPT:
+                # Called directly rather than handed a claim by a route — a test, a
+                # script. It drives under whatever claim the build has now.
+                db.refresh(project, ["run_token"])
+                claim_token = project.run_token
+            with claim.holding(db, project, claim_token):
+                try:
+                    return method(self, db, project, *args, **kwargs)
+                except claim.Superseded:
+                    db.rollback()
+                    log.info(
+                        "A newer run took over %s; this one stopped without writing.",
+                        project.id,
+                    )
+                    return project
 
     return bound
+
 
 
 class PipelineRunner:
@@ -922,6 +953,9 @@ class PipelineRunner:
                         )
                         patch["charter"] = rewritten.as_dict() if rewritten else {}
                         charter_update = patch["charter"]
+                    # A superseded redo must not patch a checkpoint the run that took
+                    # over is now writing.
+                    claim.check()
                     graph.update_state(
                         cfg,
                         patch,
@@ -1104,9 +1138,10 @@ class PipelineRunner:
     def stop(self, db: Session, project: Project, reason: str) -> Project:
         """Ask the run to stop, and say so immediately.
 
-        The in-flight model call cannot be interrupted, but the reviewer's decision
-        does not have to wait for it: the project is marked `cancelled` now, and the
-        loop honours the flag the moment the agent returns.
+        The project is marked `cancelled` now rather than when the call in flight
+        returns, and the loop honours the flag the moment the agent does. If the
+        build is resumed before then, the claim decides: the resumed run holds a new
+        one, and this driver stops without writing.
         """
         project.cancel_requested = True
         project.status = PipelineStatus.CANCELLED.value
@@ -1121,7 +1156,7 @@ class PipelineRunner:
         return project
 
     def prepare_resume(self, db: Session, project: Project) -> None:
-        """Clear the stop flag so the run can be claimed again.
+        """Tidy what the last run left on the row, once the resume has claimed it.
 
         Tidying up what the dead run left behind (a `PhaseResult` stuck at `running`)
         is `continue_run`'s first act, and it needs the checkpointer lock to do it —
@@ -1144,6 +1179,9 @@ class PipelineRunner:
                 # This build's checkpoint gets one writer at a time; every other build
                 # in the process generates alongside it. See `_checkpoint_lock`.
                 with _checkpoint_lock(project.id):
+                    # Asked again under the lock: a driver that waited here behind
+                    # another must not spend a model call on a build no longer its own.
+                    claim.check()
                     state = graph.invoke(
                         None if started else _initial_state(project), _config(project.id)
                     )
@@ -1260,8 +1298,11 @@ class PipelineRunner:
         row.skills_used = lr.get("skills_used") if "skills_used" in lr else None
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
-        db.commit()
+        # One transaction for the row and the calls that produced it, so a driver
+        # superseded mid-write records neither — and the one that took over, salvaging
+        # the same output, records them exactly once.
         self._record_usage(db, project, lr)
+        db.commit()
         if row.phase == Phase.SECURITY_ENGINEER.value:
             # Every audit, including the re-audit after a fix — which is the one that
             # decides whether the fix took. Here rather than in `_run_phase` because a
@@ -1480,7 +1521,13 @@ class PipelineRunner:
     # ── cancellation ──────────────────────────────────────────────────────────
     #: Re-read before every gate decision, because a person can change any of them
     #: while the run is in flight.
-    _LIVE_FIELDS = ("cancel_requested", "approval_mode", "require_approval", "cost_cap_usd")
+    _LIVE_FIELDS = (
+        "cancel_requested",
+        "run_token",
+        "approval_mode",
+        "require_approval",
+        "cost_cap_usd",
+    )
 
     @staticmethod
     def _cancel_requested(db: Session, project: Project) -> bool:
@@ -1496,7 +1543,12 @@ class PipelineRunner:
         return bool(project.cancel_requested)
 
     def _raise_if_cancelled(self, db: Session, project: Project) -> None:
-        if self._cancel_requested(db, project):
+        cancelled = self._cancel_requested(db, project)
+        held = claim.held_by(db)
+        if held is not None and held[0] == project.id and project.run_token != held[1]:
+            # Resumed (or taken over) by someone else: not this run's stop to settle.
+            raise claim.Superseded(project.id)
+        if cancelled:
             raise CancelledRun()
 
     def _settle_cancelled(
@@ -1629,7 +1681,7 @@ class PipelineRunner:
                 fallback_used=call.get("fallback_used", False),
                 is_local=call.get("is_local"),
             )
-            tracker.record(db, response=resp, project_id=project.id, phase=lr["phase"])
+            tracker.record(db, response=resp, project_id=project.id, phase=lr["phase"], commit=False)
 
     def _persist_new_debates(self, db: Session, project: Project, debates: list[dict]) -> None:
         existing = (
@@ -1655,7 +1707,7 @@ class PipelineRunner:
                     usage=Usage(**usage),
                     is_local=record.get("_is_local"),
                 )
-                tracker.record(db, response=resp, project_id=project.id, phase="debate")
+                tracker.record(db, response=resp, project_id=project.id, phase="debate", commit=False)
         db.commit()
 
     @staticmethod

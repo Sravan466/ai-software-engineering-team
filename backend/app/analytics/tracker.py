@@ -21,7 +21,10 @@ def record(
     response: LLMResponse,
     project_id: Optional[str] = None,
     phase: Optional[str] = None,
+    commit: bool = True,
 ) -> UsageEvent:
+    """Record one call. `commit=False` leaves it in the caller's transaction, so a
+    phase's row and the calls that produced it are written together or not at all."""
     # Whose call this was: the project's owner, which is who the run was bound to.
     project = db.get(Project, project_id) if project_id else None
     owner_id = project.owner_id if project is not None else identity.current_user_id()
@@ -51,8 +54,9 @@ def record(
         fallback_used=response.fallback_used,
     )
     db.add(event)
-    db.commit()
-    db.refresh(event)
+    if commit:
+        db.commit()
+        db.refresh(event)
     return event
 
 

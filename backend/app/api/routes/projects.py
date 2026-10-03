@@ -39,7 +39,7 @@ from app.core.constants import (
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
 from app.db.models import Project, SecurityDisposition, User
-from app.orchestration import autofix, remediation
+from app.orchestration import autofix, claim, remediation
 from app.orchestration.runner import runner
 from app.router.router import router as model_router
 from app.schemas.project import (
@@ -313,11 +313,15 @@ def _claim(
     *,
     answers_question: bool = False,
     answers_database: bool = False,
-) -> bool:
+) -> Optional[str]:
     """Atomically move the project into `running` — but only from `allowed`.
 
-    Returns False when someone else got there first (a second tab, a double click),
+    Returns None when someone else got there first (a second tab, a double click),
     which is the whole point: the phase is handed to a background task exactly once.
+    Otherwise returns the claim's token, which the background task must be handed:
+    it is how a run stopped mid-call learns, once its call returns, that a resume has
+    taken the build over (#41). Read it from here, never from the row later — by
+    then it may be someone else's.
 
     A build parked on a question only the person can answer — its database, or its
     app connectors — is released only by an answer to it (`answers_question`; the
@@ -327,11 +331,13 @@ def _claim(
     """
     if not (answers_question or answers_database):
         _refuse_at_database_gate(project)
+    token = claim.new_token()
     result = db.execute(
         update(Project)
         .where(Project.id == project.id, Project.status.in_(allowed))
         .values(
             status=PipelineStatus.RUNNING.value,
+            run_token=token,
             cancel_requested=False,
             last_error=None,
             last_error_kind=None,
@@ -342,9 +348,9 @@ def _claim(
     db.commit()
     if result.rowcount != 1:
         db.refresh(project)
-        return False
+        return None
     db.refresh(project)
-    return True
+    return token
 
 
 def _conflict(project: Project, action: str) -> HTTPException:
@@ -357,16 +363,16 @@ def _conflict(project: Project, action: str) -> HTTPException:
     )
 
 
-def _drive(project_id: str) -> None:
+def _drive(project_id: str, token: str) -> None:
     """Background task: run the pipeline forward until it needs a human again."""
     db = SessionLocal()
     try:
         project = db.get(Project, project_id)
         if project is not None:
-            runner.continue_run(db, project)
+            runner.continue_run(db, project, claim_token=token)
     except Exception as e:  # noqa: BLE001 - a background crash must not strand the run
         log.exception("Pipeline task crashed for %s", project_id)
-        _strand(db, project_id, str(e))
+        _strand(db, project_id, str(e), token)
     finally:
         db.close()
 
@@ -386,11 +392,14 @@ def _resume_paused(owner_id: str, device_id: str) -> None:
         )
         for project in paused:
             # Claimed first: a Stop that landed a moment ago keeps its own message.
-            if not _claim(db, project, {PipelineStatus.PAUSED.value}):
+            token = _claim(db, project, {PipelineStatus.PAUSED.value})
+            if not token:
                 continue  # resumed by hand, or stopped, a moment ago
             runner.prepare_resume(db, project)
             log.info("Device %s reconnected; resuming build %s.", device_id, project.id)
-            threading.Thread(target=_drive, args=(project.id,), name=f"resume-{project.id[:8]}", daemon=True).start()
+            threading.Thread(
+                target=_drive, args=(project.id, token), name=f"resume-{project.id[:8]}", daemon=True
+            ).start()
     except Exception:  # noqa: BLE001 - the builds stay paused and resumable by hand
         log.exception("Couldn't resume the builds paused for device %s", device_id)
     finally:
@@ -407,30 +416,30 @@ def resume_paused_for(owner_id: str, device_id: str) -> None:
 hub.on_ready.append(resume_paused_for)
 
 
-def _drive_reject(project_id: str, feedback: str) -> None:
+def _drive_reject(project_id: str, feedback: str, token: str) -> None:
     """Background task: regenerate the current phase with the reviewer's note."""
     db = SessionLocal()
     try:
         project = db.get(Project, project_id)
         if project is not None:
-            runner.reject(db, project, feedback)
+            runner.reject(db, project, feedback, claim_token=token)
     except Exception as e:  # noqa: BLE001
         log.exception("Reject task crashed for %s", project_id)
-        _strand(db, project_id, str(e))
+        _strand(db, project_id, str(e), token)
     finally:
         db.close()
 
 
-def _drive_redo(project_id: str, phase: str, feedback: str) -> None:
+def _drive_redo(project_id: str, phase: str, feedback: str, token: str) -> None:
     """Background task: regenerate one named phase and return to the same review."""
     db = SessionLocal()
     try:
         project = db.get(Project, project_id)
         if project is not None:
-            runner.redo(db, project, phase, feedback)
+            runner.redo(db, project, phase, feedback, claim_token=token)
     except Exception as e:  # noqa: BLE001
         log.exception("Redo task crashed for %s/%s", project_id, phase)
-        _strand(db, project_id, str(e))
+        _strand(db, project_id, str(e), token)
     finally:
         db.close()
 
@@ -445,17 +454,24 @@ _CRASHED = (
 )
 
 
-def _strand(db: Session, project_id: str, message: str) -> None:
+def _strand(db: Session, project_id: str, message: str, token: str) -> None:
     """Last resort: never leave a project `running` with nothing running.
 
     This runs on the session the crash happened on, whose transaction may already be
     poisoned — so roll back first. Without that the recovery write fails too and the
     project stays `running` forever, which is the dead end this whole change removes.
+
+    Only while the crashed run still held the build: one resumed meanwhile is running
+    under someone else's claim, and failing it would strand *that* run.
     """
     try:
         db.rollback()
         project = db.get(Project, project_id)
-        if project is not None and project.status == PipelineStatus.RUNNING.value:
+        if (
+            project is not None
+            and project.status == PipelineStatus.RUNNING.value
+            and project.run_token == token
+        ):
             project.status = PipelineStatus.FAILED.value
             project.last_error = _CRASHED
             project.last_error_kind = None
@@ -532,10 +548,11 @@ def run_pipeline(
     db: Session = Depends(get_db),
 ) -> RunResponse:
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.CREATED.value, PipelineStatus.FAILED.value}):
+    token = _claim(db, project, {PipelineStatus.CREATED.value, PipelineStatus.FAILED.value})
+    if not token:
         raise _conflict(project, "start")
 
-    background.add_task(_drive, project.id)
+    background.add_task(_drive, project.id, token)
     return RunResponse(
         project_id=project.id,
         status=project.status,
@@ -634,11 +651,12 @@ def approve_phase(
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
+    if not token:
         raise _conflict(project, "approve")
 
     runner.approve_current(db, project)
-    background.add_task(_drive, project.id)
+    background.add_task(_drive, project.id, token)
     return RunResponse(
         project_id=project.id,
         status=project.status,
@@ -672,10 +690,11 @@ def reject_phase(
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
+    if not token:
         raise _conflict(project, "reject")
 
-    background.add_task(_drive_reject, project.id, payload.feedback.strip())
+    background.add_task(_drive_reject, project.id, payload.feedback.strip(), token)
     return RunResponse(
         project_id=project.id,
         status=project.status,
@@ -787,7 +806,8 @@ def fix_finding(
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
+    if not token:
         raise _conflict(project, "fix")
 
     for tracked in rows:
@@ -803,7 +823,7 @@ def fix_finding(
         owner_phase=row.owner_phase,
     )
     background.add_task(
-        _drive_redo, project.id, row.owner_phase, remediation.fix_instruction([finding])
+        _drive_redo, project.id, row.owner_phase, remediation.fix_instruction([finding]), token
     )
     return RunResponse(
         project_id=project.id,
@@ -885,12 +905,13 @@ def keep_trying(
     more = (payload.rounds if payload and payload.rounds else None) or settings.auto_fix_retry_rounds
     data = autofix.load(project)
     names = autofix.keep_trying(data, more)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
+    if not token:
         raise _conflict(project, "retry")
     autofix.save(project, data)
     db.commit()
     log.info("Keep trying on %s: %s, %d more round(s)", project.id, names, more)
-    background.add_task(_drive, project.id)
+    background.add_task(_drive, project.id, token)
     return RunResponse(
         project_id=project.id,
         status=project.status,
@@ -922,13 +943,14 @@ def accept_code_problems(
             "one at a time instead.",
         )
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
+    if not token:
         raise _conflict(project, "accept")
     names = autofix.accept(data, payload.kind, payload.reason.strip())
     autofix.save(project, data)
     db.commit()
     log.info("Code problems accepted on %s: %s — %s", project.id, names, payload.reason)
-    background.add_task(_drive, project.id)
+    background.add_task(_drive, project.id, token)
     return RunResponse(
         project_id=project.id,
         status=project.status,
@@ -969,10 +991,11 @@ def redo_phase(
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
     _require_models(project)
-    if not _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value}):
+    token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
+    if not token:
         raise _conflict(project, "redo")
 
-    background.add_task(_drive_redo, project.id, payload.phase, payload.feedback.strip())
+    background.add_task(_drive_redo, project.id, payload.phase, payload.feedback.strip(), token)
     return RunResponse(
         project_id=project.id,
         status=project.status,
@@ -1042,11 +1065,15 @@ def resume_pipeline(
     # missing is exactly the run someone reaches for Resume on, and starting it again
     # into the identical failure teaches nothing.
     _require_models(project)
-    runner.prepare_resume(db, project)
-    if not _claim(db, project, resumable):
+    # Claimed first. Clearing the stop flag before the claim let a run stopped
+    # mid-call read "not cancelled" under its old claim and carry on (#41); and a
+    # resume that lost the race to a second tab must not have touched the row.
+    token = _claim(db, project, resumable)
+    if not token:
         raise _conflict(project, "resume")
+    runner.prepare_resume(db, project)
 
-    background.add_task(_drive, project.id)
+    background.add_task(_drive, project.id, token)
     return RunResponse(
         project_id=project.id,
         status=project.status,
