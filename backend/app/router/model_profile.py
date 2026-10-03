@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Optional
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.router import memory_gate
 
 if TYPE_CHECKING:
     from app.router.runtimes.types import ModelInfo
@@ -283,10 +284,13 @@ def resolve_window(
     )
     if ram_tokens is not None:
         gib = (ram_bytes or 0) / 2**30
-        note = (
-            f"clamped to {{window:,}} tokens by RAM — {gib:.0f} GiB total, "
-            f"{settings.local_ram_fraction:.0%} of it available to the KV cache"
+        slots = memory_gate.limit()
+        share = (
+            f"{settings.local_ram_fraction:.0%} of it shared by up to {slots} generations at once"
+            if slots > 1
+            else f"{settings.local_ram_fraction:.0%} of it available to the KV cache"
         )
+        note = f"clamped to {{window:,}} tokens by RAM — {gib:.0f} GiB total, {share}"
         if ram_tokens < _MIN_WORKABLE_TOKENS:
             # This one is an *estimate* — f16 cache, and blind to GPU or unified
             # memory offload — so unlike the two hard limits either side of it, it
@@ -345,7 +349,9 @@ def _tokens_that_fit_in_ram(
     full = kv_bytes_per_token or 0
     if not ram_bytes or not (full or windowed):
         return None
-    spare = ram_bytes * settings.local_ram_fraction
+    # One generation's share: the fraction is the budget for everything that may
+    # run on this computer at once (`memory_gate`), not for each of them.
+    spare = ram_bytes * memory_gate.ram_share()
     if not windowed or not window:
         return int(spare // (full + windowed))
     at_window = (full + windowed) * window

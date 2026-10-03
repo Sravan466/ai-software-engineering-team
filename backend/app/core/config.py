@@ -159,6 +159,13 @@ class Settings(BaseSettings):
     local_ram_fraction: BlankTolerantFloat(0.6) = Field(
         0.6, validation_alias=_renamed("local_ram_fraction", "ollama_ram_fraction")
     )
+    #: How many local generations one computer runs at once — this machine for every
+    #: runtime sharing its RAM, each paired computer for its own. The RAM fraction
+    #: above is split between them, so concurrent builds on different models never
+    #: claim more than it together; extra calls wait their turn. Cloud models are
+    #: never queued. 0 = no limit: each generation gets the whole fraction, and the
+    #: runtime evicts/reloads models (or the host swaps) when they don't all fit.
+    local_concurrent_generations: BlankTolerantInt(1) = 1
     #: The window assumed *only* when a provider will not report one at all.
     model_context_fallback_tokens: BlankTolerantInt(8192) = 8192
     #: Ceiling on tokens one call may generate. The resolved window can lower this,
