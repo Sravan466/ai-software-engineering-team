@@ -26,7 +26,7 @@ from app.core import model_settings
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.router import compat, generation
-from app.router import inflight
+from app.router import inflight, memory_gate
 from app.router.base import ComputerDisconnected, LLMProvider, ProviderError, RequestCancelled
 from app.router.model_profile import (
     ModelProfile,
@@ -279,6 +279,14 @@ class SourceProvider(LLMProvider):
         """Whether the model runs on a computer whose memory this backend can't see."""
         return not self.source.same_machine
 
+    def memory_pool(self) -> Optional[str]:
+        """Which computer's RAM this source's generations share, or None when unknown.
+
+        Every runtime on this machine draws from one pool, however many there are:
+        two models on Ollama and llama.cpp side by side share the same memory.
+        """
+        return memory_gate.THIS_MACHINE if self.ram_bytes() else None
+
     def forget(self, model: Optional[str] = None) -> None:
         """Drop cached profiles — after a download, or when the default changes.
 
@@ -509,7 +517,16 @@ class SourceProvider(LLMProvider):
             # adapter closes the connection and the runtime stops generating.
             with inflight.track(request.request_id, lambda rid=request.request_id: self.adapter.cancel(rid)):
                 try:
-                    result = self.adapter.chat(request)
+                    # One computer's RAM budget is split between the generations it
+                    # runs at once, so a call queues here rather than overrun it.
+                    with memory_gate.slot(
+                        self.memory_pool(),
+                        cancelled=lambda rid=request.request_id: inflight.was_cancelled(rid),
+                        label=f"{self.source.id}:{model}",
+                    ):
+                        result = self.adapter.chat(request)
+                except memory_gate.GateCancelled:
+                    raise RequestCancelled() from None
                 except ProviderError as e:
                     if inflight.was_cancelled(request.request_id) and not isinstance(e, RequestCancelled):
                         raise RequestCancelled() from None

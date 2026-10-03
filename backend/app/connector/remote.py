@@ -426,6 +426,11 @@ class ConnectorProvider(SourceProvider):
         # The computer said how much memory it has, so the check can use it.
         return self._ram is None
 
+    def memory_pool(self) -> Optional[str]:
+        # That computer's memory, shared by every runtime on it — and only known
+        # (so only clamped, so only queued) when it said how much it has.
+        return f"device:{self.device_id}" if self._ram else None
+
 
 class DeviceSources:
     """One account's paired computers, as model sources — read from the database,

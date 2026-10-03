@@ -220,8 +220,15 @@ repair round carrying the validation errors; if it still misses, the phase is fl
 rather than quietly stored — and the cost and security gates, which read specific keys off
 these outputs, stop the run instead of reading nothing and calling it fine.
 
+That RAM budget covers everything a computer generates at once, not each call. Builds
+on different projects run side by side, so by default one local generation runs per
+computer at a time (`LOCAL_CONCURRENT_GENERATIONS=1`). Another build's call waits its
+turn instead of loading a second model into memory that the first one already
+budgeted for. Cloud calls never wait. Raise the number and the fraction is split
+between the slots, so each model's window stays the same from call to call.
+
 Every ceiling involved is yours to move: `LOCAL_CONTEXT_CEILING`, `LOCAL_RAM_FRACTION`,
-`MAX_OUTPUT_TOKENS`, `SCHEMA_REPAIR_ROUNDS`. See `.env.example`.
+`LOCAL_CONCURRENT_GENERATIONS`, `MAX_OUTPUT_TOKENS`, `SCHEMA_REPAIR_ROUNDS`. See `.env.example`.
 
 ---
 
