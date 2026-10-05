@@ -77,11 +77,16 @@
 /* jump-none puts all four frames on screen for a quarter of the cycle each:
    0, 33.3, 66.7, 100% is frame 1 to 4 of a 400%-wide sheet.
 
-   The loop and the one-shot are the same motion under two names on purpose. A browser only restarts an animation when its name
+   The loop, the gate loop and the one-shot are the same motion under three
+   names on purpose. A browser only restarts an animation when its name
    changes, so if "done" shared a name with "working", an agent finishing its
    phase would carry on the loop's clock — already seconds past the end of a
    760ms pass — and jump straight to the last frame without celebrating. */
 @keyframes sheet-loop {
+  from { background-position-x: 0%; }
+  to   { background-position-x: 100%; }
+}
+@keyframes sheet-await {
   from { background-position-x: 0%; }
   to   { background-position-x: 100%; }
 }
@@ -109,8 +114,9 @@
 .sprite.is-working.motion-tally   { --frames: 800ms; }
 
 /* Gate: the "!" is lit on frames 1–2 and dark on 3–4 — a blink slow enough to
-   read as "waiting on you", not as an alarm. */
-.sprite.is-gate .sprite-sheet { animation: sheet-loop 1.4s steps(4, jump-none) infinite; }
+   read as "waiting on you", not as an alarm. Its own name so the blink starts
+   fresh when the gate opens, in step with the board's gate cell. */
+.sprite.is-gate .sprite-sheet { animation: sheet-await 1.4s steps(4, jump-none) infinite; }
 
 /* Done plays once and ends back at rest; rejected plays into the slump. */
 .sprite.is-done .sprite-sheet { animation: sheet-once 760ms steps(4, jump-none) 1 both; }
