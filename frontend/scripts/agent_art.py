@@ -28,10 +28,10 @@ The model output can't be used as-is, for three reasons this script exists to fi
 All eight are scaled by one factor so the crew keeps its relative builds
 (FORGE is meant to be the broadest).
 
-The source art in `assets/` is not committed (~22 MB of raw model output);
-the WebPs in public/agents/ are the shipped artefact. To change a character,
-put its regenerated still and sheet in `assets/` under the names in AGENTS and
-rerun for that agent.
+The source art lives in `assets/` at the repo root (raw model output, kept so
+the WebPs in public/agents/ can always be rebuilt). To change a character,
+replace its still and sheet in `assets/` under the names in AGENTS and rerun
+for that agent.
 
 ATLAS: its first sheet runs off the canvas in the last row, which this script
 refuses, so `public/agents/atlas.webp` is a hand-made stand-in (its idle
