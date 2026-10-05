@@ -258,7 +258,11 @@ def place(frame, anchor, scale, cell=CELL):
     ox = cell / 2 - (ax - bbox[0]) * scale
     oy = cell * FEET_Y - (ay - bbox[1]) * scale
     out = Image.new("RGBA", (cell, cell), (0, 0, 0, 0))
-    out.alpha_composite(crop, (round(ox), round(oy)))
+    # The scale is fitted to the idle row, so a tool swung wide or a jump can
+    # reach past the cell. A plain paste onto the empty cell copies the pixels
+    # exactly and clips at the edge, where alpha_composite would refuse a
+    # negative offset.
+    out.paste(crop, (round(ox), round(oy)))
     return out
 
 
