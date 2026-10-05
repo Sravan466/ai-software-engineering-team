@@ -208,6 +208,7 @@ def frames(sheet: Image.Image):
     ink_x = [sum(1 for y in range(0, H, 2) if alpha[x, y] > 40) for x in range(W)]
     xs = [0] + cut_lines(ink_x, COLS, round(W / COLS * 0.35)) + [W]
     idle_h = {}
+    bad = []
     for c in range(COLS):
         x0, x1 = xs[c], xs[c + 1]
         ink_y = [sum(1 for x in range(x0, x1) if alpha[x, y] > 40) for y in range(H)]
@@ -240,12 +241,15 @@ def frames(sheet: Image.Image):
             elif bbox[3] >= H - 2 and (bbox[3] - bbox[1]) < 0.8 * idle_h[c]:
                 # Touching the edge alone isn't enough — most sheets put the soles
                 # on the last pixel. A figure clearly shorter than its idle self
-                # has lost its feet, and that can't be repaired here.
-                raise SystemExit(
-                    f"row {r + 1}, frame {c + 1} runs off the bottom of the sheet — "
-                    "regenerate it with a margin on every edge"
-                )
+                # has lost its feet, and that can't be repaired here. Reported
+                # once the whole sheet is cut, so the idle row is always complete.
+                bad.append(f"row {r + 1}, frame {c + 1}")
             yield r, c, frame, anchor, bbox
+    if bad:
+        raise SystemExit(
+            f"{', '.join(bad)} run off the bottom of the sheet — "
+            "regenerate it with a margin on every edge"
+        )
 
 
 def place(frame, anchor, scale, cell=CELL):
@@ -294,8 +298,8 @@ def main():
                 cut[name].append(f)
         except SystemExit as e:
             # Fatal only for a sheet being written; for the others the idle
-            # row (cut first) is all the shared scale needs.
-            if name in only or not any(r == 0 for r, *_ in cut[name]):
+            # row is all the shared scale needs, and it is always cut in full.
+            if name in only or sum(1 for r, *_ in cut[name] if r == 0) < COLS:
                 raise SystemExit(f"{sheet_file}: {e}") from None
             print(f"skip {name}: {e}")
             continue

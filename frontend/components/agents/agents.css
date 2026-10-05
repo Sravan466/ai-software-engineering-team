@@ -77,8 +77,7 @@
 /* jump-none puts all four frames on screen for a quarter of the cycle each:
    0, 33.3, 66.7, 100% is frame 1 to 4 of a 400%-wide sheet.
 
-   The loop, the one-shot and the hover pass are the same motion under three
-   names on purpose. A browser only restarts an animation when its name
+   The loop and the one-shot are the same motion under two names on purpose. A browser only restarts an animation when its name
    changes, so if "done" shared a name with "working", an agent finishing its
    phase would carry on the loop's clock — already seconds past the end of a
    760ms pass — and jump straight to the last frame without celebrating. */
@@ -90,10 +89,7 @@
   from { background-position-x: 0%; }
   to   { background-position-x: 100%; }
 }
-@keyframes sheet-hover {
-  from { background-position-x: 0%; }
-  to   { background-position-x: 100%; }
-}
+
 /* Rejected stops on frame 3 — the slump — and holds it. Frame 4 is the
    recovery, and a rejected agent hasn't recovered. */
 @keyframes sheet-to-slump {
@@ -252,10 +248,27 @@
 .agent-card:hover .sprite.motion-launch  { animation: sig-launch 1.2s steps(4, end) 1; }
 .agent-card:hover .sprite.motion-tally   { animation: sig-tally 1.6s steps(6, end) 1; }
 /* …and shows what they do: one pass of their working row. Anyone already
-   working or waiting on you keeps their loop — that is news, a hover isn't. */
-.agent-card:hover .sprite:not(.is-working):not(.is-gate) .sprite-sheet {
-  background-position-y: 25%;
-  animation: sheet-hover 800ms steps(4, jump-none) 1 both;
+   working or waiting on you keeps their loop — that is news, a hover isn't.
+   The pass is layered after the agent's own animation rather than replacing
+   it: the row lives in the keyframes and nothing is held afterwards, so the
+   figure returns to its own pose, and the own animation keeps its name in
+   the list — so leaving the card doesn't replay the fist pump or the slump. */
+@keyframes sheet-hover-row {
+  from { background-position: 0% 25%; }
+  to   { background-position: 100% 25%; }
+}
+.agent-card:hover .sprite.is-queued .sprite-sheet {
+  animation: sheet-hover-row 800ms steps(4, jump-none) 1;
+}
+.agent-card:hover .sprite.is-done .sprite-sheet {
+  animation:
+    sheet-once 760ms steps(4, jump-none) 1 both,
+    sheet-hover-row 800ms steps(4, jump-none) 1;
+}
+.agent-card:hover .sprite.is-rejected .sprite-sheet {
+  animation:
+    sheet-to-slump 600ms steps(3, jump-none) 1 both,
+    sheet-hover-row 800ms steps(4, jump-none) 1;
 }
 
 /* ===========================================================================
@@ -437,6 +450,12 @@
 }
 @keyframes relay-await { 50% { opacity: 0.25; } }
 
+/* The faces lead the rail at 64px; where the card narrows they step down
+   before eight steps stop fitting and the rail has to scroll. */
+@media (max-width: 1180px) {
+  .relay-step .sprite { --sprite-size: 52px !important; }
+}
+
 /* Under this width eight codenames cannot sit side by side without colliding, so
    the rail keeps the faces and the rails — which carry the state — and hands the
    names to the summary line above it. Still scrollable, still tappable, still a
@@ -445,7 +464,7 @@
   .relay { gap: 4px; padding-bottom: 12px; }
   .relay-step {
     /* 44px of finger, and the sprite is what you are aiming at. */
-    min-width: 44px;
+    min-width: 52px;
     padding: 8px 6px 6px;
     gap: 5px;
   }
@@ -453,7 +472,7 @@
      inline style, and a normal stylesheet declaration can never beat one. The
      inline value is the per-instance default; this is the breakpoint the file
      header always meant it to be overridable by. */
-  .relay-step .sprite { --sprite-size: 28px !important; }
+  .relay-step .sprite { --sprite-size: 44px !important; }
   .relay-name { display: none; }
 }
 
@@ -1633,7 +1652,6 @@
   .sprite.is-working .sprite-sheet,
   .sprite.is-done .sprite-sheet { background-position-x: 33.333%; }
   .sprite.is-rejected .sprite-sheet { background-position-x: 66.667%; }
-  .agent-card:hover .sprite:not(.is-working):not(.is-gate) .sprite-sheet { background-position-x: 0%; }
   /* The board holds still: the running light parks mid-cell, the gate cell
      stays lit. The outline and caret still say which phase has the work. */
   .board-tick.is-working { animation: none; background-position: 50% 0; }
