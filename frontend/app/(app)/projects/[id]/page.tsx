@@ -496,7 +496,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                   }}
                   title={`${agent.codename} · ${agent.role} — ${what}`}
                 >
-                  <AgentSprite agent={agent} size={36} state={SPRITE_STATE[ns]} />
+                  <AgentSprite agent={agent} size={64} state={SPRITE_STATE[ns]} />
                   <span className="relay-name">{agent.codename}</span>
                   <span className="relay-bar" />
                   <span className="sr-only">{`${agent.role} — ${what}. Go to this phase.`}</span>

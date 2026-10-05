@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AGENTS,
-  PALETTE,
   deskPaletteFor,
   type Persona,
 } from "@/components/agents/personas";
@@ -201,7 +200,6 @@ export default function CrewPage() {
     (_, i) => stateOf(i) === "working" || stateOf(i) === "gate",
   );
   const doneCount = AGENTS.filter((_, i) => stateOf(i) === "done").length;
-  const spriteCols = Math.max(...agent.sprite.map((r) => r.length));
 
   return (
     <div className="crew-page">
@@ -277,9 +275,22 @@ export default function CrewPage() {
                   <b>AI SWE TEAM</b>
                   <span>{SCENARIOS[scenario].label.toUpperCase()}</span>
                 </span>
-                <span className="board-bar">
+                {/* One cell per phase. State classes are `is-*` on purpose: a bare
+                    `working` here picks up the build view's global .working panel
+                    (padding, radius) and the cell balloons into a pill. */}
+                <span
+                  className="board-bar"
+                  role="progressbar"
+                  aria-label="Phases approved"
+                  aria-valuemin={0}
+                  aria-valuemax={AGENTS.length}
+                  aria-valuenow={doneCount}
+                  aria-valuetext={`${doneCount} of ${AGENTS.length} approved${
+                    activeIndex >= 0 ? `, ${AGENTS[activeIndex].codename} on deck` : ""
+                  }`}
+                >
                   {AGENTS.map((a, i) => (
-                    <i key={a.key} className={"board-tick " + stateOf(i)} />
+                    <i key={a.key} className={"board-tick is-" + stateOf(i)} />
                   ))}
                 </span>
                 <span className="board-row board-row-dim">
@@ -468,46 +479,6 @@ export default function CrewPage() {
 
             <p className="inspect-tagline">{agent.tagline}</p>
 
-            <div className="inspect-grid">
-              <div className="inspect-grid-head">
-                <span className="win-title">
-                  SPRITE {spriteCols}×{agent.sprite.length}
-                </span>
-                <span className="ramp" aria-hidden="true">
-                  <i style={{ background: agent.accentLit }} />
-                  <i style={{ background: agent.accent }} />
-                  <i style={{ background: agent.accentDim }} />
-                </span>
-              </div>
-              <div
-                className="pixel-grid"
-                style={{
-                  gridTemplateColumns: `repeat(${spriteCols}, 1fr)`,
-                  gridTemplateRows: `repeat(${agent.sprite.length}, 1fr)`,
-                }}
-                aria-hidden="true"
-              >
-                {agent.sprite.map((row, y) =>
-                  row.split("").map((ch, x) => (
-                    <span
-                      key={`${x}-${y}`}
-                      style={{
-                        background:
-                          ch === "."
-                            ? "transparent"
-                            : ch === "A"
-                              ? agent.accent
-                              : ch === "H"
-                                ? agent.accentLit
-                                : ch === "B"
-                                  ? agent.accentDim
-                                  : PALETTE[ch],
-                      }}
-                    />
-                  )),
-                )}
-              </div>
-            </div>
           </aside>
         </div>
 
