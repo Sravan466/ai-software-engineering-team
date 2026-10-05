@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AGENTS,
-  PALETTE,
+  artFor,
   deskPaletteFor,
   type Persona,
 } from "@/components/agents/personas";
-import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
+import AgentSprite, { SHEET_ROWS, type SpriteState } from "@/components/agents/AgentSprite";
 import PixelArt from "@/components/agents/PixelArt";
 import {
   PLANT,
@@ -201,7 +201,6 @@ export default function CrewPage() {
     (_, i) => stateOf(i) === "working" || stateOf(i) === "gate",
   );
   const doneCount = AGENTS.filter((_, i) => stateOf(i) === "done").length;
-  const spriteCols = Math.max(...agent.sprite.map((r) => r.length));
 
   return (
     <div className="crew-page">
@@ -468,45 +467,41 @@ export default function CrewPage() {
 
             <p className="inspect-tagline">{agent.tagline}</p>
 
+            {/* The whole sheet the character is played from: one row per state,
+                four frames each. The row they're in right now is marked, so the
+                portrait above and this strip explain each other. */}
             <div className="inspect-grid">
               <div className="inspect-grid-head">
-                <span className="win-title">
-                  SPRITE {spriteCols}×{agent.sprite.length}
-                </span>
+                <span className="win-title">SHEET 4×5</span>
                 <span className="ramp" aria-hidden="true">
                   <i style={{ background: agent.accentLit }} />
                   <i style={{ background: agent.accent }} />
                   <i style={{ background: agent.accentDim }} />
                 </span>
               </div>
-              <div
-                className="pixel-grid"
-                style={{
-                  gridTemplateColumns: `repeat(${spriteCols}, 1fr)`,
-                  gridTemplateRows: `repeat(${agent.sprite.length}, 1fr)`,
-                }}
-                aria-hidden="true"
+              <ol
+                className="sheet-rows"
+                style={{ ["--sheet" as string]: `url(${artFor(agent).sheet})` }}
+                aria-label={`${agent.codename}'s animation frames`}
               >
-                {agent.sprite.map((row, y) =>
-                  row.split("").map((ch, x) => (
-                    <span
-                      key={`${x}-${y}`}
-                      style={{
-                        background:
-                          ch === "."
-                            ? "transparent"
-                            : ch === "A"
-                              ? agent.accent
-                              : ch === "H"
-                                ? agent.accentLit
-                                : ch === "B"
-                                  ? agent.accentDim
-                                  : PALETTE[ch],
-                      }}
-                    />
-                  )),
-                )}
-              </div>
+                {SHEET_ROWS.map((row, r) => (
+                  <li
+                    key={row}
+                    className={"sheet-row" + (row === agentState ? " now" : "")}
+                    aria-current={row === agentState ? "true" : undefined}
+                  >
+                    <span className="sheet-label">{STATE_LABEL[row]}</span>
+                    <span className="sheet-frames" aria-hidden="true">
+                      {[0, 1, 2, 3].map((c) => (
+                        <i
+                          key={c}
+                          style={{ backgroundPosition: `${(c * 100) / 3}% ${r * 25}%` }}
+                        />
+                      ))}
+                    </span>
+                  </li>
+                ))}
+              </ol>
             </div>
           </aside>
         </div>

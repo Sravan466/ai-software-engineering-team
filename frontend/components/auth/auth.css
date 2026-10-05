@@ -147,7 +147,6 @@
   }
   .door-codename { display: none; }
   .door-agent .sprite { --sprite-size: 36px !important; }
-  .door-agent .sprite svg { width: 36px; height: 36px; }
   .door-panel {
     justify-content: flex-start;
     gap: 24px;

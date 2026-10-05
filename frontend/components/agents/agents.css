@@ -24,8 +24,8 @@
 
 /* ── sprite shell ──
    Parts are `sprite-*`; motion signatures are `motion-*`. Keeping them in
-   separate namespaces matters: an agent whose signature is "scan" would
-   otherwise match the `.sprite-scan` visor overlay and inherit its positioning.
+   separate namespaces matters: an agent whose signature is "scan" must never
+   match a `.sprite-*` part and inherit its positioning.
    Size arrives as --sprite-size rather than a width attribute, so a breakpoint
    can shrink the whole crew without the component knowing about breakpoints.
    ── */
@@ -36,17 +36,75 @@
   width: var(--sprite-size, 48px);
   height: var(--sprite-size, 48px);
   line-height: 0;
-  image-rendering: pixelated;
-  transform-origin: 50% 92%;
+  /* The feet sit at 95% of every sheet cell (scripts/agent_art.py), so the
+     signatures pivot and squash from the floor, not the middle of the body. */
+  transform-origin: 50% 95%;
 }
-.sprite svg {
-  position: relative;
-  display: block;
-  overflow: visible;
-  /* Opt out of the global 16px icon floor — the shell owns the size here. */
+
+/* ── the sheet ──
+   4 frames across, 5 rows down: queued, working, done, rejected, gate. The
+   row is picked with background-position-y and frames are stepped with
+   background-position-x, so changing state never reloads anything — one
+   image per agent, already decoded.
+
+   The art is painted, not a 1px grid, so it is scaled smoothly: nearest-
+   neighbour on a downscale drops whole outline pixels and the figure shimmers. */
+.sprite-sheet,
+.sprite-still {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
 }
+.sprite-sheet {
+  background-image: var(--sheet);
+  background-size: 400% 500%;
+  background-repeat: no-repeat;
+  background-position: 0% 0%;
+}
+.sprite-still {
+  display: block;
+  max-width: none;
+  object-fit: contain;
+  user-select: none;
+}
+
+.sprite.is-working .sprite-sheet  { background-position-y: 25%; }
+.sprite.is-done .sprite-sheet     { background-position-y: 50%; }
+.sprite.is-rejected .sprite-sheet { background-position-y: 75%; }
+.sprite.is-gate .sprite-sheet     { background-position-y: 100%; }
+
+/* jump-none puts all four frames on screen for a quarter of the cycle each:
+   0, 33.3, 66.7, 100% is frame 1 to 4 of a 400%-wide sheet. */
+@keyframes sheet-4 {
+  from { background-position-x: 0%; }
+  to   { background-position-x: 100%; }
+}
+/* Rejected stops on frame 3 — the slump — and holds it. Frame 4 is the
+   recovery, and a rejected agent hasn't recovered. */
+@keyframes sheet-to-slump {
+  from { background-position-x: 0%; }
+  to   { background-position-x: 66.667%; }
+}
+
+/* Working: the job, looped, at the character's own tempo. */
+.sprite.is-working .sprite-sheet { animation: sheet-4 var(--frames, 720ms) steps(4, jump-none) infinite; }
+.sprite.is-working.motion-nod     { --frames: 880ms; }
+.sprite.is-working.motion-drift   { --frames: 1040ms; }
+.sprite.is-working.motion-thrum   { --frames: 600ms; }
+.sprite.is-working.motion-flicker { --frames: 480ms; }
+.sprite.is-working.motion-scan    { --frames: 800ms; }
+.sprite.is-working.motion-guard   { --frames: 960ms; }
+.sprite.is-working.motion-launch  { --frames: 720ms; }
+.sprite.is-working.motion-tally   { --frames: 800ms; }
+
+/* Gate: the "!" is lit on frames 1–2 and dark on 3–4 — a blink slow enough to
+   read as "waiting on you", not as an alarm. */
+.sprite.is-gate .sprite-sheet { animation: sheet-4 1.4s steps(4, jump-none) infinite; }
+
+/* Done plays once and ends back at rest; rejected plays into the slump. */
+.sprite.is-done .sprite-sheet { animation: sheet-4 760ms steps(4, jump-none) 1 both; }
+.sprite.is-rejected .sprite-sheet { animation: sheet-to-slump 600ms steps(3, jump-none) 1 both; }
 
 /* Queued crew are dimmed and desaturated — present, not yet involved. */
 .sprite.is-queued { filter: saturate(0.66) brightness(0.74); }
@@ -84,25 +142,6 @@
     transparent 76%
   );
   transform: scaleX(1.22);
-}
-
-/* The visor scanline, only while an agent is actually working. Inset tracks the
-   visor band of the 24x24 grid: rows 7–9, columns 8–15. */
-.sprite-scan {
-  position: absolute;
-  inset: 28% 32% 57% 32%;
-  pointer-events: none;
-  opacity: 0;
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    color-mix(in srgb, var(--agent) 75%, transparent) 45%,
-    transparent 55%
-  );
-}
-.sprite.is-working .sprite-scan {
-  opacity: 1;
-  animation: visor-scan 1.5s steps(6, end) infinite;
 }
 
 /* A glow that belongs to whichever character is lit. */
@@ -198,10 +237,10 @@
 .agent-card:hover .sprite.motion-guard   { animation: sig-guard 1.2s steps(3, end) 1; }
 .agent-card:hover .sprite.motion-launch  { animation: sig-launch 1.2s steps(4, end) 1; }
 .agent-card:hover .sprite.motion-tally   { animation: sig-tally 1.6s steps(6, end) 1; }
-
-@keyframes visor-scan {
-  0%   { transform: translateY(-120%); }
-  100% { transform: translateY(220%); }
+/* …and shows what they do: one pass of their working row. */
+.agent-card:hover .sprite-sheet {
+  background-position-y: 25%;
+  animation: sheet-4 800ms steps(4, jump-none) 1 both;
 }
 
 /* ===========================================================================
@@ -1397,15 +1436,51 @@
    shadow — shown as the ramp they are. */
 .ramp { display: inline-flex; border: 1px solid var(--line-2); border-radius: 2px; overflow: hidden; }
 .ramp i { width: 15px; height: 9px; }
-.pixel-grid {
-  display: grid;
-  gap: 1px;
-  width: 132px;
-  aspect-ratio: 1;
-  padding: 5px;
+/* The sheet, laid out as the contact strip it is: a label per state and its
+   four frames. Each frame is the same background as the live sprite, cropped
+   by position, so this can never disagree with what plays above it. */
+.sheet-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--bg-sunken);
+}
+.sheet-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+}
+.sheet-row.now {
+  border-color: color-mix(in srgb, var(--agent) 55%, transparent);
+  background: color-mix(in srgb, var(--agent) 9%, transparent);
+}
+.sheet-label {
+  font-family: var(--pixel);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.sheet-row.now .sheet-label { color: var(--agent); }
+.sheet-frames { display: inline-flex; gap: 2px; }
+.sheet-frames i {
+  width: 34px;
+  height: 34px;
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.025);
+  background-image: var(--sheet);
+  background-size: 400% 500%;
+  background-repeat: no-repeat;
 }
 
 /* ── scenario bar ── */
@@ -1508,10 +1583,16 @@
     animation: none !important;
     transform: none !important;
   }
+  /* No frames play; each state holds the one frame that says it — the job
+     mid-swing, the fist pump, the slump, the "!" lit. */
+  .sprite .sprite-sheet { animation: none !important; }
+  .sprite.is-working .sprite-sheet,
+  .sprite.is-done .sprite-sheet { background-position-x: 33.333%; }
+  .sprite.is-rejected .sprite-sheet { background-position-x: 66.667%; }
+  .agent-card:hover .sprite-sheet { background-position-x: 0%; }
   /* The working agent stays identifiable without moving. */
   .sprite.is-working { outline: 2px solid var(--agent); outline-offset: 2px; }
   .sprite.is-gate { outline: 2px dashed var(--agent); outline-offset: 2px; }
-  .sprite-scan { display: none; }
   .sprite.grounded.is-working .sprite-ground,
   .sprite.grounded.is-gate .sprite-ground { transform: none; }
   .p-drone { animation: none; }

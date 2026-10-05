@@ -4,31 +4,29 @@
  * Each pipeline phase is run by a named character rather than an anonymous job
  * title, because watching eight specialists hand work to each other is the thing
  * this product actually does. A persona carries: a codename, a colour ramp that
- * is only ever theirs, a 24x24 sprite, a motion signature, and a voice — short
+ * is only ever theirs, an animated sprite sheet, a motion signature, and a voice — short
  * status lines written the way that character would write them.
  *
  * `key` matches the backend phase key in app/agents/*.
  *
- * ── How the sprites are drawn ──────────────────────────────────────────────
- * Two rules from pixel-art practice do the heavy lifting here, and both were
- * missing from the first pass:
+ * ── How the characters are drawn ──────────────────────────────────────────
+ * The art is raster: a sprite sheet per agent in public/agents/, cut from the
+ * generated sheets in assets/ by scripts/agent_art.py (see `artFor`). Two
+ * rules from the original 24x24 pixel pass still hold, and the art was
+ * generated against them:
  *
- *   1. SILHOUETTE FIRST. A sprite has to be identifiable with every colour
- *      knocked out. So no two crew members share an outline: SCOPE has a cap
+ *   1. SILHOUETTE FIRST. A character has to be identifiable with every colour
+ *      knocked out. So no two crew members share an outline: SCOPE has a hat
  *      brim, ATLAS a survey spire, FORGE a raised welding shield, PRISM a pair
  *      of ear cups, SIEVE a loupe held up beside the head, WARDEN a crest and a
- *      slab shield, RELAY a pair of thruster fins, LEDGER a tally column. Colour
- *      is then confirmation, not the only signal — which is also what makes the
- *      roster survive colour blindness and a 30px render.
+ *      slab shield, RELAY a pair of thruster fins, LEDGER an eyeshade and a
+ *      tally column. Colour is then confirmation, not the only signal — which
+ *      is also what makes the roster survive colour blindness and an 18px render.
  *
  *   2. HUE-SHIFTED RAMPS, not brightness ramps. Every agent carries three tones:
  *      `accent` (base), `accentLit` (highlight, rotated warm) and `accentDim`
- *      (shadow, rotated cool). Darkening a single hue reads as flat plastic;
- *      rotating it as the value drops is what makes a 24px figure look lit.
- *
- * The grid grew 16 → 24 because eight distinguishable professions do not fit in
- * 16 rows once you spend nine of them on a head. 24 is still cheap: rows are
- * run-length merged into rects at render time.
+ *      (shadow, rotated cool). The art is painted in them, and the UI uses the
+ *      same three for everything that belongs to that agent.
  */
 
 export type AgentMotion =
@@ -62,33 +60,11 @@ export type Persona = {
   /** Voice: short status lines, in character, per state. */
   lines: { queued: string; working: string; done: string; rejected: string };
   debate?: boolean;
-  /** 24x24 sprite. Keys index PALETTE below; "." is transparent. */
-  sprite: string[];
   /**
    * The thing on their desk. 14x12, drawn from DESK_PALETTE plus the agent's
    * own A/H/B ramp — a cabin with a generic monitor in it belongs to nobody.
    */
   deskProp: string[];
-};
-
-/**
- * Shared sprite palette — the materials every crew member is made of.
- * Per-agent colours are substituted at render time:
- *   A → accent, H → accentLit, B → accentDim.
- * Each material is a ramp, not a flat fill, and every ramp is hue-shifted:
- * shadows drift blue, highlights drift warm.
- */
-export const PALETTE: Record<string, string> = {
-  o: "#05060c", // outline — near-black, blue-cast so it sits in the room
-  V: "#0d1428", // visor glass, deep
-  v: "#1e2f57", // visor glass, lit
-  E: "#dcfbff", // eye light
-  M: "#49536a", // metal, base
-  m: "#7e8ca8", // metal, highlight
-  N: "#242b3c", // metal, shadow
-  W: "#dfe4ee", // panel, lit
-  X: "#8b95ab", // panel, mid
-  K: "#141926", // undersuit
 };
 
 /**
@@ -107,13 +83,21 @@ export const DESK_PALETTE: Record<string, string> = {
   L: "#22d3ee", // exhaust / indicator
 };
 
+/**
+ * Where an agent's art lives. `sheet` is 4 frames across and 5 rows down, one
+ * row per SpriteState in SHEET_ROWS order; `still` is a small single frame for
+ * renders too small for the sheet to read.
+ */
+export function artFor(a: Persona): { sheet: string; still: string } {
+  const slug = a.codename.toLowerCase();
+  return { sheet: `/agents/${slug}.webp`, still: `/agents/${slug}-still.webp` };
+}
+
 /** Build the render palette for one agent's desk prop. */
 export function deskPaletteFor(a: Persona): Record<string, string> {
   return { ...DESK_PALETTE, A: a.accent, H: a.accentLit, B: a.accentDim };
 }
 
-// Rows 7–13 (head), 19–23 (stance) are common to the crew, so eight very
-// different silhouettes still read as one team wearing one uniform.
 export const AGENTS: Persona[] = [
   {
     key: "product_manager",
@@ -135,32 +119,6 @@ export const AGENTS: Persona[] = [
       done: "Scope locked",
       rejected: "Rethinking scope",
     },
-    sprite: [
-      "........................",
-      "........................",
-      "......oooooooooooo......",
-      ".....oAHHHHHHHHHHAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "...oBBBBBBBBBBBBBBBBo...",
-      "....oooooooooooooooo....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAVEEvvEEVAAo.....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "......oAAAAAAAAAAo......",
-      ".......ooAAAAAAoo...oooo",
-      "........oKKKKKKo....oWWo",
-      "....oooBBBBBBBBBBoo.oXXo",
-      "...oBBBWWWWWWWWWWBo.oWWo",
-      "...oBBBWXooXXooXWBo.oXXo",
-      "...oBBBWXXooooXXWBo.oWWo",
-      "...oBBBWWWWWWWWWWBo.oooo",
-      "....oooBBBBBBBBBBoo.....",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      ".....oMMMMo..oMMMMo.....",
-      ".....oooooo..oooooo.....",
-    ],
     deskProp: [
       "...oooooooo...",
       "..oXXoooXXo...",
@@ -196,32 +154,6 @@ export const AGENTS: Persona[] = [
       done: "Architecture set",
       rejected: "Redrawing",
     },
-    sprite: [
-      "...........oo...........",
-      "..........oHHo..........",
-      "..........oAAo..........",
-      "......oooooAAooooo......",
-      ".....oAHHHHHHHHHHAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "....oooooooooooooooo....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAVEEvvEEVAAo.....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "......oAAAAAAAAAAo......",
-      ".......ooAAAAAAoo.......",
-      "........oKKKKKKo........",
-      "....oooBBBBBBBBBBooo....",
-      "...oBBBWWWWWWWWWWBBBo...",
-      ".ooBBBBWXoXoXoXWBBBBoo..",
-      ".oMmoBBWXoXoXoXWBBomMo..",
-      "..oooBBWWWWWWWWWWBooo...",
-      "....oooBBBBBBBBBBooo....",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      ".....oMMMMo..oMMMMo.....",
-      ".....oooooo..oooooo.....",
-    ],
     deskProp: [
       "..oooooooooo..",
       "..oSSSSSSSSo..",
@@ -258,32 +190,6 @@ export const AGENTS: Persona[] = [
       done: "Endpoints up",
       rejected: "Tearing it out",
     },
-    sprite: [
-      "........................",
-      "....oooooooooooooooo....",
-      "....oNmMMMMMMMMMMmNo....",
-      "....oNMMMMMMMMMMMMNo....",
-      "....oooooooooooooooo....",
-      ".....oAHHHHHHHHHHAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAVEEvvEEVAAo.....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "......oAAAAAAAAAAo......",
-      ".......ooAAAAAAoo.......",
-      "........oKKKKKKo........",
-      "..ooooooBBBBBBBBBBoooooo",
-      "..oBBBBBWWWWWWWWWWBBBBBo",
-      "..oBBBBBWoooooooWBBBBBBo",
-      "..oBBBBBWXXXXXXXWBBBBBBo",
-      "..oooBBBWWWWWWWWWWBBBooo",
-      "....oooBBBBBBBBBBooo....",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      "....ooMMMMo..oMMMMoo....",
-      "....oooooo....oooooo....",
-    ],
     deskProp: [
       "....oooo......",
       "...oAHHAo.....",
@@ -319,32 +225,6 @@ export const AGENTS: Persona[] = [
       done: "Interface built",
       rejected: "Starting the layout over",
     },
-    sprite: [
-      "........................",
-      "........................",
-      "....oooooooooooooooo....",
-      "....oHHHHHHHHHHHHHHo....",
-      ".....oAAAAAAAAAAAAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "..ooooAAAAAAAAAAAAoooo..",
-      "..oHHoAAVVVVVVVVAAoHHo..",
-      "..oHHoAAVEEvvEEVAAoHHo..",
-      "..oAAoAAVVVVVVVVAAoAAo..",
-      "..ooooAAAAAAAAAAAAoooo..",
-      "......oAAAAAAAAAAo......",
-      ".......ooAAAAAAoo.......",
-      "........oKKKKKKo........",
-      "....oooBBBBBBBBBBooo....",
-      "...oBBBWWWWWWWWWWBBBo...",
-      "...oBBBWHHAAAAHHWBBBo...",
-      "...oBBBWXXWWWWXXWBBBo...",
-      "...oBBBWWWWWWWWWWBBBo...",
-      "....oooBBBBBBBBBBooo....",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      ".....oMMMMo..oMMMMo.....",
-      ".....oooooo..oooooo.....",
-    ],
     deskProp: [
       "..............",
       "...oooooooo...",
@@ -380,32 +260,6 @@ export const AGENTS: Persona[] = [
       done: "Suite green",
       rejected: "Re-testing",
     },
-    sprite: [
-      "........................",
-      "........................",
-      ".........oooooo.........",
-      ".......ooAAAAAAoo.......",
-      "......oAHHHHHHHHAo......",
-      ".....oAAAAAAAAAAAAo.....",
-      "....oooooooooooooooo....",
-      ".ooo.oAAVVVVVVVVAAo.....",
-      "oAHAooAAVEEvvEEVAAo.....",
-      "oHEHooAAVVVVVVVVAAo.....",
-      "oAHAooAAAAAAAAAAAAo.....",
-      ".oMo..oAAAAAAAAAAo......",
-      "..oMo..ooAAAAAAoo.......",
-      "...oMo..oKKKKKKo........",
-      "....oooBBBBBBBBBBooo....",
-      "...oBBBWWWWWWWWWWBBBo...",
-      "...oBBBWXooXXooXWBBBo...",
-      "...oBBBWXXooooXXWBBBo...",
-      "...oBBBWWWWWWWWWWBBBo...",
-      "....oooBBBBBBBBBBooo....",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      ".....oMMMMo..oMMMMo.....",
-      ".....oooooo..oooooo.....",
-    ],
     deskProp: [
       "....oooo......",
       "...oXXXXo.....",
@@ -441,32 +295,6 @@ export const AGENTS: Persona[] = [
       done: "Surface hardened",
       rejected: "Re-auditing",
     },
-    sprite: [
-      "...........oo...........",
-      "..........oHHo..........",
-      ".........oHHHHo.........",
-      "......oooHHHHHHooo......",
-      ".....oAHHHHHHHHHHAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "....oooooooooooooooo....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAVEEvvEEVAAo.....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "......oAAAAAAAAAAo......",
-      ".oooo..ooAAAAAAoo.......",
-      "oMmmMo..oKKKKKKo........",
-      "oMHHMooBBBBBBBBBBooo....",
-      "oMHHMoBWWWWWWWWWWBBBo...",
-      "oMmHmoBWXooXXooXWBBBo...",
-      "oMmmmoBWXXooooXXWBBBo...",
-      ".oMMo.BWWWWWWWWWWBBBo...",
-      "..oo..oBBBBBBBBBBooo....",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      ".....oMMMMo..oMMMMo.....",
-      ".....oooooo..oooooo.....",
-    ],
     deskProp: [
       "..............",
       ".....oooo.....",
@@ -502,32 +330,6 @@ export const AGENTS: Persona[] = [
       done: "Ready to ship",
       rejected: "Rebuilding the pipeline",
     },
-    sprite: [
-      ".................o......",
-      "................oHo.....",
-      "......ooooooooooooo.....",
-      ".....oAHHHHHHHHHHAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "....oooooooooooooooo....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAVEEvvEEVAAo.....",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "......oAAAAAAAAAAo......",
-      ".......ooAAAAAAoo.......",
-      "........oKKKKKKo........",
-      ".oM.oooBBBBBBBBBBooo.Mo.",
-      "oMm.oBBBWWWWWWWWBBBo.mMo",
-      "oMm.oBBBWXXooXXWBBBo.mMo",
-      "oMm.oBBBWXoXXoXWBBBo.mMo",
-      "oMm.oBBBWWWWWWWWBBBo.mMo",
-      ".oM.oooBBBBBBBBBBooo.Mo.",
-      "..o..ooBBBBBBBBBBoo..o..",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      ".....oMMMMo..oMMMMo.....",
-      ".....oooooo..oooooo.....",
-    ],
     deskProp: [
       "......oo......",
       ".....oHHo.....",
@@ -563,32 +365,6 @@ export const AGENTS: Persona[] = [
       done: "Budget filed",
       rejected: "Recounting",
     },
-    sprite: [
-      "........................",
-      "........................",
-      "........................",
-      "......oooooooooooo......",
-      ".....oAHHHHHHHHHHAo.....",
-      ".....oAAAAAAAAAAAAo.....",
-      "...ooHHHHHHHHHHHHHHoo...",
-      ".....oAAVVVVVVVVAAo.....",
-      ".....oAAVEEvvEEVAAo.ooo.",
-      ".....oAAVVVVVVVVAAo.oWo.",
-      ".....oAAAAAAAAAAAAo.oXo.",
-      "......oAAAAAAAAAAo..oWo.",
-      ".......ooAAAAAAoo...oXo.",
-      "........oKKKKKKo....oWo.",
-      "....oooBBBBBBBBBBoo.oXo.",
-      "...oBBBWWWWWWWWWWBo.oWo.",
-      "...oBBBWXXoXXoXXWBo.oXo.",
-      "...oBBBWXXoXXoXXWBo.oWo.",
-      "...oBBBWWWWWWWWWWBo.ooo.",
-      "....oooBBBBBBBBBBoo.....",
-      "......oBBBo..oBBBo......",
-      "......oBBBo..oBBBo......",
-      ".....oMMMMo..oMMMMo.....",
-      ".....oooooo..oooooo.....",
-    ],
     deskProp: [
       "..oooooooooo..",
       "..oWWWWWWWWo..",
