@@ -3,12 +3,6 @@ import { artFor, type Persona } from "./personas";
 export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
 
 /**
- * Row order of every agent's sprite sheet, top to bottom. The sheets were
- * generated in this order; agents.css positions the rows by it.
- */
-export const SHEET_ROWS: SpriteState[] = ["queued", "working", "done", "rejected", "gate"];
-
-/**
  * Below this a 4x5 sheet cell is a few pixels of noise, so the still is drawn
  * instead — one small pre-scaled frame that holds its silhouette at 18px.
  */

@@ -3,11 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AGENTS,
-  artFor,
   deskPaletteFor,
   type Persona,
 } from "@/components/agents/personas";
-import AgentSprite, { SHEET_ROWS, type SpriteState } from "@/components/agents/AgentSprite";
+import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import PixelArt from "@/components/agents/PixelArt";
 import {
   PLANT,
@@ -276,9 +275,22 @@ export default function CrewPage() {
                   <b>AI SWE TEAM</b>
                   <span>{SCENARIOS[scenario].label.toUpperCase()}</span>
                 </span>
-                <span className="board-bar">
+                {/* One cell per phase. State classes are `is-*` on purpose: a bare
+                    `working` here picks up the build view's global .working panel
+                    (padding, radius) and the cell balloons into a pill. */}
+                <span
+                  className="board-bar"
+                  role="progressbar"
+                  aria-label="Phases approved"
+                  aria-valuemin={0}
+                  aria-valuemax={AGENTS.length}
+                  aria-valuenow={doneCount}
+                  aria-valuetext={`${doneCount} of ${AGENTS.length} approved${
+                    activeIndex >= 0 ? `, ${AGENTS[activeIndex].codename} on deck` : ""
+                  }`}
+                >
                   {AGENTS.map((a, i) => (
-                    <i key={a.key} className={"board-tick " + stateOf(i)} />
+                    <i key={a.key} className={"board-tick is-" + stateOf(i)} />
                   ))}
                 </span>
                 <span className="board-row board-row-dim">
@@ -467,42 +479,6 @@ export default function CrewPage() {
 
             <p className="inspect-tagline">{agent.tagline}</p>
 
-            {/* The whole sheet the character is played from: one row per state,
-                four frames each. The row they're in right now is marked, so the
-                portrait above and this strip explain each other. */}
-            <div className="inspect-grid">
-              <div className="inspect-grid-head">
-                <span className="win-title">SHEET 4×5</span>
-                <span className="ramp" aria-hidden="true">
-                  <i style={{ background: agent.accentLit }} />
-                  <i style={{ background: agent.accent }} />
-                  <i style={{ background: agent.accentDim }} />
-                </span>
-              </div>
-              <ol
-                className="sheet-rows"
-                style={{ ["--sheet" as string]: `url(${artFor(agent).sheet})` }}
-                aria-label={`${agent.codename}'s animation frames`}
-              >
-                {SHEET_ROWS.map((row, r) => (
-                  <li
-                    key={row}
-                    className={"sheet-row" + (row === agentState ? " now" : "")}
-                    aria-current={row === agentState ? "true" : undefined}
-                  >
-                    <span className="sheet-label">{STATE_LABEL[row]}</span>
-                    <span className="sheet-frames" aria-hidden="true">
-                      {[0, 1, 2, 3].map((c) => (
-                        <i
-                          key={c}
-                          style={{ backgroundPosition: `${(c * 100) / 3}% ${r * 25}%` }}
-                        />
-                      ))}
-                    </span>
-                  </li>
-                ))}
-              </ol>
-            </div>
           </aside>
         </div>
 

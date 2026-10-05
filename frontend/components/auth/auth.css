@@ -41,11 +41,16 @@
 }
 .door-floor {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 76px));
-  gap: 28px 20px;
+  grid-template-columns: repeat(4, minmax(0, 152px));
+  gap: 32px 24px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
 }
+/* The crew is the whole left half, so they stand at portrait size: as wide as
+   their cell allows, up to 136px. Sized off the cell rather than the window,
+   so a narrow panel can never push a figure into its neighbour. */
+.door-agent { container-type: inline-size; }
+.door-agent .sprite { --sprite-size: min(136px, 100cqi) !important; }
 .door-agent {
   display: flex;
   flex-direction: column;

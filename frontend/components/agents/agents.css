@@ -840,17 +840,99 @@
 }
 .board-row b { color: var(--accent); font-weight: 400; }
 .board-row-dim { color: var(--ink-3); }
-.board-bar { display: flex; gap: 3px; }
-.board-tick {
-  flex: 1;
-  height: 5px;
-  background: #1b2331;
-  transition: background var(--tr), box-shadow var(--tr);
+/* The bar is an LED channel set into the board: a recessed strip with one
+   cell per phase. Every state has its own shape as well as its own colour, so
+   it reads with the colour turned off — lit solid when approved, a light
+   running through it while someone works, an outline blinking when it waits
+   on you, hatched when it was sent back, a dark slot when it hasn't started. */
+.board-bar {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 3px;
+  margin: 3px 0 1px;
+  padding: 3px;
+  background: #04070d;
+  box-shadow:
+    0 0 0 1px #151d2b,
+    inset 0 2px 0 rgba(0, 0, 0, 0.7),
+    0 1px 0 rgba(150, 180, 230, 0.07);
 }
-.board-tick.done { background: var(--ok); }
-.board-tick.working { background: var(--run); box-shadow: 0 0 7px -1px var(--run); }
-.board-tick.gate { background: var(--warn); box-shadow: 0 0 7px -1px var(--warn); }
-.board-tick.rejected { background: var(--bad); }
+.board-tick {
+  position: relative;
+  height: 8px;
+  background: #0f1622;
+  box-shadow:
+    inset 0 1px 0 rgba(150, 180, 230, 0.05),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55);
+  transition: background-color var(--tr), box-shadow var(--tr);
+}
+/* Approved: lit, with a one-pixel bevel — a lamp, not a flat fill. */
+.board-tick.is-done {
+  background: var(--ok);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 45%, var(--ok)),
+    inset 0 -2px 0 color-mix(in srgb, #000 32%, var(--ok)),
+    0 2px 6px -3px var(--ok);
+}
+/* Working: a block of light runs through the cell, left to right, in pixel
+   steps. A 250%-wide gradient panned across the cell, so nothing overflows. */
+.board-tick.is-working {
+  color: var(--run);
+  background-color: color-mix(in srgb, var(--run) 22%, #0b1220);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0 40%,
+    var(--run) 40% 60%,
+    transparent 60% 100%
+  );
+  background-size: 250% 100%;
+  background-repeat: no-repeat;
+  background-position: 100% 0;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--run) 55%, transparent),
+    0 2px 8px -3px var(--run);
+  animation: tick-run 1.1s steps(6, jump-none) infinite;
+}
+@keyframes tick-run {
+  from { background-position: 100% 0; }
+  to   { background-position: 0% 0; }
+}
+/* Waiting on you: outlined, the fill blinking on the same 1.4s beat as the
+   agent's "!" on the floor below, so the board and the figure blink together. */
+.board-tick.is-gate {
+  color: var(--warn);
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 1px var(--warn),
+    0 2px 8px -3px var(--warn);
+  animation: tick-await 1.4s steps(1, end) infinite;
+}
+@keyframes tick-await {
+  0%, 49%  { background-color: color-mix(in srgb, var(--warn) 70%, transparent); }
+  50%, 100% { background-color: transparent; }
+}
+/* Sent back: hatched, so it never reads as approved-but-red. */
+.board-tick.is-rejected {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--bad) 0 3px,
+    color-mix(in srgb, var(--bad) 28%, #0b1220) 3px 6px
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 70%, transparent);
+}
+/* On deck: a pixel caret over whoever has the work, in their state's colour. */
+.board-tick.is-working::before,
+.board-tick.is-gate::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  width: 6px;
+  height: 3px;
+  transform: translateX(-50%);
+  background: currentColor;
+  clip-path: polygon(0 0, 100% 0, 66% 100%, 33% 100%);
+}
 
 /* ── tier 2: the ground ──
    A real plane in perspective, not a flat repeat. The rotation is what supplies
@@ -1445,59 +1527,6 @@
   line-height: 1.55;
   font-style: italic;
 }
-.inspect-grid { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
-.inspect-grid-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-/* The three tones the character is actually built from — base, highlight,
-   shadow — shown as the ramp they are. */
-.ramp { display: inline-flex; border: 1px solid var(--line-2); border-radius: 2px; overflow: hidden; }
-.ramp i { width: 15px; height: 9px; }
-/* The sheet, laid out as the contact strip it is: a label per state and its
-   four frames. Each frame is the same background as the live sprite, cropped
-   by position, so this can never disagree with what plays above it. */
-.sheet-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0;
-  padding: 4px;
-  list-style: none;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-sm);
-  background: var(--bg-sunken);
-}
-.sheet-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 2px 2px 6px;
-  border: 1px solid transparent;
-  border-radius: 2px;
-}
-.sheet-row.now {
-  border-color: color-mix(in srgb, var(--agent) 55%, transparent);
-  background: color-mix(in srgb, var(--agent) 9%, transparent);
-}
-.sheet-label {
-  font-family: var(--pixel);
-  font-size: 7px;
-  letter-spacing: 0.08em;
-  color: var(--ink-3);
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.sheet-row.now .sheet-label { color: var(--agent); }
-.sheet-frames { display: inline-flex; gap: 2px; }
-.sheet-frames i {
-  width: 34px;
-  height: 34px;
-  border-radius: 2px;
-  background-color: rgba(255, 255, 255, 0.025);
-  background-image: var(--sheet);
-  background-size: 400% 500%;
-  background-repeat: no-repeat;
-}
-
 /* ── scenario bar ── */
 .win-foot {
   display: flex;
@@ -1605,6 +1634,13 @@
   .sprite.is-done .sprite-sheet { background-position-x: 33.333%; }
   .sprite.is-rejected .sprite-sheet { background-position-x: 66.667%; }
   .agent-card:hover .sprite:not(.is-working):not(.is-gate) .sprite-sheet { background-position-x: 0%; }
+  /* The board holds still: the running light parks mid-cell, the gate cell
+     stays lit. The outline and caret still say which phase has the work. */
+  .board-tick.is-working { animation: none; background-position: 50% 0; }
+  .board-tick.is-gate {
+    animation: none;
+    background-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  }
   /* The working agent stays identifiable without moving. */
   .sprite.is-working { outline: 2px solid var(--agent); outline-offset: 2px; }
   .sprite.is-gate { outline: 2px dashed var(--agent); outline-offset: 2px; }
