@@ -77,9 +77,8 @@ export default function SettingsPage() {
     <div className="settings-wrap">
       <h1 style={{ fontSize: "var(--t-2xl)" }}>Settings</h1>
       <p className="prose-lede" style={{ marginTop: 10 }}>
-        Run everything on models you host — on any local runtime — or add your own cloud keys
-        so the router can reach for a stronger model when a phase needs one. Keys are stored on
-        this backend only; they are never sent to the browser.
+        Run everything on models you host, or add cloud keys for phases that need a stronger
+        model.
       </p>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 24 }}>
@@ -125,7 +124,7 @@ const ORIGIN_LABEL: Record<LocalSource["origin"], string> = {
 const DEFAULT_ORIGIN: Record<string, string> = {
   chosen: "You chose it.",
   configured: "Named in this backend's configuration.",
-  detected: "Picked automatically — the first model found that can write. Choose one below to keep it.",
+  detected: "Picked automatically: the first model found that can write. Choose one below to keep it.",
 };
 
 // ── Local model sources ──────────────────────────────────────────────────────
@@ -241,8 +240,8 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
         </button>
       </div>
       <p className="muted" style={{ margin: "0 0 14px", fontSize: "var(--t-base)", lineHeight: 1.6 }}>
-        Runtimes on this machine are found by themselves — on loopback only, never beyond this
-        computer. Every model each one serves is listed; choose the one every agent falls back to.
+        Runtimes on this computer are found automatically. Pick the model every agent uses by
+        default.
       </p>
       <p className="field-hint" style={{ margin: "-6px 0 14px" }}>
         New to local models, or want to use the one on your own computer?{" "}
@@ -333,8 +332,8 @@ function DefaultNotice({
           <span className="notice-title">No local runtime reachable</span>
           <span className="notice-text">
             {tried ? <>Nothing answered at <span className="mono">{tried}</span>. </> : null}
-            Builds in Local mode need a model runtime serving at least one model. Start one —
-            any server that speaks the OpenAI API works — then rescan, or add its address below.
+            Local builds need a runtime with at least one model. Start one (any OpenAI-compatible
+            server works), then rescan or add its address below.
           </span>
         </div>
       </div>
@@ -347,8 +346,8 @@ function DefaultNotice({
         <div className="notice-body">
           <span className="notice-title">No local model can write</span>
           <span className="notice-text">
-            The runtimes below are answering, but none serves a model that completes text — and
-            every agent has to write. Add one to a runtime, then rescan.
+            The runtimes below are answering, but none has a model that writes text. Add one,
+            then rescan.
           </span>
         </div>
       </div>
@@ -381,8 +380,7 @@ function DefaultNotice({
           </span>
           <span className="notice-text">
             The default model isn&apos;t served there. {home?.can_download ? "Download it, or pick" : "Pick"}{" "}
-            one it does serve from the list below. A build won&apos;t start until the model it needs is
-            available.
+            one it does serve from the list below. Builds wait until it&apos;s available.
           </span>
           {home?.can_download && (
             <div className="notice-actions">
@@ -402,8 +400,8 @@ function DefaultNotice({
             <span className="mono">{name}</span> runs on a hosted service
           </span>
           <span className="notice-text">
-            {home?.label ?? "Its runtime"} sends this model elsewhere to run, so Local builds refuse
-            it. Choose a model that runs on your own hardware as the default.
+            {home?.label ?? "Its runtime"} runs this model elsewhere, so Local builds can&apos;t use
+            it. Pick a model that runs on your own hardware.
           </span>
         </div>
       </div>
@@ -418,9 +416,8 @@ function DefaultNotice({
             <span className="mono">{name}</span> can&apos;t run a build
           </span>
           <span className="notice-text">
-            The runtime {runtimeSays(status.model_capabilities?.[spec] ?? [])} — it can&apos;t write,
-            and every agent has to. Builds refuse to start on it, however each agent below is set.
-            Choose a model that writes.
+            The runtime {runtimeSays(status.model_capabilities?.[spec] ?? [])}, so it can&apos;t
+            write and builds won&apos;t start on it. Choose a model that writes.
           </span>
         </div>
       </div>
@@ -437,8 +434,7 @@ function DefaultNotice({
               className="badge badge-ok"
               style={{ marginLeft: 8, verticalAlign: "middle" }}
               title={
-                "Each agent's required output shape is sent to the model as a schema, so it " +
-                "cannot answer with anything else."
+                "The model must answer in each agent's required format."
               }
             >
               Shape-locked
@@ -446,8 +442,7 @@ function DefaultNotice({
           )}
         </span>
         <span className="notice-text">
-          Every agent runs on this unless you give one its own model below. Builds set to Local
-          run on your own hardware, at no cost.{" "}
+          Every agent uses this unless you give it its own model below. Local builds are free.{" "}
           {status.default_origin ? DEFAULT_ORIGIN[status.default_origin] : ""}
         </span>
       </div>
@@ -738,7 +733,7 @@ function SourceModelRow({
         {!canBuild && (
           <span
             className="badge"
-            title={`The runtime ${runtimeSays(reported)}. It can't write, so no agent can run on it — which is why it isn't offered as a build model.`}
+            title={`The runtime ${runtimeSays(reported)}. It can't write, so it isn't offered as a build model.`}
           >
             {reported.length > 0 ? `${reported.join(" · ")} only` : "can't write"}
           </span>
@@ -751,7 +746,7 @@ function SourceModelRow({
         {!model.is_local && (
           <span
             className="badge badge-warn"
-            title="This runtime sends the model to a hosted service to run. Local-only builds can't use it."
+            title="Runs on a hosted service. Local builds can't use it."
           >
             hosted
           </span>
@@ -759,7 +754,7 @@ function SourceModelRow({
         {canBuild && status.code_models.includes(model.spec) && (
           <span
             className="badge"
-            title="Its name suggests it was trained on code — a guess from the name, not a measurement."
+            title="Its name suggests a code model. That's a guess from the name."
           >
             code
           </span>
@@ -1146,7 +1141,7 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
                 aria-describedby={id("url-hint")}
               />
               <span className="field-hint" id={id("url-hint")}>
-                The server&apos;s root — a trailing <span className="mono">/v1</span> is fine.
+                The server&apos;s root. A trailing <span className="mono">/v1</span> is fine.
               </span>
             </div>
             <div className="field">
@@ -1187,8 +1182,7 @@ function AddSource({ onChanged }: { onChanged: (next: LocalStatus) => void }) {
               <span className="notice-body">
                 <span className="notice-title">This address is another computer</span>
                 <span className="notice-text">
-                  Every prompt a build sends it — your idea, the plans, the code — leaves this
-                  machine. Tick to confirm that is what you want.
+                  Your idea, plans and code will leave this computer. Tick to confirm.
                 </span>
               </span>
             </label>
@@ -1270,7 +1264,7 @@ function ModelCapability({ profile }: { profile: ModelProfile }) {
       <p className="field-hint" style={{ marginTop: 12 }}>
         {profile.source === "probe" && profile.context_limit
           ? `Reported by its runtime; it supports up to ${profile.context_limit.toLocaleString()}.`
-          : "Its runtime doesn't report a window, so the configured fallback is in force."}
+          : "Its runtime doesn't report a window, so the default is used."}
         {profile.clamp_reason ? ` It is ${profile.clamp_reason}.` : ""}
       </p>
 
@@ -1380,10 +1374,10 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
             {" "}on {sourceLabel(state, state.default_model)}
           </>
         ) : (
-          "no model yet — no local runtime serves one that writes"
+          "no model yet, because no local runtime serves one that writes"
         )}
-        . Give one its own model and that agent uses it from its next phase — no restart, no file
-        to edit. Only models a source actually serves appear here.
+        . Pick another model for an agent and it switches at its next phase, with no restart.
+        Only models a source serves are listed.
       </p>
 
       {state === null ? (
@@ -1401,9 +1395,8 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
                   {state ? sourceLabel(state, coder) : "a source"}
                 </span>
                 <span className="notice-text">
-                  Its name suggests it was trained on code, which is what the four building phases
-                  spend their time on. Worth trying — but it is a guess from a name rather than a
-                  measurement, so nothing reaches for it on its own.
+                  Its name suggests a code model, which may suit the four building phases. That&apos;s a
+                  guess from the name, so it&apos;s never picked automatically.
                 </span>
                 <div className="notice-actions">
                   <button
@@ -1436,7 +1429,7 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
           </ul>
 
           <div className="sec-head" style={{ marginTop: 22, marginBottom: 4 }}>
-            <h3 className="label">Everything else that costs a call</h3>
+            <h3 className="label">Other model calls</h3>
             <span className="rule" />
           </div>
           <ul className="role-rows">
@@ -1581,8 +1574,8 @@ function RoleLine({
         <span className="role-warn" role="status">
           {Icon.alert}
           <span>
-            <span className="mono">{modelName(row.assigned)}</span> can&apos;t write — a build won&apos;t
-            start while this agent is set to it.
+            <span className="mono">{modelName(row.assigned)}</span> can&apos;t write. Builds won&apos;t
+            start while this agent uses it.
           </span>
         </span>
       )}
@@ -1591,10 +1584,10 @@ function RoleLine({
           {Icon.alert}
           <span>
             <span className="mono">{modelName(row.assigned)}</span> isn&apos;t served by any running
-            source —{" "}
+            source, so{" "}
             {embeddings
-              ? "memory and document search are off until it is."
-              : "a build using this agent won't start until it is."}
+              ? "memory and document search are off."
+              : "builds using this agent won't start."}
           </span>
         </span>
       )}
@@ -1646,7 +1639,7 @@ function keyAdvice(
 function KeyModels({ models, picked, onPick }: { models: string[]; picked: string; onPick: (m: string) => void }) {
   return (
     <div className="key-models">
-      <span className="field-hint">This key can use — pick one, then Save:</span>
+      <span className="field-hint">Models this key can use. Pick one, then Save.</span>
       <div className="model-list">
         {models.map((m) => (
           <button
@@ -1804,9 +1797,9 @@ function ApiKeysCard() {
         <span className="rule" />
       </div>
       <p className="muted" style={{ margin: "0 0 6px", fontSize: "var(--t-base)", lineHeight: 1.6 }}>
-        Add your own keys to let Auto and Manual routing reach Claude, GPT or Gemini. Leave them
-        blank to stay entirely local. Each key is checked against its model when you save it, stored
-        encrypted on this backend, and never shown again — only its last four characters.
+        Add keys to use Claude, GPT or Gemini in Auto and Manual routing, or leave them blank to
+        stay local. Keys are checked when saved, encrypted on this server, and never sent to the
+        browser. Only the last four characters are shown.
       </p>
       <p className="field-hint key-safety">
         Safer keys: an OpenAI{" "}
@@ -1916,7 +1909,7 @@ function ApiKeysCard() {
                         <span className="notice-title">{info.advice.title}</span>
                         <span className="notice-text">
                           {info.advice.body}
-                          {info.during_build && " A build's own call was refused with this."}
+                          {info.during_build && " A build hit this error."}
                           {status !== "locked" && " Builds won't use this key until it passes a check."}
                         </span>
                       </>
@@ -2010,8 +2003,8 @@ function ApiKeysCard() {
                   </span>
                 ) : (
                   <>
-                    Saving checks the key: a free request, then a one-token request against the model
-                    (a tiny fraction of a cent). Get a key from{" "}
+                    Saving runs a quick test against the model (well under a cent). Get a key
+                    from{" "}
                     <a className="link" href={p.console} target="_blank" rel="noreferrer">
                       {p.company}
                     </a>
