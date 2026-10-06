@@ -104,9 +104,9 @@ export default function Mermaid({ source, id }: { source: string; id: string }) 
           <div className="notice-body">
             <span className="notice-title">This diagram couldn&apos;t be drawn</span>
             <span className="notice-text">
-              The agent&apos;s Mermaid definition is malformed, so it&apos;s shown as source
-              instead. Sending the phase back with &ldquo;fix the architecture diagram&rdquo;
-              usually gets a valid one. Reported: {state.reason.split("\n")[0]}
+              The Mermaid source is malformed, so it&apos;s shown as text. Send the phase back
+              with &ldquo;fix the architecture diagram&rdquo; to get a valid one.
+              Error: {state.reason.split("\n")[0]}
             </span>
           </div>
         </div>

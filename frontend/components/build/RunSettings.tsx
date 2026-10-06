@@ -172,8 +172,8 @@ function localBlocker(local: LocalStatus | null): RuntimeBlocker | null {
       title: "No local runtime reachable",
       text:
         (tried ? `Nothing answered at ${tried}, ` : "Nothing is answering, ") +
-        "so there's no model to hand this idea to. Setup walks through starting a runtime and " +
-        "connecting your computer; a cloud API key in Settings works too.",
+        "so there's no model to run this idea. Setup shows how to start a runtime and " +
+        "connect your computer, or add a cloud API key in Settings.",
       action: "Set up your computer",
       href: "/setup",
     };
@@ -194,8 +194,8 @@ function localBlocker(local: LocalStatus | null): RuntimeBlocker | null {
     return {
       title: `${modelName(local.default_model)} isn't on ${where}`,
       text: home?.can_download
-        ? `${where} is running but doesn't have the model this build would use. Downloading it is a one-time step.`
-        : `${where} is running but doesn't serve the model this build would use. ${home?.add_model ?? ""}`,
+        ? `${where} is running but doesn't have this build's model. You only need to download it once.`
+        : `${where} is running but doesn't serve this build's model. ${home?.add_model ?? ""}`,
       action: home?.can_download ? "Download the model" : "Choose in Settings",
       href: "/settings",
     };
@@ -233,9 +233,8 @@ export function runtimeBlocker(
         return {
           title: "Choose the model to pin",
           text:
-            "Manual routing runs every phase on the one model you choose. The models " +
-            "available run on another computer or a hosted service, so none is picked " +
-            "for you — choose one under “Model for every phase”.",
+            "Manual routing runs every phase on one model. The available models run on " +
+            "another computer or a hosted service, so pick one under “Model for every phase”.",
           action: "Review models in Settings",
           href: "/settings",
         };
@@ -247,10 +246,8 @@ export function runtimeBlocker(
       return {
         title: "No model to pin",
         text: onlyNonWriting
-          ? "Manual routing runs every phase on one model you choose. The local models " +
-            "found can't write, and no cloud key is set."
-          : "Manual routing runs every phase on one model you choose, and none is " +
-            "available — no local runtime serves a model, and no cloud key is set.",
+          ? "The local models found can't write, and no cloud key is set."
+          : "No local runtime serves a model, and no cloud key is set.",
         action: "Add a model",
         href: "/settings",
       };
@@ -467,8 +464,8 @@ export default function RunSettings({
               <span className="prefixed-suffix">/month</span>
             </div>
             <p className="field-hint">
-              Ledger estimates what the finished product costs to run. Over this, the
-              build stops and tells you instead of finishing quietly.
+              Ledger estimates what the finished product costs to run. Above this amount,
+              the build stops and tells you.
             </p>
           </div>
         )}
@@ -508,8 +505,8 @@ function OmittedModels({ models }: { models: OmittedModel[] }) {
           <span className="mono">{m.name}</span>
         </span>
       ))}
-      {one ? " isn't here" : " aren't here"} — the runtime {runtimeSays(does, !one)}. Every
-      agent has to write, so {one ? "it can't" : "they can't"} run a build.
+      {one ? " isn't here" : " aren't here"}. The runtime {runtimeSays(does, !one)}, so{" "}
+      {one ? "it can't" : "they can't"} run a build.
     </p>
   );
 }
@@ -668,7 +665,7 @@ function SkillPicker({
               {checking ? "Checking…" : "What would this idea get?"}
             </button>
             {!idea.trim() && (
-              <span className="field-hint">Write the idea first — it is what they match against.</span>
+              <span className="field-hint">Write the idea first. Skills are matched against it.</span>
             )}
           </div>
 

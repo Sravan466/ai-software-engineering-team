@@ -24,8 +24,8 @@ export default function BuildLine({
       <p className="build-line-strip" data-state="failed">
         {Icon.alert}
         <span>
-          {problems} compile problem{problems === 1 ? "" : "s"} left after the repair round — marked in the tree
-          below.
+          {problems} compile problem{problems === 1 ? "" : "s"} left after the repair round. They&apos;re marked in
+          the tree below.
         </span>
       </p>
     );
@@ -34,7 +34,7 @@ export default function BuildLine({
     return (
       <p className="build-line-strip" data-state="unchecked">
         {Icon.info}
-        <span>Some files could not be compiled here, so they are unchecked — not passed.</span>
+        <span>Some files couldn&apos;t be compiled here, so they&apos;re unchecked.</span>
       </p>
     );
   }

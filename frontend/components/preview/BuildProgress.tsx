@@ -83,11 +83,11 @@ export default function BuildProgress({ job }: { job: PreviewJob }) {
       <p className="mk-build-detail">
         {sections
           ? job.done > 0 && job.detail
-            ? `Last finished: ${job.detail}. Each section is its own call, checked against what it has to do before it is kept.`
-            : "Each section is its own call, checked against what it has to do before it is kept."
+            ? `Last finished: ${job.detail}. Each section is built and checked separately.`
+            : "Each section is built and checked separately."
           : job.stage === "queued"
-            ? "The pipeline is still using the model; the mockup starts as soon as it is free."
-            : "One call per pass, sized to the model you chose. A local model takes minutes for the whole site."}
+            ? "The pipeline is using the model. The mockup starts when it's free."
+            : "A local model takes a few minutes for the whole site."}
       </p>
     </div>
   );

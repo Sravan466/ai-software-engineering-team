@@ -53,8 +53,8 @@ export default function CharterPanel({
       <div className="charter charter-empty">
         {Icon.info}
         <p>
-          The architecture didn&apos;t name a stack this pipeline recognises, so nothing downstream
-          is being checked against one. Read the code for yourself before shipping it.
+          The architecture didn&apos;t name a stack we recognise, so later phases aren&apos;t checked
+          against one. Read the code yourself before shipping.
         </p>
       </div>
     );
@@ -66,7 +66,7 @@ export default function CharterPanel({
         <div className="sec-head" style={{ marginBottom: 12 }}>
           <h3 className="label">Stack charter</h3>
           <span className="rule" />
-          <span className="field-hint">Frozen here · binding on every phase after</span>
+          <span className="field-hint">Frozen here · applies to every later phase</span>
         </div>
       )}
       <dl className="charter-grid">
@@ -108,8 +108,8 @@ export function StackViolations({ notes }: { notes: string[] | null | undefined 
           ))}
         </ul>
         <span className="notice-text">
-          It was sent back with these named and came back disagreeing again. Approving puts two
-          incompatible halves in one archive — send it back with a note, or redo the architecture.
+          It was sent back once and still disagrees. Approving ships two stacks that don&apos;t fit
+          together. Send it back with a note, or redo the architecture.
         </span>
       </div>
     </div>

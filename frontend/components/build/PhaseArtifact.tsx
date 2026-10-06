@@ -78,8 +78,7 @@ export default function PhaseArtifact({
         <p className="artifact-flag" role="status">
           <strong>This doesn&apos;t match the shape {row.agent} declares.</strong>{" "}
           {row.schema_note ? `${row.schema_note}. ` : ""}
-          Checks and later phases that read these keys have nothing to read. Send it
-          back and the agent will try again.
+          Checks and later phases can&apos;t read it. Send it back to try again.
         </p>
       )}
 
@@ -158,9 +157,8 @@ function SkillsUsed({ row }: { row: PhaseResult }) {
           <span
             className="dryrun-none"
             title={
-              "Either nothing in the library matched this work, or what matched did " +
-              "not fit this model's share of the context window. Try the idea on the " +
-              "Skills page to see which."
+              "No skill matched, or the matches didn't fit in this model's context. " +
+              "Try the idea on the Skills page to see which."
             }
           >
             no skills

@@ -197,8 +197,8 @@ function ElementEditor(p: Props & { selection: Selection }) {
           <div className="notice-body">
             <span className="notice-title">One row of a list</span>
             <span className="notice-text">
-              This is drawn once per record from a pattern, so it can&apos;t be edited directly. Ask the crew below and the
-              pattern changes for every row.
+              Every row comes from one pattern, so you can&apos;t edit it directly. Ask the crew below to
+              change the pattern for all rows.
             </span>
           </div>
         </div>

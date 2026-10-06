@@ -186,7 +186,7 @@ export default function SecurityFindings({
           <div className="notice-body">
             <span className="notice-title">Couldn&apos;t load this build&apos;s findings</span>
             <span className="notice-text">
-              {error} Don&apos;t read this as nothing to answer for — it isn&apos;t.
+              {error} This doesn&apos;t mean there are no findings.
             </span>
             <div className="notice-actions">
               <button className="btn btn-sm btn-primary" onClick={refresh}>
@@ -209,7 +209,7 @@ export default function SecurityFindings({
             <span className="notice-text">
               {fixedByCrew.length
                 ? "Every serious finding was fixed by the crew and confirmed by a re-audit."
-                : "The security review reported no findings this build has to answer for."}
+                : "The security review found nothing that needs a decision."}
             </span>
           </div>
         </div>
@@ -234,7 +234,7 @@ export default function SecurityFindings({
           ) : open > 0 ? (
             <>
               <span className="dot dot-warn" aria-hidden="true" />
-              {open} open — none of them block shipping
+              {open} open, none blocking
             </>
           ) : (
             <>
@@ -245,7 +245,7 @@ export default function SecurityFindings({
         </span>
         <span className="rule" />
         {scope === "small" && (
-          <span className="field-hint">Medium, low and UI/UX findings — your call</span>
+          <span className="field-hint">Medium, low and UI/UX findings for you to decide</span>
         )}
       </div>
 
@@ -306,7 +306,7 @@ export default function SecurityFindings({
                     title={
                       f.owner_phase
                         ? `Send this back to ${agent?.codename ?? f.owner_phase} and re-run the review`
-                        : "Nothing in this build owns the file this points at, so there is no agent to send it to."
+                        : "No agent in this build owns this file, so it can't be sent back."
                     }
                   >
                     {mine && <span className="btn-spinner" aria-hidden="true" />}
@@ -329,7 +329,7 @@ export default function SecurityFindings({
                       id={`waive-${f.key}`}
                       className="input"
                       autoFocus
-                      placeholder="e.g. internal tool behind SSO — no untrusted browser reaches it"
+                      placeholder="e.g. internal tool behind SSO, no untrusted browser reaches it"
                       value={reason}
                       onChange={(e) => setReason(e.target.value)}
                       onKeyDown={(e) => {
@@ -360,8 +360,8 @@ export default function SecurityFindings({
                     Cancel
                   </button>
                   <p className="field-hint" style={{ flexBasis: "100%" }}>
-                    This is the only record anyone reading the build later has of why a known issue
-                    shipped, so write it for them.
+                    This is the only record of why a known issue shipped. Write it for whoever
+                    reads the build later.
                   </p>
                 </div>
               )}

@@ -129,7 +129,7 @@ const SPRITE_STATE: Record<NodeState, SpriteState> = {
 const NODE_STATUS: Record<NodeState, string> = {
   pending: "Queued",
   running: "Running",
-  redo: "Rejected — re-running",
+  redo: "Rejected, re-running",
   failed: "Stopped mid-phase",
   gate: "Needs your approval",
   done: "Done",
@@ -145,7 +145,7 @@ const NODE_STATUS: Record<NodeState, string> = {
 function waitingFor(project: Project, index: number): string {
   if (index === 0) {
     return project.status === "created"
-      ? "Queued — starts when you run the pipeline"
+      ? "Starts when you run the pipeline"
       : "Queued";
   }
   const prev = PHASES[index - 1];
@@ -156,18 +156,18 @@ function waitingFor(project: Project, index: number): string {
       // Reading the row alone is how the badge could say "Stalled" while the
       // step beneath it said the phase in front was still working.
       return effectiveStatus(project) === "stalled"
-        ? `Queued — ${prevName} stopped responding mid-phase`
-        : `Queued — ${prevName} is still working`;
+        ? `Queued · ${prevName} stopped responding`
+        : `Queued · ${prevName} is still working`;
     case "gate":
-      return `Queued — waiting on your review of ${prevName}'s work`;
+      return `Queued · waiting for your review of ${prevName}`;
     case "redo":
-      return `Queued — ${prevName} is running again`;
+      return `Queued · ${prevName} is running again`;
     case "failed":
-      return `Queued — ${prevName} stopped mid-phase`;
+      return `Queued · ${prevName} stopped mid-phase`;
     case "done":
-      return `Queued — next after ${prevName}`;
+      return `Queued · next after ${prevName}`;
     default:
-      return `Queued — behind ${prevName}`;
+      return `Queued · behind ${prevName}`;
   }
 }
 
@@ -609,31 +609,28 @@ function RunInterrupted({
     stalled: {
       title: "This build stopped responding",
       text:
-        "It is still marked as running, but nothing has reported progress in a while — " +
-        "usually the backend restarted mid-phase. Resuming re-runs the interrupted phase " +
-        "from the last checkpoint; everything already approved is kept.",
+        "No progress in a while. The backend probably restarted mid-phase. Resuming " +
+        "re-runs that phase from the last checkpoint and keeps everything approved.",
       action: "Resume from checkpoint",
     },
     paused: {
       title: "Waiting for your computer",
       text:
-        "The model this build runs on is on your computer, and it isn't connected. Nothing is " +
-        "lost: when the connector is back, the build carries on from the last finished phase " +
-        "by itself.",
+        "This build's model is on your computer, which isn't connected. Nothing is lost. " +
+        "The build picks up from the last finished phase when the connector is back.",
       action: "Resume now",
     },
     cancelled: {
       title: "You stopped this build",
       text:
-        "Every phase generated before the stop is kept. Resuming picks up from the last " +
-        "approved phase.",
+        "Everything made before the stop is kept. Resuming starts from the last approved phase.",
       action: "Resume",
     },
     failed: {
       title: "This build stopped after a model error",
       text:
-        "The most common cause is the local runtime being unavailable. Check in Settings that " +
-        "it's running and has the model, then pick it back up from where it left off.",
+        "Usually the local runtime is down. Check in Settings that it's running and has the " +
+        "model, then resume.",
       action: "Resume from checkpoint",
     },
   };
@@ -645,7 +642,7 @@ function RunInterrupted({
   if (help) {
     copy.failed = {
       title: help.title,
-      text: `${help.body} Or choose another model for this build's agents in Settings, then resume — everything approved so far is kept.`,
+      text: `${help.body} Or pick another model in Settings and resume. Approved work is kept.`,
       action: "Resume from checkpoint",
     };
   }
@@ -855,11 +852,9 @@ function BuildTab({
       <div className="card empty">
         <h3>Ready when you are</h3>
         <p>
-          Eight specialist agents will take this idea from requirements to a deployment
-          plan.{" "}
+          Eight agents take this idea from requirements to a deployment plan.{" "}
           {APPROVAL_BY_ID[project.approval_mode]?.running}{" "}
-          Wherever it stops, it hands you what the agent produced — the files, the
-          diagram, the data — so you can read it before you decide.
+          At each stop you see the files, diagram and data before you decide.
         </p>
         <button className="btn btn-primary" disabled={busy} onClick={() => act(() => api.run(id))}>
           {busy && <span className="btn-spinner" aria-hidden="true" />}
@@ -896,11 +891,10 @@ function BuildTab({
             <span className="notice-title">
               {doneCount === PHASES.length
                 ? "All eight phases approved"
-                : `This build is finished — ${doneCount} of ${PHASES.length} phases approved`}
+                : `Finished with ${doneCount} of ${PHASES.length} phases approved`}
             </span>
             <span className="notice-text">
-              Put it online in your own account, push it to your GitHub, or take a .zip —
-              all from Deliver.
+              Deploy it, push it to GitHub, or download a .zip from Deliver.
             </span>
             <div className="notice-actions">
               <button className="btn btn-sm btn-primary" onClick={() => onDeliver("deploy")}>
@@ -1311,7 +1305,7 @@ function SummaryTab({
                     title={
                       `${AGENT_BY_KEY[ph.key].codename} · ${ph.name}` +
                       (files > 0
-                        ? ` — ${files} ${files === 1 ? "file" : "files"} in the archive`
+                        ? ` · ${files} ${files === 1 ? "file" : "files"} in the archive`
                         : "")
                     }
                   >
@@ -1323,7 +1317,7 @@ function SummaryTab({
             </div>
           ) : (
             <p className="field-hint" style={{ margin: 0 }}>
-              Nothing yet — no phase has produced a file or a document.
+              No files or documents yet.
             </p>
           )}
           {/* "Produced nothing" is a verdict, and a phase that hasn't had its turn
@@ -1419,13 +1413,13 @@ function SummaryTab({
           <p className="muted" style={{ margin: 0, fontSize: "var(--t-base)", lineHeight: 1.6 }}>
             {hasOutput ? (
               <>
-                A .zip of everything above — {art.files.length} source{" "}
+                A .zip of everything above: {art.files.length} source{" "}
                 {art.files.length === 1 ? "file" : "files"}, {art.docs.length}{" "}
                 {art.docs.length === 1 ? "document" : "documents"} and a generated{" "}
                 <code>README.md</code>. Nothing leaves your machine.
               </>
             ) : (
-              <>Nothing to download yet — no phase has produced a file or a document.</>
+              <>Nothing to download yet. No phase has produced a file or document.</>
             )}
           </p>
           {hasOutput && (
@@ -1447,7 +1441,7 @@ function SummaryTab({
             </label>
             <p className="field-hint" id="db-include-hint">
               {withEnv
-                ? "This download has a real backend/.env with your credentials. Never commit it — it is already in .gitignore."
+                ? "This download has a real backend/.env with your credentials. Never commit it. It's already in .gitignore."
                 : "This download has backend/.env.example with placeholders only. GitHub always gets placeholders."}
             </p>
           </div>

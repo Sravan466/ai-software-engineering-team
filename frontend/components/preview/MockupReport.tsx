@@ -43,7 +43,7 @@ export default function MockupReport({ report }: { report: Report }) {
           {fallback.length > 0 && (
             <span
               className="badge badge-warn"
-              title="The model's version of these sections could not be wired up after a repair, so the platform drew them from its own templates."
+              title="The model's version of these sections still broke after a repair, so they use built-in templates."
             >
               {fallback.length} from template
             </span>
