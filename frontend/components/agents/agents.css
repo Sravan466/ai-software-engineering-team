@@ -138,8 +138,10 @@
 /* Queued crew are dimmed and desaturated — present, not yet involved. */
 .sprite.is-queued { filter: saturate(0.66) brightness(0.74); }
 /* Asleep is the room at rest, not someone left out of a running build, so the
-   lights come down less: still quieter than anyone awake, never greyed out. */
-.sprite.is-queued.is-asleep { filter: saturate(0.85) brightness(0.88); }
+   lights come down less: still quieter than anyone awake, never greyed out.
+   Kept at the same weight as .is-queued (AgentSprite only marks queued agents
+   asleep) so the crew floor's depth shading, later in this file, still wins. */
+.sprite.is-asleep { filter: saturate(0.85) brightness(0.88); }
 .sprite.is-done { filter: none; }
 .sprite.is-rejected { filter: saturate(0.85); }
 

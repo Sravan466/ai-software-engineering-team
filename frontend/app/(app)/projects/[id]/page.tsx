@@ -357,9 +357,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     );
   }
 
-  // Nobody holds the work unless the build is live; then whoever waits dozes.
-  // A stalled run is not live — it stopped responding, and the crew says so.
-  const atRest = !stillRunning(effectiveStatus(project));
+  const atRest = crewAtRest(project);
 
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
   const tabs: { key: Tab; label: string }[] = [
@@ -503,7 +501,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                   <AgentSprite
                     agent={agent}
                     size={64}
-                    state={SPRITE_STATE[ns]}
+                    state={spriteFor(project, ns)}
                     asleep={atRest}
                   />
                   <span className="relay-name">{agent.codename}</span>
@@ -945,7 +943,12 @@ function BuildTab({
       </div>
 
       <div className="card card-flush">
-        <PhaseList project={project} jump={jump} onJumpDone={onJumpDone} />
+        <PhaseList
+          project={project}
+          jump={jump}
+          onJumpDone={onJumpDone}
+          atRest={crewAtRest(project)}
+        />
       </div>
 
       {state === "completed" && analytics && (
@@ -985,14 +988,16 @@ function PhaseList({
   project,
   jump,
   onJumpDone,
+  atRest,
 }: {
   project: Project;
   jump: { key: string } | null;
   onJumpDone: () => void;
+  /** crewAtRest(project) — the same rule as the relay, so they never disagree. */
+  atRest: boolean;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [landed, setLanded] = useState<string | null>(null);
-  const atRest = !stillRunning(effectiveStatus(project));
   const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
 
   // The scroll and the highlight outlive the instruction that started them, so
@@ -1064,7 +1069,7 @@ function PhaseList({
               <AgentSprite
                 agent={agent}
                 size={40}
-                state={SPRITE_STATE[ns]}
+                state={spriteFor(project, ns)}
                 asleep={atRest}
               />
 
@@ -1185,6 +1190,26 @@ function producedByPhase(art: Artifacts): Map<string, number> {
 }
 
 /** A run that can still produce something hasn't finished failing to. */
+/**
+ * Whether the crew is off duty: nobody holds the work, so whoever waits dozes.
+ * Only a running build or one waiting on your approval is on duty — a build
+ * that hasn't started is at rest (as on the crew floor's "Before the build"),
+ * and so is a stalled one: it stopped responding, and the crew says so.
+ */
+function crewAtRest(project: Project): boolean {
+  const s = effectiveStatus(project);
+  return s !== "running" && s !== "awaiting_approval";
+}
+
+/**
+ * The sprite for a phase. On a stalled run the phase that stopped responding
+ * still reads `running`; it dozes with everyone else instead of looping its
+ * work beside a sleeping crew.
+ */
+function spriteFor(project: Project, ns: NodeState): SpriteState {
+  return ns === "running" && effectiveStatus(project) === "stalled" ? "queued" : SPRITE_STATE[ns];
+}
+
 function stillRunning(status: string): boolean {
   return status === "created" || status === "running" || status === "awaiting_approval";
 }

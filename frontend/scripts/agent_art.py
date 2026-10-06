@@ -37,9 +37,10 @@ for that agent.
 
 ATLAS: its first sheet runs off the canvas in the last row, which this script
 refuses, so rows 1-5 of `public/agents/atlas.webp` are a hand-made stand-in
-(its idle frames reused for the waiting row, with its own "!" on frames 1-2).
-Until a regenerated sheet is in place, a run keeps those published rows and
-the published still, and only rebuilds ATLAS's sleep row.
+(its idle frames reused for the waiting row, with its own "!" on frames 1-2),
+kept losslessly in `assets/Atlas Stand-in Rows.png` (see STAND_IN). Until a
+regenerated sheet is in place, a run uses those rows and the published still
+and only rebuilds ATLAS's sleep row; delete both entries once it is.
 """
 
 from __future__ import annotations
@@ -266,6 +267,12 @@ def frames(sheet: Image.Image):
         )
 
 
+# Agents whose sprite sheet can't be cut yet, and the lossless copy of the
+# hand-made rows 1-5 that stand in for it. Only these may keep published rows;
+# any other agent with a broken sheet stops the run.
+STAND_IN = {"atlas": "Atlas Stand-in Rows.png"}
+
+
 def sleep_file(name: str) -> str:
     return f"{name.capitalize()} Sleep Sheet.png"
 
@@ -292,7 +299,10 @@ def sleep_frames(sheet: Image.Image):
                 raise SystemExit(f"sleep frame {n} is empty")
             figure = max(mine, key=lambda k: k[0])
             fb = figure[1]
-            if fb[0] <= slot[0] or fb[1] <= slot[1] or fb[2] >= slot[2] or fb[3] >= slot[3]:
+            # Soles on the sheet's last pixel are fine, as in the main sheets;
+            # any other edge contact means the figure was cut.
+            on_floor = fb[3] >= slot[3] and slot[3] == H
+            if fb[0] <= slot[0] or fb[1] <= slot[1] or fb[2] >= slot[2] or (fb[3] >= slot[3] and not on_floor):
                 raise SystemExit(
                     f"sleep frame {n} touches the edge of its frame — regenerate it "
                     "with a margin on every edge"
@@ -365,9 +375,7 @@ def main():
         except SystemExit as e:
             # Fatal only for a sheet being written; for the others the idle
             # row is all the shared scale needs, and it is always cut in full.
-            if sum(1 for r, *_ in cut[name] if r == 0) < COLS or (
-                name in only and not (OUT / f"{name}.webp").exists()
-            ):
+            if sum(1 for r, *_ in cut[name] if r == 0) < COLS or (name in only and name not in STAND_IN):
                 raise SystemExit(f"{sheet_file}: {e}") from None
             print(f"skip {name}: {e}")
             skipped.add(name)
@@ -386,21 +394,25 @@ def main():
         if name not in only:
             continue
         grid = Image.new("RGBA", (CELL * COLS, CELL * OUT_ROWS), (0, 0, 0, 0))
-        idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
         if name in skipped:
-            # The sprite sheet can't be cut (see ATLAS above): keep the five
-            # published rows as they are and only redo the sleep row — sized
-            # from the published idle frame, not this run's scale, so the
-            # sleep row matches the rows it sits under even if the crew-wide
-            # scale has moved since they were made.
-            published = Image.open(OUT / f"{name}.webp").convert("RGBA")
-            grid.paste(published.crop((0, 0, CELL * COLS, CELL * ROWS)), (0, 0))
-            idle = published.crop((0, 0, CELL, CELL))
-            ia = idle.getchannel("A").load()
-            idle_h = max(components(ia, (0, 0, CELL, CELL)), key=lambda k: k[0])[1]
-            idle_h = idle_h[3] - idle_h[1]
-            print(f"  {name}: kept the published rows 1-5")
+            # The sprite sheet can't be cut (see ATLAS above): use the stand-in
+            # rows 1-5 from their lossless copy — made once from the published
+            # sheet — so rebuilds never re-compress them. The sleep row is
+            # sized from that idle frame, not this run's scale, so it matches
+            # the rows it sits under even if the crew-wide scale has moved.
+            rows_file = SRC / STAND_IN[name]
+            if not rows_file.exists():
+                published = Image.open(OUT / f"{name}.webp").convert("RGBA")
+                published.crop((0, 0, CELL * COLS, CELL * ROWS)).save(rows_file)
+                print(f"  {name}: saved the published rows 1-5 to {rows_file.name}")
+            rows = Image.open(rows_file).convert("RGBA")
+            grid.paste(rows, (0, 0))
+            ia = rows.crop((0, 0, CELL, CELL)).getchannel("A").load()
+            ib = max(components(ia, (0, 0, CELL, CELL)), key=lambda k: k[0])[1]
+            idle_h = ib[3] - ib[1]
+            print(f"  {name}: stand-in rows 1-5 from {rows_file.name}")
         else:
+            idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
             for r, c, frame, anchor, bbox in cut[name]:
                 grid.alpha_composite(place(frame, anchor, scale), (c * CELL, r * CELL))
 
@@ -412,6 +424,11 @@ def main():
             raise SystemExit(f"{sleep_file(name)}: {e}") from None
         k = idle_h / (sleep[0][2][3] - sleep[0][2][1])
         for c, (frame, anchor, _b) in enumerate(sleep):
+            # Scaled to the idle figure, the rising Zs could reach past the
+            # cell; place() would clip them silently, so say so.
+            fb = frame.getbbox()
+            if (anchor[1] - fb[1]) * k > CELL * FEET_Y or (max(anchor[0] - fb[0], fb[2] - anchor[0])) * k > CELL / 2:
+                print(f"  warning: {name} sleep frame {c + 1} is clipped by its cell")
             grid.alpha_composite(place(frame, anchor, k), (c * CELL, ROWS * CELL))
         webp(grid, OUT / f"{name}.webp")
         if name in skipped:
