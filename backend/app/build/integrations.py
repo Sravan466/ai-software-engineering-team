@@ -961,7 +961,7 @@ def check(integration: Integration, values: dict[str, str], mode: Optional[str] 
                 return Checked(
                     CheckResult(
                         FAILED,
-                        f"{host} doesn't exist. Check the {var.label if var else spec.id_var} . It names the "
+                        f"{host} doesn't exist. Check the {var.label if var else spec.id_var}. It names the "
                         "account, and a typo there is the usual cause.",
                         reason="id_wrong",
                         name=spec.id_var,
