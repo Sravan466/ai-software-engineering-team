@@ -1,8 +1,9 @@
 /* ===========================================================================
    THE DOOR — signing in, and setting an install up.
 
-   Two halves on a wide screen: the crew standing on the floor, waiting for a
-   shift that starts when someone signs in, and the panel that starts it. On a
+   Two halves on a wide screen: the crew on the floor, already at work — the
+   first thing anyone sees of this app is the team awake — and the panel that
+   lets you in. On a
    phone the crew becomes one strip above the form, so the form is still the
    first thing a thumb reaches.
    =========================================================================== */
@@ -69,6 +70,56 @@
 @keyframes door-arrive {
   from { opacity: 0; transform: translateY(10px); filter: blur(3px); }
   to   { opacity: 1; transform: none; filter: none; }
+}
+
+/* At work. Each agent loops their own job row at a relaxed version of their
+   working tempo, started part-way through so the eight never tick in step.
+   The jittery whole-figure signatures from the build floor are swapped for one
+   eased float — on a first screen, motion should read as calm and alive, not
+   as eight things vibrating. Selectors carry .door-floor so they outrank
+   agents.css however the two sheets end up ordered. */
+.door-floor .sprite.is-working .sprite-sheet {
+  animation: sheet-loop var(--door-frames, 1100ms) steps(4, jump-none) infinite;
+  animation-delay: calc(var(--i) * -290ms);
+}
+.door-floor .sprite.motion-nod     { --door-frames: 1200ms; }
+.door-floor .sprite.motion-drift   { --door-frames: 1400ms; }
+.door-floor .sprite.motion-thrum   { --door-frames: 900ms; }
+.door-floor .sprite.motion-flicker { --door-frames: 820ms; }
+.door-floor .sprite.motion-scan    { --door-frames: 1100ms; }
+.door-floor .sprite.motion-guard   { --door-frames: 1300ms; }
+.door-floor .sprite.motion-launch  { --door-frames: 1000ms; }
+.door-floor .sprite.motion-tally   { --door-frames: 1100ms; }
+
+/* The handoff, in miniature: a light passes down the crew in pipeline order,
+   1.5s each, so the eye has one figure to follow instead of eight. Whoever
+   holds it is at full colour with their own glow; the rest work a step back. */
+.door-floor .door-agent .sprite.is-working {
+  --dim: brightness(0.8) saturate(0.82) drop-shadow(0 0 0 transparent);
+  filter: var(--dim);
+  animation:
+    door-float 3.2s cubic-bezier(0.45, 0, 0.55, 1) calc(var(--i) * -400ms) infinite,
+    door-lit 12s cubic-bezier(0.33, 0, 0.2, 1) calc(var(--i) * 1.5s + 700ms) infinite both;
+  will-change: transform, filter;
+}
+.door-floor .door-codename {
+  opacity: 0.55;
+  animation: door-name-lit 12s cubic-bezier(0.33, 0, 0.2, 1) calc(var(--i) * 1.5s + 700ms) infinite both;
+}
+@keyframes door-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px); }
+}
+@keyframes door-lit {
+  0%, 17%, 100% { filter: var(--dim); }
+  4%, 12.5% {
+    filter: brightness(1.06) saturate(1.1)
+      drop-shadow(0 0 10px color-mix(in srgb, var(--agent) 55%, transparent));
+  }
+}
+@keyframes door-name-lit {
+  0%, 17%, 100% { opacity: 0.55; }
+  4%, 12.5%     { opacity: 1; }
 }
 
 /* ── the panel ────────────────────────────────────────────────────────────── */
@@ -166,4 +217,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .door-agent { animation: none; }
+  /* agents.css already holds each sprite on its job frame; the crew stays at
+     full light, with no moving spotlight and no working outline on all eight. */
+  .door-floor .door-agent .sprite.is-working { filter: none; outline: none; }
+  .door-floor .door-codename { animation: none; opacity: 0.9; }
 }
