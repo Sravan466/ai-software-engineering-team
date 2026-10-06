@@ -598,3 +598,28 @@ def test_a_file_cut_off_twice_is_not_asked_for_again_whole(stub_router, monkeypa
     # only be cut off again.
     assert len(model.writes) == 2 and "two files" in model.prompts[2]
     assert result.build_status == "failed" and result.output["files"][0]["code"] == "BIG = [\n"
+
+
+def test_prose_that_mentions_a_name_in_backticks_is_not_a_file():
+    text = (
+        "### backend/app/mod1.py\nReads config with `os.getenv`:\n```python\nX = 1\n```\n"
+        "### backend/app/todos.py — uses `schemas.py` models\n```python\nY = 1\n```\n"
+        "### app/(auth)/login/page.tsx\n```tsx\nexport default 1;\n```\n"
+    )
+    assert [b.path for b in code_blocks(text)] == [
+        "backend/app/mod1.py", "backend/app/todos.py", "app/(auth)/login/page.tsx",
+    ]
+
+
+def test_a_file_that_arrives_after_it_was_given_up_on_counts_as_written(stub_router, monkeypatch):
+    def reply(m, wanted, n):
+        if wanted == ["backend/app/mod2.py"]:
+            return ""  # left out twice
+        if wanted == ["backend/app/mod3.py"]:  # then sent, unasked, beside the next file
+            return fenced({"backend/app/mod3.py": "C = 3\n", "backend/app/mod2.py": "B = 2\n"})
+        return None
+
+    model = Scripted("Backend Engineer", _files(3), reply=reply)
+    result = _run(monkeypatch, "backend_engineer", model, SMALL)
+    assert "backend/app/mod2.py" in [f["path"] for f in result.output["files"]]
+    assert result.build_status == "ok" and result.handoff["generation"]["unwritten"] == []

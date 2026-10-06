@@ -135,12 +135,16 @@ def _named_path(line: str) -> str:
     text = line.strip()
     text = re.sub(r"^#{1,6}\s*", "", text)
     text = re.sub(r"^\d+[.)]\s+", "", text.strip("*").strip())  # a numbered list item
-    ticked = re.search(r"`([^`\n]+)`", text)
+    text = _NAMED.sub("", text).strip().lstrip("*").strip()  # `File:`, `**File:**`
+    # A backticked path counts only where the line starts with it: prose that
+    # mentions `os.getenv`, or a heading's description naming another file, is not
+    # the file below it.
+    ticked = re.match(r"`([^`\n]+)`", text)
     if ticked:
-        candidate = _NAMED.sub("", ticked.group(1).strip()).strip()
+        candidate = ticked.group(1).strip()
         if _looks_like_path(candidate, spaced=True):
             return candidate
-    text = _NAMED.sub("", text.strip("`").strip()).strip()
+    text = text.strip("`").strip()
     cut = _AFTER_PATH.search(text)
     if cut:
         text = text[: cut.start()]

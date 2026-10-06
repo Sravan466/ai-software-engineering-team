@@ -465,6 +465,8 @@ class _Run:
             origin=planned.origin,
             complete=complete,
         )
+        if planned.path in self.unwritten:  # it came in late, unasked: it is written now
+            self.unwritten.remove(planned.path)
         self.lengths.append(len(code))
 
     def _judge(self, w: _Written) -> None:
@@ -564,7 +566,9 @@ class _Run:
         put("bodies", bodies)
         if ctx.extra_context:
             room = min(len(ctx.extra_context), budget // 10, max(left - 200, 0))
-            put("extra", f"# Team decision to honour\n{_clip(ctx.extra_context, room)}\n")
+            # A heading with nothing under it is worse than no heading at all.
+            if room >= min(len(ctx.extra_context), 200):
+                put("extra", f"# Team decision to honour\n{_clip(ctx.extra_context, room)}\n")
         if ctx.skills:
             body, _ = _pack_skills(ctx.skills, left - _SKILLS_FRAME_COST - 1)
             if body:
@@ -734,7 +738,10 @@ class _Run:
         if build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
             build, output, errors, stack = self._fix_build(build, output, errors, stack)
 
-        never = [p for p in self.unwritten if (self._entry(p) or _Planned(p)).origin == "plan"]
+        never = [
+            p for p in self.unwritten
+            if p not in self.written and (self._entry(p) or _Planned(p)).origin == "plan"
+        ]
         if build is not None and never:
             # A file the plan promised and the model never returned: often a page
             # nothing imports, so no import problem would ever name it.
