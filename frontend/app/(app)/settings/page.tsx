@@ -1796,7 +1796,7 @@ function ApiKeysCard() {
         <span className="rule" />
       </div>
       <p className="muted" style={{ margin: "0 0 6px", fontSize: "var(--t-base)", lineHeight: 1.6 }}>
-        Add a key to use Claude, GPT or Gemini. Leave them blank to stay local. Keys are
+        Add keys to use Claude, GPT or Gemini, or leave them blank to stay local. Keys are
         encrypted on this server, and only the last four characters are shown.
       </p>
       <p className="field-hint key-safety">

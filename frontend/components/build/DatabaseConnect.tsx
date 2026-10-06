@@ -793,7 +793,7 @@ export function DatabasePanel({
       <DatabaseForm id={id} state={state} onState={setState} busy={false} />
       <p className="db-lock db-lock-inline">
         {Icon.lock}
-        <span>Encrypted on this computer and hidden after saving.</span>
+        <span>Encrypted on this computer. After saving, only the host or last four characters show.</span>
       </p>
     </div>
   );
