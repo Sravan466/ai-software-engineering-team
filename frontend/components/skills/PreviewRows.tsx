@@ -53,8 +53,8 @@ export default function PreviewRows({
                     {preview.max_per_phase === 0
                       ? "Matched, but this backend gives each phase no skills (SKILLS_MAX_PER_PHASE is 0):"
                       : pinnedFull
-                        ? `Also matched, left out — pinned skills took all ${preview.max_per_phase} places:`
-                        : `Also matched, left out — the phase takes ${preview.max_per_phase}, and these ranked lower:`}
+                        ? `Also matched but left out. Pinned skills took all ${preview.max_per_phase} places:`
+                        : `Also matched but left out. The phase takes ${preview.max_per_phase} and these ranked lower:`}
                   </span>
                   <span className="dryrun-picks">
                     {over.map((s) => (
