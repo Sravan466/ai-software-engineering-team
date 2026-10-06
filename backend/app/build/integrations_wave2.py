@@ -165,7 +165,7 @@ _RAZORPAY = Integration(
     guide=_guide(
         ("Open the Razorpay Dashboard and switch to Test Mode.", "https://dashboard.razorpay.com/app/website-app-settings/api-keys"),
         "Account & Settings → API Keys → Generate Test Key.",
-        "Copy the Key ID (rzp_test_…) and the Key Secret — the secret is shown once.",
+        "Copy the Key ID (rzp_test_…) and the Key Secret. The secret is shown once.",
     ),
     docs_url="https://razorpay.com/docs/api/",
     dashboard_url="https://dashboard.razorpay.com/app/website-app-settings/api-keys",
@@ -196,7 +196,7 @@ _LEMON = Integration(
     soft=_PAY,
     formats=(
         ("LEMONSQUEEZY_API_KEY", r"^eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$", "A Lemon Squeezy API key is a long token starting with eyJ."),
-        ("LEMONSQUEEZY_STORE_ID", r"^\d{1,12}$", "The store ID is a number — Settings → Stores shows it."),
+        ("LEMONSQUEEZY_STORE_ID", r"^\d{1,12}$", "The store ID is a number. Settings → Stores shows it."),
         ("LEMONSQUEEZY_WEBHOOK_SECRET", r"^\S{6,}$", "The webhook secret is the string you typed when you made the webhook."),
     ),
     check=HttpCheck(
@@ -210,7 +210,7 @@ _LEMON = Integration(
     ),
     guide=_guide(
         ("Open Lemon Squeezy → Settings → API.", "https://app.lemonsqueezy.com/settings/api"),
-        "Create an API key (+). Copy it — it's shown once.",
+        "Create an API key (+). Copy it. It's shown once.",
         "Settings → Stores: the number beside your store is the store ID.",
     ),
     docs_url="https://docs.lemonsqueezy.com/api",
@@ -250,7 +250,7 @@ _SENDGRID = Integration(
     ),
     guide=_guide(
         ("Open SendGrid → Settings → API Keys.", "https://app.sendgrid.com/settings/api_keys"),
-        "Create API Key → Restricted Access → turn on Mail Send. Copy it (SG.…) — it's shown once.",
+        "Create API Key → Restricted Access → turn on Mail Send. Copy it (SG.…). It's shown once.",
         "Settings → Sender Authentication: verify the address you'll send from.",
     ),
     docs_url="https://www.twilio.com/docs/sendgrid/api-reference",
@@ -327,7 +327,7 @@ _MAILGUN = Integration(
     ),
     guide=_guide(
         ("Open Mailgun → API Security.", "https://app.mailgun.com/settings/api_security"),
-        "Add new key → copy it — it's shown once.",
+        "Add new key → copy it. It's shown once.",
         "Sending → Domains: copy your sending domain, and note whether it's US or EU.",
     ),
     docs_url="https://documentation.mailgun.com/docs/mailgun/api-reference/",
@@ -357,7 +357,7 @@ _AUTH0 = Integration(
         ("AUTH0_DOMAIN", r"^[a-z0-9][a-z0-9-]*(\.[a-z]{2})?\.auth0\.com$", "Use your tenant's Auth0 domain, like your-tenant.us.auth0.com."),
         ("AUTH0_CLIENT_ID", r"^[A-Za-z0-9]{20,64}$", "An Auth0 client ID is 32 letters and digits."),
         ("AUTH0_CLIENT_SECRET", r"^[A-Za-z0-9_\-]{32,}$", "An Auth0 client secret is 64 characters."),
-        ("AUTH0_SECRET", r"^\S{32,}$", "The session secret needs at least 32 characters — or leave it blank."),
+        ("AUTH0_SECRET", r"^\S{32,}$", "The session secret needs at least 32 characters, or leave it blank."),
         ("APP_BASE_URL", r"^https?://[^\s/]+(:\d+)?/?$", "The app URL looks like http://localhost:3000."),
     ),
     check=HttpCheck(
@@ -397,7 +397,7 @@ _GOOGLE_SIGNIN = Integration(
     formats=(
         ("GOOGLE_CLIENT_ID", r"^\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com$", "A Google client ID ends in .apps.googleusercontent.com."),
         ("GOOGLE_CLIENT_SECRET", r"^GOCSPX-[A-Za-z0-9_\-]{20,}$", "A Google client secret starts with GOCSPX-."),
-        ("AUTH_SECRET", r"^\S{32,}$", "The session secret needs at least 32 characters — or leave it blank."),
+        ("AUTH_SECRET", r"^\S{32,}$", "The session secret needs at least 32 characters, or leave it blank."),
     ),
     guide=_guide(
         ("Open Google Cloud → APIs & Services → Credentials.", "https://console.cloud.google.com/apis/credentials"),
@@ -426,12 +426,12 @@ _GITHUB_SIGNIN = Integration(
     formats=(
         ("GITHUB_CLIENT_ID", r"^(Ov2[0-9][A-Za-z0-9]{16}|Iv1\.[a-f0-9]{16}|Iv23[A-Za-z0-9]{16}|[a-f0-9]{20})$", "A GitHub client ID starts with Ov23 (or Iv1.)."),
         ("GITHUB_CLIENT_SECRET", r"^[a-f0-9]{40}$", "A GitHub client secret is 40 hexadecimal characters."),
-        ("AUTH_SECRET", r"^\S{32,}$", "The session secret needs at least 32 characters — or leave it blank."),
+        ("AUTH_SECRET", r"^\S{32,}$", "The session secret needs at least 32 characters, or leave it blank."),
     ),
     guide=_guide(
         ("Open GitHub → Settings → Developer settings → OAuth Apps.", "https://github.com/settings/developers"),
         "New OAuth App. Homepage http://localhost:3000; callback http://localhost:3000/api/auth/callback/github.",
-        "Copy the Client ID, then Generate a new client secret and copy it — it's shown once.",
+        "Copy the Client ID, then Generate a new client secret and copy it. It's shown once.",
     ),
     docs_url="https://authjs.dev/getting-started/providers/github",
     dashboard_url="https://github.com/settings/developers",
@@ -446,7 +446,7 @@ def _supabase_keys(v: dict) -> Optional[tuple[str, str]]:
     if anon.startswith("sb_secret_") or _jwt_role(anon) == "service_role":
         return (
             "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-            "That's the secret (service_role) key — it bypasses your security rules, and this field goes "
+            "That's the secret (service_role) key. It bypasses your security rules, and this field goes "
             "in the browser. Paste the publishable (anon) key here.",
         )
     if not (anon.startswith("sb_publishable_") or _jwt_role(anon) == "anon"):
@@ -538,7 +538,7 @@ _ANTHROPIC = Integration(
     ),
     guide=_guide(
         ("Open the Claude Console → API keys.", "https://console.anthropic.com/settings/keys"),
-        "Create Key → name it, pick a workspace. Copy it (sk-ant-…) — it's shown once.",
+        "Create Key → name it, pick a workspace. Copy it (sk-ant-…). It's shown once.",
         "Test it here, then pick the model the app should use.",
     ),
     docs_url="https://docs.anthropic.com/en/api",
@@ -609,7 +609,7 @@ _GROQ = Integration(
     ),
     guide=_guide(
         ("Open the Groq console → API Keys.", "https://console.groq.com/keys"),
-        "Create API Key → copy it (gsk_…) — it's shown once.",
+        "Create API Key → copy it (gsk_…). It's shown once.",
         "Test it here, then pick the model the app should use.",
     ),
     docs_url="https://console.groq.com/docs/api-reference",
@@ -699,12 +699,12 @@ _ELEVENLABS = Integration(
         rules=(
             Rule((401,), "invalid", body="invalid_api_key", message="ElevenLabs didn't recognise that API key."),
             # A key scoped without user access is refused here and still works for speech.
-            Rule((401, 403), "unchecked", message="This key can't read the account, so it couldn't be tested — scoped keys are like that."),
+            Rule((401, 403), "unchecked", message="This key can't read the account, so it couldn't be tested. Scoped keys work that way."),
         ),
     ),
     guide=_guide(
         ("Open ElevenLabs → Developers → API Keys.", "https://elevenlabs.io/app/developers/api-keys"),
-        "Create API Key → give it Text to Speech access. Copy it — it's shown once.",
+        "Create API Key → give it Text to Speech access. Copy it. It's shown once.",
         "Pick a voice in the Voice Library; the app chooses by voice id.",
     ),
     docs_url="https://elevenlabs.io/docs/api-reference",
@@ -756,13 +756,13 @@ _CLOUDINARY = Integration(
             Rule((401,), "id_wrong", body="cloud_name", message="Cloudinary has no cloud by that name. Check the Cloud name.", field="CLOUDINARY_CLOUD_NAME"),
             # Cloudinary answers "api_secret mismatch" whether the secret or the cloud
             # name is wrong, so the message names all three rather than guessing.
-            Rule((401,), "invalid", message="Cloudinary didn't accept that cloud name, API key and secret together — check all three are from the same account."),
+            Rule((401,), "invalid", message="Cloudinary didn't accept that cloud name, API key and secret together. Check all three are from the same account."),
             Rule((404,), "id_wrong", message="Cloudinary has no cloud by that name. Check the Cloud name.", field="CLOUDINARY_CLOUD_NAME"),
         ),
     ),
     guide=_guide(
         ("Open the Cloudinary Console → Settings → API Keys.", "https://console.cloudinary.com/settings/api-keys"),
-        "Copy the Cloud name, the API Key and the API Secret — or the whole API environment variable.",
+        "Copy the Cloud name, the API Key and the API Secret, or the whole API environment variable.",
         "For browser uploads, Settings → Upload: note an upload preset, or let the server sign uploads.",
     ),
     docs_url="https://cloudinary.com/documentation",
@@ -1016,7 +1016,7 @@ _GOOGLE_MAPS = Integration(
     guide=_guide(
         ("Open Google Cloud → Google Maps Platform → Keys & Credentials.", "https://console.cloud.google.com/google/maps-apis/credentials"),
         "Create credentials → API key. Enable the Maps JavaScript and Geocoding APIs.",
-        "Restrict the key to your site's address — it's public in the browser.",
+        "Restrict the key to your site's address. It's public in the browser.",
     ),
     docs_url="https://developers.google.com/maps/documentation",
     dashboard_url="https://console.cloud.google.com/google/maps-apis/credentials",
@@ -1052,7 +1052,7 @@ _MAPBOX = Integration(
     ),
     guide=_guide(
         ("Open Mapbox → Account → Tokens.", "https://account.mapbox.com/access-tokens/"),
-        "Copy the Default public token (pk.…) — or create one with URL restrictions.",
+        "Copy the Default public token (pk.…), or create one with URL restrictions.",
         "Never paste a secret token (sk.…): this one goes in the browser.",
     ),
     docs_url="https://docs.mapbox.com/mapbox-gl-js/",
@@ -1079,7 +1079,7 @@ _POSTHOG = Integration(
     formats=(("NEXT_PUBLIC_POSTHOG_KEY", r"^phc_[A-Za-z0-9]{20,}$", "A PostHog project API key starts with phc_."),),
     guide=_guide(
         ("Open PostHog → Project settings.", "https://us.posthog.com/settings/project"),
-        "Copy the Project API key (phc_…) — it's public and ingest-only.",
+        "Copy the Project API key (phc_…). It's public and ingest-only.",
         "Choose the region your project is in: US or EU.",
     ),
     docs_url="https://posthog.com/docs/libraries/next-js",
@@ -1116,13 +1116,13 @@ _SENTRY = Integration(
         rules=(
             Rule((401,), "invalid", message="Sentry didn't recognise that auth token."),
             # An org token for source maps (org:ci) can't list organizations: real, just narrow.
-            Rule((403,), "unchecked", message="The token is scoped for uploads only, so it couldn't be read back — that's normal."),
+            Rule((403,), "unchecked", message="The token is scoped for uploads only, so it couldn't be read back. That's normal."),
         ),
         optional_key=True,
     ),
     guide=_guide(
         ("Open Sentry → Settings → Projects → your project → Client Keys (DSN).", "https://sentry.io/settings/projects/"),
-        "Copy the DSN — it's public by design.",
+        "Copy the DSN. It's public by design.",
         "Optional: Settings → Auth Tokens → create one for source map uploads (sntrys_…).",
     ),
     docs_url="https://docs.sentry.io/platforms/javascript/guides/nextjs/",
@@ -1153,7 +1153,7 @@ _ALGOLIA = Integration(
     ),
     cross=lambda v: (
         "NEXT_PUBLIC_ALGOLIA_SEARCH_KEY",
-        "That's the Admin API key — it can change and delete your indexes, and this field goes in the browser. "
+        "That's the Admin API key. It can change and delete your indexes, and this field goes in the browser. "
         "Paste the Search-Only API Key here.",
     )
     if v.get("NEXT_PUBLIC_ALGOLIA_SEARCH_KEY") and v.get("NEXT_PUBLIC_ALGOLIA_SEARCH_KEY") == v.get("ALGOLIA_ADMIN_KEY")
@@ -1171,7 +1171,7 @@ _ALGOLIA = Integration(
     guide=_guide(
         ("Open the Algolia dashboard → Settings → API Keys.", "https://dashboard.algolia.com/account/api-keys/all"),
         "Copy the Application ID and the Search-Only API Key (public, for the browser).",
-        "Copy the Admin API Key for the server — it never goes in the browser.",
+        "Copy the Admin API Key for the server. It never goes in the browser.",
     ),
     docs_url="https://www.algolia.com/doc/",
     dashboard_url="https://dashboard.algolia.com/account/api-keys/all",
@@ -1186,7 +1186,7 @@ _UPSTASH = Integration(
     capability="cache",
     wave=2,
     blurb="Serverless Redis for caching and rate limits",
-    builds=("Rate limiting on API routes", "A cache for slow or paid calls", "Short-lived state over HTTP — no connection pool"),
+    builds=("Rate limiting on API routes", "A cache for slow or paid calls", "Short-lived state over HTTP, with no connection pool"),
     variables=(
         Var("UPSTASH_REDIS_REST_URL", "REST URL", secret=False, placeholder="https://your-db.upstash.io", kind="url"),
         Var("UPSTASH_REDIS_REST_TOKEN", "REST token"),
@@ -1196,7 +1196,7 @@ _UPSTASH = Integration(
     soft=("rate limiting", "rate limit", "rate-limit", "caching", "cache"),
     formats=(
         ("UPSTASH_REDIS_REST_URL", r"^https://[a-z0-9\-]+\.upstash\.io/?$", "The REST URL looks like https://your-db.upstash.io."),
-        ("UPSTASH_REDIS_REST_TOKEN", r"^[A-Za-z0-9_=\-]{20,}$", "The REST token is a long string — copy it from the REST API section."),
+        ("UPSTASH_REDIS_REST_TOKEN", r"^[A-Za-z0-9_=\-]{20,}$", "The REST token is a long string. Copy it from the REST API section."),
     ),
     check=HttpCheck(
         "GET",

@@ -1374,7 +1374,7 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
             {" "}on {sourceLabel(state, state.default_model)}
           </>
         ) : (
-          "nothing yet (no local runtime serves a model that writes)"
+          "the default model, once a local runtime serves one that writes"
         )}
         . Pick another model for an agent and it switches at its next phase, with no restart.
         Only models a source serves are listed.
