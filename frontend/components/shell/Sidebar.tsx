@@ -28,8 +28,8 @@ const STATUS_TEXT: Record<string, string> = {
   running: "Running",
   failed: "Failed",
   cancelled: "Stopped",
-  paused: "Paused — waiting for your computer",
-  stalled: "Stalled — no longer responding",
+  paused: "Paused, waiting for your computer",
+  stalled: "Stalled, not responding",
   created: "Not started",
 };
 

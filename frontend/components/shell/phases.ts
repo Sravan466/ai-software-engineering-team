@@ -61,13 +61,13 @@ export const ROUTING_MODES: RoutingModeMeta[] = [
     id: "local",
     label: "Local",
     backend: "local_only",
-    hint: "Runs entirely on models you host, on whichever local runtime serves them. Free, private, slower.",
+    hint: "Runs only on models you host. Free and private, but slower.",
   },
   {
     id: "auto",
     label: "Auto",
     backend: "auto",
-    hint: "Picks the best available model per phase, falling back to local when a cloud key is missing.",
+    hint: "Picks the best model for each phase. Falls back to local when a cloud key is missing.",
   },
   {
     id: "manual",
@@ -95,19 +95,19 @@ export const APPROVAL_MODES: ApprovalModeMeta[] = [
   {
     id: "checkpoints",
     label: "Two checkpoints",
-    hint: "Stops twice — once on the plan, once on the finished build — and interrupts in between only for a severe security finding or a cost overrun.",
+    hint: "Stops on the plan and on the finished build. In between, it only stops for a severe security issue or a cost overrun.",
     running: "Stops on the plan and on the finished build.",
   },
   {
     id: "every_phase",
     label: "Every phase",
-    hint: "Stops after all eight handoffs. Thorough, and eight decisions long.",
+    hint: "Stops after each of the eight phases for your approval.",
     running: "Stops after every one of the eight handoffs.",
   },
   {
     id: "unattended",
     label: "Unattended",
-    hint: "Runs all eight phases end to end and hands you the result. Nothing interrupts it.",
+    hint: "Runs all eight phases without stopping and hands you the result.",
     running: "Runs to the end without stopping.",
   },
 ];
