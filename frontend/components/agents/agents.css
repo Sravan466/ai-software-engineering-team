@@ -279,6 +279,12 @@
    running hidden underneath, its clock untouched. When the overlay goes,
    they are exactly where they would have been: nothing restarts. */
 .sprite.is-poked > .sprite-sheet { visibility: hidden; }
+/* Poked awake: a dozing or waiting agent acts at full light, so the answer
+   reads as them waking up — keeping only the crew floor's depth shading. */
+.sprite.is-poked.is-queued { filter: none; }
+.station .sprite.is-poked.is-queued {
+  filter: brightness(calc(1 - var(--depth, 0) * 0.34)) saturate(calc(1 - var(--depth, 0) * 0.26));
+}
 @keyframes sheet-poke-row {
   from { background-position: 0% 20%; }
   to   { background-position: 100% 20%; }

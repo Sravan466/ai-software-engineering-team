@@ -153,12 +153,15 @@ export default function CrewPage() {
   const [scenario, setScenario] = useState(1);
   const [selected, setSelected] = useState(2);
   // Clicking an agent pokes them: one pass of their job and their signature
-  // (AgentSprite plays it). `n` only ever grows, and only the clicked agent's
+  // (AgentSprite plays it). Only the clicked agent's
   // sprites see it, so nobody else re-renders into a replay.
   const [poke, setPoke] = useState<{ i: number; n: number } | null>(null);
+  // Never reset with `poke`: a sprite skips a value it has already played, so
+  // a count that restarted after the relay would make the next click a no-op.
+  const pokeSeq = useRef(0);
   function pokeAgent(i: number) {
     setSelected(i);
-    setPoke((p) => ({ i, n: (p?.n ?? 0) + 1 }));
+    setPoke({ i, n: ++pokeSeq.current });
   }
   const pokeOf = (i: number) => (poke?.i === i ? poke.n : undefined);
   const [relay, setRelay] = useState<Record<string, SpriteState> | null>(null);
@@ -464,7 +467,6 @@ export default function CrewPage() {
 
             <div className="inspect-portrait">
               <AgentSprite
-                key={agent.key}
                 agent={agent}
                 size={104}
                 state={agentState}

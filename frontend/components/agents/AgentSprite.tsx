@@ -56,31 +56,51 @@ export default function AgentSprite({
   className?: string;
 }) {
   const art = artFor(agent);
+  const sheetOnly = size > STILL_MAX;
   const [acting, setActing] = useState<number | null>(null);
   const overlay = useRef<HTMLSpanElement>(null);
+  // The last poke this sprite played. A sprite that comes back round to an
+  // agent (the inspector following the relay) must not replay an old click.
+  const played = useRef<number | undefined>(undefined);
+
+  // A different agent in the same sprite (the inspector) starts clean. Declared
+  // before the poke effect: when a click changes both at once, the reset runs
+  // first and the poke then starts.
+  useEffect(() => setActing(null), [agent.key]);
 
   useEffect(() => {
-    if (poke !== undefined) setActing(poke);
-  }, [poke]);
+    if (poke === undefined) {
+      setActing(null); // the page called it off (relay, scenario)
+    } else if (poke !== played.current && sheetOnly) {
+      played.current = poke;
+      setActing(poke);
+    }
+  }, [poke, sheetOnly]);
 
-  // The pass ends when its own animations do, so it can never drift from the
-  // durations in agents.css. Under reduced motion there are none; the job
-  // frame then holds briefly as the answer to the click.
+  // The act ends when its animations do — re-read each time, so one added
+  // mid-act (a state change) is waited for too, and a cancelled one simply
+  // drops out instead of hanging the wait. A backstop timer ends it whatever
+  // happens. Under reduced motion there are none; the job frame holds briefly.
   useEffect(() => {
-    if (acting === null || !overlay.current) return;
+    const el = overlay.current;
+    if (acting === null || !el) return;
     let live = true;
     const done = () => live && setActing(null);
-    const running = overlay.current.getAnimations();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    if (running.length) Promise.all(running.map((a) => a.finished)).then(done, () => {});
-    else timer = setTimeout(done, 900);
+    const backstop = setTimeout(done, 2500);
+    (async () => {
+      if (!el.getAnimations().length) return void setTimeout(done, 900);
+      for (;;) {
+        const running = el.getAnimations().filter((a) => a.playState !== "finished");
+        if (!running.length || !live) break;
+        await Promise.allSettled(running.map((a) => a.finished));
+      }
+      done();
+    })();
     return () => {
       live = false;
-      clearTimeout(timer);
+      clearTimeout(backstop);
     };
   }, [acting]);
-
-  const sheetOnly = size > STILL_MAX;
   return (
     <span
       className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${acting !== null && sheetOnly ? " is-poked" : ""}${ground ? " grounded" : ""} ${className}`}
