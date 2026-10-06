@@ -152,6 +152,18 @@ export default function CrewPage() {
 
   const [scenario, setScenario] = useState(1);
   const [selected, setSelected] = useState(2);
+  // Clicking an agent pokes them: one pass of their job and their signature
+  // (AgentSprite plays it). Only the clicked agent's
+  // sprites see it, so nobody else re-renders into a replay.
+  const [poke, setPoke] = useState<{ i: number; n: number } | null>(null);
+  // Never reset with `poke`: a sprite skips a value it has already played, so
+  // a count that restarted after the relay would make the next click a no-op.
+  const pokeSeq = useRef(0);
+  function pokeAgent(i: number) {
+    setSelected(i);
+    setPoke({ i, n: ++pokeSeq.current });
+  }
+  const pokeOf = (i: number) => (poke?.i === i ? poke.n : undefined);
   const [relay, setRelay] = useState<Record<string, SpriteState> | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -164,6 +176,7 @@ export default function CrewPage() {
   /** Play a full pass: each agent works, hands off, the next wakes. */
   function runRelay() {
     clearTimers();
+    setPoke(null);
     const base: Record<string, SpriteState> = {};
     AGENTS.forEach((a) => (base[a.key] = "queued"));
     setRelay({ ...base });
@@ -375,7 +388,7 @@ export default function CrewPage() {
                     }}
                     aria-pressed={i === selected}
                     aria-label={`${a.codename}, ${a.role} — ${STATE_LABEL[st]}`}
-                    onClick={() => setSelected(i)}
+                    onClick={() => pokeAgent(i)}
                   >
                     {/* Only whoever is actually doing something speaks — including
                         an agent that was sent back and is running again. */}
@@ -407,7 +420,14 @@ export default function CrewPage() {
                           </span>
                         </span>
                       </span>
-                      <AgentSprite agent={a} size={72} state={st} asleep={atRest} ground />
+                      <AgentSprite
+                        agent={a}
+                        size={72}
+                        state={st}
+                        asleep={atRest}
+                        poke={pokeOf(i)}
+                        ground
+                      />
                       <span className="desk" aria-hidden="true">
                         <span className="desk-screen" />
                         <span className="desk-spill" />
@@ -446,7 +466,13 @@ export default function CrewPage() {
             </div>
 
             <div className="inspect-portrait">
-              <AgentSprite agent={agent} size={104} state={agentState} asleep={atRest} />
+              <AgentSprite
+                agent={agent}
+                size={104}
+                state={agentState}
+                asleep={atRest}
+                poke={pokeOf(selected)}
+              />
             </div>
 
             <h2 className="inspect-name">{agent.codename}</h2>
@@ -495,7 +521,10 @@ export default function CrewPage() {
                 className="scenario"
                 aria-pressed={!relay && scenario === i}
                 disabled={!!relay}
-                onClick={() => setScenario(i)}
+                onClick={() => {
+                  setPoke(null);
+                  setScenario(i);
+                }}
               >
                 {s.label}
               </button>

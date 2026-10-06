@@ -51,13 +51,15 @@
    The art is painted, not a 1px grid, so it is scaled smoothly: nearest-
    neighbour on a downscale drops whole outline pixels and the figure shimmers. */
 .sprite-sheet,
+.sprite-poke,
 .sprite-still {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
 }
-.sprite-sheet {
+.sprite-sheet,
+.sprite-poke {
   background-image: var(--sheet);
   background-size: 400% 600%;
   background-repeat: no-repeat;
@@ -271,6 +273,39 @@
 .agent-card:hover .sprite.motion-guard   { animation: sig-guard 1.2s steps(3, end) 1; }
 .agent-card:hover .sprite.motion-launch  { animation: sig-launch 1.2s steps(4, end) 1; }
 .agent-card:hover .sprite.motion-tally   { animation: sig-tally 1.6s steps(6, end) 1; }
+
+/* Poked (clicked on the crew floor): an overlay plays one act — two passes
+   of their working row and their signature — while their own sheet keeps
+   running hidden underneath, its clock untouched. When the overlay goes,
+   they are exactly where they would have been: nothing restarts. */
+.sprite.is-poked > .sprite-sheet { visibility: hidden; }
+/* Poked awake: a dozing or waiting agent acts at full light, so the answer
+   reads as them waking up — keeping only the crew floor's depth shading. */
+.sprite.is-poked.is-queued { filter: none; }
+.station .sprite.is-poked.is-queued {
+  filter: brightness(calc(1 - var(--depth, 0) * 0.34)) saturate(calc(1 - var(--depth, 0) * 0.26));
+}
+@keyframes sheet-poke-row {
+  from { background-position: 0% 20%; }
+  to   { background-position: 100% 20%; }
+}
+.sprite-poke {
+  transform-origin: 50% 95%;
+  background-position: 0% 20%;
+  --poke-row: sheet-poke-row 800ms steps(4, jump-none) 2;
+}
+.sprite.motion-nod     .sprite-poke { animation: var(--poke-row), sig-nod 1.6s steps(3, end) 1; }
+.sprite.motion-drift   .sprite-poke { animation: var(--poke-row), sig-drift 1.4s steps(4, end) 1; }
+.sprite.motion-thrum   .sprite-poke { animation: var(--poke-row), sig-thrum 0.85s steps(2, end) 2; }
+.sprite.motion-flicker .sprite-poke { animation: var(--poke-row), sig-flicker 0.5s steps(1, end) 3; }
+.sprite.motion-scan    .sprite-poke { animation: var(--poke-row), sig-scan 0.9s steps(4, end) 2 alternate; }
+.sprite.motion-guard   .sprite-poke { animation: var(--poke-row), sig-guard 1.2s steps(3, end) 1; }
+.sprite.motion-launch  .sprite-poke { animation: var(--poke-row), sig-launch 1.2s steps(4, end) 1; }
+.sprite.motion-tally   .sprite-poke { animation: var(--poke-row), sig-tally 1.6s steps(6, end) 1; }
+/* Working and gate already move the whole figure; a second signature on the
+   overlay would stack on theirs, so they act out the job pass alone. */
+.sprite.is-working .sprite-poke,
+.sprite.is-gate .sprite-poke { animation: var(--poke-row); }
 /* …and shows what they do: one pass of their working row. Anyone already
    working or waiting on you keeps their loop — that is news, a hover isn't.
    The pass is layered after the agent's own animation rather than replacing
@@ -1681,6 +1716,8 @@
   .sprite.is-working .sprite-sheet,
   .sprite.is-done .sprite-sheet { background-position-x: 33.333%; }
   .sprite.is-rejected .sprite-sheet { background-position-x: 66.667%; }
+  /* A poke still answers, without moving: the job frame while it lasts. */
+  .sprite .sprite-poke { animation: none !important; background-position: 33.333% 20%; transform: none; }
   /* Asleep holds a frame with a Z up, so it still reads as asleep. */
   .sprite.is-queued.is-asleep .sprite-sheet { background-position-x: 66.667%; }
   /* The board holds still: the running light parks mid-cell, the gate cell

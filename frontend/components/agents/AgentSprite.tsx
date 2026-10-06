@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
 import { artFor, type Persona } from "./personas";
 
 export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
@@ -34,6 +37,7 @@ export default function AgentSprite({
   state = "queued",
   ground = false,
   asleep = false,
+  poke,
   className = "",
 }: {
   agent: Persona;
@@ -43,12 +47,63 @@ export default function AgentSprite({
   ground?: boolean;
   /** Nothing is running, so a queued agent sleeps. Ignored in any other state. */
   asleep?: boolean;
+  /**
+   * Bump to poke: one pass of their job (working row) and their signature,
+   * played on an overlay while their own animation runs on, untouched,
+   * underneath — so when it ends nothing restarts. A new value restarts it.
+   */
+  poke?: number;
   className?: string;
 }) {
   const art = artFor(agent);
+  const sheetOnly = size > STILL_MAX;
+  const [acting, setActing] = useState<number | null>(null);
+  const overlay = useRef<HTMLSpanElement>(null);
+  // The last poke this sprite played. A sprite that comes back round to an
+  // agent (the inspector following the relay) must not replay an old click.
+  const played = useRef<number | undefined>(undefined);
+
+  // A different agent in the same sprite (the inspector) starts clean. Declared
+  // before the poke effect: when a click changes both at once, the reset runs
+  // first and the poke then starts.
+  useEffect(() => setActing(null), [agent.key]);
+
+  useEffect(() => {
+    if (poke === undefined) {
+      setActing(null); // the page called it off (relay, scenario)
+    } else if (poke !== played.current && sheetOnly) {
+      played.current = poke;
+      setActing(poke);
+    }
+  }, [poke, sheetOnly]);
+
+  // The act ends when its animations do — re-read each time, so one added
+  // mid-act (a state change) is waited for too, and a cancelled one simply
+  // drops out instead of hanging the wait. A backstop timer ends it whatever
+  // happens. Under reduced motion there are none; the job frame holds briefly.
+  useEffect(() => {
+    const el = overlay.current;
+    if (acting === null || !el) return;
+    let live = true;
+    const done = () => live && setActing(null);
+    const backstop = setTimeout(done, 2500);
+    (async () => {
+      if (!el.getAnimations().length) return void setTimeout(done, 900);
+      for (;;) {
+        const running = el.getAnimations().filter((a) => a.playState !== "finished");
+        if (!running.length || !live) break;
+        await Promise.allSettled(running.map((a) => a.finished));
+      }
+      done();
+    })();
+    return () => {
+      live = false;
+      clearTimeout(backstop);
+    };
+  }, [acting]);
   return (
     <span
-      className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${ground ? " grounded" : ""} ${className}`}
+      className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${acting !== null && sheetOnly ? " is-poked" : ""}${ground ? " grounded" : ""} ${className}`}
       style={{
         ["--sprite-size" as string]: `${size}px`,
         ["--agent" as string]: agent.accent,
@@ -57,12 +112,15 @@ export default function AgentSprite({
       data-agent={agent.codename}
     >
       {ground && <span className="sprite-ground" aria-hidden="true" />}
-      {size <= STILL_MAX ? (
+      {!sheetOnly ? (
         // A fixed 96px asset drawn at icon size; next/image would add nothing.
         // eslint-disable-next-line @next/next/no-img-element
         <img className="sprite-still" src={art.still} alt="" width={size} height={size} draggable={false} />
       ) : (
         <span className="sprite-sheet" aria-hidden="true" />
+      )}
+      {acting !== null && sheetOnly && (
+        <span key={acting} ref={overlay} className="sprite-poke" aria-hidden="true" />
       )}
     </span>
   );
