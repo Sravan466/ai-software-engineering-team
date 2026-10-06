@@ -118,14 +118,35 @@ def _looks_like_path(text: str, spaced: bool = False) -> bool:
     return "." in text.strip(".")
 
 
+#: What a model puts after the path on the same line: `— the entry point`,
+#: `(updated)`, `: models`. Everything from the first of these on is not the path.
+_AFTER_PATH = re.compile(r":\s|\s+(?:[—–]|-\s|\(|\[)|\s*:$")
+
+
+
 def _named_path(line: str) -> str:
-    """The path a line above a fence names, or "" when it names none."""
+    """The path a line above a fence names, or "" when it names none.
+
+    `### backend/app/main.py — FastAPI entry point` names `backend/app/main.py`, and
+    `` ### `frontend/app/page.tsx` (updated) `` names the backticked part: a heading
+    that says more than the path still names only the path.
+    """
     marked = bool(_MARKED.match(line))
     text = line.strip()
     text = re.sub(r"^#{1,6}\s*", "", text)
-    text = text.strip("*").strip().strip("`").strip()
-    text = _NAMED.sub("", text).strip().strip("`").strip().rstrip(":").strip().strip("`")
+    text = re.sub(r"^\d+[.)]\s+", "", text.strip("*").strip())  # a numbered list item
+    ticked = re.search(r"`([^`\n]+)`", text)
+    if ticked:
+        candidate = _NAMED.sub("", ticked.group(1).strip()).strip()
+        if _looks_like_path(candidate, spaced=True):
+            return candidate
+    text = _NAMED.sub("", text.strip("`").strip()).strip()
+    cut = _AFTER_PATH.search(text)
+    if cut:
+        text = text[: cut.start()]
+    text = text.strip().strip("*").strip("`").strip()
     return text if _looks_like_path(text, spaced=marked) else ""
+
 
 
 def _path_in_info(info: str) -> tuple[str, str]:

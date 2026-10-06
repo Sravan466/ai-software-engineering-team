@@ -797,7 +797,10 @@ class ModelRouter:
         self._roles.set_option(role, "files_per_call", value)
 
     def _automatic_files_per_call(self, role: str, pair: Optional[tuple[str, str]]) -> Optional[int]:
-        """What the budgets alone choose for the model `role` runs on, for the page."""
+        """What the budgets alone choose for the model this role's picker shows — its own
+        model, or the local default its "Default" option names. A hint for the page:
+        every run sizes its batches from the model it actually lands on."""
+
         mode = RoutingMode.AUTO if pair and pair[0] in CLOUD_PROVIDERS else RoutingMode.LOCAL_ONLY
         try:
             return self.profile_for(mode, None, "high", role).files_per_call

@@ -132,7 +132,7 @@ def between_calls() -> None:
     `Superseded` for a lost claim, and `RequestCancelled` for a Stop (or a deleted
     build), which the run settles exactly as a cancelled call.
     """
-    check()
+    from app.db.base import SessionLocal
     from app.router import inflight
     from app.router.base import RequestCancelled
 
@@ -141,12 +141,16 @@ def between_calls() -> None:
     project_id = held[0] if held is not None else (build or {}).get("id")
     if not project_id:
         return
-    from app.db.base import SessionLocal
-
+    # One read for both questions: it runs before every file a code phase writes.
     with SessionLocal() as db:
-        found = db.execute(select(Project.cancel_requested).where(Project.id == project_id)).first()
-    if found is None or found[0]:
+        found = db.execute(
+            select(Project.run_token, Project.cancel_requested).where(Project.id == project_id)
+        ).first()
+    if held is not None and (found is None or found[0] != held[1]):
+        raise Superseded(project_id)
+    if found is None or found[1]:
         raise RequestCancelled()
+
 
 
 @event.listens_for(Session, "before_flush")

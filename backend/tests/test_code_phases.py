@@ -535,3 +535,66 @@ def test_a_prompt_variant_can_set_a_code_phase_plan_or_write_task(tmp_path):
     path.write_text(json.dumps({"tasks": {"nobody.plan": "x"}}))
     with pytest.raises(SystemExit):
         load_variant(str(path))
+
+
+# ── review fixes ────────────────────────────────────────────────────────────
+def test_a_heading_that_says_more_than_the_path_still_names_the_path():
+    text = (
+        "### backend/app/main.py — FastAPI entry point\n```python\nA = 1\n```\n"
+        "### `frontend/app/page.tsx` (updated)\n```tsx\nexport default 1;\n```\n"
+        "### 2) backend/x.py: models\n```\nX = 1\n```\n"
+    )
+    assert [b.path for b in code_blocks(text)] == ["backend/app/main.py", "frontend/app/page.tsx", "backend/x.py"]
+
+
+def test_a_nameless_block_only_lands_on_a_file_its_language_fits(stub_router, monkeypatch):
+    reply = "Install first:\n```bash\npip install fastapi\n```\nThen:\n```python\nAPP = 1\n```\n"
+    model = Scripted("Backend Engineer", _files(1), reply=lambda m, wanted, n: reply)
+    result = _run(monkeypatch, "backend_engineer", model, SMALL)
+    assert result.output["files"][0]["code"] == "APP = 1\n"
+
+
+def test_a_json_answer_fenced_as_json_is_read_for_its_files(stub_router, monkeypatch):
+    def reply(m, wanted, n):
+        return "```json\n" + json.dumps({"path": wanted[0], "code": "MODELS = []\n", "ok": True}) + "\n```\n"
+
+    model = Scripted("Backend Engineer", _files(1), reply=reply)
+    result = _run(monkeypatch, "backend_engineer", model, SMALL)
+    assert result.output["files"][0]["code"] == "MODELS = []\n"
+
+
+def test_write_calls_carry_the_knowledge_base_memory_and_team_decision(stub_router, monkeypatch, big_budgets):
+    model = Scripted("Backend Engineer", _files(1))
+    ctx = AgentContext(
+        idea="A tool library",
+        prior_outputs={},
+        rag_context="RAG: the lending API is documented here.",
+        memory_context="MEMORY: last time the seed data was missing.",
+        extra_context="DECISION: use PostgreSQL.",
+    )
+    _run(monkeypatch, "backend_engineer", model, big_budgets, ctx)
+    write = model.prompts[1]
+    assert "RAG: the lending API" in write and "MEMORY: last time" in write and "DECISION: use PostgreSQL" in write
+
+
+def test_a_planned_file_never_written_fails_the_build(stub_router, monkeypatch):
+    model = Scripted("Backend Engineer", _files(2), reply=lambda m, wanted, n: "" if "mod2" in wanted[0] else None)
+    result = _run(monkeypatch, "backend_engineer", model, SMALL)
+    assert model.writes == [["backend/app/mod1.py"], ["backend/app/mod2.py"], ["backend/app/mod2.py"]]
+    assert result.build_status == "failed"
+    assert {"path": "backend/app/mod2.py", "kind": "missing"}.items() <= result.build_problems[-1].items()
+    assert result.handoff["generation"]["unwritten"] == ["backend/app/mod2.py"]
+
+
+def test_a_file_cut_off_twice_is_not_asked_for_again_whole(stub_router, monkeypatch):
+    model = Scripted(
+        "Backend Engineer",
+        _files(1),
+        reply=lambda m, wanted, n: f"### {wanted[0]}\n```\nBIG = [\n",
+        finish=lambda m, n: "length",
+    )
+    result = _run(monkeypatch, "backend_engineer", model, SMALL)
+    # The write, then the one ask to split it — no repair call for a file that can
+    # only be cut off again.
+    assert len(model.writes) == 2 and "two files" in model.prompts[2]
+    assert result.build_status == "failed" and result.output["files"][0]["code"] == "BIG = [\n"

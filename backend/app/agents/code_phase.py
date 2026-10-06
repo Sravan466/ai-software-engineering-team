@@ -34,18 +34,23 @@ from pydantic import BaseModel
 
 from app.agents import handoff
 from app.agents.base import (
+    _MEMORY_FRAME,
+    _RAG_FRAME,
     _SKILLS_FRAME,
     _SKILLS_FRAME_COST,
+    _TRUNCATED,
     TASK_OVERRIDES,
     AgentContext,
     AgentResult,
     BaseAgent,
     _clip,
+    _cut_off as _cut,
     _merge,
     _pack_skills,
 )
 from app.build import layout
 from app.build.check import BuildCheck, Problem, syntax_problems
+from app.core.artifacts import NOTE_KIND
 from app.core.config import settings
 from app.core.constants import BuildStatus, SchemaStatus
 from app.core.logging import get_logger
@@ -345,7 +350,9 @@ class _Run:
             return
         for path in paths:
             self._judge(self.written[path])
-        failing = [self.written[p] for p in paths if self.written[p].faults()]
+        # A file cut off at the output limit is not asked for again whole: under the
+        # same limit that can only be cut again. The compile gate names it instead.
+        failing = [self.written[p] for p in paths if self.written[p].faults() and self.written[p].complete]
         allowed = max(settings.schema_repair_rounds, 0) + (1 if self.ctx.escalate else 0)
         rounds = 0
         while failing and rounds < allowed:
@@ -403,20 +410,30 @@ class _Run:
 
     def _match(self, resp: LLMResponse, batch: list[_Planned]) -> list[tuple[str, CodeBlock]]:
         """Each block in a reply, with the planned path it is for."""
-        blocks = code_blocks(resp.text)
-        if not blocks:
-            blocks = _salvage_json(resp.text)
-        unnamed = [b for b in blocks if not b.path]
+        blocks: list[CodeBlock] = []
+        for block in code_blocks(resp.text) or _salvage_json(resp.text):
+            # A model still answering in JSON, fenced as ```json for a file that is not
+            # JSON: the files are inside it. A dict literal is valid Python, so taking
+            # it as the file's code would sail through the per-file check.
+            if block.complete and not block.path.endswith(".json") and (
+                block.language == "json" or block.code.lstrip().startswith("{")
+            ):
+                inside = _salvage_json(block.code)
+                if inside:
+                    blocks += inside
+                    continue
+            blocks.append(block)
         asked = [p.path for p in batch]
-        out: list[tuple[str, CodeBlock]] = []
-        for block in blocks:
-            if not block.path:
-                continue
-            out.append((self._resolve(block.path, asked), block))
+        out = [(self._resolve(b.path, asked), b) for b in blocks if b.path]
         named = {path for path, _ in out}
-        # A file asked for and answered without its heading: matched in order.
-        for path, block in zip([p for p in asked if p not in named], unnamed):
-            out.append((path, block))
+        # A file asked for and answered without its heading takes the next nameless
+        # block its fence could be — a ```bash install line is never `main.py`.
+        unnamed = [b for b in blocks if not b.path]
+        for path in [p for p in asked if p not in named]:
+            pick = next((b for b in unnamed if _suits(b.language, path)), None)
+            if pick is not None:
+                unnamed.remove(pick)
+                out.append((path, pick))
         return out
 
     def _resolve(self, path: str, asked: list[str]) -> str:
@@ -545,12 +562,27 @@ class _Run:
         put("written", self._written_index(batch))
         bodies = self._bodies(batch, int(left * 0.4))
         put("bodies", bodies)
+        if ctx.extra_context:
+            room = min(len(ctx.extra_context), budget // 10, max(left - 200, 0))
+            put("extra", f"# Team decision to honour\n{_clip(ctx.extra_context, room)}\n")
         if ctx.skills:
             body, _ = _pack_skills(ctx.skills, left - _SKILLS_FRAME_COST - 1)
             if body:
                 put("skills", _SKILLS_FRAME.format(body=body))
+        # What the old one-reply prompt also carried, after everything above: the
+        # knowledge base, then lessons from past projects, in what is left.
+        for name, text, frame, share in (
+            ("rag", ctx.rag_context, _RAG_FRAME, 0.6),
+            ("memory", ctx.memory_context, _MEMORY_FRAME, 1.0),
+        ):
+            room = int(left * share) - len(frame.format(body="")) - len(_TRUNCATED) - 2
+            if text and room > 200:
+                put(name, frame.format(body=_clip(text, min(len(text), room))))
 
-        order = ["idea", *[k for k in sections if k.startswith("dep:")], "skills", "feedback", "plan", "written", "bodies"]
+        order = [
+            "idea", *[k for k in sections if k.startswith("dep:")], "skills", "rag", "memory",
+            "extra", "feedback", "plan", "written", "bodies",
+        ]
         parts = [sections[k] for k in order if k in sections]
         parts.append(sections.get("write", ""))
         parts += [sections[k] for k in sections if k.startswith("echo:")]
@@ -702,8 +734,17 @@ class _Run:
         if build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
             build, output, errors, stack = self._fix_build(build, output, errors, stack)
 
+        never = [p for p in self.unwritten if (self._entry(p) or _Planned(p)).origin == "plan"]
+        if build is not None and never:
+            # A file the plan promised and the model never returned: often a page
+            # nothing imports, so no import problem would ever name it.
+            build.problems = build.problems + [
+                Problem(path, "was planned but never written. Write it, or drop it and every import of it.", "missing")
+                for path in never
+            ]
+            build.status = BuildStatus.FAILED.value
         notes = [
-            Problem(p.path, "was not in the plan; kept", "plan")
+            Problem(p.path, "was not in the plan; kept", NOTE_KIND)
             for p in self.planned
             if p.origin == "unplanned"
         ]
@@ -795,10 +836,9 @@ class _Run:
             w = self.written[path]
             failing.append(_Written(w.path, w.code, w.language, w.purpose, w.origin, w.complete, problems, w.stack))
         before = dict(self.written)
-        claim.between_calls()
         n = self._batch_size(len(failing))
         for i in range(0, len(failing), n):
-
+            claim.between_calls()
             group = failing[i : i + n]
             for w in group:
                 activity.file(w.path, "fixing")
@@ -813,7 +853,6 @@ class _Run:
                     self._judge(trial)
                     if not trial.problems:
                         self.written[path] = trial
-            claim.between_calls()
         output2, errors2 = self._assemble()
         stack2 = charter_violations(self.ctx.charter, self.agent.key, output2) if settings.enforce_stack_charter else []
         build2 = self.agent._build_check(self.ctx, output2)
@@ -852,8 +891,25 @@ def _choice(value: object) -> object:
     return value
 
 
-def _cut(resp: LLMResponse) -> bool:
-    return (getattr(resp, "finish_reason", None) or "") == "length"
+#: Which files a fence's language word can be, for a block that names no path.
+_JS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
+_FENCE_FITS: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys(("python", "py"), (".py",)),
+    **dict.fromkeys(("javascript", "js", "jsx", "typescript", "ts", "tsx"), _JS),
+    "json": (".json",), "css": (".css", ".scss"), "scss": (".scss", ".css"), "html": (".html",),
+    "sql": (".sql",), "yaml": (".yml", ".yaml"), "yml": (".yml", ".yaml"), "toml": (".toml",),
+    "markdown": (".md",), "md": (".md",), "ini": (".ini", ".cfg"), "env": (".env",),
+    **dict.fromkeys(("bash", "sh", "shell"), (".sh",)), "dockerfile": ("dockerfile",), "diff": (),
+}
+
+
+def _suits(language: str, path: str) -> bool:
+    """Whether a block fenced as `language` can be the file at `path`."""
+    word = (language or "").lower()
+    if word in ("", "text", "txt", "plaintext"):
+        return True
+    fits = _FENCE_FITS.get(word)
+    return fits is None or path.lower().endswith(fits)
 
 
 def _strings(value: object) -> list[str]:
@@ -893,7 +949,7 @@ def _echo(w: _Written, room: int) -> str:
     """The broken version of a file, clipped to `room`, for the repair call to correct."""
     if room <= 200:
         return ""
-    code = w.code if len(w.code) <= room else w.code[:room] + "\n… [cut here to fit this model's context window]\n"
+    code = w.code if len(w.code) <= room else w.code[:room] + "\n" + _TRUNCATED
     fence = _fence(code)
     nl = "" if code.endswith("\n") else "\n"
     return _FIX_ECHO.format(path=w.path, fence=fence, lang=w.language, code=code, nl=nl)
