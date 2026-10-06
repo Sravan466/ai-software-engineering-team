@@ -120,8 +120,8 @@ export default function Pairing({
       {!pairing && (
         <>
           <p className="su-p">
-            The connector is a small program that runs on your computer. It dials out to this server and
-            keeps the line open, so it never opens a port and your model is never exposed to the internet.
+            The connector is a small program on your computer. It connects out to this server, so it opens
+            no port and your model stays off the internet.
           </p>
           <button className="btn btn-primary btn-lg" onClick={start} disabled={busy === "code"}>
             {busy === "code" ? <span className="btn-spinner" aria-hidden="true" /> : Icon.laptop}
@@ -170,8 +170,8 @@ export default function Pairing({
 
           <div className="su-pair-steps">
             <p className="su-p">
-              <strong>Run this in a terminal on the computer with the model.</strong> It asks for the code —
-              type it there, not on the command line.
+              <strong>Run this in a terminal on the computer with the model.</strong> Type the code when
+              it asks for it.
             </p>
             <OSPicker value={os} onChange={onOS} />
             {info && <CopyLine command={info.commands[os]} label={`Install and run the connector on ${OS_LABEL[os]}`} />}
@@ -188,7 +188,7 @@ export default function Pairing({
                 <span className="notice-text">
                   Before it connects, the connector asks “This connects &lt;your computer&gt; to{" "}
                   <strong>{pairing.account}</strong> on <span className="mono">{hostOf(info?.server)}</span>. Continue?”
-                  If it names another account, answer no: someone sent you their code.
+                  If it names another account, answer no. Someone sent you their code.
                 </span>
               </span>
             </div>
@@ -228,8 +228,8 @@ export default function Pairing({
                 {device.same_network !== null && (
                   <span className={device.same_network ? "su-ok-text" : "su-warn-text"}>
                     {device.same_network
-                      ? " — the same network as this browser"
-                      : " — a different network from this browser"}
+                      ? ", on the same network as this browser"
+                      : ", on a different network from this browser"}
                   </span>
                 )}
               </dd>
@@ -271,7 +271,7 @@ export default function Pairing({
           <span className="notice-body">
             <span className="notice-title">{done.name} is approved.</span>
             <span className="notice-text">
-              Step 5 shows whether it’s connected and what it found — it updates on its own.
+              Step 5 shows whether it’s connected and what it found. It updates on its own.
             </span>
             <span className="notice-actions">
               <button className="btn btn-sm" onClick={start}>

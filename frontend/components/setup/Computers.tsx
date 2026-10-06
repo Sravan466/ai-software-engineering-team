@@ -26,8 +26,7 @@ export default function Computers({
           {Icon.laptop}
         </span>
         <p className="su-p">
-          No computers yet. Pair one and it shows up here with the runtime and models it found. The model
-          stays on your computer, and you can disconnect it at any time.
+          No computers yet. Pair one to see its runtime and models here. You can disconnect it any time.
         </p>
         <button className="btn btn-primary" onClick={onPair}>
           {Icon.laptop} Connect my computer

@@ -94,7 +94,7 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
   if (!device) {
     return (
       <p className="su-p dim">
-        Nothing to show yet. Once a computer is approved in step 4, what its connector finds appears here.
+        Nothing yet. Approve a computer in step 4 and what it finds shows up here.
       </p>
     );
   }
@@ -185,7 +185,7 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
             <RuntimeWarnings key={s.id} warnings={device.warnings?.[s.id]} label={s.label} />
           ))}
           <p className="field-hint">
-            Builds still run. What to do:{" "}
+            Builds still run. To fix it,{" "}
             {kinds.has("outdated") && (
               <a className="link" href="#t-security">
                 update the runtime
@@ -197,7 +197,7 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
                 keep it on this computer
               </a>
             )}
-            . The connector warns in its terminal too.
+            .
           </p>
         </div>
       )}
@@ -212,7 +212,7 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
       {models.length > 0 && (
         <div className="su-choose">
           <label className="field">
-            <span className="label">Chat model — writes the crew’s work</span>
+            <span className="label">Chat model (does the crew’s work)</span>
             <select
               className="select input-mono"
               value={device.chat_model ?? ""}
@@ -229,14 +229,14 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
             </select>
           </label>
           <label className="field">
-            <span className="label">Embedding model — searches documents and memory</span>
+            <span className="label">Embedding model (searches documents and memory)</span>
             <select
               className="select input-mono"
               value={device.embed_model ?? ""}
               disabled={busy !== ""}
               onChange={(e) => choose("embed_model", e.target.value)}
             >
-              <option value="">None — documents and memory aren’t searched</option>
+              <option value="">None (no document or memory search)</option>
               {embedModels.map((m) => (
                 <option key={m.spec} value={m.spec}>
                   {m.name} · {m.runtime}
@@ -244,7 +244,7 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
               ))}
             </select>
             {!embedModels.length && (
-              <span className="field-hint">No embedding model found. Step 2 says how to add one; builds work without it.</span>
+              <span className="field-hint">No embedding model found. Builds work without one, and step 2 shows how to add it.</span>
             )}
           </label>
         </div>
