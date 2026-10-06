@@ -103,7 +103,7 @@
   will-change: transform, filter;
 }
 .door-floor .door-codename {
-  opacity: 0.55;
+  opacity: 0.72;
   animation: door-name-lit 12s cubic-bezier(0.33, 0, 0.2, 1) calc(var(--i) * 1.5s + 700ms) infinite both;
 }
 @keyframes door-float {
@@ -118,7 +118,7 @@
   }
 }
 @keyframes door-name-lit {
-  0%, 17%, 100% { opacity: 0.55; }
+  0%, 17%, 100% { opacity: 0.72; }
   4%, 12.5%     { opacity: 1; }
 }
 
