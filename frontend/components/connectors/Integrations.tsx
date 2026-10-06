@@ -307,7 +307,7 @@ export function IntegrationsGate({
                 )}
                 {waiting.length > 0 && (
                   <>
-                    Connect {names(waiting.map((r) => r.label))} now, or add{" "}
+                    Connect {names(waiting.map((r) => r.label))} now so the crew builds against {waiting.length === 1 ? "it" : "them"}, or add{" "}
                     {waiting.length === 1 ? "it" : "them"} later.
                   </>
                 )}

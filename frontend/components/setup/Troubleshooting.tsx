@@ -73,7 +73,7 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
         <summary>The computer went to sleep</summary>
         <p className="su-p">
           The build pauses and keeps its finished work. Wake the computer and the connector reconnects in a few
-          seconds, then the build carries on. If the connector was closed, run the pinned command again. To keep
+          seconds, then the build carries on. If the connector was closed, run the pinned command again. It reconnects without a new code. To keep
           a Mac awake during a long build, run <code className="su-code">caffeinate -i</code> in another terminal.
         </p>
       </details>
@@ -96,7 +96,7 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
                 <code className="su-code">{op}</code>
               </span>
             ))}
-            ) and refuses the rest, logging each refusal to{" "}
+            ) and refuses the rest, whatever this server asks, logging each refusal to{" "}
             <code className="su-code">~/.aiteam-connect/connector.log</code>. It never downloads or deletes a model,
             runs a command, writes a file, or calls an address this website sends. Model answers are returned as
             data and nothing runs them. It opens no port, so{" "}

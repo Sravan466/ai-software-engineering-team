@@ -143,7 +143,7 @@ export default function NewBuildPage() {
       </h1>
       <p className="prose-lede composer-lede">
         Describe a product idea. Eight AI agents plan, build, test and ship it, and stop
-        twice for your approval.
+        when they need your approval.
       </p>
 
       <div className="composer">

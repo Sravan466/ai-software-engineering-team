@@ -196,7 +196,7 @@ def _describe_unknown(base_url: str, *, http: bool = True) -> dict:
     if openai:
         note = "Speaks the OpenAI API, but isn't a runtime this app knows."
     elif status is not None:
-        note = f"Answers HTTP {status}. Not a model runtime."
+        note = f"Answers HTTP {status}, but doesn't look like a model runtime."
     else:
         note = "Accepts connections but doesn't speak HTTP."
     return {"base_url": base_url, "openai": openai, "note": note}

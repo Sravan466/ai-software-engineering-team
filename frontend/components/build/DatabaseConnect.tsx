@@ -322,7 +322,7 @@ export function DatabaseGate({
               <code className="db-var">{n}</code>
             </span>
           ))}
-          .
+          , not the values.
         </span>
       </p>
     </section>

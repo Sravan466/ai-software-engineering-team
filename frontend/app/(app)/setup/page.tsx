@@ -254,8 +254,8 @@ export default function SetupPage() {
                           {runtime.facts.context_reported === true
                             ? "Reported"
                             : runtime.facts.context_reported === false
-                              ? "Not reported, you set it"
-                              : "On some versions, otherwise you set it"}
+                              ? "Not reported (set it yourself)"
+                              : "On some versions, otherwise set it yourself"}
                         </dd>
                       </div>
                       <div>
@@ -264,7 +264,7 @@ export default function SetupPage() {
                       </div>
                       <div>
                         <dt>Embeddings</dt>
-                        <dd>{runtime.facts.embeddings ? "Yes" : "No, use a second runtime"}</dd>
+                        <dd>{runtime.facts.embeddings ? "Yes" : "No (use a second runtime)"}</dd>
                       </div>
                       <div>
                         <dt>Listens on</dt>
@@ -320,9 +320,8 @@ export default function SetupPage() {
                 ) : (
                   <p className="su-p">
                     {reporting
-                      ? `No model on ${reporting.name} can write yet. `
-                      : "Already have a model? Skip this step. Step 5 lists it once your computer is connected. "}
-                    Otherwise, get one.
+                      ? `No model on ${reporting.name} can write yet. Get one below.`
+                      : "Already have a model? Skip this step. Step 5 lists it once your computer is connected. Otherwise, get one below."}
                   </p>
                 )}
                 {haveModels ? (

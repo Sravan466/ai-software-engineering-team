@@ -240,7 +240,7 @@ function LocalSourcesCard({ onModelsChanged }: { onModelsChanged: () => void }) 
         </button>
       </div>
       <p className="muted" style={{ margin: "0 0 14px", fontSize: "var(--t-base)", lineHeight: 1.6 }}>
-        Runtimes on this computer are found automatically. Pick the model every agent uses by
+        Runtimes on this computer are found automatically, on loopback only. Pick the model every agent uses by
         default.
       </p>
       <p className="field-hint" style={{ margin: "-6px 0 14px" }}>
@@ -380,7 +380,7 @@ function DefaultNotice({
           </span>
           <span className="notice-text">
             The default model isn&apos;t served there. {home?.can_download ? "Download it, or pick" : "Pick"}{" "}
-            one it does serve from the list below. Builds wait until it&apos;s available.
+            one it does serve from the list below. Builds won&apos;t start until that model is available.
           </span>
           {home?.can_download && (
             <div className="notice-actions">
@@ -1374,7 +1374,7 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
             {" "}on {sourceLabel(state, state.default_model)}
           </>
         ) : (
-          "no model yet, because no local runtime serves one that writes"
+          "nothing yet (no local runtime serves a model that writes)"
         )}
         . Pick another model for an agent and it switches at its next phase, with no restart.
         Only models a source serves are listed.

@@ -185,7 +185,7 @@ export default function Detected({ devices, onChanged }: { devices: Device[]; on
             <RuntimeWarnings key={s.id} warnings={device.warnings?.[s.id]} label={s.label} />
           ))}
           <p className="field-hint">
-            Builds still run. To fix it,{" "}
+            Builds still run. To fix:{" "}
             {kinds.has("outdated") && (
               <a className="link" href="#t-security">
                 update the runtime

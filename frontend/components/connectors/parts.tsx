@@ -650,7 +650,7 @@ export function LockLine({ names }: { names: string[] }) {
             <code className="db-var">{n}</code>
           </span>
         ))}
-        .
+        , not the values.
       </span>
     </p>
   );

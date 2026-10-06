@@ -853,8 +853,8 @@ function BuildTab({
         <h3>Ready when you are</h3>
         <p>
           Eight agents take this idea from requirements to a deployment plan.{" "}
-          {APPROVAL_BY_ID[project.approval_mode]?.running}{" "}
-          At each stop you see the files, diagram and data before you decide.
+          {APPROVAL_BY_ID[project.approval_mode]?.running}
+          {project.approval_mode !== "unattended" && " When it stops, you see the files, diagram and data before you decide."}
         </p>
         <button className="btn btn-primary" disabled={busy} onClick={() => act(() => api.run(id))}>
           {busy && <span className="btn-spinner" aria-hidden="true" />}

@@ -243,7 +243,7 @@ export default function TestIt({
             </div>
           </dl>
           <p className="su-fine">
-            You set these on that computer. A build that goes over one is refused and told why.
+            You set these on that computer. A build that goes over one is refused with the reason.
           </p>
           <CopyLine command="aiteam-connect limits --concurrency 1 --requests-per-minute 60" label="Change the limits" />
         </>

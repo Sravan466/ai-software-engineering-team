@@ -108,7 +108,7 @@ export function StackViolations({ notes }: { notes: string[] | null | undefined 
           ))}
         </ul>
         <span className="notice-text">
-          It was sent back once and still disagrees. Approving ships two stacks that don&apos;t fit
+          It was sent back and still disagrees. Approving ships two stacks that don&apos;t fit
           together. Send it back with a note, or redo the architecture.
         </span>
       </div>

@@ -448,8 +448,12 @@ export default function Decision({
                 (unresolved === 1 ? "still needs" : "still need") +
                 " a decision" +
                 (findingsBehindTab
-                  ? ". They're under Security above. Send each one back to be fixed, or waive it with a reason."
-                  : ". Send each one back to be fixed, or waive it with a reason.")
+                  ? unresolved === 1
+                    ? ". It's under Security above. Send it back to be fixed, or waive it with a reason."
+                    : ". They're under Security above. Send each one back to be fixed, or waive it with a reason."
+                  : unresolved === 1
+                    ? ". Send it back to be fixed, or waive it with a reason."
+                    : ". Send each one back to be fixed, or waive it with a reason.")
               : copy.after}
           </span>
         </div>

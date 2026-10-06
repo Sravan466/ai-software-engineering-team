@@ -50,7 +50,7 @@ export default function DeploySettings() {
       </div>
       <p className="ship-copy" style={{ marginBottom: 14 }}>
         Frontends deploy to your Vercel. Anything with a backend goes to your GitHub, then Render.
-        Tokens are encrypted on this server.
+        Tokens are encrypted on this server and never sent to the browser.
       </p>
       {!state && !error && <SkeletonLines lines={2} />}
       {error && (
