@@ -35,12 +35,10 @@ the WebPs in public/agents/ can always be rebuilt). To change a character,
 replace its still and sheet in `assets/` under the names in AGENTS and rerun
 for that agent.
 
-ATLAS: its first sheet runs off the canvas in the last row, which this script
-refuses, so rows 1-5 of `public/agents/atlas.webp` are a hand-made stand-in
-(its idle frames reused for the waiting row, with its own "!" on frames 1-2),
-kept losslessly in `assets/Atlas Stand-in Rows.png` (see STAND_IN). Until a
-regenerated sheet is in place, a run uses those rows and the published still
-and only rebuilds ATLAS's sleep row; delete both entries once it is.
+Sheets don't have to be square: five rows in a square left the image model too
+little height, and ATLAS's bottom row ran off the canvas twice; its sheet is a
+1024x1536 portrait. If a sheet can't be cut, an agent can be listed in
+STAND_IN with a lossless copy of hand-made rows 1-5 to use meanwhile.
 """
 
 from __future__ import annotations
@@ -253,7 +251,9 @@ def frames(sheet: Image.Image):
 
             if r == 0:
                 idle_h[c] = bbox[3] - bbox[1]
-            elif bbox[3] >= H - 2 and (bbox[3] - bbox[1]) < 0.8 * idle_h[c]:
+            elif bbox[3] >= H - 12 and (bbox[3] - bbox[1]) < 0.8 * idle_h[c]:
+                # Within a few pixels of the bottom counts: a cut edge fades out
+                # over its last pixels, so a cut figure can stop short of it.
                 # Touching the edge alone isn't enough — most sheets put the soles
                 # on the last pixel. A figure clearly shorter than its idle self
                 # has lost its feet, and that can't be repaired here. Reported
@@ -270,7 +270,7 @@ def frames(sheet: Image.Image):
 # Agents whose sprite sheet can't be cut yet, and the lossless copy of the
 # hand-made rows 1-5 that stand in for it. Only these may keep published rows;
 # any other agent with a broken sheet stops the run.
-STAND_IN = {"atlas": "Atlas Stand-in Rows.png"}
+STAND_IN: dict[str, str] = {}
 
 
 def sleep_file(name: str) -> str:
