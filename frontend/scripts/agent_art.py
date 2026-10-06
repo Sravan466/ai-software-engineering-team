@@ -7,7 +7,8 @@ Turns the generated crew art in `assets/` into what AgentSprite plays.
 
 Inputs, per agent: a still (`scope.png`), a 5x4 sprite sheet
 (`Scope Sprite Sheet.png`) and a 2x2 sleep sheet (`Scope Sleep Sheet.png`),
-all 1254x1254 out of an image model. Outputs, in
+each straight out of an image model (1254x1254 squares, except ATLAS's
+1024x1536 portrait sheet — any size works). Outputs, in
 `frontend/public/agents/`:
 
     <codename>.webp        the sheet, re-cut onto an even 4x6 grid of CELL cells:
@@ -35,12 +36,10 @@ the WebPs in public/agents/ can always be rebuilt). To change a character,
 replace its still and sheet in `assets/` under the names in AGENTS and rerun
 for that agent.
 
-ATLAS: its first sheet runs off the canvas in the last row, which this script
-refuses, so rows 1-5 of `public/agents/atlas.webp` are a hand-made stand-in
-(its idle frames reused for the waiting row, with its own "!" on frames 1-2),
-kept losslessly in `assets/Atlas Stand-in Rows.png` (see STAND_IN). Until a
-regenerated sheet is in place, a run uses those rows and the published still
-and only rebuilds ATLAS's sleep row; delete both entries once it is.
+Sheets don't have to be square: five rows in a square left the image model too
+little height, and ATLAS's bottom row ran off the canvas twice; its sheet is a
+1024x1536 portrait. A sheet that can't be cut stops the run — regenerate it
+(a temporary hand-made stand-in is in git history before #70, if one is needed).
 """
 
 from __future__ import annotations
@@ -253,7 +252,9 @@ def frames(sheet: Image.Image):
 
             if r == 0:
                 idle_h[c] = bbox[3] - bbox[1]
-            elif bbox[3] >= H - 2 and (bbox[3] - bbox[1]) < 0.8 * idle_h[c]:
+            elif bbox[3] >= H * 0.99 and (bbox[3] - bbox[1]) < 0.8 * idle_h[c]:
+                # The last 1% of the sheet counts: a cut edge fades out over its
+                # last pixels, so a cut figure can stop a few short of it.
                 # Touching the edge alone isn't enough — most sheets put the soles
                 # on the last pixel. A figure clearly shorter than its idle self
                 # has lost its feet, and that can't be repaired here. Reported
@@ -265,12 +266,6 @@ def frames(sheet: Image.Image):
             f"{', '.join(bad)} run off the bottom of the sheet — "
             "regenerate it with a margin on every edge"
         )
-
-
-# Agents whose sprite sheet can't be cut yet, and the lossless copy of the
-# hand-made rows 1-5 that stand in for it. Only these may keep published rows;
-# any other agent with a broken sheet stops the run.
-STAND_IN = {"atlas": "Atlas Stand-in Rows.png"}
 
 
 def sleep_file(name: str) -> str:
@@ -365,7 +360,6 @@ def main():
     # Every sheet is cut even when only some are written: the shared scale
     # depends on all eight, so a rebuilt agent stays the same size as the rest.
     cut = {}
-    skipped = set()
     for name, (_, sheet_file) in AGENTS.items():
         sheet = strip_painted_checkerboard(Image.open(SRC / sheet_file))
         cut[name] = []
@@ -375,12 +369,20 @@ def main():
         except SystemExit as e:
             # Fatal only for a sheet being written; for the others the idle
             # row is all the shared scale needs, and it is always cut in full.
-            if sum(1 for r, *_ in cut[name] if r == 0) < COLS or (name in only and name not in STAND_IN):
+            if name in only or sum(1 for r, *_ in cut[name] if r == 0) < COLS:
                 raise SystemExit(f"{sheet_file}: {e}") from None
-            print(f"skip {name}: {e}")
-            skipped.add(name)
+            print(f"skip {name} (not being written): {e}")
             continue
         print(f"cut {name}: {len(cut[name])} frames")
+
+    # The shared scale compares figures in source pixels, so a sheet drawn on a
+    # different canvas than the rest can move everyone's size. Say so.
+    sizes = {n: Image.open(SRC / f).size for n, (_, f) in AGENTS.items()}
+    common = max(set(sizes.values()), key=list(sizes.values()).count)
+    for n, sz in sizes.items():
+        if sz != common:
+            print(f"  note: {n}'s sheet is {sz[0]}x{sz[1]}, the rest {common[0]}x{common[1]} — "
+                  "check its size against the crew")
 
     # One scale for the whole crew: the largest that fits every idle figure.
     scale = min(
@@ -394,27 +396,9 @@ def main():
         if name not in only:
             continue
         grid = Image.new("RGBA", (CELL * COLS, CELL * OUT_ROWS), (0, 0, 0, 0))
-        if name in skipped:
-            # The sprite sheet can't be cut (see ATLAS above): use the stand-in
-            # rows 1-5 from their lossless copy — made once from the published
-            # sheet — so rebuilds never re-compress them. The sleep row is
-            # sized from that idle frame, not this run's scale, so it matches
-            # the rows it sits under even if the crew-wide scale has moved.
-            rows_file = SRC / STAND_IN[name]
-            if not rows_file.exists():
-                published = Image.open(OUT / f"{name}.webp").convert("RGBA")
-                published.crop((0, 0, CELL * COLS, CELL * ROWS)).save(rows_file)
-                print(f"  {name}: saved the published rows 1-5 to {rows_file.name}")
-            rows = Image.open(rows_file).convert("RGBA")
-            grid.paste(rows, (0, 0))
-            ia = rows.crop((0, 0, CELL, CELL)).getchannel("A").load()
-            ib = max(components(ia, (0, 0, CELL, CELL)), key=lambda k: k[0])[1]
-            idle_h = ib[3] - ib[1]
-            print(f"  {name}: stand-in rows 1-5 from {rows_file.name}")
-        else:
-            idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
-            for r, c, frame, anchor, bbox in cut[name]:
-                grid.alpha_composite(place(frame, anchor, scale), (c * CELL, r * CELL))
+        idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
+        for r, c, frame, anchor, bbox in cut[name]:
+            grid.alpha_composite(place(frame, anchor, scale), (c * CELL, r * CELL))
 
         # The sleep loop is drawn at its own size, so each agent's is scaled to
         # its idle figure — dozing off and waking up never change their size.
@@ -431,10 +415,6 @@ def main():
                 print(f"  warning: {name} sleep frame {c + 1} is clipped by its cell")
             grid.alpha_composite(place(frame, anchor, k), (c * CELL, ROWS * CELL))
         webp(grid, OUT / f"{name}.webp")
-        if name in skipped:
-            # Its still stays as published, alongside the rows it matches.
-            print(f"wrote {name} (sleep row only)")
-            continue
 
         # The still is drawn at the same height as the idle frame, so swapping
         # one for the other never changes the figure's size.
