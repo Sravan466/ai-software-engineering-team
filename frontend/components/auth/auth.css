@@ -79,32 +79,32 @@
    as eight things vibrating. Selectors carry .door-floor so they outrank
    agents.css however the two sheets end up ordered. */
 .door-floor .sprite.is-working .sprite-sheet {
-  animation: sheet-loop var(--door-frames, 1100ms) steps(4, jump-none) infinite;
-  animation-delay: calc(var(--i) * -290ms);
+  animation: sheet-loop var(--door-frames, 1500ms) steps(4, jump-none) infinite;
+  animation-delay: calc(var(--i) * -390ms);
 }
-.door-floor .sprite.motion-nod     { --door-frames: 1200ms; }
-.door-floor .sprite.motion-drift   { --door-frames: 1400ms; }
-.door-floor .sprite.motion-thrum   { --door-frames: 900ms; }
-.door-floor .sprite.motion-flicker { --door-frames: 820ms; }
-.door-floor .sprite.motion-scan    { --door-frames: 1100ms; }
-.door-floor .sprite.motion-guard   { --door-frames: 1300ms; }
-.door-floor .sprite.motion-launch  { --door-frames: 1000ms; }
-.door-floor .sprite.motion-tally   { --door-frames: 1100ms; }
+.door-floor .sprite.motion-nod     { --door-frames: 1650ms; }
+.door-floor .sprite.motion-drift   { --door-frames: 1900ms; }
+.door-floor .sprite.motion-thrum   { --door-frames: 1250ms; }
+.door-floor .sprite.motion-flicker { --door-frames: 1150ms; }
+.door-floor .sprite.motion-scan    { --door-frames: 1500ms; }
+.door-floor .sprite.motion-guard   { --door-frames: 1800ms; }
+.door-floor .sprite.motion-launch  { --door-frames: 1400ms; }
+.door-floor .sprite.motion-tally   { --door-frames: 1500ms; }
 
 /* The handoff, in miniature: a light passes down the crew in pipeline order,
-   1.5s each, so the eye has one figure to follow instead of eight. Whoever
+   2s each, so the eye has one figure to follow instead of eight. Whoever
    holds it is at full colour with their own glow; the rest work a step back. */
 .door-floor .door-agent .sprite.is-working {
   --dim: brightness(0.8) saturate(0.82) drop-shadow(0 0 0 transparent);
   filter: var(--dim);
   animation:
-    door-float 3.2s cubic-bezier(0.45, 0, 0.55, 1) calc(var(--i) * -400ms) infinite,
-    door-lit 12s cubic-bezier(0.33, 0, 0.2, 1) calc(var(--i) * 1.5s + 700ms) infinite both;
+    door-float 4.4s cubic-bezier(0.45, 0, 0.55, 1) calc(var(--i) * -550ms) infinite,
+    door-lit 16s cubic-bezier(0.33, 0, 0.2, 1) calc(var(--i) * 2s + 700ms) infinite both;
   will-change: transform, filter;
 }
 .door-floor .door-codename {
   opacity: 0.72;
-  animation: door-name-lit 12s cubic-bezier(0.33, 0, 0.2, 1) calc(var(--i) * 1.5s + 700ms) infinite both;
+  animation: door-name-lit 16s cubic-bezier(0.33, 0, 0.2, 1) calc(var(--i) * 2s + 700ms) infinite both;
 }
 @keyframes door-float {
   0%, 100% { transform: translateY(0); }
