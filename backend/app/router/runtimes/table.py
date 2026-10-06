@@ -219,7 +219,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
                 "Start a second `llama-server --embeddings -m <embedding model>.gguf --port 8081`. "
                 "Without one, uploaded documents and the crew's memory aren't searched."
             ),
-            serve="`llama-server -m <model>.gguf --port 8080 -c 16384` — it runs as long as that terminal does.",
+            serve="`llama-server -m <model>.gguf --port 8080 -c 16384`. It runs while that terminal is open.",
             check="curl http://127.0.0.1:8080/health",
             exposure="It listens on 127.0.0.1 by default. Never start it with `--host 0.0.0.0`.",
         ),
@@ -513,7 +513,7 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
                 "windows": "In Docker Desktop, turn on Docker Model Runner (Settings → AI).",
                 "linux": "Install the `docker-model-plugin` package for Docker Engine.",
             },
-            download="`docker model pull ai/<model>` — browse hub.docker.com/u/ai.",
+            download="`docker model pull ai/<model>`. Browse models at hub.docker.com/u/ai.",
             embeddings="Pull an embedding model too, e.g. one tagged embedding on hub.docker.com/u/ai.",
             serve="`docker desktop enable model-runner --tcp 12434` (Docker Engine serves it on 12434 already).",
             check="curl http://127.0.0.1:12434/engines/v1/models",
@@ -546,8 +546,8 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             download="`foundry model list`, then `foundry model download <name>`.",
             embeddings="Foundry Local 1.1 and later serve embedding models too.",
             serve=(
-                "`foundry service start`, then `foundry service status` prints its address — its port "
-                "changes each start, so add it: `aiteam-connect add-source http://127.0.0.1:<port>`."
+                "Run `foundry service start`, then `foundry service status` to see its port. The port "
+                "changes on each start, so add it with `aiteam-connect add-source http://127.0.0.1:<port>`."
             ),
             check="curl http://127.0.0.1:<port>/openai/status",
             exposure="It listens on 127.0.0.1 only.",
@@ -577,8 +577,8 @@ RUNTIMES: tuple[RuntimeSpec, ...] = (
             download="Add models the way the server's documentation describes.",
             embeddings="If it serves `/v1/embeddings`, load an embedding model on it too.",
             serve=(
-                "Start it on this computer, then tell the connector where it is — on that computer, "
-                "never from this website: `aiteam-connect add-source http://127.0.0.1:<port>`."
+                "Start it, then run `aiteam-connect add-source http://127.0.0.1:<port>` on that computer. "
+                "Sources are never added from this website."
             ),
             check="curl http://127.0.0.1:<port>/v1/models",
             exposure="Make it listen on 127.0.0.1 only.",

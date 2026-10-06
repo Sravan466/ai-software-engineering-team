@@ -475,7 +475,7 @@ def advice(
                       "Create a new key", keys)
     if kind == REVOKED:
         return Advice(kind, "Revoked", f"This {who} key was revoked or suspended",
-                      f"It was revoked, deleted or suspended — {who} also disables a key that leaked. "
+                      f"It was revoked, deleted or suspended. {who} also disables keys that leak. "
                       "Create a new key, or ask the account's owner.", "Create a new key", keys)
     if kind == NO_CREDIT:
         return Advice(kind, "No credit", f"Your {who} account is out of credit",
@@ -483,7 +483,7 @@ def advice(
                       "Add credits", billing)
     if kind == SPEND_LIMIT:
         return Advice(kind, "Limit reached", f"Your {who} account reached its spending limit",
-                      "The key is fine, but a usage or spend limit on the account has been reached. "
+                      "The key is fine, but the account hit a usage or spend limit. "
                       "Raise the limit, or wait for it to reset.", "Raise the limit", limits)
     if kind == BILLING_DISABLED:
         return Advice(kind, "Billing off", f"Billing is off for this {who} account",

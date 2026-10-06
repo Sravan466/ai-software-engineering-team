@@ -363,7 +363,7 @@ def parse_uri(var: Var, raw: str, database: str, provider: str) -> tuple[Optiona
         problems.append(
             Problem(
                 var.name,
-                "It still says <password> — replace it with your database user's password.",
+                "It still says <password>. Replace it with your database user's password.",
                 step=_step(provider, "password"),
             )
         )
