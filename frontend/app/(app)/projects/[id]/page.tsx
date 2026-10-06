@@ -357,6 +357,10 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     );
   }
 
+  // Nobody holds the work unless the build is live; then whoever waits dozes.
+  // A stalled run is not live — it stopped responding, and the crew says so.
+  const atRest = !stillRunning(effectiveStatus(project));
+
   const doneCount = PHASES.filter((ph) => nodeStateFor(project, ph.key) === "done").length;
   const tabs: { key: Tab; label: string }[] = [
     { key: "build", label: "Build" },
@@ -500,7 +504,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                     agent={agent}
                     size={64}
                     state={SPRITE_STATE[ns]}
-                    asleep={!stillRunning(status ?? "")}
+                    asleep={atRest}
                   />
                   <span className="relay-name">{agent.codename}</span>
                   <span className="relay-bar" />
@@ -988,6 +992,7 @@ function PhaseList({
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [landed, setLanded] = useState<string | null>(null);
+  const atRest = !stillRunning(effectiveStatus(project));
   const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
 
   // The scroll and the highlight outlive the instruction that started them, so
@@ -1060,7 +1065,7 @@ function PhaseList({
                 agent={agent}
                 size={40}
                 state={SPRITE_STATE[ns]}
-                asleep={!stillRunning(effectiveStatus(project))}
+                asleep={atRest}
               />
 
               <span className="phase-main">

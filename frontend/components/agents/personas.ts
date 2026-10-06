@@ -91,8 +91,19 @@ export const DESK_PALETTE: Record<string, string> = {
  */
 export function artFor(a: Persona): { sheet: string; still: string } {
   const slug = a.codename.toLowerCase();
-  return { sheet: `/agents/${slug}.webp`, still: `/agents/${slug}-still.webp` };
+  return {
+    sheet: `/agents/${slug}.webp?v=${ART_VERSION}`,
+    still: `/agents/${slug}-still.webp?v=${ART_VERSION}`,
+  };
 }
+
+/**
+ * Bump whenever the sheet layout or the art changes. The CSS assumes the
+ * layout (rows, order), so a cached sheet from before a change would be drawn
+ * at the wrong offsets; a new query string makes every browser and CDN fetch
+ * the new one. 2 = the 4x6 sheet with the sleep row.
+ */
+const ART_VERSION = 2;
 
 /** Build the render palette for one agent's desk prop. */
 export function deskPaletteFor(a: Persona): Record<string, string> {

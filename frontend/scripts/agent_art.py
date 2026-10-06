@@ -36,10 +36,10 @@ replace its still and sheet in `assets/` under the names in AGENTS and rerun
 for that agent.
 
 ATLAS: its first sheet runs off the canvas in the last row, which this script
-refuses, so `public/agents/atlas.webp` is a hand-made stand-in (its idle
-frames reused for the waiting row, with its own "!" on frames 1–2). Running
-the script for every agent stops at ATLAS until a regenerated sheet is in
-place — name the other seven to rebuild them meanwhile.
+refuses, so rows 1-5 of `public/agents/atlas.webp` are a hand-made stand-in
+(its idle frames reused for the waiting row, with its own "!" on frames 1-2).
+Until a regenerated sheet is in place, a run keeps those published rows and
+the published still, and only rebuilds ATLAS's sleep row.
 """
 
 from __future__ import annotations
@@ -286,13 +286,28 @@ def sleep_frames(sheet: Image.Image):
     for r in range(2):
         for c in range(2):
             slot = (xs[c], ys[r], xs[c + 1], ys[r + 1])
+            n = r * 2 + c + 1
             mine = [k for k in components(alpha, slot) if k[0] > 12]
+            if not mine:
+                raise SystemExit(f"sleep frame {n} is empty")
             figure = max(mine, key=lambda k: k[0])
-            if figure[1][3] >= H - 1 or figure[1][1] <= 0:
-                raise SystemExit(f"sleep frame {r * 2 + c + 1} touches the edge of the sheet")
+            fb = figure[1]
+            if fb[0] <= slot[0] or fb[1] <= slot[1] or fb[2] >= slot[2] or fb[3] >= slot[3]:
+                raise SystemExit(
+                    f"sleep frame {n} touches the edge of its frame — regenerate it "
+                    "with a margin on every edge"
+                )
+            # A neighbour's sliver sits on the frame's edge; this figure's own
+            # Zs float free of it.
+            keep = [
+                k
+                for k in mine
+                if k is figure
+                or not (k[1][0] <= slot[0] or k[1][1] <= slot[1] or k[1][2] >= slot[2] or k[1][3] >= slot[3])
+            ]
             mask = Image.new("L", sheet.size, 0)
             mp = mask.load()
-            for k in mine:
+            for k in keep:
                 for x, y in k[2]:
                     mp[x, y] = 255
             mask = mask.filter(ImageFilter.MaxFilter(3))
@@ -374,9 +389,16 @@ def main():
         idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
         if name in skipped:
             # The sprite sheet can't be cut (see ATLAS above): keep the five
-            # published rows as they are and only redo the sleep row.
+            # published rows as they are and only redo the sleep row — sized
+            # from the published idle frame, not this run's scale, so the
+            # sleep row matches the rows it sits under even if the crew-wide
+            # scale has moved since they were made.
             published = Image.open(OUT / f"{name}.webp").convert("RGBA")
             grid.paste(published.crop((0, 0, CELL * COLS, CELL * ROWS)), (0, 0))
+            idle = published.crop((0, 0, CELL, CELL))
+            ia = idle.getchannel("A").load()
+            idle_h = max(components(ia, (0, 0, CELL, CELL)), key=lambda k: k[0])[1]
+            idle_h = idle_h[3] - idle_h[1]
             print(f"  {name}: kept the published rows 1-5")
         else:
             for r, c, frame, anchor, bbox in cut[name]:
@@ -392,6 +414,10 @@ def main():
         for c, (frame, anchor, _b) in enumerate(sleep):
             grid.alpha_composite(place(frame, anchor, k), (c * CELL, ROWS * CELL))
         webp(grid, OUT / f"{name}.webp")
+        if name in skipped:
+            # Its still stays as published, alongside the rows it matches.
+            print(f"wrote {name} (sleep row only)")
+            continue
 
         # The still is drawn at the same height as the idle frame, so swapping
         # one for the other never changes the figure's size.

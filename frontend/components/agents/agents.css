@@ -282,6 +282,11 @@
 .agent-card:hover .sprite.is-queued .sprite-sheet {
   animation: sheet-hover-row 800ms steps(4, jump-none) 1;
 }
+.agent-card:hover .sprite.is-queued.is-asleep .sprite-sheet {
+  animation:
+    sheet-sleep 3.2s steps(4, jump-none) infinite,
+    sheet-hover-row 800ms steps(4, jump-none) 1;
+}
 .agent-card:hover .sprite.is-done .sprite-sheet {
   animation:
     sheet-once 760ms steps(4, jump-none) 1 both,

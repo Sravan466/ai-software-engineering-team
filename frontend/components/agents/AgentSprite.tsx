@@ -3,7 +3,7 @@ import { artFor, type Persona } from "./personas";
 export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
 
 /**
- * Below this a 4x5 sheet cell is a few pixels of noise, so the still is drawn
+ * Below this a 4x6 sheet cell is a few pixels of noise, so the still is drawn
  * instead — one small pre-scaled frame that holds its silhouette at 18px.
  */
 const STILL_MAX = 28;
