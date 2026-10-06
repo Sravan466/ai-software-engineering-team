@@ -89,8 +89,7 @@ export default function ConnectorsPage() {
       <header className="cx-head">
         <h1>Connectors</h1>
         <p className="prose-lede">
-          Connect a service once. Every build that needs it uses it automatically — the crew only ever
-          sees the variable names, never your keys.
+          Connect a service once and every build that needs it uses it.
         </p>
       </header>
 
@@ -98,8 +97,8 @@ export default function ConnectorsPage() {
         <p className="cx-hint">
           {Icon.info}
           <span>
-            Connect Stripe and your next store build takes real test payments. Nothing here is required:
-            a build that needs a service you haven&apos;t connected asks for it, or carries on without.
+            Connect Stripe and your next store build takes real test payments. None of these are
+            required. A build asks for a missing service or carries on without it.
           </span>
         </p>
       )}

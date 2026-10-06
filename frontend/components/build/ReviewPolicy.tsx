@@ -173,8 +173,8 @@ export default function ReviewPolicy({
           )}
           {project.status === "awaiting_approval" && project.approval_mode === "unattended" && (
             <p className="field-hint">
-              This build is still parked on the decision below. Approve it once and it
-              will run to the end.
+              This build is still waiting on the decision below. Approve it and it runs
+              to the end.
             </p>
           )}
         </div>

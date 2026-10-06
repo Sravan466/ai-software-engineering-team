@@ -152,7 +152,7 @@ export function CheckDetail({
       {reasons.length === 0 ? (
         <p className="check-reason" data-level="fits">
           {Icon.check}
-          <span>Nothing known stands in its way.</span>
+          <span>No known problems.</span>
         </p>
       ) : (
         <ul className="check-reasons">

@@ -140,8 +140,8 @@ export default function ShipCard({
           <div className="notice-body">
             <span className="notice-title">Deploy options didn&apos;t load</span>
             <span className="notice-text">
-              The backend didn&apos;t answer, so we can&apos;t tell what this build can be deployed to. Check
-              that it is running on <code>:8000</code> — the .zip above still works.
+              The backend didn&apos;t answer. Check that it&apos;s running on <code>:8000</code>. The
+              .zip above still works.
             </span>
             <span className="notice-detail mono">{loadError}</span>
             <div className="notice-actions">
@@ -329,8 +329,8 @@ function GithubConnect({
   return (
     <div className="ship-stack">
       {gh.reason === "revoked" ? (
-        <Problem title="GitHub access was removed — reconnect">
-          GitHub no longer accepts the saved connection, so it was forgotten. Connect again to keep pushing.
+        <Problem title="GitHub access was removed">
+          GitHub rejected the saved connection. Connect again to keep pushing.
         </Problem>
       ) : (
         <p className="ship-copy">{lead}</p>
@@ -409,7 +409,7 @@ function RepoForm({
         </button>
       </form>
       <p className={`field-hint${valid ? "" : " ship-hint-bad"}`} id={`${fieldId}-hint`}>
-        {valid ? "Letters, digits, - _ and . only." : "Use letters, digits, - _ and . — no spaces."}
+        {valid ? "Letters, digits, - _ and . only." : "Use letters, digits, - _ and . with no spaces."}
       </p>
       {conflict && (
         <Problem
@@ -625,7 +625,7 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
           </button>
         )}
         {mine && state.status === "error" && state.error?.includes("rejected") && !replacing && (
-          <Problem title="Token rejected — replace it">{state.error}</Problem>
+          <Problem title="Token rejected">{state.error}</Problem>
         )}
         <VercelConnect
           onSaved={async () => {
@@ -843,7 +843,7 @@ function RenderFlow({
         <>
           <p className="ship-copy">
             Pushing to <b>@{gh.login}</b>. The repo gets the code and a <code>render.yaml</code> that tells
-            Render what to create — variable names only, never values.
+            Render what to create. It holds variable names, not values.
           </p>
           <RepoForm
             defaultName={defaultName}
@@ -878,7 +878,7 @@ function RenderFlow({
                     <code>{n}</code>
                   </span>
                 ))}{" "}
-                on its own page — paste the values there.
+                on its own page. Paste the values there.
               </li>
             )}
           </ul>
@@ -930,7 +930,7 @@ function RenderFlow({
           )}
           {savedUrl && !urlError && (
             <p className="field-hint" role="status">
-              Saved — it shows on this build from now on.
+              Saved. It now shows on this build.
             </p>
           )}
         </form>
@@ -995,7 +995,7 @@ function GithubFlow({
         info={info}
         next="github"
         oauthNotice={oauthNotice}
-        lead="Sign in with your own GitHub and we'll push this project — source, docs and README — into a private repo there."
+        lead="Sign in with GitHub and we'll push this project's source, docs and README to a private repo."
       />
     );
   }
@@ -1055,7 +1055,7 @@ function GithubFlow({
           <div className="notice-body">
             <span className="notice-title">
               {result.changed === false
-                ? "Already up to date — nothing new to push"
+                ? "Already up to date"
                 : result.created
                   ? `Pushed ${result.files} files`
                   : "Pushed the update"}

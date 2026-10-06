@@ -82,7 +82,7 @@ export default function TestIt({
   if (!device) {
     return (
       <p className="su-fine">
-        Pair a computer (step 4) and choose the model it writes with (step 5); then send it a test prompt here.
+        Pair a computer (step 4) and pick its model (step 5) to send a test prompt.
       </p>
     );
   }
@@ -135,8 +135,7 @@ export default function TestIt({
       )}
 
       <p className="su-p">
-        Sends one short prompt through the same path a build uses, so it passes or fails for the same reasons —
-        and says how long the round trip took.
+        Sends one short prompt the way a build would, and shows how long it took.
       </p>
 
       <ol className="su-route" data-trip={trip} aria-label="The path the test prompt takes">
@@ -244,7 +243,7 @@ export default function TestIt({
             </div>
           </dl>
           <p className="su-fine">
-            Set on that computer, never from this website. A build that goes over one is refused with the reason.
+            You set these on that computer. A build that goes over one is refused with the reason.
           </p>
           <CopyLine command="aiteam-connect limits --concurrency 1 --requests-per-minute 60" label="Change the limits" />
         </>

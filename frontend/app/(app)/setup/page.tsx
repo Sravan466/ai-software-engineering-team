@@ -19,8 +19,8 @@ type Tab = "setup" | "computers";
 const STRUCTURED_LABEL: Record<string, string> = {
   schema: "Held to a JSON schema",
   grammar: "Held to a grammar",
-  json: "Valid JSON — checked and repaired",
-  none: "Free text — checked and repaired",
+  json: "Valid JSON, checked and repaired",
+  none: "Free text, checked and repaired",
 };
 
 /**
@@ -150,7 +150,7 @@ export default function SetupPage() {
           </div>
         </dl>
       ) : (
-        <p className="su-fine">Once your computer is connected (step 4), this says what size of model fits its memory.</p>
+        <p className="su-fine">Connect your computer (step 4) to see what model size fits its memory.</p>
       )}
       {reporting?.advice && <p className="su-fine">{reporting.advice.note}</p>}
       <h3 className="su-h3">Embeddings</h3>
@@ -164,16 +164,14 @@ export default function SetupPage() {
     <div className="settings-wrap su-wrap">
       <h1 style={{ fontSize: "var(--t-2xl)" }}>Set up your computer</h1>
       <p className="prose-lede" style={{ marginTop: 10 }}>
-        Run the crew on a model on your own computer. The model runs on your computer. Your project and its
-        files are stored on our server.
+        Run the crew on a model on your own computer. Your project files are stored on our server.
       </p>
       <p className="field-hint" style={{ marginTop: 8, maxWidth: "70ch" }}>
-        &ldquo;The connector&rdquo; here is the small program that lends this app your computer&apos;s models.
-        Services your generated apps use — Stripe, Resend, Clerk, OpenAI — are on the{" "}
+        Looking for Stripe, Resend, Clerk or OpenAI for your apps? They&apos;re on the{" "}
         <Link className="link" href="/connectors">
           Connectors
         </Link>{" "}
-        page instead.
+        page.
       </p>
 
       <div className="tabs su-tabs" role="tablist" aria-label="Setup">
@@ -213,8 +211,8 @@ export default function SetupPage() {
           ) : guide && runtime ? (
             <ol className="su-steps">
               <Step n={1} title="Pick a runtime" summary={runtime.label} state={state(1)} open={isOpen(1)} onToggle={() => toggle(1)}>
-                <p className="su-p">The program that runs the model. Every one of these works the same way here — pick the one you
-                  already use, or the one that suits your computer.</p>
+                <p className="su-p">The program that runs your model. They all work the same here, so pick the one you
+                  already use.</p>
                 <div className="su-runtimes" role="radiogroup" aria-label="Runtime">
                   {guide.runtimes.map((card) => (
                     <button
@@ -256,8 +254,8 @@ export default function SetupPage() {
                           {runtime.facts.context_reported === true
                             ? "Reported"
                             : runtime.facts.context_reported === false
-                              ? "Not reported — you set it"
-                              : "On some versions — else you set it"}
+                              ? "Not reported (set it yourself)"
+                              : "On some versions, otherwise set it yourself"}
                         </dd>
                       </div>
                       <div>
@@ -266,7 +264,7 @@ export default function SetupPage() {
                       </div>
                       <div>
                         <dt>Embeddings</dt>
-                        <dd>{runtime.facts.embeddings ? "Yes" : "No — use a second runtime"}</dd>
+                        <dd>{runtime.facts.embeddings ? "Yes" : "No (use a second runtime)"}</dd>
                       </div>
                       <div>
                         <dt>Listens on</dt>
@@ -299,7 +297,7 @@ export default function SetupPage() {
                   <>
                     <p className="su-p">
                       {reporting?.name ?? "Your computer"} already has {ownModels.length === 1 ? "a model" : `${ownModels.length} models`} that
-                      can write the crew’s work — nothing to download. You choose which one to use in step 5.
+                      can do the work. Nothing to download. Pick one in step 5.
                     </p>
                     <ul className="su-have" aria-label="Models already on your computer">
                       {ownModels.slice(0, 6).map((m) => (
@@ -316,15 +314,14 @@ export default function SetupPage() {
                       ))}
                     </ul>
                     {ownModels.length > 6 && (
-                      <p className="su-fine">And {ownModels.length - 6} more — all of them are listed in step 5.</p>
+                      <p className="su-fine">And {ownModels.length - 6} more, all listed in step 5.</p>
                     )}
                   </>
                 ) : (
                   <p className="su-p">
                     {reporting
-                      ? `The connector didn’t find a model on ${reporting.name} that can write yet. `
-                      : "Already have a model? Skip this step — once your computer is connected, step 5 lists what it has. "}
-                    Otherwise, get one:
+                      ? `No model on ${reporting.name} can write yet. Get one below.`
+                      : "Already have a model? Skip this step. Step 5 lists it once your computer is connected. Otherwise, get one below."}
                   </p>
                 )}
                 {haveModels ? (
@@ -341,7 +338,7 @@ export default function SetupPage() {
                 <p className="su-p">
                   <Rich text={runtime.serve} />
                 </p>
-                <p className="su-fine">Check it on that computer — an answer means it’s running:</p>
+                <p className="su-fine">Run this on that computer. Any answer means it’s running.</p>
                 <CopyLine command={runtime.check.split("  →  ")[0]} label={`Check that ${runtime.label} is running`} />
                 <div className="notice notice-warn su-check" role="note">
                   {Icon.alert}
@@ -349,7 +346,7 @@ export default function SetupPage() {
                     <span className="notice-title">Keep it on this computer only</span>
                     <span className="notice-text">
                       Never bind a runtime to <code className="su-code">0.0.0.0</code> or set{" "}
-                      <code className="su-code">OLLAMA_ORIGINS=*</code> — the connector doesn’t need either, and both
+                      <code className="su-code">OLLAMA_ORIGINS=*</code>. The connector doesn’t need either, and both
                       let anyone on your network use your model.
                       {runtime.exposure && (
                         <>

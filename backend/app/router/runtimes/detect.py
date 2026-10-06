@@ -194,11 +194,11 @@ def _describe_unknown(base_url: str, *, http: bool = True) -> dict:
             pass
     openai = http and speaks_openai(base_url)
     if openai:
-        note = "Answers the OpenAI API, but not as any runtime this app recognises."
+        note = "Speaks the OpenAI API, but isn't a runtime this app knows."
     elif status is not None:
         note = f"Answers HTTP {status}, but doesn't look like a model runtime."
     else:
-        note = "Accepts connections, but doesn't answer over HTTP."
+        note = "Accepts connections but doesn't speak HTTP."
     return {"base_url": base_url, "openai": openai, "note": note}
 
 

@@ -63,7 +63,7 @@ type Target = { phase: string; path?: string };
 const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; after: string }> = {
   plan: {
     title: "Plan review",
-    blurb: "The scope and the architecture, before anyone writes code against them.",
+    blurb: "Check the scope and architecture before any code is written.",
     approve: "Approve the plan",
     after: "Five agents then build it without stopping.",
   },
@@ -75,47 +75,47 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
   },
   cost: {
     title: "Ship review · over budget",
-    blurb: "Everything the crew built — and an estimate that came in over your cap.",
+    blurb: "Everything the crew built. The cost estimate is over your cap.",
     approve: "Ship it anyway",
     after: "Approving accepts the cost and marks this build complete.",
   },
   security: {
     title: "Security stop",
     blurb:
-      "Warden found things that are your call — polish and lower-severity findings. " +
-      "Anything serious, the crew fixes by itself.",
+      "Warden found lower-severity issues for you to decide on. " +
+      "The crew fixes serious ones itself.",
     approve: "Accept and continue",
     after: "The remaining phases then run without stopping.",
   },
   unchecked: {
     title: "Check that didn't run",
     blurb:
-      "This agent's report didn't come back in the shape the automatic check reads, " +
-      "so that check couldn't run on it. Reading it is on you.",
-    approve: "I've read it — continue",
+      "This report came back in a shape the automatic check can't read, " +
+      "so you need to read it yourself.",
+    approve: "I've read it, continue",
     after: "The remaining phases then run without stopping.",
   },
   build: {
     title: "Build doesn't compile",
     blurb:
-      "Some files the crew wrote don't parse, use names they never import, or import " +
-      "things that don't exist. The crew already went back over them with the errors named.",
+      "Some files don't parse, use names they never import, or import things that " +
+      "don't exist. The crew already tried to fix them.",
     approve: "Ship it anyway",
     after: "Approving marks a build that does not compile as complete.",
   },
   stack: {
     title: "Build disagrees with itself",
     blurb:
-      "This phase was written against a different stack than the architecture froze. " +
-      "The crew already went back over it with the contradiction named.",
+      "This phase uses a different stack from the one the architecture set. " +
+      "The crew already tried to fix it.",
     approve: "Ship both halves anyway",
     after: "Approving puts code written against two different stacks in one archive.",
   },
   needs_help: {
     title: "The crew needs a hand",
     blurb:
-      "Something serious is still wrong after the crew's own fix rounds. Here is " +
-      "what each round tried and what is left.",
+      "Something serious is still wrong after the crew's fix rounds. Here's what " +
+      "each round tried and what's left.",
     approve: "Keep trying",
     after: "",
   },
@@ -163,8 +163,8 @@ export default function Decision({
       ? {
           ...base,
           blurb: base.blurb.replace(
-            "The crew already went back over",
-            `The crew went back ${codeRounds === 1 ? "once" : `${codeRounds} times`} over`,
+            /already tried to fix (them|it)\./,
+            (_, what) => `tried to fix ${what} ${codeRounds === 1 ? "once" : `${codeRounds} times`}.`,
           ),
         }
       : base;
@@ -448,8 +448,12 @@ export default function Decision({
                 (unresolved === 1 ? "still needs" : "still need") +
                 " a decision" +
                 (findingsBehindTab
-                  ? " — they're under Security above. Send each one back to be fixed, or waive it with a reason."
-                  : ". Send each one back to be fixed, or waive it with a reason.")
+                  ? unresolved === 1
+                    ? ". It's under Security above. Send it back to be fixed, or waive it with a reason."
+                    : ". They're under Security above. Send each one back to be fixed, or waive it with a reason."
+                  : unresolved === 1
+                    ? ". Send it back to be fixed, or waive it with a reason."
+                    : ". Send each one back to be fixed, or waive it with a reason.")
               : copy.after}
           </span>
         </div>
@@ -463,7 +467,7 @@ export default function Decision({
                   {redoAgent?.codename ?? redoPhase}
                 </>
               ) : mustAim ? (
-                <>Or send part of it back — pick a file or a panel above first</>
+                <>Or send part of it back. Pick a file or panel above first</>
               ) : (
                 <>Or send it back to {redoAgent?.codename ?? redoPhase} with a note</>
               )}
@@ -507,9 +511,8 @@ export default function Decision({
           <p className="field-hint decision-consequence">
             {Icon.alert}
             <span>
-              Every phase after {redoAgent?.codename ?? redoPhase} was built on the
-              version you are replacing, so the run rebuilds from there. You come back
-              to this review over the new build.
+              Every phase after {redoAgent?.codename ?? redoPhase} is rebuilt from this
+              change. You&apos;ll return to this review with the new build.
             </span>
           </p>
         )}
@@ -675,7 +678,7 @@ function ShipReview({
           <div className="notice-body">
             <span className="notice-title">Couldn&apos;t load what this build produced</span>
             <span className="notice-text">
-              {error} Nothing below is the build — don&apos;t ship it until this loads.
+              {error} Don&apos;t ship it until this loads.
             </span>
             <div className="notice-actions">
               <button className="btn btn-sm btn-primary" onClick={onRetry}>
@@ -758,9 +761,8 @@ function ShipReview({
               <p className="decision-alarm" style={{ borderBottom: 0, marginBottom: 12 }}>
                 {Icon.alert}
                 <span>
-                  This mockup predates the current front end — it was kept because it
-                  has been edited by hand. Regenerate it on the Preview tab to see what
-                  was actually built.
+                  This mockup is older than the current front end. It was kept because it
+                  was edited by hand. Regenerate it on the Preview tab to see the latest build.
                 </span>
               </p>
             )}
@@ -769,7 +771,7 @@ function ShipReview({
               {stale
                 ? "Edit it section by section on the Preview tab."
                 : preview.routes.length > 1
-                  ? "Built when the Frontend phase finished. Click through it — the pages, forms and filters work. Edit it section by section on the Preview tab."
+                  ? "Pages, forms and filters work. Edit it section by section on the Preview tab."
                   : "Drawn by the Frontend phase. Edit it section by section on the Preview tab."}
             </p>
           </div>
@@ -794,9 +796,8 @@ function ShipReview({
           <div className="artifact-pad">
             <CharterPanel charter={project.charter} compact />
             <p className="field-hint" style={{ marginTop: 14 }}>
-              Frozen when the architecture was approved. Every phase after it was written against
-              these choices and checked against them — a contradiction stops the run rather than
-              reaching the archive.
+              Frozen when the architecture was approved. Every later phase is checked against it,
+              and a contradiction stops the run.
             </p>
           </div>
         </div>

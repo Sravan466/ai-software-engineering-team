@@ -498,9 +498,9 @@ export default function VisualPreview({ id }: { id: string }) {
           <p>
             {state && !state.has_frontend
               ? "The mockup is drawn when the Frontend phase finishes. You can build one now from the design so far."
-              : "The Frontend phase builds this on its own. Something stopped it from landing — build it now and it will be here for the Ship review."}{" "}
-            It&apos;s a clickable site: several pages, sample records, forms that validate and store, lists you can
-            search and sort. Switch to Edit to select any element and restyle it.
+              : "The Frontend phase usually builds this, but something stopped it. Build it now so it's ready for the Ship review."}{" "}
+            It&apos;s a clickable site with pages, sample records, working forms and searchable lists. Switch to
+            Edit to restyle any element.
           </p>
           <button className="btn btn-primary" disabled={busy} onClick={generate}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}
@@ -640,10 +640,10 @@ export default function VisualPreview({ id }: { id: string }) {
               (comparing
                 ? "Showing the version before the crew's change."
                 : editing
-                  ? "Hover to see what a click picks. ↑ or Esc selects the parent, ↵ the first child, right-click lists every layer under the pointer."
+                  ? "Hover to preview a selection. ↑ or Esc selects the parent, ↵ the first child, right-click lists every layer."
                   : legacy
-                    ? "This mockup is a single static page, drawn before mockups were built as sites. Rebuild it for pages, sample data and forms that work."
-                    : "Click through it like a user: the pages, forms and filters work. Switch to Edit (S) to change anything.")}
+                    ? "This is an older single-page mockup. Rebuild it for pages, sample data and working forms."
+                    : "Pages, forms and filters work. Switch to Edit (S) to change anything.")}
           </p>
         </div>
         {editing && (

@@ -496,8 +496,8 @@ async function req<T>(
   } catch (e: any) {
     if (e?.name === "AbortError") {
       throw new Error(
-        `Request timed out after ${Math.round(timeoutMs / 1000)}s — the backend ` +
-          `may be down (:8000) or a local model is still generating.`
+        `Request timed out after ${Math.round(timeoutMs / 1000)}s. The backend ` +
+          `may be down (:8000), or a local model is still generating.`
       );
     }
     throw e;

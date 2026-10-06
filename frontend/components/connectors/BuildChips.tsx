@@ -172,7 +172,7 @@ export default function BuildChips({
       </div>
       {picks.some((p) => !p.connected) && !sheet && (
         <p className="field-hint" style={{ margin: 0 }}>
-          Not connected yet? The build asks for it after the architecture — or carries on without it.
+          Not connected yet? The build asks for it later, or carries on without it.
         </p>
       )}
 

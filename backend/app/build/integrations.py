@@ -255,7 +255,7 @@ _STRIPE = Integration(
     builds=(
         "A checkout page that takes real test payments",
         "Subscription plans with a customer portal",
-        "Payment status by polling — no webhook needed to start",
+        "Payment status by polling, with no webhook needed to start",
         "Webhook handling once you add a signing secret",
     ),
     variables=(
@@ -309,7 +309,7 @@ _STRIPE = Integration(
     guide=(
         GuideStep("Open the Stripe dashboard and switch on Test mode (top right).", "https://dashboard.stripe.com/test/apikeys"),
         GuideStep("Go to Developers → API keys. Copy the Publishable key (pk_test_…)."),
-        GuideStep("Reveal the Secret key (sk_test_…) and copy it — or create a restricted key for less risk."),
+        GuideStep("Reveal the Secret key (sk_test_…) and copy it, or create a restricted key for less risk."),
         GuideStep("Optional: Developers → Webhooks → add an endpoint, then copy its signing secret (whsec_…)."),
     ),
     docs_url="https://docs.stripe.com/keys",
@@ -375,7 +375,7 @@ _RESEND = Integration(
     ),
     guide=(
         GuideStep("Open Resend and go to API Keys.", "https://resend.com/api-keys"),
-        GuideStep("Create API Key → Sending access is enough. Copy it (re_…) — it's shown once."),
+        GuideStep("Create API Key → Sending access is enough. Copy it (re_…). It's shown once."),
         GuideStep("Until you verify a domain, send from onboarding@resend.dev (to your own address only)."),
     ),
     docs_url="https://resend.com/docs",
@@ -789,8 +789,8 @@ def parse(integration: Integration, values: dict[str, object]) -> Parsed:
         out.problems.append(
             Problem(
                 next((v.name for v in integration.variables if v.side == "client"), integration.variables[0].name),
-                "One key is a test key and the other is live. Copy both from the same mode — "
-                "Test mode while you build.",
+                "One key is a test key and the other is live. Copy both from the same mode. "
+                "Use Test mode while you build.",
                 step=1,
             )
         )
@@ -961,7 +961,7 @@ def check(integration: Integration, values: dict[str, str], mode: Optional[str] 
                 return Checked(
                     CheckResult(
                         FAILED,
-                        f"{host} doesn't exist. Check the {var.label if var else spec.id_var} — it names the "
+                        f"{host} doesn't exist. Check the {var.label if var else spec.id_var}. It names the "
                         "account, and a typo there is the usual cause.",
                         reason="id_wrong",
                         name=spec.id_var,

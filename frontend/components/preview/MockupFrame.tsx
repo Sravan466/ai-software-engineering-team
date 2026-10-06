@@ -414,7 +414,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
               aria-valuemax={MAX_W}
               aria-valuenow={width}
               aria-valuetext={`${width} pixels`}
-              title="Drag to resize — or use the arrow keys"
+              title="Drag or use the arrow keys to resize"
               onPointerDown={startResize}
               onKeyDown={resizeKey}
             />

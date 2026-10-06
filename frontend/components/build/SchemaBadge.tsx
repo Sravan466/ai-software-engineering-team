@@ -55,7 +55,7 @@ export default function SchemaBadge({ row }: { row: PhaseResult }) {
       <span
         key="build"
         className="badge"
-        title="No compiler was available for some of this phase's files, so they were not checked — which is not the same as passing."
+        title="No compiler was available for some of this phase's files, so they weren't checked."
       >
         Not compiled
       </span>,
@@ -67,8 +67,8 @@ export default function SchemaBadge({ row }: { row: PhaseResult }) {
         key="schema"
         className="badge badge-warn"
         title={
-          "This output missed the shape this agent declares and was corrected on a " +
-          "second attempt. What you're reading is the corrected version."
+          "This output missed the agent's declared shape. You're reading the version " +
+          "corrected on a second attempt."
         }
       >
         Shape repaired

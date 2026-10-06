@@ -61,8 +61,8 @@ function guideFor(database: string, provider: string): Guide {
         open: { label: "Open Supabase", href: "https://supabase.com/dashboard" },
         steps: [
           <>{path("Project Settings", "API Keys")} — copy the Project URL and the <b>publishable</b> key.</>,
-          <>Optional, for direct Postgres: {path("Connect", "Session pooler")} — copy the string and fill in your database password. The pooler works over IPv4.</>,
-          <>Never paste the {code("service_role")} or {code("sb_secret_")} key here — it bypasses your security rules.</>,
+          <>Optional, for direct Postgres: open {path("Connect", "Session pooler")}, copy the string and fill in your database password. The pooler works over IPv4.</>,
+          <>Never paste the {code("service_role")} or {code("sb_secret_")} key here. It bypasses your security rules.</>,
         ],
       };
     case "neon":
@@ -80,7 +80,7 @@ function guideFor(database: string, provider: string): Guide {
         open: { label: "Open PlanetScale", href: "https://app.planetscale.com" },
         steps: [
           <>Open your database and choose <b>Connect</b>.</>,
-          <><b>Create password</b> — it is shown once, so copy it now.</>,
+          <><b>Create password</b> and copy it now. It&apos;s shown only once.</>,
           <>Pick your framework and copy the {code("mysql://…")} string.</>,
         ],
       };
@@ -91,7 +91,7 @@ function guideFor(database: string, provider: string): Guide {
         steps: [
           <>{path("Project settings", "Your apps")} — the gear icon, top left.</>,
           <>Pick the web app, then {path("SDK setup and configuration", "Config")}.</>,
-          <>Copy the whole {code("firebaseConfig")} object and paste it below, braces and all.</>,
+          <>Copy the whole {code("firebaseConfig")} object, braces included, and paste it below.</>,
         ],
       };
     case "aws":
@@ -134,7 +134,7 @@ function blurCheck(v: DatabaseVar, raw: string): { bad?: string; note?: string }
   const text = raw.trim();
   if (!text) return {};
   if (PLACEHOLDER.test(text)) {
-    return { bad: "Still says <password> — replace it with your database user's password." };
+    return { bad: "It still says <password>. Replace it with your database user's password." };
   }
   if (v.kind === "uri") {
     const body = text.split("://")[1] ?? "";
@@ -142,7 +142,7 @@ function blurCheck(v: DatabaseVar, raw: string): { bad?: string; note?: string }
     const password = userinfo.includes(":") ? userinfo.slice(userinfo.indexOf(":") + 1) : "";
     if (/[@:/?#]/.test(password)) {
       const which = password.includes("@") ? "an @" : "a character like : / ? #";
-      return { note: `Your password has ${which} — we'll encode it for you.` };
+      return { note: `Your password has ${which}. We'll encode it for you.` };
     }
   }
   return {};
@@ -314,7 +314,7 @@ export function DatabaseGate({
       <p className="db-lock">
         {Icon.lock}
         <span>
-          Encrypted on this computer. The crew only ever sees the{" "}
+          Encrypted on this computer. The crew sees only the{" "}
           {names.length === 1 ? "name" : "names"}{" "}
           {names.map((n, i) => (
             <span key={n}>
@@ -322,7 +322,7 @@ export function DatabaseGate({
               <code className="db-var">{n}</code>
             </span>
           ))}
-          , never the value.
+          , not the values.
         </span>
       </p>
     </section>
@@ -449,7 +449,7 @@ function DatabaseForm({
     } catch (e: any) {
       const message =
         e instanceof ApiError && e.status === 429
-          ? "Too many tests in a few minutes. Wait a little, then try again — nothing was saved."
+          ? "Too many tests in a few minutes. Nothing was saved. Try again shortly."
           : e?.message || "The test didn't finish. Try again.";
       setOutcome({ kind: "error", message });
     } finally {
@@ -738,7 +738,7 @@ function StatusLine({ state }: { state: DatabaseState }) {
   return (
     <p className="db-msg db-msg-warn">
       {Icon.alert}
-      <span>Saved, not tested — we couldn&apos;t sign in to it from here. The crew builds against it anyway.</span>
+      <span>Saved, but we couldn&apos;t sign in to test it from here. The crew builds against it anyway.</span>
     </p>
   );
 }
@@ -794,12 +794,12 @@ export function DatabasePanel({
         ))}
         {state.status === "connected" || state.status === "unchecked"
           ? "."
-          : " — until you connect it, the download has placeholders in .env.example."}
+          : ". Until you connect it, the download has placeholders in .env.example."}
       </p>
       <DatabaseForm id={id} state={state} onState={setState} busy={false} />
       <p className="db-lock db-lock-inline">
         {Icon.lock}
-        <span>Encrypted on this computer and never shown again — only a host or the last four characters.</span>
+        <span>Encrypted on this computer. Only the host or last four characters are shown again.</span>
       </p>
     </div>
   );

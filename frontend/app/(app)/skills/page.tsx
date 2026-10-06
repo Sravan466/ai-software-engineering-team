@@ -79,11 +79,9 @@ export default function SkillsPage() {
     <div className="skills-wrap">
       <h1 style={{ fontSize: "var(--t-2xl)" }}>Skills</h1>
       <p className="prose-lede" style={{ marginTop: 10 }}>
-        A skill is procedure that holds across projects — how to write an acceptance
-        criterion someone else can check, what a paginated endpoint sends back. The
-        knowledge base carries facts about <em>your</em> project; these carry craft, and
-        they are chosen by keyword and written into the agent&apos;s prompt, so the same
-        ones reach a build on a local 7B model and a build on Claude.
+        A skill is a reusable how-to, like writing a testable acceptance criterion or
+        shaping a paginated endpoint. Skills are matched to each build by keyword and added
+        to the agent&apos;s prompt, on any model.
       </p>
 
       {lib && !lib.enabled && (
@@ -92,9 +90,8 @@ export default function SkillsPage() {
           <div className="notice-body">
             <span className="notice-title">Skills are switched off for this backend</span>
             <span className="notice-text">
-              <span className="mono">SKILLS_ENABLED</span> is false, so every build runs
-              with no procedures at all. Everything below is still here; nothing below is
-              reaching an agent.
+              <span className="mono">SKILLS_ENABLED</span> is false, so no build gets any
+              skills. The library below is kept.
             </span>
           </div>
         </div>
@@ -140,9 +137,8 @@ export default function SkillsPage() {
 
           {lib && !canEdit && (
             <p className="field-hint skills-readonly">
-              The library is shared by every account on this install, so only its owner
-              can add, edit or switch skills. You can read all of them, and pin or skip
-              any of them on your own builds from the composer.
+              Only the install&apos;s owner can add, edit or switch skills. You can read them
+              all and pin or skip any on your own builds.
             </p>
           )}
 
@@ -186,9 +182,7 @@ export default function SkillsPage() {
               />
               {skills.length === 0 && !loading && (
                 <p className="skills-empty">
-                  The library is empty, so every phase runs on the idea and the phases
-                  before it alone — exactly as this pipeline did before skills existed.
-                  Add one above, or drop a <span className="mono">SKILL.md</span> into{" "}
+                  The library is empty. Add a skill above, or drop a <span className="mono">SKILL.md</span> into{" "}
                   <span className="mono">{lib?.user_dir ?? "data/skills"}</span>.
                 </p>
               )}
@@ -242,9 +236,8 @@ function DryRun() {
         <span className="rule" />
       </div>
       <p className="field-hint" style={{ marginTop: -6, marginBottom: 12 }}>
-        Skills are matched on keywords before the model is called, so a skill that
-        misses simply never arrives and the build never mentions it. This is where you
-        find that out — before you spend a run on it.
+        Test an idea to see which skills each phase would get. A skill that misses its
+        keywords is skipped silently.
       </p>
 
       <div className="dryrun-ask">
@@ -281,8 +274,7 @@ function DryRun() {
               {empty.length === 1
                 ? `${AGENT_BY_KEY[empty[0].phase]?.codename ?? empty[0].label} would get no skills for this idea.`
                 : `${empty.length} phases would get no skills for this idea.`}{" "}
-              That is a keyword miss, not a verdict — add a keyword below, or pin the
-              skill on the build itself from the composer.
+              Add a keyword below, or pin the skill on the build from the composer.
             </p>
           )}
           {crowded.length > 0 && (
@@ -290,14 +282,12 @@ function DryRun() {
               {crowded.length === 1
                 ? `${AGENT_BY_KEY[crowded[0].phase]?.codename ?? crowded[0].label} matched more skills than it can take.`
                 : `${crowded.length} phases matched more skills than they can take.`}{" "}
-              Each phase gets at most {result.max_per_phase} — pinned first, then the
-              strongest match — so the ones listed as left out never reach the model. Pin
-              one on the build to put it first, or tighten another skill&apos;s keywords.
+              Each phase gets at most {result.max_per_phase}, pinned ones first. Pin one on
+              the build to put it first, or tighten another skill&apos;s keywords.
             </p>
           )}
           <p className="field-hint" style={{ marginTop: 8 }}>
-            Scored on the idea alone. During a real run each phase also sees what the
-            phases before it wrote, so the later ones usually match more than this.
+            Scored on the idea alone. In a real run, later phases usually match more.
           </p>
         </>
       )}
@@ -432,7 +422,7 @@ function SkillRow({
               ? "Only the install's owner can switch skills"
               : skill.usable
                 ? "Off means no build gets it unless it names it"
-                : "This skill can never be injected — see the reason below"
+                : "This skill can't be used. See the reason below."
           }
         >
           <span className="switch-track" aria-hidden="true" />
@@ -652,11 +642,11 @@ function Editor({
   if (!locked && !NAME_RE.test(slug))
     problems.name = slug
       ? "Use 2–64 lowercase letters, digits and hyphens, starting and ending with a letter or digit."
-      : "Give it a name — it is the folder it is saved in, and what a build pins it by.";
+      : "Give it a name. Builds pin it by this name.";
   else if (nameTaken) problems.name = nameTaken;
-  if (!form.title.trim()) problems.title = "Give it a title — it is what every list shows.";
+  if (!form.title.trim()) problems.title = "Give it a title.";
   if (!form.description.trim())
-    problems.description = "Say when it applies — it is the one line the preview can show.";
+    problems.description = "Say when it applies.";
   if (!form.body.trim()) problems.body = "Write the procedure the agent will follow.";
   else if (over)
     problems.body = `${cost.toLocaleString()} characters is over the ${maxChars.toLocaleString()} ceiling. Cut the procedure, or the title and description beside it.`;
@@ -708,8 +698,8 @@ function Editor({
     <div className="skill-editor">
       {bundled && (
         <p className="field-hint">
-          This one ships with the platform. Saving keeps the original where it is and
-          uses your version instead — and Restore hands the original back.
+          This skill ships with the platform. Saving uses your version, and Restore brings
+          back the original.
         </p>
       )}
 
@@ -765,7 +755,7 @@ function Editor({
           />
           {problem("description")}
           <p className="field-hint" id="sk-description-hint">
-            An agent given a procedure with no trigger applies it to everything.
+            Without a clear trigger, the agent applies it to everything.
           </p>
         </div>
 
@@ -802,7 +792,7 @@ function Editor({
           </div>
           <p className="field-hint">
             {form.agents.length === 0
-              ? "None chosen — every agent may receive it."
+              ? "None chosen. Every agent may receive it."
               : `${form.agents.length} of ${phases.length} phases.`}
           </p>
         </div>
@@ -822,14 +812,13 @@ function Editor({
             <p className="field-hint field-note" id="sk-keys-warn" aria-live="polite">
               <EverywhereText hits={everywhere} /> Keep{" "}
               {everywhere.length === 1 ? "it" : "them"} if the skill belongs on all of
-              those builds. If it should only arrive for some ideas, use words about the
-              product instead — each phase takes a limited number of skills, and one that
-              always matches takes a place every time.
+              those builds. Otherwise use words about the product, since each phase takes
+              only a few skills.
             </p>
           )}
           <p className="field-hint" id="sk-keys-hint">
-            Matched whole-word against the idea, the phase and what earlier phases
-            wrote. No keywords means it is relevant to every build its agents run in.
+            Matched as whole words against the idea, the phase and earlier phases&apos; output.
+            No keywords means it always matches.
           </p>
         </div>
 
@@ -851,11 +840,9 @@ function Editor({
             <span className="mono">
               {cost.toLocaleString()} / {maxChars.toLocaleString()}
             </span>{" "}
-            — the title and the description count too, because they are injected beside
-            the procedure. Every phase that gets this pays for all of it, so what you
-            spend here the knowledge base and the earlier phases do not get. Say what to
-            do, never how to lay the answer out: each agent already answers in a fixed
-            shape, and a procedure that argues with it costs the build a repair round.
+            characters, including the title and description. Every character takes prompt
+            space from the rest of the build. Say what to do, and leave the answer format
+            alone, since each agent already has a fixed one.
           </p>
         </div>
       </div>

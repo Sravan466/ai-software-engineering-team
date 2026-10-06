@@ -142,9 +142,8 @@ export default function NewBuildPage() {
         <em>build today?</em>
       </h1>
       <p className="prose-lede composer-lede">
-        Describe a product idea. Eight specialists take it from requirements through
-        architecture, code, tests, security and deployment — and stop for you at the two
-        moments your answer changes what they build.
+        Describe a product idea. Eight AI agents plan, build, test and ship it, and stop
+        when they need your approval.
       </p>
 
       <div className="composer">

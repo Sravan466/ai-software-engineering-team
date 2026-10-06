@@ -33,16 +33,16 @@ import { ReasonKinds } from "./ReasonKinds";
 const ORDER = PHASES.map((p) => p.key);
 
 const STRATEGY: Record<AutoFixRound["strategy"], string> = {
-  guided: "The findings, with advice checked against the skills library",
-  with_code: "The code itself, and word that the last attempt didn't work",
-  stronger_model: "A full rewrite, on the most capable model the router can reach",
+  guided: "The findings, plus advice from the skills library",
+  with_code: "The code, plus a note that the last try failed",
+  stronger_model: "A full rewrite on the strongest model available",
 };
 
 /** A code round starts from the errors, not from a reviewer's advice. */
 const CODE_STRATEGY: Record<AutoFixRound["strategy"], string> = {
   guided: "The errors, named file by file",
-  with_code: "The broken code itself, and word that the last attempt didn't work",
-  stronger_model: "A full rewrite, on the most capable model the router can reach",
+  with_code: "The broken code, plus a note that the last try failed",
+  stronger_model: "A full rewrite on the strongest model available",
 };
 
 export function approach(track: string, strategy: AutoFixRound["strategy"]): string {
@@ -248,7 +248,7 @@ export function NeedsHelp({
             What the crew tried on {trackLabel(name)}
             <span className="field-hint">
               {t.stopped?.reason === "no_progress"
-                ? "Stopped early: the last round fixed nothing, and repeating it wouldn't either."
+                ? "Stopped early. The last round fixed nothing."
                 : `Stopped after ${t.rounds.length - (t.episode_start ?? 0)} round${t.rounds.length - (t.episode_start ?? 0) === 1 ? "" : "s"}.`}
             </span>
           </h3>
@@ -293,8 +293,8 @@ export function NeedsHelp({
           </button>
           <span className="field-hint">
             {nothingToFix
-              ? "Every serious finding is waived on the record, so the build can go on."
-              : "Keep trying gives the crew up to two more rounds, starting from what it has now."}
+              ? "Every serious finding is waived, so the build can go on."
+              : "Keep trying gives the crew up to two more rounds."}
           </span>
         </div>
 
@@ -314,9 +314,8 @@ export function NeedsHelp({
             <div id="help-more-body" className="help-more-body">
               {security && (
                 <p className="field-hint">
-                  Each finding above now has a Waive button. A waiver of something serious
-                  needs a reason kind as well as the reason — it&apos;s the record of why a
-                  known issue shipped.
+                  Each finding above now has a Waive button. Waiving a serious one needs a
+                  reason and a reason kind, so there&apos;s a record of why it shipped.
                 </p>
               )}
               {code.length > 0 && (
@@ -397,7 +396,7 @@ function AcceptForm({
         />
       </div>
       <button className="btn btn-sm btn-danger" disabled={busy || !ready} onClick={onAccept}>
-        Continue with them on the record
+        Continue and record the waiver
       </button>
     </div>
   );

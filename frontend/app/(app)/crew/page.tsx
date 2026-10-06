@@ -59,19 +59,19 @@ const SCENARIOS: Scenario[] = [
   {
     id: "mid",
     label: "Mid build",
-    hint: "Three phases approved. FORGE has the work.",
+    hint: "Two phases approved. FORGE is working.",
     state: (i) => (i < 2 ? "done" : i === 2 ? "working" : "queued"),
   },
   {
     id: "gate",
     label: "Waiting on you",
-    hint: "PRISM has finished and is holding for your approval.",
+    hint: "PRISM is done and waiting for your approval.",
     state: (i) => (i < 3 ? "done" : i === 3 ? "gate" : "queued"),
   },
   {
     id: "reject",
     label: "Sent back",
-    hint: "You rejected SIEVE's tests — it is running again.",
+    hint: "You sent SIEVE's tests back. It's running again.",
     state: (i) => (i < 4 ? "done" : i === 4 ? "rejected" : "queued"),
   },
   {
@@ -224,8 +224,8 @@ export default function CrewPage() {
         <div>
           <h1 className="crew-h1">The crew floor</h1>
           <p className="prose-lede" style={{ marginTop: 8 }}>
-            Eight specialists, one pipeline. Pick a scenario to see how the floor behaves, run the
-            relay to watch the work change hands, or click anyone to inspect them.
+            Pick a scenario, run the relay to watch the work change hands, or click an agent to
+            see what they do.
           </p>
           {/* Every number on this page is scripted. Saying so once, plainly, and
               in the same place your eye lands after the lede, is the difference
@@ -233,9 +233,7 @@ export default function CrewPage() {
           <p className="crew-demo">
             {Icon.info}
             <span>
-              Nothing here is a running build. This is a demo of how the floor behaves — the
-              scenarios below drive it. Your real builds are under Recent builds in the navigation,
-              and each one has its own relay at the top of its page.
+              This is a demo. Your real builds are under Recent builds, each with its own relay.
             </span>
           </p>
         </div>
@@ -543,7 +541,7 @@ export default function CrewPage() {
       </div>
 
       <p className="field-hint" style={{ marginTop: 12 }} aria-live="polite">
-        {relay ? "Relay running — the floor is driving itself." : SCENARIOS[scenario].hint}
+        {relay ? "Relay running." : SCENARIOS[scenario].hint}
       </p>
     </div>
   );

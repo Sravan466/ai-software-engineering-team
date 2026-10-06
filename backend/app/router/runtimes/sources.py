@@ -100,7 +100,7 @@ def normalise_url(raw: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise SourceError(f"'{_shown(raw)}' isn't an http(s) address with a host.")
     if parsed.username or parsed.password:
-        raise SourceError("Leave credentials out of the address — use the API key field.")
+        raise SourceError("Leave credentials out of the address. Use the API key field.")
     if parsed.path.rstrip("/") not in ("", "/v1"):
         raise SourceError("Give the server's address, without a path (a trailing /v1 is fine).")
     if parsed.query or parsed.fragment:

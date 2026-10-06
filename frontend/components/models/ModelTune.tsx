@@ -30,12 +30,12 @@ const GROUPS: { key: GenerationField["group"]; title: string; note: string }[] =
   {
     key: "limits",
     title: "Ceilings",
-    note: "Lower only — a model's own limit is never raised by a bigger number here.",
+    note: "These can only lower the model's own limits.",
   },
   {
     key: "machine",
     title: "This machine",
-    note: "About the computer the model runs on. Set on this backend, and sent only to a runtime on this same machine.",
+    note: "For the computer the model runs on. Sent only to a runtime on this machine.",
   },
 ];
 
@@ -90,7 +90,7 @@ function problem(field: GenerationField, raw: string): string | null {
     }
   }
   if (field.kind === "duration" && !/^(-1|0|[1-9]\d{0,5}(ms|s|m|h)?)$/.test(text)) {
-    return "A duration like 30s, 10m or 1h — or 0, or -1.";
+    return "A duration like 30s, 10m or 1h, or 0 or -1.";
   }
   if (field.kind === "stops") {
     const stops = stopsOf(raw);
@@ -193,7 +193,7 @@ export default function ModelTune({
         onSaved(next.check);
       }
       setTouched({});
-      setStatus(`Saved. The next call to ${name} uses these — no other model is touched.`);
+      setStatus(`Saved. The next call to ${name} uses these.`);
       title.current?.focus();
     } catch (e: any) {
       setSaveError(e.message);
@@ -238,17 +238,17 @@ export default function ModelTune({
     if (f.key === "context_window") return `Without one: ${base.context_window.toLocaleString()} tokens.`;
     if (f.key === "max_output_tokens") return `Without one: ${base.max_output_tokens.toLocaleString()} tokens.`;
     if (f.key === "reasoning_tokens") {
-      return `Kept only while it thinks — ${data.fallbacks.reasoning_tokens.toLocaleString()} by default.`;
+      return `Kept only while it thinks: ${data.fallbacks.reasoning_tokens.toLocaleString()} by default.`;
     }
     if (f.group === "machine" && !data.machine_applies) {
-      return "Not sent: this model runs on another computer, whose own settings apply.";
+      return "Not sent. This model runs on another computer, which uses its own settings.";
     }
     if (f.key === "kv_cache_type") return `Assumed ${data.fallbacks.kv_cache_type} unless set.`;
     if (f.group === "machine") return "The runtime decides unless set.";
     if (f.key in data.defaults) return `Server default ${shown(data.defaults[f.key])}.`;
     const sent = data.sent_when_unset[f.key];
-    if (sent !== undefined && sent !== null) return `Not reported — ${shown(sent)} is sent.`;
-    return "Not reported — the runtime's own default applies.";
+    if (sent !== undefined && sent !== null) return `Not reported. ${shown(sent)} is sent.`;
+    return "Not reported. The runtime's default applies.";
   }
 
   if (loadError) {
@@ -301,7 +301,7 @@ export default function ModelTune({
           <fieldset className="tune-group">
             <legend className="tune-legend">Thinking</legend>
             {data.thinking === "none" ? (
-              <p className="field-hint">This model answers directly — there is nothing to set.</p>
+              <p className="field-hint">This model doesn&apos;t think first. Nothing to set.</p>
             ) : data.thinking_options.length === 0 ? (
               <p className="field-hint">{data.source_label} can&apos;t be told how hard this model thinks.</p>
             ) : (
@@ -329,7 +329,7 @@ export default function ModelTune({
                 </div>
                 <p className="field-hint">
                   {data.thinking === "levels"
-                    ? "This model thinks at a level and can't be switched off, so its default is the lowest."
+                    ? "Thinking can't be turned off for this model, so it defaults to the lowest level."
                     : data.thinking === "always"
                       ? "This model always reasons first, so a budget is kept for it."
                       : thinkingField.help}

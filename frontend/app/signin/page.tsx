@@ -142,10 +142,10 @@ function SignIn() {
     mode === "setup"
       ? status?.has_unclaimed_work
         ? "You'll own this install. The builds, keys and model choices already on it move into your account."
-        : "The first account owns this install: its keys, its runtimes and the shared skill library."
+        : "The first account owns this install, including its keys, runtimes and shared skills."
       : mode === "signup"
-        ? "Your builds, keys and model choices are yours alone. Nobody else on this install sees them."
-        : "Your builds and settings are waiting where you left them.";
+        ? "Your builds, keys and model choices are private to you."
+        : "Welcome back.";
 
   return (
     <div className="door">
@@ -181,7 +181,7 @@ function SignIn() {
             <div className="notice-body">
               <span className="notice-title">The backend isn&apos;t answering</span>
               <span className="notice-text">
-                Nothing answered at the API address. Start the backend on :8000, then reload this page.
+                Start the backend on :8000, then reload this page.
               </span>
               <div className="notice-actions">
                 <button className="btn btn-sm" onClick={() => window.location.reload()}>
@@ -300,9 +300,8 @@ function SignIn() {
                   onChange={(e) => setToken(e.target.value)}
                 />
                 <span className="field-hint">
-                  You&apos;re not on the machine this backend runs on, so setting it up needs a
-                  setup token: SETUP_TOKEN from its configuration, or the one-time token the
-                  backend printed in its log when it started.
+                  You&apos;re not on the backend&apos;s machine, so you need a setup token. Use
+                  SETUP_TOKEN from its config, or the one-time token in the backend&apos;s startup log.
                 </span>
               </div>
             )}

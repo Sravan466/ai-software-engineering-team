@@ -18,8 +18,8 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
       <details id="t-unknown" className="su-more">
         <summary>A port answered but wasn’t recognised</summary>
         <p className="su-p">
-          Something is listening where a runtime usually is, but it didn’t answer like one. If it’s an
-          OpenAI-compatible server on another port, tell the connector about it — on that computer:
+          Something is listening on a runtime’s port but didn’t answer like one. If it’s an
+          OpenAI-compatible server on another port, add it on that computer.
         </p>
         <CopyLine command="aiteam-connect add-source http://127.0.0.1:<port>" label="Add a source to the connector" />
       </details>
@@ -33,34 +33,33 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
       <details id="t-security" className="su-more">
         <summary>The runtime is older than a known security fix</summary>
         <p className="su-p">
-          The runtime’s version is below the first release that fixes a published vulnerability — step 5 names it
-          and links the advisory. Update the runtime the way you installed it (step 1 links the official download), restart it, and press{" "}
-          <strong>Check again</strong>. Builds keep working meanwhile; the warning is there so it isn’t a surprise.
+          This version has a known vulnerability, and step 5 links the advisory. Update the runtime the way you
+          installed it (step 1 links the download), restart it, and press <strong>Check again</strong>. Builds
+          keep working in the meantime.
         </p>
       </details>
       <details id="t-exposed" className="su-more">
         <summary>The runtime is reachable from your network</summary>
         <p className="su-p">
-          It answers on this computer’s network address as well as on 127.0.0.1, so anyone on the same Wi-Fi can use
-          it. vLLM, KoboldCpp and LocalAI listen that way unless told otherwise. Restart it listening on 127.0.0.1
-          only — each runtime’s card in step 3 says how. The connector never needs more: it reaches the runtime on
-          this computer and dials out itself. Never bind a runtime to <code className="su-code">0.0.0.0</code>, and
-          never set <code className="su-code">OLLAMA_ORIGINS=*</code>: either lets other devices, or any web page you
-          open, drive it.
+          It answers on your network address, not just 127.0.0.1, so anyone on the same Wi-Fi can use it. vLLM,
+          KoboldCpp and LocalAI do this by default. Restart it on 127.0.0.1 only (step 3 shows how). The connector
+          doesn’t need more. Never bind to <code className="su-code">0.0.0.0</code> or set{" "}
+          <code className="su-code">OLLAMA_ORIGINS=*</code>. Either one lets other devices, or any web page you
+          open, use it.
         </p>
       </details>
       <details id="t-code" className="su-more">
         <summary>The pairing code expired</summary>
         <p className="su-p">
           Codes last ten minutes and work once. Press <strong>Make a new code</strong> in step 4 and run the
-          command again; nothing from the old attempt is kept.
+          command again.
         </p>
       </details>
       <details id="t-outdated" className="su-more">
         <summary>The connector is out of date</summary>
         <p className="su-p">
           This server needs connector {connector?.min_version ?? "—"} or newer. Stop the old one (Ctrl+C) and
-          run the pinned command again — it fetches exactly {connector?.version ?? "the current version"}.
+          run the pinned command again. It fetches {connector?.version ?? "the current version"}.
         </p>
       </details>
       <details id="t-connector" className="su-more">
@@ -73,18 +72,16 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
       <details id="t-sleep" className="su-more">
         <summary>The computer went to sleep</summary>
         <p className="su-p">
-          A sleeping computer can’t answer, so a build using it pauses at the phase it was on — nothing already
-          finished is lost. Wake the computer: the connector reconnects by itself within a few seconds, and the
-          build carries on from the last finished phase. If the connector was closed, run the pinned command again;
-          it reconnects without a new code. For a long build, keep the computer awake — on macOS,{" "}
-          <code className="su-code">caffeinate -i</code> in another terminal.
+          The build pauses and keeps its finished work. Wake the computer and the connector reconnects in a few
+          seconds, then the build carries on. If the connector was closed, run the pinned command again. It reconnects without a new code. To keep
+          a Mac awake during a long build, run <code className="su-code">caffeinate -i</code> in another terminal.
         </p>
       </details>
       <details id="t-limit" className="su-more">
         <summary>A build was refused by a limit</summary>
         <p className="su-p">
-          Your computer decides how much a build may use: calls at once, calls per minute, prompt and answer size,
-          and how long one call may run. The build says which limit it hit. Raise it on that computer:
+          Your computer limits calls at once, calls per minute, prompt and answer size, and call length. The
+          build says which limit it hit. Raise it on that computer.
         </p>
         <CopyLine command="aiteam-connect limits --requests-per-minute 120" label="Raise a connector limit" />
       </details>
@@ -92,22 +89,22 @@ export default function Troubleshooting({ connector }: { connector: ConnectorInf
         <details className="su-more">
           <summary>What the connector will and won’t do</summary>
           <p className="su-p">
-            It answers exactly {connector.ops.length} kinds of request —{" "}
+            It answers {connector.ops.length} kinds of request (
             {connector.ops.map((op, i) => (
               <span key={op}>
                 {i > 0 && ", "}
                 <code className="su-code">{op}</code>
               </span>
-            ))}{" "}
-            — and refuses everything else, whatever this server asks, writing each refusal to{" "}
+            ))}
+            ) and refuses the rest, whatever this server asks, logging each refusal to{" "}
             <code className="su-code">~/.aiteam-connect/connector.log</code>. It never downloads or deletes a model,
-            runs a command, writes a file, or calls an address this website sends. A model’s answer is sent back as
-            data; nothing on your computer acts on it. It opens no port:{" "}
+            runs a command, writes a file, or calls an address this website sends. Model answers are returned as
+            data and nothing runs them. It opens no port, so{" "}
             <code className="su-code">lsof -iTCP -sTCP:LISTEN</code> shows nothing from it.
           </p>
           <p className="su-p">
-            Every model call is written to <code className="su-code">~/.aiteam-connect/activity.log</code> — time,
-            model and token counts, never the prompt or the answer.{" "}
+            Every model call is written to <code className="su-code">~/.aiteam-connect/activity.log</code> with the
+            time, model and token counts. Prompts and answers aren’t logged.{" "}
             <code className="su-code">aiteam-connect pause</code> stops it answering until{" "}
             <code className="su-code">aiteam-connect resume</code>.
           </p>
