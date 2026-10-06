@@ -5,11 +5,13 @@ Turns the generated crew art in `assets/` into what AgentSprite plays.
     python3 frontend/scripts/agent_art.py atlas      # just the named agents
     (needs Pillow; writes WebP through `cwebp`)
 
-Inputs, per agent: a still (`scope.png`) and a 5x4 sprite sheet
-(`Scope Sprite Sheet.png`), both 1254x1254 out of an image model. Outputs, in
+Inputs, per agent: a still (`scope.png`), a 5x4 sprite sheet
+(`Scope Sprite Sheet.png`) and a 2x2 sleep sheet (`Scope Sleep Sheet.png`),
+all 1254x1254 out of an image model. Outputs, in
 `frontend/public/agents/`:
 
-    <codename>.webp        the sheet, re-cut onto an even 4x5 grid of CELL cells
+    <codename>.webp        the sheet, re-cut onto an even 4x6 grid of CELL cells:
+                           the 5 rows of the sprite sheet, then the sleep loop
     <codename>-still.webp  the still at ICON px, for the smallest renders
 
 The model output can't be used as-is, for three reasons this script exists to fix:
@@ -55,7 +57,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "assets"
 OUT = ROOT / "frontend" / "public" / "agents"
 
-COLS, ROWS = 4, 5
+COLS, ROWS = 4, 5  # the sprite sheet as generated
+OUT_ROWS = ROWS + 1  # …plus the sleep loop as a sixth row
 CELL = 224  # 104px inspector portrait at 2x DPR, with headroom
 ICON = 96  # stills are only used at <= 32px
 FEET_Y = 0.95  # where the soles land in a cell (matches .sprite transform-origin)
@@ -63,7 +66,7 @@ MAX_H = 0.80  # tallest idle figure fills this much of the cell
 MAX_W = 0.98
 
 AGENTS = {
-    # codename: (still, sheet)
+    # codename: (still, sheet); the sleep sheet is "<Name> Sleep Sheet.png"
     "scope": ("scope.png", "Scope Sprite Sheet.png"),
     "atlas": ("Atlas.png", "ATLAS Sprite Sheet.png"),
     "forge": ("FORGE.png", "ForgeSprite Sheet.png"),
@@ -263,6 +266,42 @@ def frames(sheet: Image.Image):
         )
 
 
+def sleep_file(name: str) -> str:
+    return f"{name.capitalize()} Sleep Sheet.png"
+
+
+def sleep_frames(sheet: Image.Image):
+    """Yield (frame image, anchor, figure bbox) for the 2x2 sleep loop, in order.
+
+    Cut at the real gaps like the main sheets; the Zs are separate shapes and
+    stay with the figure in their quadrant. Sleep is drawn standing, so the
+    feet anchor works unchanged.
+    """
+    alpha = sheet.getchannel("A").load()
+    W, H = sheet.size
+    ink_x = [sum(1 for y in range(0, H, 2) if alpha[x, y] > 40) for x in range(W)]
+    ink_y = [sum(1 for x in range(0, W, 2) if alpha[x, y] > 40) for y in range(H)]
+    xs = [0] + cut_lines(ink_x, 2, round(W * 0.2)) + [W]
+    ys = [0] + cut_lines(ink_y, 2, round(H * 0.2)) + [H]
+    for r in range(2):
+        for c in range(2):
+            slot = (xs[c], ys[r], xs[c + 1], ys[r + 1])
+            mine = [k for k in components(alpha, slot) if k[0] > 12]
+            figure = max(mine, key=lambda k: k[0])
+            if figure[1][3] >= H - 1 or figure[1][1] <= 0:
+                raise SystemExit(f"sleep frame {r * 2 + c + 1} touches the edge of the sheet")
+            mask = Image.new("L", sheet.size, 0)
+            mp = mask.load()
+            for k in mine:
+                for x, y in k[2]:
+                    mp[x, y] = 255
+            mask = mask.filter(ImageFilter.MaxFilter(3))
+            frame = Image.new("RGBA", sheet.size, (0, 0, 0, 0))
+            frame.paste(sheet.crop(slot), slot[:2])
+            frame = Image.composite(frame, Image.new("RGBA", sheet.size, (0, 0, 0, 0)), mask)
+            yield frame, feet_anchor(figure[2], figure[1]), figure[1]
+
+
 def place(frame, anchor, scale, cell=CELL):
     """Scale the frame about its feet and drop it on a cell at FEET_Y."""
     ax, ay = anchor
@@ -301,6 +340,7 @@ def main():
     # Every sheet is cut even when only some are written: the shared scale
     # depends on all eight, so a rebuilt agent stays the same size as the rest.
     cut = {}
+    skipped = set()
     for name, (_, sheet_file) in AGENTS.items():
         sheet = strip_painted_checkerboard(Image.open(SRC / sheet_file))
         cut[name] = []
@@ -310,9 +350,12 @@ def main():
         except SystemExit as e:
             # Fatal only for a sheet being written; for the others the idle
             # row is all the shared scale needs, and it is always cut in full.
-            if name in only or sum(1 for r, *_ in cut[name] if r == 0) < COLS:
+            if sum(1 for r, *_ in cut[name] if r == 0) < COLS or (
+                name in only and not (OUT / f"{name}.webp").exists()
+            ):
                 raise SystemExit(f"{sheet_file}: {e}") from None
             print(f"skip {name}: {e}")
+            skipped.add(name)
             continue
         print(f"cut {name}: {len(cut[name])} frames")
 
@@ -327,12 +370,27 @@ def main():
     for name, (still_file, _) in AGENTS.items():
         if name not in only:
             continue
-        grid = Image.new("RGBA", (CELL * COLS, CELL * ROWS), (0, 0, 0, 0))
-        idle_h = None
-        for r, c, frame, anchor, bbox in cut[name]:
-            grid.alpha_composite(place(frame, anchor, scale), (c * CELL, r * CELL))
-            if r == 0 and c == 0:
-                idle_h = (bbox[3] - bbox[1]) * scale
+        grid = Image.new("RGBA", (CELL * COLS, CELL * OUT_ROWS), (0, 0, 0, 0))
+        idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
+        if name in skipped:
+            # The sprite sheet can't be cut (see ATLAS above): keep the five
+            # published rows as they are and only redo the sleep row.
+            published = Image.open(OUT / f"{name}.webp").convert("RGBA")
+            grid.paste(published.crop((0, 0, CELL * COLS, CELL * ROWS)), (0, 0))
+            print(f"  {name}: kept the published rows 1-5")
+        else:
+            for r, c, frame, anchor, bbox in cut[name]:
+                grid.alpha_composite(place(frame, anchor, scale), (c * CELL, r * CELL))
+
+        # The sleep loop is drawn at its own size, so each agent's is scaled to
+        # its idle figure — dozing off and waking up never change their size.
+        try:
+            sleep = list(sleep_frames(strip_painted_checkerboard(Image.open(SRC / sleep_file(name)))))
+        except SystemExit as e:
+            raise SystemExit(f"{sleep_file(name)}: {e}") from None
+        k = idle_h / (sleep[0][2][3] - sleep[0][2][1])
+        for c, (frame, anchor, _b) in enumerate(sleep):
+            grid.alpha_composite(place(frame, anchor, k), (c * CELL, ROWS * CELL))
         webp(grid, OUT / f"{name}.webp")
 
         # The still is drawn at the same height as the idle frame, so swapping

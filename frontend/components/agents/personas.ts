@@ -84,10 +84,10 @@ export const DESK_PALETTE: Record<string, string> = {
 };
 
 /**
- * Where an agent's art lives. `sheet` is 4 frames across and 5 rows down, one
- * row per state — queued, working, done, rejected, gate (agents.css positions
- * them in that order); `still` is a small single frame for
- * renders too small for the sheet to read.
+ * Where an agent's art lives. `sheet` is 4 frames across and 6 rows down, one
+ * row per state — queued, working, done, rejected, gate, then asleep
+ * (agents.css positions them in that order); `still` is a small single frame
+ * for renders too small for the sheet to read.
  */
 export function artFor(a: Persona): { sheet: string; still: string } {
   const slug = a.codename.toLowerCase();

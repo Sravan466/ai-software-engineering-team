@@ -200,6 +200,10 @@ export default function CrewPage() {
     (_, i) => stateOf(i) === "working" || stateOf(i) === "gate",
   );
   const doneCount = AGENTS.filter((_, i) => stateOf(i) === "done").length;
+  // The floor is at rest when nobody holds or is redoing work and the relay
+  // isn't driving it — then whoever is waiting dozes. Mid-build they wait awake.
+  const atRest =
+    !relay && AGENTS.every((_, i) => stateOf(i) === "queued" || stateOf(i) === "done");
 
   return (
     <div className="crew-page">
@@ -403,7 +407,7 @@ export default function CrewPage() {
                           </span>
                         </span>
                       </span>
-                      <AgentSprite agent={a} size={72} state={st} ground />
+                      <AgentSprite agent={a} size={72} state={st} asleep={atRest} ground />
                       <span className="desk" aria-hidden="true">
                         <span className="desk-screen" />
                         <span className="desk-spill" />
@@ -442,7 +446,7 @@ export default function CrewPage() {
             </div>
 
             <div className="inspect-portrait">
-              <AgentSprite agent={agent} size={104} state={agentState} />
+              <AgentSprite agent={agent} size={104} state={agentState} asleep={atRest} />
             </div>
 
             <h2 className="inspect-name">{agent.codename}</h2>

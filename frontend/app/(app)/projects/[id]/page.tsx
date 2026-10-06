@@ -496,7 +496,12 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
                   }}
                   title={`${agent.codename} · ${agent.role} — ${what}`}
                 >
-                  <AgentSprite agent={agent} size={64} state={SPRITE_STATE[ns]} />
+                  <AgentSprite
+                    agent={agent}
+                    size={64}
+                    state={SPRITE_STATE[ns]}
+                    asleep={!stillRunning(status ?? "")}
+                  />
                   <span className="relay-name">{agent.codename}</span>
                   <span className="relay-bar" />
                   <span className="sr-only">{`${agent.role} — ${what}. Go to this phase.`}</span>
@@ -1051,7 +1056,12 @@ function PhaseList({
               aria-expanded={hasDoc ? isOpen : undefined}
               onClick={() => hasDoc && setOpen((o) => ({ ...o, [ph.key]: !isOpen }))}
             >
-              <AgentSprite agent={agent} size={40} state={SPRITE_STATE[ns]} />
+              <AgentSprite
+                agent={agent}
+                size={40}
+                state={SPRITE_STATE[ns]}
+                asleep={!stillRunning(effectiveStatus(project))}
+              />
 
               <span className="phase-main">
                 <span className="phase-line agent-line">
