@@ -102,6 +102,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # skill library existed cannot say which skills it had, and an empty list
         # would read as "it was offered skills and took none".
         "skills_used",
+        # Nullable (#80): a phase that ran before hand-offs were recorded cannot say
+        # what it was shown, and an empty record would claim it was shown nothing.
+        "handoff",
         # Nullable: a row written before calls recorded where they ran cannot say,
         # and the API answers for it from the provider's name instead.
         "is_local",

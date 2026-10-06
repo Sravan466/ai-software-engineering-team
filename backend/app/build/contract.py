@@ -20,7 +20,7 @@ _OWNED = (
 
 
 def prompt_block(phase_key: str, charter=None) -> Optional[str]:
-    """The platform contract for one phase, or None for a phase that writes no code."""
+    """The platform contract for one phase, or None for a phase it says nothing to."""
     language = charter.get("language").token if charter is not None and charter.get("language") else None
     python_backend = language in (None, "python")
 
@@ -45,6 +45,21 @@ def prompt_block(phase_key: str, charter=None) -> Optional[str]:
             "without an import fails the build.\n"
             "- With Next.js, <Link href=\"/x\">Text</Link> wraps its text directly — no <a> "
             "inside it.\n"
+        )
+    elif phase_key == Phase.DEVOPS_ENGINEER.value:
+        # Not a code phase, but it used to write files that shipped unchecked into the
+        # person's repository — a `render.yaml` that replaced the platform's, a CI
+        # workflow running a guessed test command. It is told what the platform owns.
+        return (
+            "PLATFORM DEPLOY — the platform deploys this build itself; you do not.\n"
+            "- The app is laid out as backend/ and frontend/. The platform deploys frontend/ "
+            "to Vercel and the rest to Render from its own render.yaml, generated from the "
+            "stack charter.\n"
+            f"- Do NOT write render.yaml, Dockerfiles, compose files, {_OWNED}, or anything "
+            "under .github/workflows except the one `ci_workflow` when you are asked for it.\n"
+            "- Your job is the notes a person deploying this needs: every environment variable "
+            "the code reads and what it is for, the health-check path, the migration command, "
+            "and how to roll back."
         )
     elif phase_key == Phase.QA_ENGINEER.value:
         where = (

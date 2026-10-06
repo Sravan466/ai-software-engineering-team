@@ -1296,6 +1296,7 @@ class PipelineRunner:
         # offered skills and none fitted" is a different fact from "this row was
         # written before skills existed", and the review panel says which.
         row.skills_used = lr.get("skills_used") if "skills_used" in lr else None
+        row.handoff = lr.get("handoff") or None
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
         # One transaction for the row and the calls that produced it, so a driver

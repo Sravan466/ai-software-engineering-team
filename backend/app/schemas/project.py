@@ -198,6 +198,11 @@ class PhaseResultOut(BaseModel):
     #: reporting that an agent was offered skills and took none.
     skills_used: Optional[list[str]] = None
 
+    #: What this agent was shown of the phases before it: `{deps: [{phase, digest,
+    #: full: whole|cut|digest_only, omitted}], registry, contract, truncated_replies}`.
+    #: `None` on rows written before hand-offs were recorded.
+    handoff: Optional[dict] = None
+
     # Timing, so a phase in flight can show elapsed time and a finished one can show
     # what it actually cost in wall-clock and tokens.
     started_at: Optional[UtcDatetime] = None

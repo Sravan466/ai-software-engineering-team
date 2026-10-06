@@ -31,6 +31,9 @@ def iter_files(output: dict) -> Iterator[Tuple[str, str, str]]:
     if not isinstance(output, dict):
         return
     for value in output.values():
+        # A lone file (DevOps's `ci_workflow`) is a file too.
+        if isinstance(value, dict) and "path" in value:
+            value = [value]
         if not isinstance(value, list):
             continue
         for item in value:
@@ -118,6 +121,27 @@ def _language(path: str, given: str) -> str:
     }.get(ext, "")
 
 
+def devops_may_write(path: str, output: dict) -> bool:
+    """Whether a DevOps file may ship. Never one the platform writes — `render.yaml`
+    above all, which used to replace the platform's Blueprint — and never a workflow
+    that runs in the person's repository unless it is the checked `ci_workflow`."""
+    from app.agents.devops_engineer import workflow_problems
+    from app.build.scaffold import platform_owned
+
+    p = path.strip().lstrip("/")
+    name = p.rsplit("/", 1)[-1]
+    if p == "render.yaml" or name in ("package.json", "package-lock.json") or platform_owned(p):
+        return False
+    if p.startswith(".github/"):
+        ci = output.get("ci_workflow") if isinstance(output, dict) else None
+        return (
+            isinstance(ci, dict)
+            and str(ci.get("path") or "").strip().lstrip("/") == p
+            and not workflow_problems(ci)
+        )
+    return True
+
+
 def assemble(project: Project) -> dict:
     """Collapse the current attempt at each phase into a placed, scaffolded build."""
     from app.build import layout
@@ -145,6 +169,9 @@ def assemble(project: Project) -> dict:
             design = out
         for placed, path, content, lang in placer.place_all(ph.phase, iter_files(out)):
             if not placed:
+                continue
+            if ph.phase == "devops_engineer" and not devops_may_write(placed, out):
+                replaced.append(placed)
                 continue
             files[placed] = {
                 "path": placed,
@@ -329,7 +356,9 @@ def ship_files(project: Project, assembled: dict) -> dict[str, str]:
         saved_env=saved_env_names(project),
         required_env=tuple(scaffold_info.get("required_env") or ()),
     )
-    if render and "render.yaml" not in files:
+    if render:
+        # The platform's, always. An agent's copy never reaches here (`devops_may_write`),
+        # and a Blueprint a model wrote would deploy something the charter never chose.
         files["render.yaml"] = render
     return files
 

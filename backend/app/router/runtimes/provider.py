@@ -51,7 +51,7 @@ from app.router.runtimes.types import (
     thinks,
     writes,
 )
-from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
+from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage, normalise_finish
 
 log = get_logger(__name__)
 
@@ -572,6 +572,7 @@ class SourceProvider(LLMProvider):
             ),
             latency_ms=latency,
             is_local=profile.is_local,
+            finish_reason=normalise_finish(result.finish_reason),
             reasoning=result.reasoning,
         )
 

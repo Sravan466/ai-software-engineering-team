@@ -35,10 +35,27 @@ class LLMResponse(BaseModel):
     #: Why an earlier model in the chain was passed over, when a provider refused its
     #: key ("OpenAI: out of credit; continued on Google Gemini (…)").
     fallback_note: Optional[str] = None
+    #: Why generation stopped, normalised: `length` when the reply hit the output
+    #: limit (OpenAI's `length`, Anthropic's `max_tokens`, Gemini's `MAX_TOKENS`,
+    #: Ollama's `done_reason`), else whatever the runtime said. A cut reply is not a
+    #: malformed one, and the agent that asked treats them differently.
+    finish_reason: Optional[str] = None
     #: What the model reasoned before answering, when it did. Kept apart from `text`
     #: so no parser ever reads a thought as the deliverable, and excluded from every
     #: serialisation so it is never stored, echoed into a prompt, or acted on.
     reasoning: Optional[str] = Field(default=None, exclude=True, repr=False)
+
+
+def normalise_finish(reason: object) -> Optional[str]:
+    """One word for "the output limit cut this reply", whatever the provider calls it."""
+    if reason is None:
+        return None
+    text = str(getattr(reason, "name", reason) or "").strip()
+    if not text:
+        return None
+    if text.lower() in ("length", "max_tokens", "max_output_tokens", "2") or text.upper() == "MAX_TOKENS":
+        return "length"
+    return text.lower()
 
 
 class GenerationOptions(BaseModel):

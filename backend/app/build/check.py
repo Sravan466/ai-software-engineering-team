@@ -513,12 +513,61 @@ def check_phase(prior_outputs: dict, phase_key: str, output: dict, charter=None)
 
     targets = [p for p in mine if not platform_owned(p)]
     out = check_tree(files, targets)
+    names = name_problems(files, targets, phase_key, prior_outputs) if settings.check_endpoint_references else []
+    if names:
+        # After the compile problems: a file that does not parse is fixed first, and
+        # its calls are read again once it does.
+        out.problems = (out.problems + names)[:_TOTAL]
+        out.status = BuildStatus.FAILED.value
     leaks = secret_leaks(files, targets, charter)
     if leaks:
         # Ahead of the compile problems: a key in the browser bundle is the one a
         # build must never ship, whatever else is wrong with it.
         out.problems = (leaks + out.problems)[:_TOTAL]
         out.status = BuildStatus.FAILED.value
+    return out
+
+
+# ── names across phases (#80) ────────────────────────────────────────────────
+def name_problems(files: dict[str, str], targets: list[str], phase_key: str, prior_outputs: dict) -> list[Problem]:
+    """A frontend call no backend route serves; a backend route that misspells the registry.
+
+    Both are `reference` problems — a name used that the other side does not declare —
+    with the nearest real name suggested, and go through the same repair round as a
+    missing import. A route the registry simply does not list (`/health`) is an
+    addition, not a misspelling, and is left alone.
+    """
+    from app.build import routes
+    from app.core.constants import Phase
+
+    out: list[Problem] = []
+    if phase_key == Phase.FRONTEND_ENGINEER.value:
+        for call, near in routes.unserved_calls(files, targets):
+            hint = f" Did you mean {near}?" if near else ""
+            out.append(
+                Problem(
+                    call.file,
+                    f"calls {call.method} {call.path}, which no backend route serves.{hint} "
+                    "Use the paths in the Backend's endpoints_implemented.",
+                    "reference",
+                    call.line,
+                )
+            )
+    elif phase_key == Phase.BACKEND_ENGINEER.value:
+        from app.agents.handoff import registry
+
+        reg = registry(prior_outputs)
+        mine = [r for r in routes.served({p: files[p] for p in targets if p in files}, layout.BACKEND)]
+        for route, expected in routes.off_registry(mine, reg.paths):
+            out.append(
+                Problem(
+                    route.file,
+                    f"serves {route.method} {route.path}, but the name registry calls this "
+                    f"{expected}. Use the registry's path.",
+                    "reference",
+                    route.line,
+                )
+            )
     return out
 
 

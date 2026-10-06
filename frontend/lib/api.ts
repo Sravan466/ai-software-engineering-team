@@ -65,6 +65,27 @@ export type PhaseResult = {
    * that an agent was offered skills and took none.
    */
   skills_used: string[] | null;
+  /**
+   * What this agent was shown of the phases before it (#80). `null` on rows
+   * written before hand-offs were recorded — the UI then says nothing.
+   */
+  handoff?: Handoff | null;
+};
+
+export type HandoffDep = {
+  phase: string;
+  digest: boolean;
+  /** whole: the full output fit. cut: some fields or files left out. digest_only: none of it fit. */
+  full: "whole" | "cut" | "digest_only";
+  /** What was left out: field names, or `files[7-19 of 19]`. */
+  omitted: string[];
+};
+
+export type Handoff = {
+  deps: HandoffDep[];
+  registry: boolean;
+  contract: boolean;
+  truncated_replies: number;
 };
 
 /** One reason a generated file does not compile. */

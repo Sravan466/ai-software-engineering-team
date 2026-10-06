@@ -1,0 +1,23 @@
+{
+  "_note": "Approximate list prices in USD per month, for estimates only. Edit this file when a provider changes its tiers; the Cost agent is told to state which tier each figure assumes.",
+  "as_of": "2026-10",
+  "hosting": [
+    {"item": "Vercel (frontend)", "tiers": {"Hobby": 0, "Pro (per member)": 20}},
+    {"item": "Render web service (backend)", "tiers": {"Free (sleeps when idle)": 0, "Starter": 7, "Standard": 25}},
+    {"item": "Render Postgres", "tiers": {"Free (expires after 30 days)": 0, "Basic 256 MB": 6, "Basic 1 GB": 19}}
+  ],
+  "databases": [
+    {"item": "Supabase", "match": ["supabase", "postgres"], "tiers": {"Free": 0, "Pro": 25}},
+    {"item": "Neon Postgres", "match": ["neon", "postgres"], "tiers": {"Free": 0, "Launch (usage based, typical)": 19}},
+    {"item": "MongoDB Atlas", "match": ["mongo"], "tiers": {"M0 free": 0, "Flex (typical)": 15}},
+    {"item": "SQLite", "match": ["sqlite"], "tiers": {"On the app's own disk": 0}}
+  ],
+  "services": [
+    {"item": "Stripe", "match": ["stripe"], "pricing": "no monthly fee; about 2.9% + $0.30 per card payment"},
+    {"item": "Resend", "match": ["resend"], "tiers": {"Free (3,000 emails)": 0, "Pro (50,000 emails)": 20}},
+    {"item": "Clerk", "match": ["clerk"], "tiers": {"Free (10,000 monthly users)": 0, "Pro": 25}},
+    {"item": "OpenAI API", "match": ["openai"], "pricing": "usage based; size it from expected requests per month"},
+    {"item": "Twilio SMS", "match": ["twilio"], "pricing": "about $0.008 per SMS in the US, plus a $1.15/month number"},
+    {"item": "Cloudinary", "match": ["cloudinary"], "tiers": {"Free (25 credits)": 0, "Plus": 99}}
+  ]
+}

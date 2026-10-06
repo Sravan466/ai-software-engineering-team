@@ -387,9 +387,6 @@ def test_every_agent_declares_a_shape_that_prompt_and_schema_agree_on(phase):
         ),
         (QAEngineerOutput, "estimated_coverage", "coverage_estimate"),
         (QAEngineerOutput, "estimatedCoverage", "coverage_estimate"),
-        (DevOpsEngineerOutput, "docker_compose", "compose_or_manifests"),
-        (DevOpsEngineerOutput, "k8s_manifests", "compose_or_manifests"),
-        (DevOpsEngineerOutput, "github_actions", "ci_cd"),
         (SecurityEngineerOutput, "security_findings", "findings"),
         (SecurityEngineerOutput, "vulnerabilities", "findings"),
         (CostEstimationOutput, "totalMonthlyHighUsd", "total_monthly_high_usd"),
@@ -419,22 +416,31 @@ def test_money_written_as_prose_still_reads_as_money():
     assert out["total_monthly_high_usd"] == 1240.0
 
 
+@pytest.mark.parametrize("drifted", ["github_actions", "ci_cd"])
+def test_the_ci_workflow_is_read_under_its_drifted_names(drifted):
+    """`github_actions`, and the old list-shaped `ci_cd`, both become the one workflow."""
+    workflow = {"path": ".github/workflows/ci.yml", "tool": "github actions", "content": "jobs: {}"}
+    payload = {**_minimal(DevOpsEngineerOutput), drifted: [workflow] if drifted == "ci_cd" else workflow}
+    out = DevOpsEngineerOutput.model_validate(payload).model_dump(mode="json")
+    assert out["ci_workflow"]["path"] == ".github/workflows/ci.yml"
+    assert drifted not in out
+
+
 def test_a_losing_alias_is_kept_rather_than_dropped():
     """`AliasChoices` picks one name. The others are not thrown away.
 
-    A model that writes both `docker_compose` and `k8s_manifests` has said two
-    different things; the gate needs one canonical key, but `extra="allow"` means
-    the other still reaches the file browser instead of vanishing on the way in.
+    A model that writes both `github_actions` and `ci_cd` has said two different
+    things; the reader needs one canonical key, but `extra="allow"` means the other
+    still reaches the file browser instead of vanishing on the way in.
     """
     payload = {
         **_minimal(DevOpsEngineerOutput),
-        "docker_compose": [{"path": "compose.yml", "content": "c"}],
-        "k8s_manifests": [{"path": "deploy.yaml", "content": "k"}],
+        "github_actions": {"path": ".github/workflows/a.yml", "tool": "gha", "content": "a"},
+        "ci_cd": [{"path": ".github/workflows/b.yml", "tool": "gha", "content": "b"}],
     }
-    payload.pop("compose_or_manifests")
     out = DevOpsEngineerOutput.model_validate(payload).model_dump(mode="json")
-    assert [f["path"] for f in out["compose_or_manifests"]] == ["compose.yml"]
-    assert out["k8s_manifests"] == [{"path": "deploy.yaml", "content": "k"}]
+    assert out["ci_workflow"]["path"] == ".github/workflows/b.yml"  # `ci_cd` comes first
+    assert out["github_actions"]["path"] == ".github/workflows/a.yml"
 
 
 def test_extra_keys_survive_validation():
@@ -947,11 +953,10 @@ def test_a_consumed_alias_is_moved_not_copied():
     prior-phase context — spending the context budget on a verbatim copy.
     """
     payload = _minimal(DevOpsEngineerOutput)
-    payload.pop("compose_or_manifests")
-    payload["docker_compose"] = [{"path": "compose.yml", "content": "x"}]
+    payload["github_actions"] = {"path": ".github/workflows/ci.yml", "tool": "gha", "content": "x"}
     out = DevOpsEngineerOutput.model_validate(payload).model_dump(mode="json")
-    assert out["compose_or_manifests"]
-    assert "docker_compose" not in out
+    assert out["ci_workflow"]
+    assert "github_actions" not in out
 
 
 @pytest.mark.parametrize("reply", ["123", '"sorry"', "true", "[1,2,3]", "not json", ""])
