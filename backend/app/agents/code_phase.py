@@ -375,7 +375,7 @@ class _Run:
         for w in failing:
             block = blocks.get(w.path)
             if block is not None:
-                trial = _Written(w.path, block.code, block.language or w.language, w.purpose, w.origin)
+                trial = _Written(w.path, block.code, w.language, w.purpose, w.origin)
                 self._judge(trial)
                 # Fewer things wrong wins; a repair that came back worse is not kept.
                 if len(trial.faults()) <= len(w.faults()):
@@ -855,7 +855,7 @@ class _Run:
             self.truncated += 1 if _cut(resp) else 0
             for path, block in self._match(resp, planned):
                 if block.complete and path in named:
-                    trial = _Written(path, block.code, block.language or self.written[path].language,
+                    trial = _Written(path, block.code, self.written[path].language,
                                      self.written[path].purpose, self.written[path].origin)
                     self._judge(trial)
                     if not trial.problems:

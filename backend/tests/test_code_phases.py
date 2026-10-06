@@ -291,6 +291,8 @@ def test_a_file_that_does_not_parse_is_fixed_before_the_next_batch(stub_router, 
     result = _run(monkeypatch, "backend_engineer", model, SMALL)
     assert model.writes == [["backend/app/mod1.py"], ["backend/app/mod1.py"], ["backend/app/mod2.py"]]
     assert "does not parse" in model.prompts[2] and "def broken(:" in model.prompts[2]
+    # The repaired file keeps the extension's name for its language, whatever the fence said.
+    assert result.output["files"][0]["language"] == "python"
     assert result.build_status == "ok" and result.schema_status == "valid"
     assert result.handoff["generation"]["repairs"] == 1 and result.repair_rounds == 1
 
