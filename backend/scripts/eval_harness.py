@@ -7,6 +7,8 @@
     .venv/bin/python -m scripts.eval_harness --score <project-id> [<project-id> ...]
     .venv/bin/python -m scripts.eval_harness --prompt-variant variant.json
                                              # {"name": "...", "tasks": {"qa_engineer": "…"}}
+    .venv/bin/python -m scripts.eval_harness --generation-mode one batch whole
+                                             # every idea once per way of writing code (#81)
 
 Every run is unattended — no gate stops for a judgement call — and waits for the
 mockup the Frontend phase draws. Results go to `data/evals/<timestamp>.json` and a
@@ -29,6 +31,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.agents import base as agent_base  # noqa: E402
+from app.agents import code_phase  # noqa: E402
 from app.core.constants import ApprovalMode, PipelineStatus  # noqa: E402
 from app.db.base import SessionLocal, init_db  # noqa: E402
 from app.db.models import PreviewRevision, Project  # noqa: E402
@@ -100,8 +103,27 @@ def _row(result: dict) -> str:
         f"{m.get('bytes') or 0:>7,}B checks {m.get('checks_passed', '-')}/{m.get('checks_total', '-')} "
         f"console {m.get('console_errors', '-')}  names {_p(result.get('names_used_pct'))} "
         f"wired {_p(result.get('endpoints_wired_pct'))} criteria {_p(result.get('criteria_covered_pct'))} "
-        f"cut {result.get('truncated_replies', 0)}"
+        f"cut {result.get('truncated_replies', 0)}  "
+        f"code {'/'.join(sorted(set((result.get('generation_mode') or {}).values()))) or '-'} "
+        f"{result.get('files_written', 0)}/{result.get('files_planned', 0)} files"
     )
+
+
+def compare(results: list[dict]) -> list[str]:
+    """One line per generation mode: compile rate, files written of planned, truncations."""
+    lines = []
+    for mode in dict.fromkeys(r.get("generation_run") or "default" for r in results):
+        mine = [r for r in results if (r.get("generation_run") or "default") == mode]
+        compiled = sum(1 for r in mine if r.get("compiles") == "ok")
+        planned = sum(int(r.get("files_planned") or 0) for r in mine)
+        written = sum(int(r.get("files_written") or 0) for r in mine)
+        cut = sum(int(r.get("truncated_replies") or 0) for r in mine)
+        calls = sum(sum((r.get("calls_per_phase") or {}).values()) for r in mine)
+        lines.append(
+            f"{mode:8} compiles {compiled}/{len(mine)}  files {written}/{planned}  "
+            f"truncated {cut}  calls {calls}"
+        )
+    return lines
 
 
 def _p(value) -> str:
@@ -118,7 +140,8 @@ def load_variant(path: str) -> tuple[str, dict[str, str]]:
     tasks = data.get("tasks") if isinstance(data, dict) else None
     if not isinstance(tasks, dict) or not tasks:
         raise SystemExit(f"{path}: expected {{\"name\": …, \"tasks\": {{phase: task text}}}}")
-    unknown = [k for k in tasks if k not in AGENTS]
+    # `backend_engineer.plan` / `.write` set a code phase's plan or write task (#81).
+    unknown = [k for k in tasks if k.split(".", 1)[0] not in AGENTS]
     if unknown:
         raise SystemExit(f"{path}: no agent for {', '.join(unknown)}")
     name = str(data.get("name") or os.path.splitext(os.path.basename(path))[0])
@@ -137,6 +160,13 @@ def main() -> None:
     parser.add_argument(
         "--prompt-variant",
         help="JSON file {name, tasks: {phase: task text}} to run instead of the agents' own task text",
+    )
+    parser.add_argument(
+        "--generation-mode",
+        nargs="+",
+        choices=code_phase.MODES,
+        help="how the code phases write code: one (a file per call), batch (sized by the "
+        "model's budgets), whole (one JSON reply). Several run every idea once per mode.",
     )
     args = parser.parse_args()
 
@@ -158,17 +188,21 @@ def main() -> None:
         if args.limit:
             ideas = ideas[: args.limit]
         ids = []
-        for n, idea in enumerate(ideas, 1):
-            print(f"[{n}/{len(ideas)}] {idea}", flush=True)
-            ids.append(run_idea(idea, args.mode, args.model, args.mockup_timeout))
+        for gen in args.generation_mode or [None]:
+            code_phase.MODE_OVERRIDE = gen
+            for n, idea in enumerate(ideas, 1):
+                print(f"[{n}/{len(ideas)}]{f' ({gen})' if gen else ''} {idea}", flush=True)
+                ids.append((run_idea(idea, args.mode, args.model, args.mockup_timeout), gen))
+        code_phase.MODE_OVERRIDE = None
+    ids = [item if isinstance(item, tuple) else (item, None) for item in ids]
 
     results = []
     db = SessionLocal()
     try:
-        for pid in ids:
+        for pid, gen in ids:
             project = db.get(Project, pid)
             if project is not None:
-                results.append(score(db, project))
+                results.append({**score(db, project), "generation_run": gen})
     finally:
         db.close()
 
@@ -177,12 +211,24 @@ def main() -> None:
     path = os.path.join(args.out, f"{stamp}.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(
-            {"at": stamp, "mode": args.mode, "model": args.model, "prompt_variant": variant, "results": results},
+            {
+                "at": stamp,
+                "mode": args.mode,
+                "model": args.model,
+                "prompt_variant": variant,
+                "generation_modes": args.generation_mode,
+                "comparison": compare(results),
+                "results": results,
+            },
             fh,
             indent=2,
         )
     for result in results:
         print(_row(result))
+    if args.generation_mode:
+        print()
+        for line in compare(results):
+            print(line)
     print(f"\nwrote {path}")
 
 

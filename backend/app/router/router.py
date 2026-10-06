@@ -70,7 +70,7 @@ from app.router import compat, keycheck
 from app.router.keycheck import KeyCheck
 from app.connector.remote import ConnectorProvider, DeviceSources, looks_like_device_source
 from app.router.base import CLOUD_PROVIDERS, ComputerDisconnected, LLMProvider, ProviderError, RequestCancelled
-from app.router.model_profile import ModelProfile, fallback_profile
+from app.router.model_profile import FILES_ALL, ModelProfile, fallback_profile
 from app.router.providers.anthropic_provider import AnthropicProvider
 from app.router.providers.gemini_provider import GeminiProvider
 from app.router.providers.openai_provider import OpenAIProvider
@@ -87,6 +87,8 @@ audit = get_logger("app.audit")
 
 #: Longer than any model name a runtime lists; a spec past this is refused unread.
 _MAX_SPEC_CHARS = 512
+#: The most files a person may ask one code-writing call for, short of "all".
+_MAX_FILES_PER_CALL = 50
 
 #: How the local default was arrived at, for the Settings page to say.
 DEFAULT_CHOSEN = "chosen"  # picked in Settings
@@ -771,6 +773,37 @@ class ModelRouter:
             # A choice made — or cleared — is a new answer to "which model embeds".
             self._embedding_pin = None
 
+    # ── how many files a code phase writes per call (#81) ────────────────────
+    def files_per_call_choice(self, role: Optional[str]) -> object:
+        """The person's choice for `role` — a count or `"all"` — or None for automatic."""
+        if role not in model_roles.FILES_PER_CALL_ROLES:
+            return None
+        value = self._roles.option(role, "files_per_call")
+        if value == FILES_ALL:
+            return FILES_ALL
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return None
+
+    def set_files_per_call(self, role: str, value: object) -> None:
+        """Save how many files `role` writes per call; None puts it back on automatic."""
+        if role not in model_roles.FILES_PER_CALL_ROLES:
+            raise ValueError(f"'{role}' doesn't write code file by file.")
+        if value is not None and value != FILES_ALL:
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_FILES_PER_CALL:
+                raise ValueError(
+                    f"Files per call is a whole number from 1 to {_MAX_FILES_PER_CALL}, or \"all\"."
+                )
+        self._roles.set_option(role, "files_per_call", value)
+
+    def _automatic_files_per_call(self, role: str, pair: Optional[tuple[str, str]]) -> Optional[int]:
+        """What the budgets alone choose for the model `role` runs on, for the page."""
+        mode = RoutingMode.AUTO if pair and pair[0] in CLOUD_PROVIDERS else RoutingMode.LOCAL_ONLY
+        try:
+            return self.profile_for(mode, None, "high", role).files_per_call
+        except Exception:  # noqa: BLE001 - nothing resolvable is "no automatic answer"
+            return None
+
     def _refuse_if_it_cannot_write(self, pair: tuple[str, str], what: str) -> None:
         """Refuse a model the runtime says cannot write, at the moment it is chosen.
 
@@ -1036,14 +1069,16 @@ class ModelRouter:
         for entry in model_roles.catalogue():
             spec = self._roles.get(entry["role"])
             pair = self._listed(self._saved_pair(spec)) if spec else None
-            rows.append(
-                {
-                    **entry,
-                    "assigned": self._spec(pair) if pair else None,
-                    "provider": pair[0] if pair else None,
-                    "model": pair[1] if pair else None,
-                }
-            )
+            row = {
+                **entry,
+                "assigned": self._spec(pair) if pair else None,
+                "provider": pair[0] if pair else None,
+                "model": pair[1] if pair else None,
+            }
+            if entry["role"] in model_roles.FILES_PER_CALL_ROLES:
+                row["files_per_call"] = self.files_per_call_choice(entry["role"])
+                row["files_per_call_auto"] = self._automatic_files_per_call(entry["role"], pair)
+            rows.append(row)
         return {
             "roles": rows,
             "default_model": view["default_model"],

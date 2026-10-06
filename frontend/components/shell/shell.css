@@ -1669,3 +1669,23 @@ kbd {
   .icon-btn { width: 44px; height: 44px; }
   .tab { min-height: 44px; }
 }
+
+/* How many files a code-writing agent asks for per call (#81): a second line on
+   its row, under the model it applies to — the same table, one more column of it. */
+.role-files {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 15rem);
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  margin-top: 2px;
+}
+.role-files-label { font-size: var(--t-xs); color: var(--ink-2); cursor: pointer; }
+.role-files-pick { display: flex; align-items: center; gap: 8px; min-width: 0; grid-row: span 2; }
+.role-files-pick .select { width: 100%; min-width: 0; }
+.role-files-hint { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.45; }
+@media (max-width: 640px) {
+  .role-files { grid-template-columns: minmax(0, 1fr); }
+  .role-files-pick { grid-row: auto; }
+}

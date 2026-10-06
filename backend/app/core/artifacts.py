@@ -76,7 +76,13 @@ def _current(rows) -> list:
     return [ph for ph in rows if id(ph) in kept]
 
 
+#: The `build_note` kind of a note that is not a compile problem: a file a code phase
+#: wrote that its plan never listed (#81). Kept and shown, never gated on.
+NOTE_KIND = "plan"
+
+
 def build_problems(project: Project) -> list[dict]:
+
     """Every compile problem still outstanding in the current build, phase by phase.
 
     Read from the database, not from `project.phases`. The runner's session loads that
@@ -105,14 +111,22 @@ def build_problems(project: Project) -> list[dict]:
         if ph.phase not in CODE_PHASES or ph.build_status != BuildStatus.FAILED.value:
             continue
         for problem in ph.build_note or []:
-            if isinstance(problem, dict):
+            # A "not in the plan" note says where a file came from; it is not a problem.
+            if isinstance(problem, dict) and problem.get("kind") != NOTE_KIND:
                 out.append({**problem, "phase": ph.phase})
+
     return out
+
+
+def language_of(path: str, given: str = "") -> str:
+    """The language a file is written in: what its writer said, else its extension."""
+    return _language(path, given)
 
 
 def _language(path: str, given: str) -> str:
     if given:
         return given
+
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return {
         "py": "python", "js": "javascript", "jsx": "javascript", "mjs": "javascript",

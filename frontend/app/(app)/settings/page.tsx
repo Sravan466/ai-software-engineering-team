@@ -1321,6 +1321,20 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
     }
   }
 
+  async function chooseFilesPerCall(role: string, value: string) {
+    setSaving(`${role}:files`);
+    setError("");
+    try {
+      const parsed = value === "" ? null : value === "all" ? "all" : Number(value);
+      setState(await api.setFilesPerCall(role, parsed));
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSaving(null);
+    }
+  }
+
+
   /** A downloaded model whose name says "code", if there is one nothing uses yet.
    *  The list comes from the backend rather than a regex here, so the badge in the
    *  card above and the suggestion in this one cannot disagree about a model. */
@@ -1421,8 +1435,10 @@ function RoleModelCard({ refreshKey }: { refreshKey: number }) {
                 row={row}
                 state={state}
                 busy={saving === row.role}
+                filesBusy={saving === `${row.role}:files`}
                 disabled={saving !== null}
                 onChoose={choose}
+                onFilesPerCall={chooseFilesPerCall}
               />
             ))}
           </ul>
@@ -1482,14 +1498,18 @@ function RoleLine({
   row,
   state,
   busy,
+  filesBusy = false,
   disabled,
   onChoose,
+  onFilesPerCall,
 }: {
   row: RoleRow;
   state: RoleSettings;
   busy: boolean;
+  filesBusy?: boolean;
   disabled: boolean;
   onChoose: (role: string, value: string) => void;
+  onFilesPerCall?: (role: string, value: string) => void;
 }) {
   const agent = AGENT_BY_KEY[row.role];
   const id = `role-${row.role}`;
@@ -1569,6 +1589,9 @@ function RoleLine({
         </select>
         {busy && <span className="btn-spinner" aria-hidden="true" />}
       </span>
+      {row.files_per_call !== undefined && onFilesPerCall && (
+        <FilesPerCall row={row} busy={filesBusy} disabled={disabled} onChoose={onFilesPerCall} />
+      )}
       {assignedCannotWrite && (
         <span className="role-warn" role="status">
           {Icon.alert}
@@ -1591,6 +1614,67 @@ function RoleLine({
         </span>
       )}
     </li>
+  );
+}
+
+/** The counts offered besides automatic and "all". */
+const FILES_PER_CALL = [1, 2, 3, 4, 6, 8];
+
+/**
+ * How many files the Backend or Frontend Engineer writes per call (#81).
+ *
+ * Automatic is the router's answer from this model's measured window, never its
+ * name: one file at a time on a small window, several on a large one. A person can
+ * know better — a model that writes more than its window suggests, or one that loses
+ * the thread sooner — so the count can be set per agent.
+ */
+function FilesPerCall({
+  row,
+  busy,
+  disabled,
+  onChoose,
+}: {
+  row: RoleRow;
+  busy: boolean;
+  disabled: boolean;
+  onChoose: (role: string, value: string) => void;
+}) {
+  const id = `files-${row.role}`;
+  const auto = row.files_per_call_auto;
+  const value = row.files_per_call === null || row.files_per_call === undefined ? "" : String(row.files_per_call);
+  const offered = FILES_PER_CALL.includes(Number(value)) || value === "" || value === "all"
+    ? FILES_PER_CALL
+    : [...FILES_PER_CALL, Number(value)].sort((a, b) => a - b);
+  return (
+    <span className="role-files">
+      <label htmlFor={id} className="role-files-label">
+        Files per call
+      </label>
+      <span className="role-files-pick">
+        <select
+          id={id}
+          className="select"
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChoose(row.role, e.target.value)}
+          aria-describedby={`${id}-hint`}
+        >
+          <option value="">
+            {auto ? `Auto — ${auto === 1 ? "one file" : `${auto} files`} per call for this model` : "Auto"}
+          </option>
+          {offered.map((n) => (
+            <option key={n} value={String(n)}>
+              {n === 1 ? "1 — one at a time" : `${n} per call`}
+            </option>
+          ))}
+          <option value="all">All — the whole plan in one call</option>
+        </select>
+        {busy && <span className="btn-spinner" aria-hidden="true" />}
+      </span>
+      <span id={`${id}-hint`} className="role-files-hint">
+        Fewer is steadier on a small model; more is faster on a large one.
+      </span>
+    </span>
   );
 }
 

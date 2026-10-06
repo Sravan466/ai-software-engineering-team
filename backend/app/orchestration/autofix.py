@@ -226,8 +226,9 @@ def code_problems(row) -> list[dict]:
             )
     if row.build_status == BuildStatus.FAILED.value:
         for p in row.build_note or []:
-            if not isinstance(p, dict):
+            if not isinstance(p, dict) or p.get("kind") == "plan":
                 continue
+
             message = str(p.get("message") or "does not compile")
             path = str(p.get("path") or "")
             line = p.get("line")

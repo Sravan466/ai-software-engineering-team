@@ -34,7 +34,9 @@ export default function SchemaBadge({ row }: { row: PhaseResult }) {
     );
   }
   if (row.build_status === "failed") {
-    const problems = row.build_note ?? [];
+    // A "not in the plan" note says where a file came from; it isn't a problem (#81).
+    const problems = (row.build_note ?? []).filter((p) => p.kind !== "plan");
+
     const files = new Set(problems.map((p) => p.path)).size;
     badges.push(
       <span

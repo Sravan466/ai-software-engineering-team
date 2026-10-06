@@ -50,6 +50,12 @@ EMBEDDINGS_ROLE = "embeddings"
 #: and the API cannot disagree about what "no role" is called.
 DEFAULT_ROLE = ""
 
+#: Where per-role options live in the same file, beside the model picks. Not a role
+#: name, so `get_all` never reads it as one.
+_OPTIONS = "_options"
+#: The roles that write code file by file, and so have a "files per call" (#81).
+FILES_PER_CALL_ROLES = ("backend_engineer", "frontend_engineer")
+
 
 def catalogue() -> list[dict]:
     """Every role a model can be chosen for, in the order they are shown.
@@ -130,6 +136,37 @@ class RoleStore:
                 data.pop(role, None)
             self._write(data)
 
+    # ── per-role options beside the model pick (#81) ─────────────────────────
+    def option(self, role: Optional[str], name: str) -> object:
+        """One option saved for `role`, or None when it is on automatic."""
+        if not role:
+            return None
+        options = self._read().get(_OPTIONS)
+        found = options.get(role) if isinstance(options, dict) else None
+        return found.get(name) if isinstance(found, dict) else None
+
+    def set_option(self, role: str, name: str, value: object) -> None:
+        """Save one option for `role`; `None` puts it back on automatic."""
+        if role not in known_roles():
+            raise ValueError(f"'{role}' is not a role a model can be chosen for.")
+        with self._lock:
+            data = self._read()
+            options = data.get(_OPTIONS) if isinstance(data.get(_OPTIONS), dict) else {}
+            mine = dict(options.get(role) or {}) if isinstance(options.get(role), dict) else {}
+            if value is None:
+                mine.pop(name, None)
+            else:
+                mine[name] = value
+            if mine:
+                options[role] = mine
+            else:
+                options.pop(role, None)
+            if options:
+                data[_OPTIONS] = options
+            else:
+                data.pop(_OPTIONS, None)
+            self._write(data)
+
     def clear_all(self) -> None:
         """Put every role back on the default model."""
         with self._lock:
@@ -161,3 +198,11 @@ def set_role(role: str, spec: Optional[str]) -> None:
 
 def clear_all() -> None:
     default_store.clear_all()
+
+
+def option(role: Optional[str], name: str) -> object:
+    return default_store.option(role, name)
+
+
+def set_option(role: str, name: str, value: object) -> None:
+    default_store.set_option(role, name, value)

@@ -7,7 +7,7 @@ import pytest
 
 from app.core.config import settings
 from app.orchestration import autofix, remediation
-from tests.conftest import _fake_complete, stub, through_database_gate
+from tests.conftest import _fake_complete, fenced, stub, through_database_gate
 
 SECRET = {
     "title": "Hardcoded MongoDB connection string",
@@ -69,7 +69,11 @@ def _build(client, monkeypatch, audits, mode="unattended"):
 
 
 def _fix_notes(crew: Crew, role: str) -> list[str]:
-    return [p for p in crew.asked.get(role, []) if remediation.FIX_NOTE_PREFIX in p]
+    """The fix notes a phase was handed, once per attempt: a code phase's plan call.
+    Its write calls carry the same note (#81), and are not counted again."""
+    return [
+        p for p in crew.asked.get(role, []) if remediation.FIX_NOTE_PREFIX in p and "# Write now" not in p
+    ]
 
 
 # ── the loop ─────────────────────────────────────────────────────────────────
@@ -325,12 +329,15 @@ def test_a_compile_fix_that_works_closes_its_round_and_frees_the_budget(client, 
     def fake(messages, **kwargs):
         resp = _fake_complete(messages, **kwargs)
         if messages[0].content.startswith("You are the Backend Engineer"):
-            calls["backend"] += 1
-            if calls["backend"] <= 2:  # the first attempt and its own repair round
+            if getattr(kwargs.get("options"), "json_schema", None):  # the plan
                 payload = json.loads(resp.text)
-                payload["files"] = [{"path": "main.py", "language": "python", "purpose": "app",
-                                     "code": "from fastapi import FastAPI\napp = FastAPI(\n"}]
+                payload["files"] = [{"path": "main.py", "purpose": "app"}]
                 return resp.model_copy(update={"text": json.dumps(payload)})
+            calls["backend"] += 1
+            code = "from fastapi import FastAPI\napp = FastAPI()\n"
+            if calls["backend"] <= 2:  # the first write and its own repair round
+                code = "from fastapi import FastAPI\napp = FastAPI(\n"
+            return resp.model_copy(update={"text": fenced({"backend/main.py": code})})
         return resp
 
     stub(monkeypatch, "complete", fake)

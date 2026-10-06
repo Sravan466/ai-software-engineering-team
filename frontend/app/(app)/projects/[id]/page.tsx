@@ -24,6 +24,8 @@ import { FixingPanel } from "@/components/build/AutoFix";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
 import { Elapsed, formatDuration } from "@/components/build/Elapsed";
+import { ActivityLine, FileProgress, activityFor, activityShare } from "@/components/build/CodeWriting";
+
 import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
 
 type Tab = "build" | "preview" | "summary";
@@ -774,8 +776,12 @@ function NowWorking({ project }: { project: Project }) {
   // is *who* held the work, and inventing a duration to fill the slot would put
   // back the kind of confident wrong number this whole change is about.
   const ranFor = stopped ? staticDuration(startIso, project.heartbeat_at) : null;
+  // A code phase says which file it's on (#81); every other phase keeps its voice.
+  const activity = stopped ? null : activityFor(project, key);
+  const share = activityShare(activity);
 
   return (
+
     <div
       className={"working" + (stopped ? " working-stopped" : "")}
       style={{ ["--agent" as string]: agent.accent }}
@@ -793,21 +799,23 @@ function NowWorking({ project }: { project: Project }) {
       <div className="working-body">
         <div className="working-line">
           <b className="agent-line-name">{agent.codename}</b>
-          <span className="working-verb">
-            {stopped
-              ? (STOPPED_VERB[state] ?? "is no longer running")
-              : state === "cancelled"
-                ? "is finishing this phase, then stopping"
-                : agent.lines.working.toLowerCase()}
-          </span>
-          {meta && <span className="phase-deliver">{meta.deliver}</span>}
+          {stopped ? (
+            <span className="working-verb">{STOPPED_VERB[state] ?? "is no longer running"}</span>
+          ) : state === "cancelled" ? (
+            <span className="working-verb">is finishing this phase, then stopping</span>
+          ) : (
+            <ActivityLine activity={activity} fallback={agent.lines.working.toLowerCase()} />
+          )}
+          {meta && !activity && <span className="phase-deliver">{meta.deliver}</span>}
         </div>
-        {/* The sweep says "in flight". Nothing is in flight. */}
+        {/* The sweep says "in flight". Nothing is in flight. Once a code phase has
+            a plan it has real progress to report, and the bar fills instead. */}
         {!stopped && (
-          <div className="working-bar" aria-hidden="true">
-            <span />
+          <div className={"working-bar" + (share !== null ? " working-bar-fill" : "")} aria-hidden="true">
+            <span style={share !== null ? { transform: `scaleX(${share})` } : undefined} />
           </div>
         )}
+
       </div>
       {stopped ? (
         ranFor && (
@@ -1042,11 +1050,13 @@ function PhaseList({
         const isOpen =
           open[ph.key] ?? (isGate && project.gate_kind === "needs_help");
         const agent = AGENT_BY_KEY[ph.key];
+        const writing = ns === "running" ? activityFor(project, ph.key) : null;
 
         return (
           <div
             key={ph.key}
             id={`phase-${ph.key}`}
+
             className={
               `phase ${ns}` +
               (isOpen && hasDoc ? " open" : "") +
@@ -1120,8 +1130,16 @@ function PhaseList({
               </span>
             </button>
 
+            {/* A code phase writing its files: which file, and the list filling in. */}
+            {writing && !project.stalled && (
+              <div className="phase-writing" aria-live="polite">
+                <FileProgress activity={writing} />
+              </div>
+            )}
+
             {/* Any phase that produced something can be read in full, whenever —
                 including the one under review, which the decision above also shows. */}
+
             {hasDoc && isOpen && row && (
               <div className="phase-body">
                 <PhaseArtifact row={row} maxHeight={420} />

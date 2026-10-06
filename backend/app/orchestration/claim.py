@@ -123,6 +123,32 @@ def check() -> None:
         raise Superseded(project_id)
 
 
+def between_calls() -> None:
+    """For a phase that makes many model calls (#81): stop before the next one when the
+    build is no longer this driver's, or the person pressed Stop.
+
+    Stop cancels the call in flight, but a Stop landing *between* two calls has nothing
+    to cancel — without this the next file's call would start anyway. Raises
+    `Superseded` for a lost claim, and `RequestCancelled` for a Stop (or a deleted
+    build), which the run settles exactly as a cancelled call.
+    """
+    check()
+    from app.router import inflight
+    from app.router.base import RequestCancelled
+
+    held = current()
+    build = inflight.current()
+    project_id = held[0] if held is not None else (build or {}).get("id")
+    if not project_id:
+        return
+    from app.db.base import SessionLocal
+
+    with SessionLocal() as db:
+        found = db.execute(select(Project.cancel_requested).where(Project.id == project_id)).first()
+    if found is None or found[0]:
+        raise RequestCancelled()
+
+
 @event.listens_for(Session, "before_flush")
 def _guard_writes(session: Session, _flush_context, _instances) -> None:
     claim = session.info.get(_INFO_KEY)

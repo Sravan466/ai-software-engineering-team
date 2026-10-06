@@ -263,15 +263,9 @@ def _module_exists(root: str, dotted: str, tree: set[str], dirs: set[str]) -> bo
 
 
 def _check_python(path: str, content: str, tree: set[str], dirs: set[str]) -> list[Problem]:
-    try:
-        ast.parse(content, filename=path)
-    except SyntaxError as e:
-        detail = (e.msg or "invalid syntax").rstrip(".")
-        snippet = (e.text or "").strip()
-        hint = f" near `{snippet[:80]}`" if snippet else ""
-        return [Problem(path, f"does not parse: {detail}{hint}", "syntax", e.lineno)]
-    except ValueError as e:  # e.g. null bytes
-        return [Problem(path, f"does not parse: {e}", "syntax")]
+    broken = syntax_problems(path, content)
+    if broken:
+        return broken
 
     problems: list[Problem] = []
     roots = _python_roots(path)
@@ -379,6 +373,33 @@ def _js_problem(d: dict) -> Problem:
     return Problem(d["path"], message, "reference", d.get("line"))
 
 
+# ── one file as it lands (#81) ───────────────────────────────────────────────
+def syntax_problems(path: str, content: str) -> list[Problem]:
+    """Whether one file parses, in-process — for a code phase writing file by file.
+
+    Python and JSON only. Imports are not asked about: a file the plan has not written
+    yet is not missing, and the whole-tree check once the last file lands is where an
+    import is judged. JavaScript and TypeScript wait for that check too, which spawns
+    the one `node` run a phase makes, rather than one per file.
+    """
+    if path.endswith(".py"):
+        try:
+            ast.parse(content, filename=path)
+        except SyntaxError as e:
+            detail = (e.msg or "invalid syntax").rstrip(".")
+            snippet = (e.text or "").strip()
+            hint = f" near `{snippet[:80]}`" if snippet else ""
+            return [Problem(path, f"does not parse: {detail}{hint}", "syntax", e.lineno)]
+        except ValueError as e:  # e.g. null bytes
+            return [Problem(path, f"does not parse: {e}", "syntax")]
+    elif path.endswith(".json"):
+        try:
+            json.loads(content)
+        except ValueError as e:
+            return [Problem(path, f"is not valid JSON: {getattr(e, 'msg', e)}", "syntax", getattr(e, "lineno", None))]
+    return []
+
+
 # ── the check ────────────────────────────────────────────────────────────────
 def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
     """Check `report_on` (placed paths) against the whole tree `files`."""
@@ -402,11 +423,9 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
             problems += _check_python(path, content, tree, dirs)
         elif path.endswith(".json"):
             out.checked += 1
-            try:
-                json.loads(content)
-            except ValueError as e:
-                problems.append(Problem(path, f"is not valid JSON: {e.msg}", "syntax", e.lineno))
+            problems += syntax_problems(path, content)
         elif path.endswith(_JS_EXT):
+
             out.checked += 1
             problems += _check_js_imports(path, content, tree, aliases_for(files, layout.side_of(path)))
             js_targets.append(path)

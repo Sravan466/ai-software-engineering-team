@@ -229,6 +229,21 @@ class Settings(BaseSettings):
     #: backend route serves, a backend route that is a near miss of a registry path.
     check_endpoint_references: bool = True
 
+    # ── Code phases, file by file (#81) ──
+    #: Whether the Backend and Frontend phases plan their files and then write them in
+    #: batches, as fenced code. Off means the one-JSON-reply path for every build.
+    code_by_file: bool = True
+    #: Below either of these a model writes one file per call: its prompt cannot hold the
+    #: plan, the digests and what is already written beside several files' worth of ask,
+    #: or its reply cannot hold several files. Measured budgets, never a model's name.
+    code_batch_min_prompt_chars: BlankTolerantInt(60_000) = 60_000
+    code_batch_min_output_tokens: BlankTolerantInt(8192) = 8192
+    #: What one file is assumed to cost before any is written; the phase refines it from
+    #: its own files as they land.
+    code_avg_file_tokens: BlankTolerantInt(1200) = 1200
+    #: The most files one plan may list. Each is a call on a small model.
+    code_max_files: BlankTolerantInt(30) = 30
+
     # ── Skills (the procedural library injected into agent prompts) ──
     #: Whether agents are given skills at all. Off means an empty library and a
     #: pipeline that runs exactly as it did before skills existed — the same

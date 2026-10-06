@@ -18,7 +18,17 @@ and, since #80, whether each agent used what it was handed:
   criteria_covered_pct  P0 acceptance criteria with a test named after them
   digest_present        per phase: was every dependency handed over with its digest
   truncated_replies     replies the output limit cut off, across every phase
+
+and, since #81, how the code phases wrote their code:
+
+  generation_mode       per code phase: one | batch | whole (file by file, in batches,
+                        or the old single JSON reply)
+  calls_per_phase       model calls each phase made, repairs included
+  files_planned         files the code phases' plans listed
+  files_written         of those, files that were written
+  compile_by_path       ok | failed for every file the code phases wrote
 """
+
 from __future__ import annotations
 
 import re
@@ -160,4 +170,37 @@ def score(db: Session, project: Project) -> dict:
         "truncated_replies": sum(
             int((getattr(ph, "handoff", None) or {}).get("truncated_replies") or 0) for ph in phases
         ),
+        **generation(db, project, phases, code_paths, check),
     }
+
+
+def generation(db: Session, project: Project, phases: list, code_paths: list[str], check) -> dict:
+    """How the code phases wrote their code (#81), and what each call bought."""
+    from sqlalchemy import func
+
+    from app.db.models import UsageEvent
+
+    records = {
+        ph.phase: ((getattr(ph, "handoff", None) or {}).get("generation") or {})
+        for ph in phases
+        if ph.phase in CODE_PHASES
+    }
+    try:
+        rows = (
+            db.query(UsageEvent.phase, func.count(UsageEvent.id))
+            .filter(UsageEvent.project_id == project.id)
+            .group_by(UsageEvent.phase)
+            .all()
+        )
+        calls = {phase: n for phase, n in rows if phase}
+    except Exception:  # noqa: BLE001 - a scoring stand-in with no database
+        calls = {}
+    failed = {p.path for p in check.problems}
+    return {
+        "generation_mode": {phase: r.get("mode") for phase, r in records.items() if r.get("mode")},
+        "calls_per_phase": calls,
+        "files_planned": sum(int(r.get("files_planned") or 0) for r in records.values()),
+        "files_written": sum(int(r.get("files_written") or 0) for r in records.values()),
+        "compile_by_path": {path: ("failed" if path in failed else "ok") for path in code_paths},
+    }
+

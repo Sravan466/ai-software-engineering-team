@@ -26,7 +26,7 @@ _PY_ROUTE = re.compile(
     r"""@\s*\w+(?:\.\w+)*\.(get|post|put|patch|delete|route|api_route)\(\s*[rbuf]?["']([^"']*)["']""",
     re.IGNORECASE,
 )
-_PY_PREFIX = re.compile(r"""(\w+)\s*=\s*(?:\w+\.)?(?:APIRouter|Blueprint)\(([^)]*)\)""")
+_PY_PREFIX = re.compile(r"""\b(\w+)\s*=\s*(?:\w+\.)?(?:APIRouter|Blueprint)\(([^)]*)\)""")
 _PY_PREFIX_ARG = re.compile(r"""(?:prefix|url_prefix)\s*=\s*["']([^"']*)["']""")
 _JS_ROUTE = re.compile(
     r"""\b(?:app|router|server|api|\w+Router|routes)\.(get|post|put|patch|delete|all)\(\s*['"`]([^'"`]+)['"`]""",

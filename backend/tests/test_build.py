@@ -182,26 +182,22 @@ def test_a_build_that_does_not_compile_is_never_labelled_finished():
 def test_a_phase_that_writes_broken_code_is_sent_back_and_recorded(client, monkeypatch):
     """The repair round sees the compile error, and what survives reaches the gate."""
     from app.router.router import router as model_router
-    from tests.conftest import _fake_complete
+    from tests.conftest import _fake_complete, fenced
 
     asked: list[str] = []
 
     def fake(messages, **kwargs):
         system = messages[0].content
+        resp = _fake_complete(messages, **kwargs)
         if system.startswith("You are the Backend Engineer"):
             asked.append(messages[-1].content)
-            payload = {
-                "framework": "FastAPI",
-                "summary": "api",
-                "db_models": "none",
-                "auth_flow": "none",
-                "setup_instructions": ["run it"],
-                "files": [{"path": "main.py", "language": "python", "purpose": "app",
-                           "code": "from fastapi import FastAPI\napp = FastAPI(\n"}],
-            }
-            resp = _fake_complete(messages, **kwargs)
-            return resp.model_copy(update={"text": json.dumps(payload)})
-        return _fake_complete(messages, **kwargs)
+            if getattr(kwargs.get("options"), "json_schema", None):  # the plan
+                payload = json.loads(resp.text)
+                payload["files"] = [{"path": "main.py", "purpose": "app"}]
+                return resp.model_copy(update={"text": json.dumps(payload)})
+            broken = "from fastapi import FastAPI\napp = FastAPI(\n"
+            return resp.model_copy(update={"text": fenced({"backend/main.py": broken})})
+        return resp
 
     monkeypatch.setattr(model_router, "complete", fake)
     r = client.post("/api/projects", json={"idea": "A broken API", "routing_mode": "local_only",
@@ -210,11 +206,13 @@ def test_a_phase_that_writes_broken_code_is_sent_back_and_recorded(client, monke
     client.post(f"/api/projects/{pid}/run")
     project = through_database_gate(client, pid)
 
-    # Its own repair round names the file and the error; then the crew's fix loop
-    # re-runs the phase with the problems as its note. That round fixed nothing, so
-    # the loop stops rather than spending a third identical attempt.
-    assert "backend/main.py" in asked[1] and "does not parse" in asked[1]
-    assert len(asked) == 4 and "does not compile" in asked[2]
+    # Plan, write, and the file's own repair round naming the file and the error, as
+    # soon as it lands (#81); then the crew's fix loop re-runs the phase with the
+    # problems as its note. That round fixed nothing, so the loop stops rather than
+    # spending a third identical attempt.
+    assert "# Write now" not in asked[0] and "`backend/main.py`" in asked[1]
+    assert "backend/main.py" in asked[2] and "does not parse" in asked[2]
+    assert len(asked) == 6 and "does not compile" in asked[3]
     backend = next(
         p for p in project["phases"]
         if p["phase"] == "backend_engineer" and p["status"] != "rejected"

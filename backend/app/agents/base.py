@@ -193,16 +193,9 @@ class BaseAgent:
 
     # ── public entrypoint ───────────────────────────────────────────────────
     def run(self, ctx: AgentContext) -> AgentResult:
-        if ctx.escalate and ctx.pin_model is None:
-            try:
-                ctx.pin_model = router.strongest_for(
-                    ctx.routing_mode, ctx.preferred_model, role=self.key
-                )
-            except Exception as e:  # noqa: BLE001 - escalation is best effort
-                log.warning("%s: no stronger model could be chosen: %s", self.title, e)
-            if ctx.pin_model:
-                log.info("%s: last fix round runs on %s", self.title, ctx.pin_model)
+        self._pin(ctx)
         profile = router.profile_for(
+
             ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
         )
         ask = self._build_messages(ctx, profile)
@@ -328,7 +321,20 @@ class BaseAgent:
             truncated_replies=truncated,
         )
 
+    def _pin(self, ctx: AgentContext) -> None:
+        """The fix loop's last round: pin this call to the strongest model, once."""
+        if ctx.escalate and ctx.pin_model is None:
+            try:
+                ctx.pin_model = router.strongest_for(
+                    ctx.routing_mode, ctx.preferred_model, role=self.key
+                )
+            except Exception as e:  # noqa: BLE001 - escalation is best effort
+                log.warning("%s: no stronger model could be chosen: %s", self.title, e)
+            if ctx.pin_model:
+                log.info("%s: last fix round runs on %s", self.title, ctx.pin_model)
+
     def _missing(self, fields: dict) -> list[str]:
+
         """Declared fields with no answer yet, under their own name or a drift alias."""
         out = []
         for name, info in self.output_model.model_fields.items():
@@ -438,6 +444,17 @@ class BaseAgent:
         can be cut to fit; the one instruction that must survive a small window is
         the one saying which database the rest of the team is building against.
         """
+        return (
+            self._standing(charter, registry, _HANDOFF_NOTE if self.depends_on else "")
+            + "Respond with ONLY a single valid JSON object — no prose, no markdown fences — "
+            f"matching this shape:\n{self.output_spec}"
+        )
+
+    def _standing(
+        self, charter: Optional[Charter], registry: Optional[handoff.Registry], note: str
+    ) -> str:
+        """Everything in the system prompt above the answer format: who this agent is,
+        how hand-offs read (`note`), the charter, the registry, the platform contract."""
         charter_block = charter.prompt_block() if charter else ""
         # Where files go, which files are the platform's, and which packages exist —
         # standing instructions for the phases that write code, for the same reason
@@ -452,14 +469,13 @@ class BaseAgent:
         brief = self.standing_brief(charter)
         return (
             f"You are the {self.title} on an AI software engineering team. {self.role}\n\n"
-            + (_HANDOFF_NOTE if self.depends_on else "")
+            + note
             + (f"{charter_block}\n\n" if charter_block else "")
             + (f"{registry_block}\n\n" if registry_block else "")
             + (f"{platform_block}\n\n" if platform_block else "")
             + (f"{brief}\n\n" if brief else "")
-            + "Respond with ONLY a single valid JSON object — no prose, no markdown fences — "
-            f"matching this shape:\n{self.output_spec}"
         )
+
 
     def _build_messages(
         self,

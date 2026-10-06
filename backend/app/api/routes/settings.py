@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt, StrictStr
 
 from app.core import secretbox, secrets_store
 from app.core.config import settings
@@ -89,6 +89,13 @@ class RoleModelUpdate(BaseModel):
     """
 
     model: Optional[str] = None
+
+
+class FilesPerCallUpdate(BaseModel):
+    """How many files a code phase writes per call: a count, `"all"`, or null for
+    automatic — what the model's measured window allows (#81)."""
+
+    value: Union[StrictInt, StrictStr, None] = None
 
 
 # ── Cloud provider API keys ──────────────────────────────────────────────────
@@ -190,6 +197,21 @@ def get_roles() -> dict:
 def set_role(role: str, body: RoleModelUpdate) -> dict:
     try:
         model_router.set_role_model(role, body.model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return model_router.role_settings()
+
+
+@router.put("/roles/{role}/files-per-call")
+def set_files_per_call(role: str, body: FilesPerCallUpdate) -> dict:
+    """How many files the Backend or Frontend Engineer writes per call (#81)."""
+    value = body.value
+    if isinstance(value, str):
+        value = value.strip().lower() or None
+        if value not in (None, "all"):
+            raise HTTPException(status_code=400, detail='Files per call is a number, "all", or empty for automatic.')
+    try:
+        model_router.set_files_per_call(role, value)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return model_router.role_settings()
