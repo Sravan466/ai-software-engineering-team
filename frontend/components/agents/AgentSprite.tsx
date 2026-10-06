@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
 import { artFor, type Persona } from "./personas";
 
 export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
@@ -34,7 +37,7 @@ export default function AgentSprite({
   state = "queued",
   ground = false,
   asleep = false,
-  poked = false,
+  poke,
   className = "",
 }: {
   agent: Persona;
@@ -45,16 +48,42 @@ export default function AgentSprite({
   /** Nothing is running, so a queued agent sleeps. Ignored in any other state. */
   asleep?: boolean;
   /**
-   * Clicked: one pass of their working row and their signature, layered over
-   * whatever they are doing. The caller re-keys the sprite to restart it.
+   * Bump to poke: one pass of their job (working row) and their signature,
+   * played on an overlay while their own animation runs on, untouched,
+   * underneath — so when it ends nothing restarts. A new value restarts it.
    */
-  poked?: boolean;
+  poke?: number;
   className?: string;
 }) {
   const art = artFor(agent);
+  const [acting, setActing] = useState<number | null>(null);
+  const overlay = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (poke !== undefined) setActing(poke);
+  }, [poke]);
+
+  // The pass ends when its own animations do, so it can never drift from the
+  // durations in agents.css. Under reduced motion there are none; the job
+  // frame then holds briefly as the answer to the click.
+  useEffect(() => {
+    if (acting === null || !overlay.current) return;
+    let live = true;
+    const done = () => live && setActing(null);
+    const running = overlay.current.getAnimations();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (running.length) Promise.all(running.map((a) => a.finished)).then(done, () => {});
+    else timer = setTimeout(done, 900);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [acting]);
+
+  const sheetOnly = size > STILL_MAX;
   return (
     <span
-      className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${poked ? " is-poked" : ""}${ground ? " grounded" : ""} ${className}`}
+      className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${acting !== null && sheetOnly ? " is-poked" : ""}${ground ? " grounded" : ""} ${className}`}
       style={{
         ["--sprite-size" as string]: `${size}px`,
         ["--agent" as string]: agent.accent,
@@ -63,12 +92,15 @@ export default function AgentSprite({
       data-agent={agent.codename}
     >
       {ground && <span className="sprite-ground" aria-hidden="true" />}
-      {size <= STILL_MAX ? (
+      {!sheetOnly ? (
         // A fixed 96px asset drawn at icon size; next/image would add nothing.
         // eslint-disable-next-line @next/next/no-img-element
         <img className="sprite-still" src={art.still} alt="" width={size} height={size} draggable={false} />
       ) : (
         <span className="sprite-sheet" aria-hidden="true" />
+      )}
+      {acting !== null && sheetOnly && (
+        <span key={acting} ref={overlay} className="sprite-poke" aria-hidden="true" />
       )}
     </span>
   );

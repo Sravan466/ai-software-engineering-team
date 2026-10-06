@@ -115,9 +115,6 @@ const VOICE_FOR: Record<SpriteState, keyof Persona["lines"]> = {
   rejected: "rejected",
 };
 
-/** How long a poke's pass runs — the longest signature pass in agents.css. */
-const POKE_MS = 1700;
-
 const STATE_LABEL: Record<SpriteState, string> = {
   queued: "idle",
   working: "working",
@@ -155,21 +152,15 @@ export default function CrewPage() {
 
   const [scenario, setScenario] = useState(1);
   const [selected, setSelected] = useState(2);
-  // Clicking an agent pokes them: one pass of their job and their signature,
-  // then back to whatever they were doing. `n` re-keys the sprite so a second
-  // click restarts the pass; `on` drops after the pass so their own animation
-  // carries on underneath without replaying.
-  const [poke, setPoke] = useState<{ i: number; n: number; on: boolean } | null>(null);
-  const pokeTimer = useRef<ReturnType<typeof setTimeout>>();
-  useEffect(() => () => clearTimeout(pokeTimer.current), []);
+  // Clicking an agent pokes them: one pass of their job and their signature
+  // (AgentSprite plays it). `n` only ever grows, and only the clicked agent's
+  // sprites see it, so nobody else re-renders into a replay.
+  const [poke, setPoke] = useState<{ i: number; n: number } | null>(null);
   function pokeAgent(i: number) {
     setSelected(i);
-    setPoke((p) => ({ i, n: (p?.n ?? 0) + 1, on: true }));
-    clearTimeout(pokeTimer.current);
-    pokeTimer.current = setTimeout(() => setPoke((p) => (p ? { ...p, on: false } : p)), POKE_MS);
+    setPoke((p) => ({ i, n: (p?.n ?? 0) + 1 }));
   }
-  const pokeKey = (i: number) => (poke?.i === i ? poke.n : 0);
-  const poked = (i: number) => poke?.i === i && poke.on;
+  const pokeOf = (i: number) => (poke?.i === i ? poke.n : undefined);
   const [relay, setRelay] = useState<Record<string, SpriteState> | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -182,6 +173,7 @@ export default function CrewPage() {
   /** Play a full pass: each agent works, hands off, the next wakes. */
   function runRelay() {
     clearTimers();
+    setPoke(null);
     const base: Record<string, SpriteState> = {};
     AGENTS.forEach((a) => (base[a.key] = "queued"));
     setRelay({ ...base });
@@ -426,12 +418,11 @@ export default function CrewPage() {
                         </span>
                       </span>
                       <AgentSprite
-                        key={pokeKey(i)}
                         agent={a}
                         size={72}
                         state={st}
                         asleep={atRest}
-                        poked={poked(i)}
+                        poke={pokeOf(i)}
                         ground
                       />
                       <span className="desk" aria-hidden="true">
@@ -473,12 +464,12 @@ export default function CrewPage() {
 
             <div className="inspect-portrait">
               <AgentSprite
-                key={`${agent.key}-${pokeKey(selected)}`}
+                key={agent.key}
                 agent={agent}
                 size={104}
                 state={agentState}
                 asleep={atRest}
-                poked={poked(selected)}
+                poke={pokeOf(selected)}
               />
             </div>
 
@@ -528,7 +519,10 @@ export default function CrewPage() {
                 className="scenario"
                 aria-pressed={!relay && scenario === i}
                 disabled={!!relay}
-                onClick={() => setScenario(i)}
+                onClick={() => {
+                  setPoke(null);
+                  setScenario(i);
+                }}
               >
                 {s.label}
               </button>
