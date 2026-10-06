@@ -42,7 +42,8 @@
 }
 
 /* ── the sheet ──
-   4 frames across, 5 rows down: queued, working, done, rejected, gate. The
+   4 frames across, 6 rows down: queued, working, done, rejected, gate, and
+   asleep (queued while no build is running). The
    row is picked with background-position-y and frames are stepped with
    background-position-x, so changing state never reloads anything — one
    image per agent, already decoded.
@@ -58,7 +59,7 @@
 }
 .sprite-sheet {
   background-image: var(--sheet);
-  background-size: 400% 500%;
+  background-size: 400% 600%;
   background-repeat: no-repeat;
   background-position: 0% 0%;
 }
@@ -69,10 +70,11 @@
   user-select: none;
 }
 
-.sprite.is-working .sprite-sheet  { background-position-y: 25%; }
-.sprite.is-done .sprite-sheet     { background-position-y: 50%; }
-.sprite.is-rejected .sprite-sheet { background-position-y: 75%; }
-.sprite.is-gate .sprite-sheet     { background-position-y: 100%; }
+.sprite.is-working .sprite-sheet  { background-position-y: 20%; }
+.sprite.is-done .sprite-sheet     { background-position-y: 40%; }
+.sprite.is-rejected .sprite-sheet { background-position-y: 60%; }
+.sprite.is-gate .sprite-sheet     { background-position-y: 80%; }
+.sprite.is-queued.is-asleep .sprite-sheet { background-position-y: 100%; }
 
 /* jump-none puts all four frames on screen for a quarter of the cycle each:
    0, 33.3, 66.7, 100% is frame 1 to 4 of a 400%-wide sheet.
@@ -122,8 +124,24 @@
 .sprite.is-done .sprite-sheet { animation: sheet-once 760ms steps(4, jump-none) 1 both; }
 .sprite.is-rejected .sprite-sheet { animation: sheet-to-slump 600ms steps(3, jump-none) 1 both; }
 
+/* Asleep: a slow breath with the Zs rising — frame 1 none, then small,
+   medium, large. Slow on purpose: it is the one loop that may run while
+   nothing is happening, so it should read as calm, not as activity. */
+@keyframes sheet-sleep {
+  from { background-position-x: 0%; }
+  to   { background-position-x: 100%; }
+}
+.sprite.is-queued.is-asleep .sprite-sheet {
+  animation: sheet-sleep 3.2s steps(4, jump-none) infinite;
+}
+
 /* Queued crew are dimmed and desaturated — present, not yet involved. */
 .sprite.is-queued { filter: saturate(0.66) brightness(0.74); }
+/* Asleep is the room at rest, not someone left out of a running build, so the
+   lights come down less: still quieter than anyone awake, never greyed out.
+   Kept at the same weight as .is-queued (AgentSprite only marks queued agents
+   asleep) so the crew floor's depth shading, later in this file, still wins. */
+.sprite.is-asleep { filter: saturate(0.85) brightness(0.88); }
 .sprite.is-done { filter: none; }
 .sprite.is-rejected { filter: saturate(0.85); }
 
@@ -260,11 +278,16 @@
    figure returns to its own pose, and the own animation keeps its name in
    the list — so leaving the card doesn't replay the fist pump or the slump. */
 @keyframes sheet-hover-row {
-  from { background-position: 0% 25%; }
-  to   { background-position: 100% 25%; }
+  from { background-position: 0% 20%; }
+  to   { background-position: 100% 20%; }
 }
 .agent-card:hover .sprite.is-queued .sprite-sheet {
   animation: sheet-hover-row 800ms steps(4, jump-none) 1;
+}
+.agent-card:hover .sprite.is-queued.is-asleep .sprite-sheet {
+  animation:
+    sheet-sleep 3.2s steps(4, jump-none) infinite,
+    sheet-hover-row 800ms steps(4, jump-none) 1;
 }
 .agent-card:hover .sprite.is-done .sprite-sheet {
   animation:
@@ -1658,6 +1681,8 @@
   .sprite.is-working .sprite-sheet,
   .sprite.is-done .sprite-sheet { background-position-x: 33.333%; }
   .sprite.is-rejected .sprite-sheet { background-position-x: 66.667%; }
+  /* Asleep holds a frame with a Z up, so it still reads as asleep. */
+  .sprite.is-queued.is-asleep .sprite-sheet { background-position-x: 66.667%; }
   /* The board holds still: the running light parks mid-cell, the gate cell
      stays lit. The outline and caret still say which phase has the work. */
   .board-tick.is-working { animation: none; background-position: 50% 0; }

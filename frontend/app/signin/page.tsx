@@ -156,7 +156,7 @@ function SignIn() {
         <div className="door-floor">
           {AGENTS.map((a, i) => (
             <span className="door-agent" key={a.key} style={{ ["--i" as string]: i }}>
-              <AgentSprite agent={a} size={136} state="queued" ground />
+              <AgentSprite agent={a} size={136} state="queued" asleep ground />
               <span className="door-codename" style={{ color: a.accent }}>
                 {a.codename}
               </span>

@@ -3,7 +3,7 @@ import { artFor, type Persona } from "./personas";
 export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
 
 /**
- * Below this a 4x5 sheet cell is a few pixels of noise, so the still is drawn
+ * Below this a 4x6 sheet cell is a few pixels of noise, so the still is drawn
  * instead — one small pre-scaled frame that holds its silhouette at 18px.
  */
 const STILL_MAX = 28;
@@ -15,7 +15,9 @@ const STILL_MAX = 28;
  * working and gate loop (someone is busy; someone needs you), done plays once
  * and settles, rejected plays into its slump and holds, queued stands still.
  * Eight characters breathing on a loop everywhere is noise; motion is kept for
- * the states that are news.
+ * the states that are news — with one exception, `asleep`: a queued agent
+ * while no build is running dozes on a slow loop. Waiting a turn inside a live
+ * build stays awake and still, so nobody looks stuck mid-run.
  *
  * Two things layer on top and are deliberately not in the sheet:
  *
@@ -31,6 +33,7 @@ export default function AgentSprite({
   size = 48,
   state = "queued",
   ground = false,
+  asleep = false,
   className = "",
 }: {
   agent: Persona;
@@ -38,12 +41,14 @@ export default function AgentSprite({
   state?: SpriteState;
   /** Draw a contact shadow beneath the figure. On for anyone standing in a room. */
   ground?: boolean;
+  /** Nothing is running, so a queued agent sleeps. Ignored in any other state. */
+  asleep?: boolean;
   className?: string;
 }) {
   const art = artFor(agent);
   return (
     <span
-      className={`sprite motion-${agent.motion} is-${state}${ground ? " grounded" : ""} ${className}`}
+      className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${ground ? " grounded" : ""} ${className}`}
       style={{
         ["--sprite-size" as string]: `${size}px`,
         ["--agent" as string]: agent.accent,

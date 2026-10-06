@@ -84,15 +84,26 @@ export const DESK_PALETTE: Record<string, string> = {
 };
 
 /**
- * Where an agent's art lives. `sheet` is 4 frames across and 5 rows down, one
- * row per state — queued, working, done, rejected, gate (agents.css positions
- * them in that order); `still` is a small single frame for
- * renders too small for the sheet to read.
+ * Where an agent's art lives. `sheet` is 4 frames across and 6 rows down, one
+ * row per state — queued, working, done, rejected, gate, then asleep
+ * (agents.css positions them in that order); `still` is a small single frame
+ * for renders too small for the sheet to read.
  */
 export function artFor(a: Persona): { sheet: string; still: string } {
   const slug = a.codename.toLowerCase();
-  return { sheet: `/agents/${slug}.webp`, still: `/agents/${slug}-still.webp` };
+  return {
+    sheet: `/agents/${slug}.webp?v=${ART_VERSION}`,
+    still: `/agents/${slug}-still.webp?v=${ART_VERSION}`,
+  };
 }
+
+/**
+ * Bump whenever the sheet layout or the art changes. The CSS assumes the
+ * layout (rows, order), so a cached sheet from before a change would be drawn
+ * at the wrong offsets; a new query string makes every browser and CDN fetch
+ * the new one. 2 = the 4x6 sheet with the sleep row.
+ */
+const ART_VERSION = 2;
 
 /** Build the render palette for one agent's desk prop. */
 export function deskPaletteFor(a: Persona): Record<string, string> {
