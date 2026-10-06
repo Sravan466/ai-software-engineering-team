@@ -375,6 +375,15 @@ def main():
             continue
         print(f"cut {name}: {len(cut[name])} frames")
 
+    # The shared scale compares figures in source pixels, so a sheet drawn on a
+    # different canvas than the rest can move everyone's size. Say so.
+    sizes = {n: Image.open(SRC / f).size for n, (_, f) in AGENTS.items()}
+    common = max(set(sizes.values()), key=list(sizes.values()).count)
+    for n, sz in sizes.items():
+        if sz != common:
+            print(f"  note: {n}'s sheet is {sz[0]}x{sz[1]}, the rest {common[0]}x{common[1]} — "
+                  "check its size against the crew")
+
     # One scale for the whole crew: the largest that fits every idle figure.
     scale = min(
         min(CELL * MAX_H / (b[3] - b[1]), CELL * MAX_W / (b[2] - b[0]))

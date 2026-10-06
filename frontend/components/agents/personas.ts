@@ -101,7 +101,8 @@ export function artFor(a: Persona): { sheet: string; still: string } {
  * Bump whenever the sheet layout or the art changes. The CSS assumes the
  * layout (rows, order), so a cached sheet from before a change would be drawn
  * at the wrong offsets; a new query string makes every browser and CDN fetch
- * the new one. 2 = the 4x6 sheet with the sleep row; 3 = ATLAS's real sheet.
+ * the new one. 2 = the 4x6 sheet with the sleep row; 3 = ATLAS's real sheet,
+ * which moved the crew-wide scale, so all eight sheets and stills re-rendered.
  */
 const ART_VERSION = 3;
 
