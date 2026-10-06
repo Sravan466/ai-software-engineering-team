@@ -111,8 +111,8 @@ export default function ConnectorPage() {
               ) : (
                 <div className="db-pad">
                   <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
-                    {c.label} is {c.wave === 2 ? "next in line" : "on the roadmap"}. It can&apos;t be connected yet — a
-                    build that needs it today writes code against the names below and leaves the keys to you.
+                    {c.label} is {c.wave === 2 ? "next in line" : "on the roadmap"}. It can&apos;t be connected yet.
+                    Builds that need it use the names below and leave the keys to you.
                   </p>
                 </div>
               )}

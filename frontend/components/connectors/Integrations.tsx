@@ -307,9 +307,8 @@ export function IntegrationsGate({
                 )}
                 {waiting.length > 0 && (
                   <>
-                    Connect {names(waiting.map((r) => r.label))} now so the crew builds against{" "}
-                    {waiting.length === 1 ? "it" : "them"}, or keep going and add {waiting.length === 1 ? "it" : "them"}{" "}
-                    any time.
+                    Connect {names(waiting.map((r) => r.label))} now, or add{" "}
+                    {waiting.length === 1 ? "it" : "them"} later.
                   </>
                 )}
               </>
@@ -430,8 +429,8 @@ export function IntegrationsPanel({ id, refreshKey }: { id: string; refreshKey?:
       </div>
       {state.used.length ? (
         <p className="muted db-card-lede">
-          The services this build&apos;s code reads keys for. A key from your Connectors is linked, not copied — replace it
-          there and every build that uses it gets the new one.
+          The services this build&apos;s code uses. Keys come from your Connectors, so replacing one there
+          updates every build.
         </p>
       ) : (
         <p className="muted db-card-lede">This build uses no app connectors.</p>

@@ -49,8 +49,8 @@ export default function DeploySettings() {
         <span className="rule" />
       </div>
       <p className="ship-copy" style={{ marginBottom: 14 }}>
-        Where finished builds go: your own Vercel for a frontend, your own GitHub (and from there Render) for
-        anything with a backend. Tokens are encrypted on this backend and never sent to the browser.
+        Frontends deploy to your Vercel. Anything with a backend goes to your GitHub, then Render.
+        Tokens are encrypted on this server.
       </p>
       {!state && !error && <SkeletonLines lines={2} />}
       {error && (
@@ -106,7 +106,7 @@ export default function DeploySettings() {
                       </>
                     )
                   : state.github.reason === "revoked"
-                    ? "GitHub access was removed — reconnect from a build's Deliver tab."
+                    ? "GitHub access was removed. Reconnect from a build's Deliver tab."
                     : "GitHub isn't connected. Connect it from a build's Deliver tab."}
             </span>
             {state.github.connected && (

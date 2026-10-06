@@ -188,7 +188,7 @@ export function ConnectForm({
       if (e instanceof ApiError && e.status === 409 && detail?.status === "needs_live_confirm") {
         setOutcome({ kind: "live", message: detail.message });
       } else if (e instanceof ApiError && e.status === 429) {
-        setOutcome({ kind: "error", message: "Too many tests in a few minutes. Wait a little, then try again — nothing was saved." });
+        setOutcome({ kind: "error", message: "Too many tests in a few minutes. Nothing was saved. Try again shortly." });
       } else {
         setOutcome({ kind: "error", message: e?.message || "The test didn't finish. Try again." });
       }
@@ -632,7 +632,7 @@ function ModelPicker({
           </option>
         ))}
       </select>
-      <p className="field-hint">From your account&apos;s own list. The app reads it from {v.name} — never a hardcoded name.</p>
+      <p className="field-hint">From your account&apos;s own list. The app reads it from {v.name}.</p>
     </div>
   );
 }
@@ -643,14 +643,14 @@ export function LockLine({ names }: { names: string[] }) {
     <p className="db-lock">
       {Icon.lock}
       <span>
-        Encrypted on this computer. The crew only ever sees the {names.length === 1 ? "name" : "names"}{" "}
+        Encrypted on this computer. The crew sees only the {names.length === 1 ? "name" : "names"}{" "}
         {names.map((n, i) => (
           <span key={n}>
             {i > 0 && (i === names.length - 1 ? " and " : ", ")}
             <code className="db-var">{n}</code>
           </span>
         ))}
-        , never the value.
+        .
       </span>
     </p>
   );
