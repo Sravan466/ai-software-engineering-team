@@ -79,9 +79,8 @@ export default function SkillsPage() {
     <div className="skills-wrap">
       <h1 style={{ fontSize: "var(--t-2xl)" }}>Skills</h1>
       <p className="prose-lede" style={{ marginTop: 10 }}>
-        A skill is a reusable how-to, like writing a testable acceptance criterion or
-        shaping a paginated endpoint. Skills are matched to each build by keyword and added
-        to the agent&apos;s prompt, on any model.
+        Reusable how-tos the agents follow, like writing testable acceptance criteria. Each
+        build gets the skills that match its idea.
       </p>
 
       {lib && !lib.enabled && (
