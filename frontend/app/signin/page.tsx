@@ -151,12 +151,12 @@ function SignIn() {
     <div className="door">
       <section className="door-crew" aria-hidden="true">
         <p className="door-shout">
-          The crew is <em>on standby</em>
+          The crew is <em>ready when you are</em>
         </p>
         <div className="door-floor">
           {AGENTS.map((a, i) => (
             <span className="door-agent" key={a.key} style={{ ["--i" as string]: i }}>
-              <AgentSprite agent={a} size={136} state="queued" asleep ground />
+              <AgentSprite agent={a} size={136} state="working" ground />
               <span className="door-codename" style={{ color: a.accent }}>
                 {a.codename}
               </span>
