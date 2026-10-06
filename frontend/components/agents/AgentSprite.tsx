@@ -34,6 +34,7 @@ export default function AgentSprite({
   state = "queued",
   ground = false,
   asleep = false,
+  poked = false,
   className = "",
 }: {
   agent: Persona;
@@ -43,12 +44,17 @@ export default function AgentSprite({
   ground?: boolean;
   /** Nothing is running, so a queued agent sleeps. Ignored in any other state. */
   asleep?: boolean;
+  /**
+   * Clicked: one pass of their working row and their signature, layered over
+   * whatever they are doing. The caller re-keys the sprite to restart it.
+   */
+  poked?: boolean;
   className?: string;
 }) {
   const art = artFor(agent);
   return (
     <span
-      className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${ground ? " grounded" : ""} ${className}`}
+      className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${poked ? " is-poked" : ""}${ground ? " grounded" : ""} ${className}`}
       style={{
         ["--sprite-size" as string]: `${size}px`,
         ["--agent" as string]: agent.accent,

@@ -271,6 +271,45 @@
 .agent-card:hover .sprite.motion-guard   { animation: sig-guard 1.2s steps(3, end) 1; }
 .agent-card:hover .sprite.motion-launch  { animation: sig-launch 1.2s steps(4, end) 1; }
 .agent-card:hover .sprite.motion-tally   { animation: sig-tally 1.6s steps(6, end) 1; }
+
+/* Poked (clicked on the crew floor): their signature once, and two passes of
+   their working row layered over whatever they were doing — the same layering
+   as the hover pass, so their own animation keeps its name and carries on
+   underneath. Someone already working keeps working; the signature is the nod. */
+.sprite.is-poked.motion-nod     { animation: sig-nod 1.6s steps(3, end) 1; }
+.sprite.is-poked.motion-drift   { animation: sig-drift 1.4s steps(4, end) 1; }
+.sprite.is-poked.motion-thrum   { animation: sig-thrum 0.85s steps(2, end) 2; }
+.sprite.is-poked.motion-flicker { animation: sig-flicker 0.5s steps(1, end) 3; }
+.sprite.is-poked.motion-scan    { animation: sig-scan 0.9s steps(4, end) 2 alternate; }
+.sprite.is-poked.motion-guard   { animation: sig-guard 1.2s steps(3, end) 1; }
+.sprite.is-poked.motion-launch  { animation: sig-launch 1.2s steps(4, end) 1; }
+.sprite.is-poked.motion-tally   { animation: sig-tally 1.6s steps(6, end) 1; }
+.sprite.is-poked .sprite-sheet {
+  animation: sheet-hover-row 800ms steps(4, jump-none) 2;
+}
+.sprite.is-poked.is-working .sprite-sheet {
+  animation: sheet-loop var(--frames, 720ms) steps(4, jump-none) infinite;
+}
+.sprite.is-poked.is-queued.is-asleep .sprite-sheet {
+  animation:
+    sheet-sleep 3.2s steps(4, jump-none) infinite,
+    sheet-hover-row 800ms steps(4, jump-none) 2;
+}
+.sprite.is-poked.is-done .sprite-sheet {
+  animation:
+    sheet-once 760ms steps(4, jump-none) 1 both,
+    sheet-hover-row 800ms steps(4, jump-none) 2;
+}
+.sprite.is-poked.is-rejected .sprite-sheet {
+  animation:
+    sheet-to-slump 600ms steps(3, jump-none) 1 both,
+    sheet-hover-row 800ms steps(4, jump-none) 2;
+}
+.sprite.is-poked.is-gate .sprite-sheet {
+  animation:
+    sheet-await 1.4s steps(4, jump-none) infinite,
+    sheet-hover-row 800ms steps(4, jump-none) 2;
+}
 /* …and shows what they do: one pass of their working row. Anyone already
    working or waiting on you keeps their loop — that is news, a hover isn't.
    The pass is layered after the agent's own animation rather than replacing
@@ -1681,6 +1720,8 @@
   .sprite.is-working .sprite-sheet,
   .sprite.is-done .sprite-sheet { background-position-x: 33.333%; }
   .sprite.is-rejected .sprite-sheet { background-position-x: 66.667%; }
+  /* A poke still answers, without moving: the job frame while it lasts. */
+  .sprite.is-poked:not(.is-working) .sprite-sheet { background-position: 33.333% 20%; }
   /* Asleep holds a frame with a Z up, so it still reads as asleep. */
   .sprite.is-queued.is-asleep .sprite-sheet { background-position-x: 66.667%; }
   /* The board holds still: the running light parks mid-cell, the gate cell

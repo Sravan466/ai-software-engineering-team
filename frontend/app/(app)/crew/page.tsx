@@ -115,6 +115,9 @@ const VOICE_FOR: Record<SpriteState, keyof Persona["lines"]> = {
   rejected: "rejected",
 };
 
+/** How long a poke's pass runs — the longest signature pass in agents.css. */
+const POKE_MS = 1700;
+
 const STATE_LABEL: Record<SpriteState, string> = {
   queued: "idle",
   working: "working",
@@ -152,6 +155,21 @@ export default function CrewPage() {
 
   const [scenario, setScenario] = useState(1);
   const [selected, setSelected] = useState(2);
+  // Clicking an agent pokes them: one pass of their job and their signature,
+  // then back to whatever they were doing. `n` re-keys the sprite so a second
+  // click restarts the pass; `on` drops after the pass so their own animation
+  // carries on underneath without replaying.
+  const [poke, setPoke] = useState<{ i: number; n: number; on: boolean } | null>(null);
+  const pokeTimer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(pokeTimer.current), []);
+  function pokeAgent(i: number) {
+    setSelected(i);
+    setPoke((p) => ({ i, n: (p?.n ?? 0) + 1, on: true }));
+    clearTimeout(pokeTimer.current);
+    pokeTimer.current = setTimeout(() => setPoke((p) => (p ? { ...p, on: false } : p)), POKE_MS);
+  }
+  const pokeKey = (i: number) => (poke?.i === i ? poke.n : 0);
+  const poked = (i: number) => poke?.i === i && poke.on;
   const [relay, setRelay] = useState<Record<string, SpriteState> | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -375,7 +393,7 @@ export default function CrewPage() {
                     }}
                     aria-pressed={i === selected}
                     aria-label={`${a.codename}, ${a.role} — ${STATE_LABEL[st]}`}
-                    onClick={() => setSelected(i)}
+                    onClick={() => pokeAgent(i)}
                   >
                     {/* Only whoever is actually doing something speaks — including
                         an agent that was sent back and is running again. */}
@@ -407,7 +425,15 @@ export default function CrewPage() {
                           </span>
                         </span>
                       </span>
-                      <AgentSprite agent={a} size={72} state={st} asleep={atRest} ground />
+                      <AgentSprite
+                        key={pokeKey(i)}
+                        agent={a}
+                        size={72}
+                        state={st}
+                        asleep={atRest}
+                        poked={poked(i)}
+                        ground
+                      />
                       <span className="desk" aria-hidden="true">
                         <span className="desk-screen" />
                         <span className="desk-spill" />
@@ -446,7 +472,14 @@ export default function CrewPage() {
             </div>
 
             <div className="inspect-portrait">
-              <AgentSprite agent={agent} size={104} state={agentState} asleep={atRest} />
+              <AgentSprite
+                key={`${agent.key}-${pokeKey(selected)}`}
+                agent={agent}
+                size={104}
+                state={agentState}
+                asleep={atRest}
+                poked={poked(selected)}
+              />
             </div>
 
             <h2 className="inspect-name">{agent.codename}</h2>
