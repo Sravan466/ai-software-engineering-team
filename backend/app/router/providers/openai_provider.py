@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.router.base import LLMProvider, ProviderError, cloud_error
 from app.router.providers.cloud_key import CloudKey
-from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
+from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage, normalise_finish
 
 log = get_logger(__name__)
 
@@ -68,5 +68,10 @@ class OpenAIProvider(CloudKey, LLMProvider):
             total_tokens=getattr(u, "total_tokens", 0) or 0,
         )
         return LLMResponse(
-            text=text, provider=self.name, model=model, usage=usage, latency_ms=latency
+            text=text,
+            provider=self.name,
+            model=model,
+            usage=usage,
+            latency_ms=latency,
+            finish_reason=normalise_finish(resp.choices[0].finish_reason),
         )

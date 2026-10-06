@@ -74,6 +74,9 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # from one that did nothing — and because selection is a keyword score, so
         # "this phase got none" is a result the reviewer has to be able to see.
         "skills_used": list(result.skills_used),
+        # What the agent was shown of each phase before it — the "What this agent
+        # saw" panel — and how many of its replies the output limit cut off.
+        "handoff": dict(getattr(result, "handoff", {}) or {}),
         # One entry per model call. A repaired phase made two, and analytics counts
         # calls and averages latency across them — folding both into a single event
         # would report one call that took as long as two.

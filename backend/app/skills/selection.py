@@ -118,6 +118,17 @@ def phase_text(phase: str) -> str:
     return f"{phase} {PHASE_LABELS.get(phase, phase)}".lower()
 
 
+def _values(node) -> list[str]:
+    """Every string and number in a phase output, in order, without its keys."""
+    if isinstance(node, dict):
+        return [v for value in node.values() for v in _values(value)]
+    if isinstance(node, (list, tuple)):
+        return [v for item in node for v in _values(item)]
+    if node is None or isinstance(node, bool):
+        return []
+    return [str(node)]
+
+
 def _parts(idea: str, phase: str, prior_outputs: Optional[dict]) -> list[tuple[str, float]]:
     """The three texts a skill's keywords are scored against, and what each is worth.
 
@@ -127,7 +138,10 @@ def _parts(idea: str, phase: str, prior_outputs: Optional[dict]) -> list[tuple[s
     prior = ""
     if prior_outputs:
         try:
-            prior = json.dumps(prior_outputs, default=str)[:_HAYSTACK_CHARS].lower()
+            # What the phases *said*, not the names of the fields they said it in: a
+            # schema key like `auth` or `auth_flow` is in every build's output, and
+            # scoring it would hand the auth skills to every phase whatever the app is.
+            prior = " ".join(_values(prior_outputs))[:_HAYSTACK_CHARS].lower()
         except Exception:  # noqa: BLE001 - scoring must never fail a phase
             prior = ""
     return [

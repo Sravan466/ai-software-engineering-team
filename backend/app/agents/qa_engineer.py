@@ -10,10 +10,10 @@ class QAEngineerAgent(BaseAgent):
     title = "QA Engineer"
     complexity = "medium"
     role = (
-        "You generate unit, integration, and edge-case tests for the generated code and report "
-        "on coverage and risk."
+        "Name each test after the criterion it checks; import real code by its real path."
     )
     depends_on = (
+        Phase.PRODUCT_MANAGER.value,
         Phase.SYSTEM_DESIGN.value,
         Phase.BACKEND_ENGINEER.value,
         Phase.FRONTEND_ENGINEER.value,
@@ -22,7 +22,9 @@ class QAEngineerAgent(BaseAgent):
 
     def task_instruction(self) -> str:
         return (
-            "Write a test suite for the backend and frontend produced upstream. Cover the P0 "
-            "acceptance criteria, key edge cases, and failure modes. Provide runnable test files "
-            "(pytest for backend, the framework's test runner for frontend) and estimate coverage."
+            "Test the code the Backend and Frontend phases wrote.\n"
+            "- One test per P0 acceptance criterion from the Product Manager, named after it.\n"
+            "- Use the registry's paths and the files in each digest; add the edge cases that matter.\n"
+            "- pytest for a Python backend, the frontend's runner for the frontend; put the "
+            "commands that run them in `command_backend` / `command_frontend`."
         )

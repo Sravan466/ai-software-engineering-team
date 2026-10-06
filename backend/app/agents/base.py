@@ -21,18 +21,19 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
+from app.agents import handoff
 from app.router import inflight
 from app.build import contract as build_contract
 from app.build.check import BuildCheck, check_phase
 from app.core.config import settings
-from app.core.constants import CODE_PHASES, BuildStatus, RoutingMode, SchemaStatus
+from app.core.constants import CODE_PHASES, PHASE_ORDER, BuildStatus, Phase, RoutingMode, SchemaStatus
 from app.core.logging import get_logger
 from app.core.reading import json_object
 from app.orchestration.charter import Charter
 from app.orchestration.charter import violations as charter_violations
 from app.router.model_profile import ModelProfile
 from app.router.router import router
-from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text
+from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text, subset_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
 from app.skills.loader import render as render_skill
 from app.skills.selection import Selected
@@ -64,7 +65,7 @@ _CONTEXT_SHARE = {
 #: the section, and to charge its cost against the budget — because a frame that is
 #: estimated on one side and printed on the other is a frame the prompt overruns by
 #: however far the estimate was off.
-_DEP_FRAME = "# Context — {dep} output\n```json\n{body}\n```\n"
+_DEP_FRAME = handoff.DEP_FRAME
 _RAG_FRAME = "# Reference material (from the uploaded knowledge base)\n{body}\n"
 _MEMORY_FRAME = "# Lessons from past projects (long-term memory)\n{body}\n"
 _SKILLS_FRAME = "# How this team does this work — follow these procedures\n{body}\n"
@@ -134,6 +135,11 @@ class AgentResult:
     #: the window never reached the model, and recording it would make a skill you
     #: cannot confirm was used indistinguishable from one that did nothing.
     skills_used: list[str] = field(default_factory=list)
+    #: What this agent was shown of each phase before it — digest, whole output, or
+    #: cut — whether the name registry was in its instructions, and how many of its
+    #: replies were cut off at the output limit. The "What this agent saw" panel.
+    handoff: dict = field(default_factory=dict)
+    truncated_replies: int = 0
 
 
 @dataclass
@@ -142,6 +148,21 @@ class Prompt:
 
     messages: list[ChatMessage]
     skills_used: list[str] = field(default_factory=list)
+    #: One record per dependency: what of it reached the model.
+    deps: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class _Deps:
+    """Each dependency's digest (already fitted) and what its full output would add.
+
+    Computed once per prompt: the budget pass and the real assembly both read it, and
+    serialising several hundred kilobytes of generated source twice to count it is
+    the cost `bodies` used to exist to avoid.
+    """
+
+    digests: dict[str, str] = field(default_factory=dict)
+    wants: dict[str, int] = field(default_factory=dict)
 
 
 class BaseAgent:
@@ -189,7 +210,16 @@ class BaseAgent:
 
         resp = self._complete(ask.messages, ctx, options)
         responses = [resp]
-        output, errors = self._check(self._parse(resp.text), ctx)
+        # A reply cut off at the output limit is kept for its finished fields, and
+        # the next round asks only for what is missing — not for the whole object
+        # again, under the same output cap that cut it the first time.
+        partial: dict = {}
+        raw, partial, cut = self._read_reply(resp, partial)
+        truncated = 1 if cut else 0
+        echo = resp.text
+        output, errors = self._check(raw, ctx)
+        if cut and self._missing(raw):
+            errors = [_TRUNCATED_ERROR] + errors
         best = (output, errors)
         # Which skills the *kept* attempt was written with. A repair round is sized
         # down to make room for the echoed attempt, so it can carry fewer of them —
@@ -213,17 +243,32 @@ class BaseAgent:
             # already sized to fill the window is how the repair call — the one whose
             # whole job is to restate the shape — gets truncated from the head and
             # loses the system prompt that carries it.
-            retry = self._repair_messages(ctx, profile, resp.text, errors)
-            resp = self._complete(retry.messages, ctx, options)
+            if partial:
+                missing = self._missing(partial)
+                retry = self._continue_messages(ctx, profile, partial, missing)
+                round_options = options.model_copy(
+                    update={"json_schema": subset_schema(self.output_model, missing)}
+                )
+            else:
+                retry = self._repair_messages(ctx, profile, echo, errors)
+                round_options = options
+            resp = self._complete(retry.messages, ctx, round_options)
             responses.append(resp)
-            output, errors = self._check(self._parse(resp.text), ctx)
+            merged = bool(partial)
+            raw, partial, cut = self._read_reply(resp, partial)
+            truncated += 1 if cut else 0
+            # A continuation answered only the missing keys; the next repair, if one
+            # is needed, is about the whole object they make together.
+            echo = json.dumps(raw) if merged else resp.text
+            output, errors = self._check(raw, ctx)
+            if cut and self._missing(raw):
+                errors = [_TRUNCATED_ERROR] + errors
             # Fewer things wrong wins. Without this the *last* attempt is kept
             # whatever it looks like, so a repair that came back worse than the
             # response it was repairing is what reaches the database and the gates.
             if len(errors) < len(best[1]):
                 best = (output, errors)
                 best_skills = list(retry.skills_used)
-
         output, errors = best
         # Two different failures, kept apart all the way to the reviewer. "This did
         # not match its declared shape" and "this contradicts the stack everyone else
@@ -259,6 +304,12 @@ class BaseAgent:
             if shape_errors
             else (SchemaStatus.REPAIRED.value if rounds else SchemaStatus.VALID.value)
         )
+        record = {
+            "deps": ask.deps,
+            "registry": bool(self._registry(ctx)),
+            "contract": self._contract(ctx) is not None,
+            "truncated_replies": truncated,
+        }
         return AgentResult(
             output=output,
             content_md=self.to_markdown(output),
@@ -273,7 +324,41 @@ class BaseAgent:
             build_status=build.status if build else None,
             build_problems=build.as_list() if build else [],
             skills_used=best_skills,
+            handoff=record,
+            truncated_replies=truncated,
         )
+
+    def _missing(self, fields: dict) -> list[str]:
+        """Declared fields with no answer yet, under their own name or a drift alias."""
+        out = []
+        for name, info in self.output_model.model_fields.items():
+            if not info.is_required():
+                continue
+            names = {name, *(getattr(info.validation_alias, "choices", None) or ())}
+            if not any(n in fields for n in names):
+                out.append(name)
+        return out
+
+    def _read_reply(self, resp: LLMResponse, partial: dict) -> tuple[dict, dict, bool]:
+        """(what to check, finished fields still waiting for the rest, was it cut off).
+
+        A cut reply contributes the fields that arrived whole; a continuation is
+        merged over the fields kept from before. Once nothing is missing there is
+        nothing to continue, whether or not the closing brace made it.
+        """
+        cut = _cut_off(resp)
+        if cut:
+            got = _finished_fields(resp.text)
+        else:
+            got = json_object(resp.text)
+            if got is None:
+                got = {} if partial else self._parse(resp.text)
+        raw = {**partial, **got} if partial else got
+        if cut and not raw:
+            # Cut inside the very first value: nothing arrived whole to keep.
+            return self._parse(resp.text), {}, cut
+        waiting = raw if cut and self._missing(raw) else {}
+        return raw, waiting, cut
 
     def _complexity(self, ctx: AgentContext) -> str:
         return "high" if ctx.escalate else self.complexity
@@ -289,6 +374,9 @@ class BaseAgent:
         security review three phases later, which is where this started.
         """
         output, errors = self._validate(raw)
+        if not errors:
+            output, own = self.own_checks(output, ctx)
+            errors = errors + own
         if settings.enforce_stack_charter:
             errors = errors + charter_violations(ctx.charter, self.key, output)
         build = self._build_check(ctx, output)
@@ -327,7 +415,22 @@ class BaseAgent:
             )
 
     # ── prompt construction ─────────────────────────────────────────────────
-    def system_prompt(self, charter: Optional[Charter] = None) -> str:
+    def _registry(self, ctx: AgentContext) -> handoff.Registry:
+        """The names System Design fixed, for every phase after it. Empty before."""
+        order = [p.value for p in PHASE_ORDER]
+        design = order.index(Phase.SYSTEM_DESIGN.value)
+        if self.key not in order or order.index(self.key) <= design:
+            return handoff.Registry()
+        return handoff.registry(ctx.prior_outputs)
+
+    def _contract(self, ctx: AgentContext) -> Optional[str]:
+        if not settings.enforce_build_check:
+            return None
+        return build_contract.prompt_block(self.key, ctx.charter)
+
+    def system_prompt(
+        self, charter: Optional[Charter] = None, registry: Optional[handoff.Registry] = None
+    ) -> str:
         """The agent's standing instructions, including the stack it is held to.
 
         The charter belongs *here* rather than in the user turn, and verbatim rather
@@ -340,16 +443,20 @@ class BaseAgent:
         # standing instructions for the phases that write code, for the same reason
         # the charter is: they cannot be trimmed away to fit a small window.
         platform_block = (
-            build_contract.prompt_block(self.key, charter)
-            if settings.enforce_build_check and self.key in CODE_PHASES
-            else None
+            build_contract.prompt_block(self.key, charter) if settings.enforce_build_check else None
         )
+        # The names the rest of the team is building against. Here for the charter's
+        # reason: a vocabulary trimmed away to fit a small window is one the phase
+        # cannot be held to, and the compile gate holds it to it.
+        registry_block = registry.prompt_block() if registry else ""
+        brief = self.standing_brief(charter)
         return (
             f"You are the {self.title} on an AI software engineering team. {self.role}\n\n"
-            "You collaborate with other specialist agents; your output is consumed by the "
-            "next agent in the pipeline, so be precise, concrete, and complete.\n\n"
+            + (_HANDOFF_NOTE if self.depends_on else "")
             + (f"{charter_block}\n\n" if charter_block else "")
+            + (f"{registry_block}\n\n" if registry_block else "")
             + (f"{platform_block}\n\n" if platform_block else "")
+            + (f"{brief}\n\n" if brief else "")
             + "Respond with ONLY a single valid JSON object — no prose, no markdown fences — "
             f"matching this shape:\n{self.output_spec}"
         )
@@ -364,29 +471,43 @@ class BaseAgent:
             profile = router.profile_for(
                 ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
             )
-        # Serialised once: the budget pass and the real assembly both read these,
-        # and they can be hundreds of kilobytes of generated source apiece.
-        bodies = {
-            dep: json.dumps(ctx.prior_outputs[dep], indent=2)
-            for dep in self.depends_on
-            if dep in ctx.prior_outputs
-        }
+        bodies = self._prepare_deps(ctx, profile)
         budget = self._section_budgets(ctx, profile, reserve, bodies)
         used: list[str] = []
+        seen: list[dict] = []
         return Prompt(
             messages=[
-                ChatMessage(role="system", content=self.system_prompt(ctx.charter)),
-                ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies, used)),
+                ChatMessage(role="system", content=self.system_prompt(ctx.charter, self._registry(ctx))),
+                ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies, used, seen)),
             ],
             skills_used=used,
+            deps=seen,
         )
+
+    def _prepare_deps(self, ctx: AgentContext, profile: Optional[ModelProfile]) -> _Deps:
+        """Every dependency's digest, fitted to its share of the window, and its want.
+
+        Fitted against the window rather than printed whatever its size: the digests
+        are always printed and so are part of the measured overhead, and on a 4K
+        window three uncapped ones would be the instructions' room gone.
+        """
+        deps = [d for d in self.depends_on if d in ctx.prior_outputs]
+        budget = profile.prompt_char_budget if profile is not None else 0
+        limit = max(int(budget * settings.handoff_digest_share) // max(len(deps), 1), 300)
+        out = _Deps()
+        for dep in deps:
+            output = ctx.prior_outputs[dep]
+            out.digests[dep] = handoff.fit(handoff.digest(dep, output), limit)
+            out.wants[dep] = handoff.full_cost(output) if isinstance(output, dict) else 0
+        return out
 
     def _user_turn(
         self,
         ctx: AgentContext,
         budget: dict[str, int],
-        bodies: Optional[dict[str, str]] = None,
+        bodies: Optional[_Deps] = None,
         skills_used: Optional[list[str]] = None,
+        deps_seen: Optional[list[dict]] = None,
     ) -> str:
         """Everything the agent is given, with every section held to its budget.
 
@@ -400,20 +521,23 @@ class BaseAgent:
         the model was given.
         """
         if bodies is None:
-            bodies = {}
+            bodies = _Deps()
         parts: list[str] = [
             f"# Product idea\n{_clip(ctx.idea, budget['idea'])}\n"
         ]
 
+        # Every dependency is one JSON object that parses: its digest, always, and as
+        # much of its output as its share holds, cut between fields and never inside
+        # one. A small dependency's unused share goes to the larger ones.
         deps = [d for d in self.depends_on if d in ctx.prior_outputs]
-        per_dep = budget["depends_on"] // max(len(deps), 1)
+        rooms = handoff.share({d: bodies.wants.get(d, 0) for d in deps}, budget["depends_on"])
         for dep in deps:
-            body = bodies.get(dep, "")
-            # The "this was cut" note goes outside the fence: inside it, the block
-            # the next agent is reading as JSON would no longer parse as any.
-            clipped = body[:per_dep] if len(body) > per_dep else body
-            note = "" if len(clipped) == len(body) else _TRUNCATED
-            parts.append(_DEP_FRAME.format(dep=dep, body=clipped) + note)
+            shown = handoff.render(
+                dep, ctx.prior_outputs[dep], rooms.get(dep, 0), bodies.digests.get(dep)
+            )
+            parts.append(shown.text)
+            if deps_seen is not None:
+                deps_seen.append(shown.record())
 
         # Before the reference material, because a procedure is how to do the work
         # and reference material is what the work is about — and because a small
@@ -446,7 +570,7 @@ class BaseAgent:
                 f"{_clip(ctx.feedback, budget['feedback'])}\n"
             )
 
-        parts.append(self.task_instruction())
+        parts.append(self.task_text())
         return "\n".join(parts)
 
     def _section_budgets(
@@ -454,7 +578,7 @@ class BaseAgent:
         ctx: AgentContext,
         profile: Optional[ModelProfile],
         reserve: int = 0,
-        bodies: Optional[dict[str, str]] = None,
+        bodies: Optional[_Deps] = None,
     ) -> dict[str, int]:
         """How many characters each section may spend.
 
@@ -481,7 +605,9 @@ class BaseAgent:
         # The charter is part of the overhead, not part of the context: it is printed
         # in full or the phase is not really bound by it, so it is counted here at its
         # real cost rather than being sized like a section that can be trimmed.
-        overhead = len(self.system_prompt(ctx.charter)) + len(
+        if bodies is None:
+            bodies = self._prepare_deps(ctx, profile)
+        overhead = len(self.system_prompt(ctx.charter, self._registry(ctx))) + len(
             self._user_turn(ctx, empty, bodies)
         )
         if overhead > profile.prompt_char_budget:
@@ -558,9 +684,24 @@ class BaseAgent:
             budget[name] = int(free * (share / share_total)) if present[name] and share_total else 0
         return budget
 
+    def standing_brief(self, charter: Optional[Charter] = None) -> str:
+        """Facts this agent must work from that cannot be trimmed to fit — a pricing
+        table, whether GitHub is connected. In the system prompt, beside the charter."""
+        return ""
+
+    def own_checks(self, output: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
+        """What this agent's output must also satisfy, beyond its declared shape.
+        Returns the output to keep (possibly narrowed) and what is wrong with it."""
+        return output, []
+
     def task_instruction(self) -> str:
         """The concrete ask for this phase. Override per agent."""
         return "Produce your deliverable as the JSON object described above."
+
+    def task_text(self) -> str:
+        """The ask actually sent: an eval's prompt variant when one is set, else the
+        agent's own. The harness compares two task texts on the same ideas this way."""
+        return TASK_OVERRIDES.get(self.key) or self.task_instruction()
 
     def _repair_messages(
         self,
@@ -596,6 +737,32 @@ class BaseAgent:
             skills_used=ask.skills_used,
         )
 
+    def _continue_messages(
+        self,
+        ctx: AgentContext,
+        profile: ModelProfile,
+        partial: dict,
+        missing: list[str],
+    ) -> Prompt:
+        """The reply was cut off at the output limit: ask for the missing keys only.
+
+        Echoing the cut attempt back and asking for "the COMPLETE object again" asks
+        for the same reply under the same output cap that cut it. The finished fields
+        are kept, named, and not sent again.
+        """
+        instruction = (
+            "Your reply was cut off at this model's output limit. These keys arrived "
+            f"complete and are kept: {', '.join(partial) or 'none'}.\n"
+            f"Return a JSON object with ONLY the remaining keys: {', '.join(missing)}. "
+            "Keep it shorter than before — fewer, smaller items — so it fits."
+        )
+        ask = self._build_messages(ctx, profile, reserve=len(instruction))
+        return Prompt(
+            messages=[*ask.messages, ChatMessage(role="user", content=instruction)],
+            skills_used=ask.skills_used,
+            deps=ask.deps,
+        )
+
     # ── output handling ───────────────────────────────────────────────────────
     def _validate(self, raw: dict) -> tuple[dict, list[str]]:
         """Check a parsed response against the declared shape.
@@ -625,6 +792,64 @@ class BaseAgent:
         lines: list[str] = [f"## {self.title}\n"]
         lines.append(_render_value(output))
         return "\n".join(lines)
+
+
+#: How every dependency frame reads, said once in the system prompt.
+_HANDOFF_NOTE = (
+    "Earlier phases hand over {digest, output}; output may be cut (_cut). Trust the digest.\n\n"
+)
+
+#: Set by the eval harness's `--prompt-variant`: phase key -> task text to send
+#: instead of the agent's own. Empty in a running server.
+TASK_OVERRIDES: dict[str, str] = {}
+
+#: What a reply cut off at the output limit is recorded as, ahead of any shape error.
+_TRUNCATED_ERROR = "the reply was cut off at the model's output limit (truncated)"
+
+
+def _cut_off(resp: LLMResponse) -> bool:
+    return (getattr(resp, "finish_reason", None) or "") == "length"
+
+
+def _finished_fields(text: str) -> dict:
+    """The top-level fields of a JSON object that arrived whole before the reply was cut.
+
+    Reads key by key with the standard decoder and stops at the first value that does
+    not parse — the one the output limit cut through. Everything before it is exactly
+    what the model wrote.
+    """
+    text = (text or "").strip()
+    start = text.find("{")
+    if start < 0:
+        return {}
+    decoder = json.JSONDecoder()
+    out: dict = {}
+    i = start + 1
+    n = len(text)
+    while i < n:
+        while i < n and text[i] in " \t\r\n,":
+            i += 1
+        if i >= n or text[i] == "}":
+            break
+        try:
+            key, i = decoder.raw_decode(text, i)
+        except ValueError:
+            break
+        if not isinstance(key, str):
+            break
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n or text[i] != ":":
+            break
+        i += 1
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        try:
+            value, i = decoder.raw_decode(text, i)
+        except ValueError:
+            break
+        out[key] = value
+    return out
 
 
 #: A cut the reader can see. A silent one reads as a model that simply stopped.

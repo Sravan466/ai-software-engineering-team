@@ -212,6 +212,23 @@ class Settings(BaseSettings):
     #: How many more rounds "Keep trying" grants a build that asked for help.
     auto_fix_retry_rounds: BlankTolerantInt(2) = 2
 
+    # ── Agent briefs and hand-offs (#80) ──
+    #: How many P0 features the Product Manager may name. More than this is not an
+    #: MVP, and every later phase has to build all of them.
+    pm_max_p0_features: BlankTolerantInt(5) = 5
+    #: How much System Design may put in the MVP; the rest goes in its `later` list.
+    #: Counts, not a model's size: a 200K-window model gets the same limits, because
+    #: a smaller surface is what makes a build run first time on any model.
+    sd_max_entities: BlankTolerantInt(6) = 6
+    sd_max_endpoints: BlankTolerantInt(12) = 12
+    #: The share of a phase's prompt budget its dependency digests may take together.
+    #: Digests are always printed (they are the index of what came before), so on a
+    #: small window this is what keeps them from crowding out the instructions.
+    handoff_digest_share: BlankTolerantFloat(0.3) = 0.3
+    #: Whether the compile gate also checks names across phases: a frontend call no
+    #: backend route serves, a backend route that is a near miss of a registry path.
+    check_endpoint_references: bool = True
+
     # ── Skills (the procedural library injected into agent prompts) ──
     #: Whether agents are given skills at all. Off means an empty library and a
     #: pipeline that runs exactly as it did before skills existed — the same

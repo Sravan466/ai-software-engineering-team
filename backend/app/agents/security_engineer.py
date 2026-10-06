@@ -10,8 +10,8 @@ class SecurityEngineerAgent(BaseAgent):
     title = "Security Engineer"
     complexity = "high"
     role = (
-        "You audit the generated design and code for security issues and recommend concrete "
-        "fixes. You are thorough but precise — no hand-waving."
+        "Report only what you can point at: a file and line you were shown, or an endpoint "
+        "in the design. A finding in code that is not in your hand-off is a guess."
     )
     depends_on = (
         Phase.SYSTEM_DESIGN.value,
@@ -22,8 +22,9 @@ class SecurityEngineerAgent(BaseAgent):
 
     def task_instruction(self) -> str:
         return (
-            "Perform a security review of the architecture and generated code. Check for SQL "
-            "injection, XSS, CSRF, broken authentication/authorization, and exposed secrets. "
-            "Report each finding with a severity and a concrete remediation. Give an overall "
-            "risk assessment."
+            "Review the architecture and the generated code you were handed. Check each "
+            "endpoint's `auth` against what its handler enforces, then look for SQL "
+            "injection, XSS, CSRF and exposed secrets. Report each finding with its file "
+            "(`location`), a severity and a concrete fix. Where the code you were shown was "
+            "cut, say so rather than assume. Give an overall risk assessment."
         )

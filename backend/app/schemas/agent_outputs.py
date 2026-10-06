@@ -141,6 +141,10 @@ class UserStory(_Shape):
     i_want: str
     so_that: str
     acceptance_criteria: StrList
+    #: Which feature this story delivers, by name, and so its priority. "The P0
+    #: stories" used to be unanswerable: only features carried a priority.
+    feature: str = ""
+    priority: str = Field("", description="P0 | P1 | P2 — the feature's, when left out")
 
 
 class Milestone(_Shape):
@@ -154,10 +158,24 @@ class ProductManagerOutput(_Shape):
     target_users: StrList
     mvp_scope: StrList
     out_of_scope: StrList
+    #: What the spec takes for granted. Named so the next phase can see a guess is
+    #: a guess, rather than reading it as a requirement.
+    assumptions: StrList = Field(default_factory=list)
     features: _list_of(Feature)
     user_stories: _list_of(UserStory)
     success_metrics: StrList
     roadmap: _list_of(Milestone)
+
+    @model_validator(mode="after")
+    def _stories_take_their_feature_priority(self) -> "ProductManagerOutput":
+        """A story with no priority of its own has its feature's — or P0 when its
+        feature can't be found, so a story is never silently left out of "the P0
+        stories" that QA writes tests for."""
+        by_name = {f.name.strip().lower(): f.priority for f in self.features}
+        for story in self.user_stories:
+            if not story.priority.strip():
+                story.priority = by_name.get(story.feature.strip().lower(), "") or "P0"
+        return self
 
 
 # ── System Design ────────────────────────────────────────────────────────────
@@ -183,6 +201,10 @@ class Endpoint(_Shape):
     method: str
     path: str
     purpose: str
+    #: Which entity it serves and who may call it. Both were invented downstream
+    #: when the architecture left them out — the auth flow especially.
+    entity: str = ""
+    auth: str = Field("", description="public | user | owner | admin")
 
 
 class SystemDesignOutput(_Shape):
@@ -191,6 +213,12 @@ class SystemDesignOutput(_Shape):
     components: _list_of(Component)
     data_model: _list_of(Entity)
     api_endpoints: _list_of(Endpoint)
+    #: The page routes the frontend should have ("/", "/todos/[id]"). With the
+    #: entities and endpoints, the name registry every later phase is held to.
+    pages_expected: StrList = Field(default_factory=list)
+    #: What did not make the MVP's cut — entities or endpoints for later.
+    later: StrList = Field(default_factory=list)
+    open_questions: StrList = Field(default_factory=list)
     scaling_considerations: StrList
     architecture_diagram_mermaid: str = Field(description="a Mermaid flowchart definition")
 
@@ -203,13 +231,15 @@ class SourceFile(_Shape):
     code: str
 
 
+#: Code last, in every shape that carries code: a reader cut short for room loses
+#: source before it loses the index of what was written. `db_models` is gone — it
+#: was a second copy of the models file, as an escaped string, ahead of the files.
 class BackendEngineerOutput(_Shape):
     framework: str = Field(description="e.g. FastAPI")
     summary: str
-    db_models: str = Field(description="code")
     auth_flow: str
-    files: _list_of(SourceFile)
     setup_instructions: StrList
+    files: _list_of(SourceFile)
 
 
 class Page(_Shape):
@@ -242,7 +272,6 @@ class TestFile(_Shape):
 class QAEngineerOutput(_Shape):
     summary: str
     test_strategy: str
-    test_files: _list_of(TestFile)
     edge_cases: StrList
     #: Observed drift: models return `estimated_coverage`. Same number, other name.
     coverage_estimate: str = Field(
@@ -251,6 +280,11 @@ class QAEngineerOutput(_Shape):
         )
     )
     risks: StrList
+    #: The commands that run these tests, which DevOps's CI workflow uses rather
+    #: than guessing. Empty when the side has no tests.
+    command_backend: str = Field("", description="e.g. pytest backend/tests")
+    command_frontend: str = Field("", description="e.g. npm test --prefix frontend")
+    test_files: _list_of(TestFile)
 
 
 # ── Security ─────────────────────────────────────────────────────────────────
@@ -293,22 +327,43 @@ class CiCdFile(_Shape):
     content: str
 
 
+class EnvVar(_Shape):
+    name: str
+    purpose: str
+
+
+class DeploymentNotes(_Shape):
+    """What the person deploying needs and the platform cannot work out by itself."""
+
+    env_vars: _list_of(EnvVar) = Field(default_factory=list)
+    health_check_path: str = ""
+    migration_command: str = ""
+    rollback: str = Field("", description="one paragraph")
+
+
+def _first_file(value: Any) -> Any:
+    """The old `ci_cd` list, or a lone file, read as the one workflow."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
 class DevOpsEngineerOutput(_Shape):
+    """Narrowed to what deploy uses or the person needs (#80).
+
+    Deploy decides its own Dockerfiles, Blueprint and Vercel settings from the
+    charter, never from a model, so the Dockerfiles, compose files and pipeline that
+    used to be asked for here were written for nothing — or worse, shipped unchecked
+    into the person's repository. What is left is notes, and a CI workflow only when
+    GitHub is connected, built from QA's real test commands.
+    """
+
     summary: str
-    target_platform: str
-    dockerfiles: _list_of(ConfigFile)
-    #: Observed drift: `docker_compose` / `k8s_manifests` invented in place of this.
-    compose_or_manifests: _list_of(ConfigFile) = Field(
-        validation_alias=AliasChoices(
-            "compose_or_manifests", "docker_compose", "k8s_manifests", "kubernetes_manifests"
-        )
+    deployment_notes: DeploymentNotes
+    #: Observed drift: `github_actions`, and the old list-shaped `ci_cd`.
+    ci_workflow: Annotated[Optional[CiCdFile], BeforeValidator(_first_file)] = Field(
+        None, validation_alias=AliasChoices("ci_workflow", "ci_cd", "github_actions")
     )
-    #: Observed drift: `github_actions`.
-    ci_cd: _list_of(CiCdFile) = Field(
-        validation_alias=AliasChoices("ci_cd", "github_actions", "ci_cd_pipelines", "cicd")
-    )
-    deployment_steps: StrList
-    rollback_plan: str
 
 
 # ── Cost estimation ──────────────────────────────────────────────────────────
@@ -317,20 +372,27 @@ class InfraCost(_Shape):
     low_usd: Number
     high_usd: Number
     notes: str = ""
+    #: What this figure takes for granted ("Render starter, one instance").
+    assumption: str = ""
 
 
 class ThirdPartyCost(_Shape):
     item: str
     monthly_usd: Number
+    assumption: str = ""
 
 
 class DevEffort(_Shape):
     role: str
     weeks: Number
+    assumption: str = ""
 
 
 class CostEstimationOutput(_Shape):
     summary: str
+    #: Every estimate rests on these. Shown beside the figures, because a number
+    #: without its assumption reads as a quote.
+    assumptions: StrList
     monthly_infra_cost: _list_of(InfraCost)
     api_or_third_party_cost: _list_of(ThirdPartyCost)
     dev_effort: _list_of(DevEffort)
@@ -361,6 +423,18 @@ def response_schema(model: type[BaseModel]) -> dict:
     """
     schema = model.model_json_schema(mode="serialization")
     return _inline_refs(schema)
+
+
+def subset_schema(model: type[BaseModel], keys: list[str]) -> dict:
+    """The response schema narrowed to `keys` — for the round that asks a reply cut
+    off at the output limit for only the fields it did not finish."""
+    schema = response_schema(model)
+    if not keys:
+        return schema
+    props = schema.get("properties") or {}
+    schema["properties"] = {k: v for k, v in props.items() if k in keys}
+    schema["required"] = [k for k in schema.get("required") or [] if k in keys]
+    return schema
 
 
 def _inline_refs(schema: dict) -> dict:

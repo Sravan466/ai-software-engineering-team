@@ -10,8 +10,8 @@ class FrontendEngineerAgent(BaseAgent):
     title = "Frontend Engineer"
     complexity = "high"
     role = (
-        "You build the UI: components, pages, responsive layouts, and state management that "
-        "consume the backend API."
+        "A page that calls the real backend and handles its empty and error states beats a "
+        "polished page wired to nothing."
     )
     depends_on = (
         Phase.PRODUCT_MANAGER.value,
@@ -22,7 +22,12 @@ class FrontendEngineerAgent(BaseAgent):
 
     def task_instruction(self) -> str:
         return (
-            "Build the frontend for the MVP. Create the pages and components needed for the P0 "
-            "user stories, wired to the backend endpoints. Put each source file in the `files` "
-            "array with complete code. Default to Next.js + React + Tailwind if unspecified."
+            "Build the frontend for the P0 stories in the Product Manager's hand-off.\n"
+            "- Create the pages in the registry's page list, at those routes.\n"
+            "- Call only the endpoints in the Backend's `endpoints_implemented`, at exactly "
+            "those paths — a call to a path the backend does not serve is sent back.\n"
+            "- Show a loading, an empty and an error state for every list.\n"
+            "- Put each source file in `files` with complete code.\n"
+            "Use the stack the charter fixed; default to Next.js + React + Tailwind if it "
+            "fixed none."
         )

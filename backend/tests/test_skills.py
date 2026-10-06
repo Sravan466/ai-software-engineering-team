@@ -412,21 +412,12 @@ def test_the_budget_and_the_prompt_agree_about_what_was_injected(library):
     for window in range(3_000, 40_001, 250):
         profile = _profile(window)
         ctx = AgentContext(**shared, skills=skills)
-        budget = agent._section_budgets(ctx, profile, 0, _bodies(agent, ctx))
+        budget = agent._section_budgets(ctx, profile, 0, agent._prepare_deps(ctx, profile))
         printed = _skills_block(agent._build_messages(ctx, profile).messages[1].content)
         assert len(printed) == budget["skills"], (
             f"at a {window}-token window the budget charged {budget['skills']} "
             f"characters for skills and the prompt carries {len(printed)}"
         )
-
-
-def _bodies(agent, ctx) -> dict:
-    """The serialised prior-phase context, the way `_build_messages` computes it."""
-    return {
-        dep: json.dumps(ctx.prior_outputs[dep], indent=2)
-        for dep in agent.depends_on
-        if dep in ctx.prior_outputs
-    }
 
 
 def _skills_block(user_turn: str) -> str:

@@ -342,6 +342,12 @@ class PhaseResult(Base):
     #: Null on rows written before skills existed, and on a phase that got none.
     skills_used: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    #: What this agent was shown (#80): per dependency, its digest and whether the
+    #: full output went whole, cut, or not at all; whether the name registry and the
+    #: platform contract were in its instructions; how many replies the output limit
+    #: cut off. Null on rows written before hand-offs were recorded.
+    handoff: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="phases")

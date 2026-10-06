@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { PhaseResult } from "@/lib/api";
+import type { HandoffDep, PhaseResult } from "@/lib/api";
+import { AGENT_BY_KEY } from "@/components/agents/personas";
 import Markdown from "@/components/ui/Markdown";
 import { Icon } from "@/components/shell/icons";
 import DetailFields from "./DetailFields";
@@ -125,6 +126,7 @@ export default function PhaseArtifact({
       </div>
 
       <SkillsUsed row={row} />
+      <WhatItSaw row={row} />
     </div>
   );
 }
@@ -175,5 +177,97 @@ function SkillsUsed({ row }: { row: PhaseResult }) {
         </>
       )}
     </p>
+  );
+}
+
+/** `files[7-19 of 19]` → `files 7–19 of 19`. Field names stay as written. */
+function omittedText(omitted: string[]): string {
+  return omitted
+    .map((o) => o.replace(/^(\w+)\[(\d+)-(\d+) of (\d+)\]$/, (_m, k, a, b, n) =>
+      a === b ? `${k} ${a} of ${n}` : `${k} ${a}–${b} of ${n}`,
+    ))
+    .map((o) => o.replace(/_/g, " "))
+    .join(", ");
+}
+
+const STATE: Record<HandoffDep["full"], { label: string; tone: string }> = {
+  whole: { label: "Everything", tone: "ok" },
+  cut: { label: "Cut to fit", tone: "warn" },
+  digest_only: { label: "Summary only", tone: "warn" },
+};
+
+/**
+ * What this agent was handed by the phases before it (#80).
+ *
+ * Every hand-off carries a summary of the earlier work (paths, endpoints,
+ * criteria); the full output follows when it fits this model's window. On a
+ * small window it often doesn't, and a reviewer reading QA's tests or Warden's
+ * findings needs to know the agent saw a cut copy. Folded away: it is
+ * provenance, read when a result looks off, not on every pass.
+ */
+function WhatItSaw({ row }: { row: PhaseResult }) {
+  const h = row.handoff;
+  if (!h) return null;
+  const deps = h.deps ?? [];
+  const cut = deps.filter((d) => d.full !== "whole").length;
+  const truncated = h.truncated_replies ?? 0;
+  if (deps.length === 0 && !h.registry && truncated === 0) return null;
+
+  const meta = [
+    deps.length ? `${deps.length} hand-off${deps.length === 1 ? "" : "s"}` : null,
+    cut ? `${cut} cut to fit` : deps.length ? "nothing cut" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <details className="artifact-saw">
+      <summary>
+        <span className="artifact-saw-chev" aria-hidden>
+          {Icon.chevron}
+        </span>
+        <span className="artifact-saw-title">What this agent saw</span>
+        {meta && <span className="artifact-saw-meta">{meta}</span>}
+        {truncated > 0 && (
+          <span className="artifact-saw-tag warn">
+            {truncated} {truncated === 1 ? "reply" : "replies"} hit the length limit
+          </span>
+        )}
+      </summary>
+      <div className="artifact-saw-body">
+        {deps.length > 0 && (
+          <ul className="artifact-saw-list">
+            {deps.map((d) => {
+              const who = AGENT_BY_KEY[d.phase];
+              const state = STATE[d.full] ?? STATE.whole;
+              return (
+                <li key={d.phase} className="artifact-saw-row">
+                  <span className="artifact-saw-who">
+                    <span className="artifact-saw-code">{who?.codename ?? d.phase}</span>
+                    <span className="artifact-saw-role">{who?.role ?? ""}</span>
+                  </span>
+                  <span className="artifact-saw-what">
+                    <span className={"artifact-saw-tag " + state.tone}>{state.label}</span>
+                    {d.full === "cut" && d.omitted.length > 0 && (
+                      <span className="artifact-saw-left">Left out: {omittedText(d.omitted)}</span>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        <p className="artifact-saw-note">
+          {deps.length > 0 && "Each hand-off includes a summary of the earlier work. "}
+          {h.registry
+            ? "Held to the names System Design chose."
+            : deps.length > 0
+              ? "No shared names yet."
+              : ""}
+          {truncated > 0 &&
+            " The rest of a cut-off reply was asked for separately."}
+        </p>
+      </div>
+    </details>
   );
 }

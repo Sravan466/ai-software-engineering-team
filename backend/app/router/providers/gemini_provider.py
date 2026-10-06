@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.router.base import LLMProvider, ProviderError, cloud_error, status_of
 from app.router.providers.cloud_key import CloudKey
-from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
+from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage, normalise_finish
 
 log = get_logger(__name__)
 
@@ -115,5 +115,16 @@ class GeminiProvider(CloudKey, LLMProvider):
             total_tokens=getattr(meta, "total_token_count", 0) if meta else 0,
         )
         return LLMResponse(
-            text=text, provider=self.name, model=model, usage=usage, latency_ms=latency
+            text=text,
+            provider=self.name,
+            model=model,
+            usage=usage,
+            latency_ms=latency,
+            finish_reason=normalise_finish(_gemini_finish(resp)),
         )
+
+
+def _gemini_finish(resp) -> object:
+    """The first candidate's finish reason (`MAX_TOKENS` when the output limit cut it)."""
+    candidates = getattr(resp, "candidates", None) or []
+    return getattr(candidates[0], "finish_reason", None) if candidates else None
