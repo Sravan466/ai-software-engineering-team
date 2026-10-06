@@ -785,21 +785,15 @@ export function DatabasePanel({
         </span>
       </div>
       <p className="muted db-card-lede">
-        {state.database_label} was chosen by Atlas. The code reads it from{" "}
-        {state.contract.variables.map((v, i) => (
-          <span key={v.name}>
-            {i > 0 && ", "}
-            <code className="db-var">{v.name}</code>
-          </span>
-        ))}
+        Atlas chose {state.database_label}.
         {state.status === "connected" || state.status === "unchecked"
-          ? "."
-          : ". Until you connect it, the download has placeholders in .env.example."}
+          ? null
+          : " Until you connect it, the download uses placeholders."}
       </p>
       <DatabaseForm id={id} state={state} onState={setState} busy={false} />
       <p className="db-lock db-lock-inline">
         {Icon.lock}
-        <span>Encrypted on this computer. Only the host or last four characters are shown again.</span>
+        <span>Encrypted on this computer and hidden after saving.</span>
       </p>
     </div>
   );

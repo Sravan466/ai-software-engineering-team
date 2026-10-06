@@ -332,8 +332,7 @@ function DefaultNotice({
           <span className="notice-title">No local runtime reachable</span>
           <span className="notice-text">
             {tried ? <>Nothing answered at <span className="mono">{tried}</span>. </> : null}
-            Local builds need a runtime with at least one model. Start one (any OpenAI-compatible
-            server works), then rescan or add its address below.
+            Start any OpenAI-compatible runtime with a model, then rescan or add its address below.
           </span>
         </div>
       </div>
@@ -1797,20 +1796,19 @@ function ApiKeysCard() {
         <span className="rule" />
       </div>
       <p className="muted" style={{ margin: "0 0 6px", fontSize: "var(--t-base)", lineHeight: 1.6 }}>
-        Add keys to use Claude, GPT or Gemini in Auto and Manual routing, or leave them blank to
-        stay local. Keys are checked when saved, encrypted on this server, and never sent to the
-        browser. Only the last four characters are shown.
+        Add a key to use Claude, GPT or Gemini. Leave them blank to stay local. Keys are
+        encrypted on this server, and only the last four characters are shown.
       </p>
       <p className="field-hint key-safety">
-        Safer keys: an OpenAI{" "}
+        Safer: a{" "}
         <a className="link" href="https://help.openai.com/en/articles/8867743-assign-api-key-permissions" target="_blank" rel="noreferrer">
-          project key with restricted permissions
-        </a>
-        , an Anthropic{" "}
+          restricted OpenAI key
+        </a>{" "}
+        or an{" "}
         <a className="link" href="https://platform.claude.com/docs/en/manage-claude/workspaces" target="_blank" rel="noreferrer">
-          workspace with a spend limit
+          Anthropic workspace with a spend limit
         </a>
-        . Best practices from{" "}
+        . Tips from{" "}
         <a className="link" href="https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety" target="_blank" rel="noreferrer">
           OpenAI
         </a>{" "}

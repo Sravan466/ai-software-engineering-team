@@ -171,9 +171,8 @@ function localBlocker(local: LocalStatus | null): RuntimeBlocker | null {
     return {
       title: "No local runtime reachable",
       text:
-        (tried ? `Nothing answered at ${tried}, ` : "Nothing is answering, ") +
-        "so there's no model to run this idea. Setup shows how to start a runtime and " +
-        "connect your computer, or add a cloud API key in Settings.",
+        (tried ? `Nothing answered at ${tried}. ` : "Nothing is answering. ") +
+        "Start a local runtime, or add a cloud API key in Settings.",
       action: "Set up your computer",
       href: "/setup",
     };
@@ -438,7 +437,7 @@ export default function RunSettings({
 
         {approval === "checkpoints" && (
           <div className="field" style={{ marginTop: 4 }}>
-            <label htmlFor="cost-cap">Interrupt if projected running cost exceeds</label>
+            <label htmlFor="cost-cap">Stop if the monthly running cost goes over</label>
             <div className="prefixed">
               <span className="prefixed-mark" aria-hidden="true">
                 $
@@ -464,8 +463,7 @@ export default function RunSettings({
               <span className="prefixed-suffix">/month</span>
             </div>
             <p className="field-hint">
-              Ledger estimates what the finished product costs to run. Above this amount,
-              the build stops and tells you.
+              Ledger estimates what the finished app costs to run.
             </p>
           </div>
         )}
@@ -604,7 +602,7 @@ function SkillPicker({
           {skills === null
             ? "reading the library…"
             : touched === 0
-              ? `${skills.length} skills, matched to this idea automatically`
+              ? `${skills.length} skills matched to this idea`
               : `${skills.length} skills · ${touched} decided by you`}
         </span>
       </button>
