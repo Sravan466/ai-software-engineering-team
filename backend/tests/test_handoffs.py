@@ -395,7 +395,7 @@ def test_cost_requires_assumptions_and_shows_them_under_each_figure():
             "total_monthly_high_usd": 7,
         }
     )
-    assert "Assumes:_ Starter tier" in md and "100 users" in md and "Estimates" in md
+    assert "*Assumes:* Starter tier" in md and "100 users" in md and "Estimates" in md
 
 
 # ── 6. measured ──────────────────────────────────────────────────────────────
@@ -424,3 +424,79 @@ def test_a_prompt_variant_replaces_the_task_text(monkeypatch, tmp_path):
     path.write_text(json.dumps({"tasks": {"nobody": "x"}}))
     with pytest.raises(SystemExit):
         load_variant(str(path))
+
+
+# ── review fixes: no false positives from the route check ────────────────────
+_ROUTE_OK = {
+    "router root mounted with a prefix": {
+        "backend/r.py": "router = APIRouter()\n@router.get('/')\ndef a():\n    pass\n",
+        "backend/main.py": "app.include_router(r.router, prefix='/api/todos')\n",
+        "frontend/a.js": "fetch('/api/todos')",
+    },
+    "express router mounted with app.use": {
+        "backend/r.js": "router.get('/', h)\n",
+        "backend/s.js": "app.use('/api/todos', router)\n",
+        "frontend/a.js": "fetch('/api/todos')",
+    },
+    "base URL already carries /api": {
+        "backend/m.py": "@app.get('/api/todos')\ndef a():\n    pass\n",
+        "frontend/a.js": "api.get('/todos')",
+    },
+    "template suffix": {
+        "backend/m.py": "@app.get('/api/todos')\ndef a():\n    pass\n",
+        "frontend/a.js": "fetch(`${API}/api/todos${qs}`)",
+    },
+    "static file": {
+        "backend/m.py": "@app.get('/api/todos')\ndef a():\n    pass\n",
+        "frontend/a.js": "fetch('/data.json')",
+    },
+    "Next.js route group": {
+        "backend/m.py": "@app.get('/api/todos')\ndef a():\n    pass\n",
+        "frontend/app/api/(auth)/login/route.ts": "export async function POST(){}",
+        "frontend/a.js": "fetch('/api/login')",
+    },
+    "catch-all parameter": {
+        "backend/m.py": "@app.get('/files/{p:path}')\ndef a(p):\n    pass\n",
+        "frontend/a.js": "fetch('/files/a/b')",
+    },
+}
+
+
+@pytest.mark.parametrize("case", list(_ROUTE_OK))
+def test_correct_frontend_calls_are_never_sent_back(case):
+    from app.build import routes
+
+    files = _ROUTE_OK[case]
+    assert routes.unserved_calls(files, [p for p in files if p.startswith("frontend/")]) == []
+
+
+def test_new_routes_are_not_misspellings_but_a_rename_is():
+    from app.build.routes import Route, off_registry
+
+    found = off_registry(
+        [Route("GET", p, "f") for p in ("/api/tags", "/api/tasks/{id}/tags", "/api/task/{id}", "/health", "/api/status")],
+        ["/api/tasks", "/api/tasks/{id}", "/api/stats"],
+    )
+    assert [(r.path, p) for r, p in found] == [("/api/task/{id}", "/api/tasks/{id}")]
+
+
+def test_fit_terminates_when_nothing_is_left_to_shorten():
+    assert handoff.fit({"rationale": "r" * 100, "framework": "f" * 150}, 100)
+
+
+def test_an_older_devops_build_keeps_its_workflow():
+    from app.core.artifacts import devops_may_write
+
+    legacy = {"summary": "s", "ci_cd": [{"path": ".github/workflows/ci.yml", "content": "jobs: {}"}]}
+    assert devops_may_write(".github/workflows/ci.yml", legacy)
+    assert not devops_may_write("render.yaml", legacy)
+
+
+def test_a_query_string_template_does_not_hide_a_misspelled_path():
+    from app.build import routes
+
+    files = {
+        "backend/m.py": "@app.get('/api/todos')\ndef a():\n    pass\n",
+        "frontend/a.js": "fetch(`${API}/api/tasks${qs}`)",
+    }
+    assert [c.path for c, _ in routes.unserved_calls(files, ["frontend/a.js"])] == ["/api/tasks"]

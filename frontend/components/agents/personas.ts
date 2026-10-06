@@ -329,7 +329,7 @@ export const AGENTS: Persona[] = [
     codename: "RELAY",
     role: "DevOps Engineer",
     discipline: "CI / CD",
-    deliver: ".github/ + Dockerfile",
+    deliver: "deploy-notes.md",
     trait: "Impatient",
     tagline: "Gets it off this machine and into the world.",
     motion: "launch",

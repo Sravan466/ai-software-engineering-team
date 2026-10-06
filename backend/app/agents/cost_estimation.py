@@ -87,13 +87,19 @@ class CostEstimationAgent(BaseAgent):
 
     def to_markdown(self, output: dict) -> str:
         """Each figure with its assumption under it, labelled as an estimate."""
-        lines = [f"## {self.title}", "", "_Estimates, not quotes — each rests on the assumption under it._", ""]
+        lines = [f"## {self.title}", "", "*Estimates, not quotes — each rests on the assumption under it.*", ""]
         if output.get("summary"):
             lines += [str(output["summary"]), ""]
 
         def money(v) -> str:
             try:
                 return f"${float(v):,.0f}"
+            except (TypeError, ValueError):
+                return str(v)
+
+        def weeks(v) -> str:
+            try:
+                return f"{float(v):g}"
             except (TypeError, ValueError):
                 return str(v)
 
@@ -106,7 +112,7 @@ class CostEstimationAgent(BaseAgent):
             for r in infra:
                 lines.append(f"- **{r.get('item')}** — {money(r.get('low_usd'))}–{money(r.get('high_usd'))}")
                 if r.get("assumption") or r.get("notes"):
-                    lines.append(f"  - _Assumes:_ {r.get('assumption') or r.get('notes')}")
+                    lines.append(f"  - *Assumes:* {r.get('assumption') or r.get('notes')}")
             lines.append("")
         third = [r for r in output.get("api_or_third_party_cost") or [] if isinstance(r, dict)]
         if third:
@@ -114,17 +120,17 @@ class CostEstimationAgent(BaseAgent):
             for r in third:
                 lines.append(f"- **{r.get('item')}** — {money(r.get('monthly_usd'))}")
                 if r.get("assumption"):
-                    lines.append(f"  - _Assumes:_ {r['assumption']}")
+                    lines.append(f"  - *Assumes:* {r['assumption']}")
             lines.append("")
         effort = [r for r in output.get("dev_effort") or [] if isinstance(r, dict)]
         if effort:
             lines.append("### Build effort")
             for r in effort:
-                lines.append(f"- **{r.get('role')}** — {r.get('weeks')} weeks")
+                lines.append(f"- **{r.get('role')}** — {weeks(r.get('weeks'))} weeks")
                 if r.get("assumption"):
-                    lines.append(f"  - _Assumes:_ {r['assumption']}")
+                    lines.append(f"  - *Assumes:* {r['assumption']}")
             if output.get("estimated_timeline_weeks") is not None:
-                lines.append(f"- **Timeline** — {output['estimated_timeline_weeks']} weeks")
+                lines.append(f"- **Timeline** — {weeks(output['estimated_timeline_weeks'])} weeks")
             lines.append("")
         if output.get("assumptions"):
             lines.append("### Assumptions")

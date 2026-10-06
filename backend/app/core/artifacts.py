@@ -133,6 +133,10 @@ def devops_may_write(path: str, output: dict) -> bool:
     if p == "render.yaml" or name in ("package.json", "package-lock.json") or platform_owned(p):
         return False
     if p.startswith(".github/"):
+        if isinstance(output, dict) and "ci_workflow" not in output and "deployment_notes" not in output:
+            # A DevOps output from before #80 kept its workflow in `ci_cd`; the
+            # build it belongs to shipped with it, and a reassembly must not drop it.
+            return True
         ci = output.get("ci_workflow") if isinstance(output, dict) else None
         return (
             isinstance(ci, dict)

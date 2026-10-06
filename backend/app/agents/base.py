@@ -329,7 +329,15 @@ class BaseAgent:
         )
 
     def _missing(self, fields: dict) -> list[str]:
-        return [k for k in self.output_model.model_fields if k not in fields]
+        """Declared fields with no answer yet, under their own name or a drift alias."""
+        out = []
+        for name, info in self.output_model.model_fields.items():
+            if not info.is_required():
+                continue
+            names = {name, *(getattr(info.validation_alias, "choices", None) or ())}
+            if not any(n in fields for n in names):
+                out.append(name)
+        return out
 
     def _read_reply(self, resp: LLMResponse, partial: dict) -> tuple[dict, dict, bool]:
         """(what to check, finished fields still waiting for the rest, was it cut off).

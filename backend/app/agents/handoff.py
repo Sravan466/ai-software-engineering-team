@@ -402,13 +402,15 @@ def fit(d: dict, limit: int) -> str:
     d = json.loads(_dumps(d))
     text = _dumps(d)
     trimmed: dict[str, int] = {}
+    rationale_cut = False
     while len(text) > limit:
         lists = [(len(_dumps(v)), k) for k, v in d.items() if isinstance(v, list) and len(v) > 1]
         if not lists:
             # Nothing left to shorten but prose: cut the rationale, then give up on
             # being smaller than the floor — the instructions still come first.
-            if isinstance(d.get("rationale"), str) and len(d["rationale"]) > 60:
+            if not rationale_cut and isinstance(d.get("rationale"), str) and len(d["rationale"]) > 60:
                 d["rationale"] = d["rationale"][:60] + "…"
+                rationale_cut = True
                 text = _dumps(d)
                 continue
             break

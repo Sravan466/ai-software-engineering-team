@@ -40,7 +40,15 @@ _CALL = re.compile(
     r"""\(\s*(['"`])((?:(?!\1).){1,300}?)\1""",
 )
 _TEMPLATE = re.compile(r"\$\{[^}]*\}")
-_PARAM = re.compile(r"^(?:\{[^}]*\}|:[\w]+|<[^>]*>|\[[^\]]*\]|\*)$")
+_PARAM = re.compile(r"^(?:\{[^}]*\}|:[\w]+\??|<[^>]*>|\[[^\]]*\]|\*)$")
+#: A segment that takes the rest of the path: `{p:path}`, `<path:p>`, `[...slug]`, `*`.
+_REST = re.compile(r"^(?:\{\w+:path\}|<path:\w+>|\[\[?\.\.\.\w+\]\]?|\*|:\w+\*)$")
+#: Where a router is mounted, in whatever file does the mounting.
+_MOUNT = re.compile(
+    r"""(?:include_router|register_blueprint)\([^)]*?(?:url_)?prefix\s*=\s*["']([^"']+)["']"""
+    r"""|\.use\(\s*['"`](/[^'"`]*)['"`]\s*,"""
+)
+_FILE_EXT = re.compile(r"\.[a-z0-9]{1,5}$", re.IGNORECASE)
 _METHOD_OPT = re.compile(r"""method\s*:\s*['"`](\w+)['"`]""", re.IGNORECASE)
 
 
@@ -69,13 +77,23 @@ class Call:
 
 
 def segments(path: str) -> tuple[str, ...]:
-    """`/api/todos/{id}/` -> ('api', 'todos', '*'). Parameters of every spelling are '*'."""
+    """`/api/todos/{id}/` -> ('api', 'todos', '*'). Parameters of every spelling are '*',
+    a rest-of-path parameter is '**', and a Next.js route group `(auth)` is no segment."""
     path = (path or "").split("?", 1)[0].split("#", 1)[0]
     out = []
     for part in path.strip("/").split("/"):
-        if not part:
+        if not part or (part.startswith("(") and part.endswith(")")):
             continue
-        out.append("*" if _PARAM.match(part) or part == "\0" else part.lower())
+        if "\0" in part and part.strip("\0") and "\0" not in part.strip("\0"):
+            # `tasks${qs}`: fixed text with a template on one end is that text — a
+            # wildcard here would let a misspelled path hide behind a query string.
+            part = part.strip("\0")
+        if _REST.match(part):
+            out.append("**")
+        elif _PARAM.match(part) or "\0" in part:
+            out.append("*")
+        else:
+            out.append(part.lower())
     return tuple(out)
 
 
@@ -84,6 +102,19 @@ def _line_of(text: str, index: int) -> int:
 
 
 # ── what the backend serves ───────────────────────────────────────────────────
+def mounts(files: dict[str, str], side: Optional[str] = layout.BACKEND) -> list[str]:
+    """Every prefix a router is mounted at (`include_router(x, prefix="/api")`, `app.use("/api", r)`)."""
+    found: dict[str, None] = {}
+    for path, content in files.items():
+        if (side is not None and layout.side_of(path) != side) or not isinstance(content, str):
+            continue
+        for m in _MOUNT.finditer(content):
+            prefix = (m.group(1) or m.group(2) or "").rstrip("/")
+            if prefix:
+                found.setdefault(prefix, None)
+    return list(found)
+
+
 def served(files: dict[str, str], side: Optional[str] = layout.BACKEND) -> list[Route]:
     """Every route declared in `files` (placed paths), on one side or everywhere."""
     out: list[Route] = []
@@ -190,24 +221,54 @@ def _call_path(raw: str) -> Optional[str]:
         raw = raw[host.end():]
     # A leading `${API_URL}` / `${base}` is the backend's address.
     raw = re.sub(r"^\$\{[^}]*\}", "", raw)
-    raw = _TEMPLATE.sub("\0", raw)
+    raw = _TEMPLATE.sub("\0", raw).split("?", 1)[0]
     if not raw.startswith("/") or raw.startswith("//"):
         return None
     shape = segments(raw)
     if not shape or all(s == "*" for s in shape):
         return None
+    if _FILE_EXT.search(shape[-1]):
+        return None  # a static file (`/data.json`, `/logo.svg`), not an API call
     return "/" + "/".join("{param}" if s == "*" else s for s in shape)
 
 
 # ── matching ──────────────────────────────────────────────────────────────────
+def _same(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
+    """Equal, segment by segment, with '*' matching one segment and '**' the rest."""
+    if "**" in b:
+        i = b.index("**")
+        return len(a) >= i and _same(a[:i], b[:i])
+    if "**" in a:
+        return _same(b, a)
+    return len(a) == len(b) and all(x == "*" or y == "*" or x == y for x, y in zip(a, b))
+
+
 def _tail_match(call: tuple[str, ...], route: tuple[str, ...]) -> bool:
-    """A route serves a call when it equals the call's tail (its prefix may be elsewhere)."""
-    if not route or len(route) > len(call):
+    """A route serves a call when one is the other's tail.
+
+    The route's prefix may be set where it is mounted (`/todos` serving `/api/todos`),
+    and the call's base URL may already carry it (`${API}/todos` with `API=…/api`).
+    At least one fixed segment has to line up, so a bare `/{id}` matches nothing.
+    """
+    if not route or not call:
         return False
-    tail = call[len(call) - len(route):]
-    return all(r == "*" or c == "*" or r == c for r, c in zip(route, tail)) and (
-        len(route) == len(call) or route[0] != "*"
-    )
+    if "**" in route:
+        head = route[: route.index("**")]
+        return any(_same(call[i:i + len(head)], head) for i in range(0, len(call) - len(head) + 1)) and bool(head)
+    short, long_ = (route, call) if len(route) <= len(call) else (call, route)
+    if not any(s not in ("*", "**") for s in short):
+        return len(route) == len(call) and _same(call, route)
+    return _same(long_[len(long_) - len(short):], short)
+
+
+def _expanded(routes: Iterable[Route], prefixes: Iterable[str]) -> list[Route]:
+    """Each route as declared, and as mounted under every prefix the backend uses."""
+    out = list(routes)
+    for r in list(out):
+        for prefix in prefixes:
+            if not r.path.startswith(prefix + "/") and r.path != prefix:
+                out.append(Route(r.method, _join(prefix, r.path), r.file, r.line))
+    return out
 
 
 def is_served(call: Call, routes: Iterable[Route]) -> bool:
@@ -230,7 +291,7 @@ def unserved_calls(files: dict[str, str], targets: Iterable[str]) -> list[tuple[
     Empty when the build has no backend routes at all: with nothing to compare
     against, every call would be "unserved", and that says nothing about the call.
     """
-    backend = served(files, layout.BACKEND)
+    backend = _expanded(served(files, layout.BACKEND), mounts(files, layout.BACKEND))
     if not backend:
         return []
     known = backend + frontend_api(files)
@@ -241,14 +302,27 @@ def unserved_calls(files: dict[str, str], targets: Iterable[str]) -> list[tuple[
     return out
 
 
+def _number_slip(a: str, b: str) -> bool:
+    """`todo`/`todos`, `category`/`categories`: the same name, singular for plural."""
+    def stem(w: str) -> str:
+        if w.endswith("ies"):
+            return w[:-3] + "y"
+        if w.endswith(("ses", "xes", "zes", "ches", "shes")):
+            return w[:-2]
+        return w[:-1] if w.endswith("s") and not w.endswith("ss") else w
+
+    return a != b and stem(a) == stem(b)
+
+
 def off_registry(
     routes: Iterable[Route], registry_paths: Iterable[str], cutoff: float = 0.8
 ) -> list[tuple[Route, str]]:
     """Backend routes that are a near miss of a registry path — a rename, not an addition.
 
-    A route the registry does not list at all (`/health`) is an addition and is fine;
-    one that is *almost* a registry path (`/api/task/{id}` beside `/api/tasks/{id}`) is
-    the drift the registry exists to stop, and is sent back with the registry's name.
+    Near miss means the same number of segments with exactly one fixed segment that is
+    the registry's name in the other number (`todo` beside `todos`). A route the
+    registry does not list (`/health`, `/api/status` beside `/api/stats`, a nested
+    `/api/tasks/{id}/tags`) is an addition, and is fine.
     """
     paths = [p for p in registry_paths if segments(p)]
     if not paths:
@@ -256,22 +330,18 @@ def off_registry(
     out = []
     for route in routes:
         shape = route.shape
-        if not shape:
+        if not shape or any(_tail_match(segments(p), shape) for p in paths):
             continue
-        if any(_tail_match(segments(p), shape) or segments(p) == shape for p in paths):
-            continue
-        key = "/" + "/".join(shape)
-        best, score = None, 0.0
         for p in paths:
-            ratio = difflib.SequenceMatcher(None, key, "/" + "/".join(segments(p))).ratio()
-            # Compared against the registry path's tail too: a router prefix set in
-            # another file is not a difference in name.
-            tail = segments(p)[-len(shape):]
-            ratio = max(ratio, difflib.SequenceMatcher(None, key, "/" + "/".join(tail)).ratio())
-            if ratio > score:
-                best, score = p, ratio
-        if best is not None and score >= cutoff:
-            out.append((route, best))
+            want = segments(p)
+            # Compared on the registry path's tail: a prefix set elsewhere is not a rename.
+            if len(want) < len(shape):
+                continue
+            want = want[len(want) - len(shape):]
+            diff = [(a, b) for a, b in zip(shape, want) if not (a == b or "*" in (a, b))]
+            if len(diff) == 1 and _number_slip(*diff[0]):
+                out.append((route, p))
+                break
     return out
 
 
