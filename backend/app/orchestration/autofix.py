@@ -230,20 +230,44 @@ def code_problems(row) -> list[dict]:
             if not isinstance(p, dict) or p.get("kind") == NOTE_KIND:
                 continue
 
-            message = str(p.get("message") or "does not compile")
-            path = str(p.get("path") or "")
-            line = p.get("line")
-            problems.append(
-                {
-                    "key": _key("build", path, re.sub(r"\d+", "#", message)),
-                    "title": message.replace("`", ""),
-                    "kind": "build",
-                    "where": f"{path}:{line}" if path and line else (path or None),
-                    "phase": row.phase,
-                }
-            )
+            problems.append(_build_problem(p, row.phase))
     # One entry per key: the same error in the same file twice is one problem.
     return list({p["key"]: p for p in problems}.values())
+
+
+def _build_problem(p: dict, phase: str) -> dict:
+    """One compile or build problem with its key: the file and the error, without the
+    numbers that move (a line, a count, a duration)."""
+    message = str(p.get("message") or "does not compile")
+    path = str(p.get("path") or "")
+    line = p.get("line")
+    out = {
+        "key": _key("build", path, re.sub(r"\d+", "#", message)),
+        "title": message.replace("`", ""),
+        "kind": "build",
+        "where": f"{path}:{line}" if path and line else (path or None),
+        "phase": phase,
+    }
+    # Which real step found it (#75): install | build | boot | vercel. The parser's own
+    # problems have none.
+    if p.get("step"):
+        out["step"] = str(p["step"])
+    return out
+
+
+def deploy_problems(problems: Iterable[dict], phase: str) -> list[dict]:
+    """A failed Vercel build's problems, keyed like the sandbox's own (#75)."""
+    found = [_build_problem({**p, "step": "vercel"}, phase) for p in problems if isinstance(p, dict)]
+    return list({p["key"]: p for p in found}.values())
+
+
+#: How the fix note names what a problem broke, by the step that found it.
+_BROKE = {
+    "install": "does not install",
+    "build": "fails the build",
+    "boot": "crashes when it starts",
+    "vercel": "failed the build on Vercel",
+}
 
 
 CODE_NOTE_PREFIX = "Your last deliverable still has problems"
@@ -264,7 +288,7 @@ def code_note(
     lines = []
     for p in problems:
         where = f" in `{p['where']}`" if p.get("where") else ""
-        label = "contradicts the stack" if p["kind"] == "stack" else "does not compile"
+        label = "contradicts the stack" if p["kind"] == "stack" else _BROKE.get(p.get("step") or "", "does not compile")
         lines.append(f"- ({label}){where}: {p['title']}")
         code = (snippets or {}).get(p["key"])
         if code:
@@ -308,6 +332,7 @@ __all__ = [
     "close_round",
     "code_note",
     "code_problems",
+    "deploy_problems",
     "keep_trying",
     "load",
     "next_step",

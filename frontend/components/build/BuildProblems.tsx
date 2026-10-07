@@ -18,6 +18,10 @@ const KIND: Record<string, string> = {
   reference: "Undeclared name",
   import: "Missing file",
   package: "Unknown package",
+  // From the real build (#75).
+  type: "Type error",
+  runtime: "Crashes",
+  build: "Build failed",
 };
 
 /** "uses `Header`, which…" with the name set as code rather than as backticks. */
@@ -46,7 +50,9 @@ export default function BuildProblems({
   return (
     <div className="build-problems">
       <div className="build-problems-head">
-        <span className="label">Still doesn&apos;t compile</span>
+        <span className="label">
+          {problems.some((p) => p.step) ? "Still doesn't build" : "Still doesn't compile"}
+        </span>
         <span className="rule" />
         <span className="field-hint">
           {byFile.size} file{byFile.size === 1 ? "" : "s"} · {problems.length} problem
@@ -81,7 +87,10 @@ export default function BuildProblems({
                   <li key={i}>
                     <span className="badge badge-bad">{KIND[p.kind] ?? "Error"}</span>
                     {p.line ? <span className="mono build-line">line {p.line}</span> : null}
-                    <span className="build-msg">{withCode(p.message)}</span>
+                    <span className="build-msg">{withCode(p.message.split("\n")[0])}</span>
+                    {p.message.includes("\n") && (
+                      <pre className="fix-item-tail mono">{p.message.split("\n").slice(1).join("\n")}</pre>
+                    )}
                   </li>
                 ))}
               </ul>

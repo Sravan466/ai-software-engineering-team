@@ -38,6 +38,8 @@ export default function SchemaBadge({ row }: { row: PhaseResult }) {
     const problems = (row.build_note ?? []).filter((p) => p.kind !== "plan");
 
     const files = new Set(problems.map((p) => p.path)).size;
+    // Parsed fine and then failed the real build (#75): it doesn't *build*.
+    const verb = problems.some((p) => p.step) ? "build" : "compile";
     badges.push(
       <span
         key="build"
@@ -45,11 +47,11 @@ export default function SchemaBadge({ row }: { row: PhaseResult }) {
         title={
           problems
             .slice(0, 4)
-            .map((p) => `${p.path}${p.line ? ` line ${p.line}` : ""} — ${p.message.replace(/`/g, "")}`)
+            .map((p) => `${p.path}${p.line ? ` line ${p.line}` : ""} — ${p.message.replace(/`/g, "").split("\n")[0]}`)
             .join("\n") || "This phase's code does not compile."
         }
       >
-        {files > 1 ? `${files} files don't compile` : "Doesn't compile"}
+        {files > 1 ? `${files} files don't ${verb}` : `Doesn't ${verb}`}
       </span>,
     );
   } else if (row.build_status === "unchecked") {

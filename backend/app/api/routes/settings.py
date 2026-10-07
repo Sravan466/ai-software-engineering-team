@@ -218,6 +218,15 @@ def set_files_per_call(role: str, body: FilesPerCallUpdate) -> dict:
 
 
 # ── Will each model run, and how is it tuned ─────────────────────────────────
+@router.get("/build-runner")
+def get_build_runner() -> dict:
+    """What builds the generated code for real (#75): Docker here, a builder service,
+    or nothing — and why — for the Settings row. Never starts a build."""
+    from app.build import runner as build_runner
+
+    return build_runner.status()
+
+
 @router.get("/compatibility")
 def get_compatibility() -> dict:
     """Every model on every answering source: fits, degraded or blocked, and why."""

@@ -82,6 +82,8 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "deploy_id",
         "deployed_at",
         "deploy_error",
+        # Nullable (#75): only a deploy that failed on Vercel since then has a log kept.
+        "deploy_log",
     ),
     "phase_results": (
         # Nullable (#63): only a phase that fell back past a refused key has one.
@@ -98,6 +100,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # its code built, and writing "ok" into it would claim a check nobody ran.
         "build_status",
         "build_note",
+        # Nullable (#75): a row from before real builds was only parsed, and an empty
+        # record would claim a build that never ran.
+        "build_run",
         # Nullable for the same reason as `build_status`: a phase that ran before the
         # skill library existed cannot say which skills it had, and an empty list
         # would read as "it was offered skills and took none".

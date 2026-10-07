@@ -69,6 +69,9 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # not. A third fact beside the two above, with its own fix: the files named.
         "build_status": result.build_status,
         "build_problems": list(result.build_problems),
+        # What installing, building and starting the code did (#75): the steps, their
+        # output's tail, and how long it took. None when nothing was built.
+        "build_run": getattr(result, "build_run", None),
         # Which procedures this deliverable was actually written with. Recorded
         # because a skill you cannot confirm reached the model is indistinguishable
         # from one that did nothing — and because selection is a keyword score, so

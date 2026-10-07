@@ -176,6 +176,22 @@ docker compose up --build
 docker compose exec ollama ollama pull <model>
 ```
 
+### Real builds before Ship
+
+Once a code phase's files parse, the crew installs, builds and starts them for real —
+`npm install` + `npm run build` (`next build` type-checks), a Python import of the app,
+a Node server kept up for ten seconds — and anything that fails goes back through the
+same fix loop as a compile error. A build that doesn't build never reaches the Ship
+review, and a deploy Vercel fails is sent back to the crew with Vercel's own errors.
+
+Each build runs in throwaway Docker containers: the network only while packages
+download (no install scripts then — they run afterwards, offline), then none; a memory,
+CPU, process and time cap (`BUILD_RUN_*` in `.env`); read-only apart from the build's
+own volume; and nothing of the platform's mounted. Self-hosted, that needs Docker
+running on the same computer. Under `docker compose`, the separate `builder` service
+runs them, so the backend container never runs generated code. With neither, code is
+only parsed, and **Settings → Build runner** says why.
+
 ---
 
 ## Using cloud models instead of / alongside a local runtime

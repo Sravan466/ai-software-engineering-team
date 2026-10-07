@@ -24,7 +24,15 @@ def project_summary(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return tracker.summary(db, user.id, project_id=project.id)
+    out = tracker.summary(db, user.id, project_id=project.id)
+    # The time the sandbox spent installing, building and starting the code (#75),
+    # beside the time the models spent writing it.
+    from app.core.artifacts import current_phases
+
+    runs = [ph.build_run for ph in current_phases(project) if isinstance(ph.build_run, dict)]
+    out["builds"] = len([r for r in runs if r.get("status") != "unchecked"])
+    out["build_seconds"] = round(sum(float(r.get("seconds") or 0) for r in runs), 1)
+    return out
 
 
 @router.get("/projects/{project_id}/debates")

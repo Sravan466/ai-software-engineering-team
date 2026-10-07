@@ -24,14 +24,18 @@ from pydantic import BaseModel, ValidationError
 from app.agents import handoff
 from app.router import inflight
 from app.build import contract as build_contract
-from app.build.check import BuildCheck, check_phase
+from app.build import layout as build_layout
+from app.build import runner as build_runner
+from app.build.check import BuildCheck, check_phase, phase_tree
 from app.core.config import settings
 from app.core.constants import CODE_PHASES, PHASE_ORDER, BuildStatus, Phase, RoutingMode, SchemaStatus
 from app.core.logging import get_logger
 from app.core.reading import json_object
 from app.orchestration.charter import Charter
 from app.orchestration.charter import violations as charter_violations
+from app.orchestration.claim import Superseded
 from app.router.model_profile import ModelProfile
+from app.router.base import RequestCancelled
 from app.router.router import router
 from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text, subset_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
@@ -39,6 +43,15 @@ from app.skills.loader import render as render_skill
 from app.skills.selection import Selected
 
 log = get_logger(__name__)
+
+#: The phases whose code is built for real (#75), and the side each one builds. QA's
+#: tests run in the same sandbox in #76.
+_BUILT_SIDES = {
+    Phase.FRONTEND_ENGINEER.value: build_layout.FRONTEND,
+    Phase.BACKEND_ENGINEER.value: build_layout.BACKEND,
+}
+#: The compile gate's total cap, kept for the real build's problems too.
+_BUILD_PROBLEM_CAP = 24
 
 #: What a person wrote gets whatever it needs, up to this share of the budget each.
 #: These are normally a sentence or two, so the cap almost never binds — but `idea`
@@ -140,6 +153,10 @@ class AgentResult:
     #: replies were cut off at the output limit. The "What this agent saw" panel.
     handoff: dict = field(default_factory=dict)
     truncated_replies: int = 0
+    #: The real build (#75): what installing, building and starting this phase's code
+    #: did — `BuildRun.as_dict()`. None for a phase that isn't built, or whose files
+    #: didn't parse, so there was nothing to build.
+    build_run: Optional[dict] = None
 
 
 @dataclass
@@ -278,6 +295,9 @@ class BaseAgent:
         build = self._build_check(ctx, output)
         build_errors = build.messages() if build else []
         shape_errors = [e for e in errors if e not in stack_errors and e not in build_errors]
+        # Then, once it parses, for real: installed, built and started in a sandbox.
+        # What fails there goes to the fix loop with the parser's problems.
+        build_run = self._run_build(ctx, output, build)
 
         if errors:
             # Repair stops paying after a round or two, and a local model pays
@@ -319,6 +339,7 @@ class BaseAgent:
             skills_used=best_skills,
             handoff=record,
             truncated_replies=truncated,
+            build_run=build_run,
         )
 
     def _pin(self, ctx: AgentContext) -> None:
@@ -404,6 +425,37 @@ class BaseAgent:
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure
             log.warning("%s: the compile check could not run: %s", self.title, e)
             return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")
+
+    def _run_build(self, ctx: AgentContext, output: dict, build: Optional[BuildCheck]) -> Optional[dict]:
+        """Install, build and start what this phase wrote, once it parses (#75).
+
+        Only after the parser passes: a file that doesn't parse can't build, and the
+        parser names it faster and more precisely. What the real build finds is
+        merged into `build` — a failed build fails the phase exactly as a parse error
+        does, and goes to the fix loop the same way. A runner that can't run (no
+        Docker, no builder service) leaves `build` as the parser left it.
+        """
+        side = _BUILT_SIDES.get(self.key)
+        if (
+            side is None
+            or build is None
+            or not settings.enforce_build_check
+            or not settings.build_run_enabled
+            or build.status == BuildStatus.FAILED.value
+        ):
+            return None
+        try:
+            files, _ = phase_tree(ctx.prior_outputs, self.key, output, ctx.charter)
+            run = build_runner.run_build(files, side)
+        except (RequestCancelled, Superseded):
+            raise
+        except Exception as e:  # noqa: BLE001 - the runner must not become the failure
+            log.warning("%s: the build couldn't run: %s", self.title, e)
+            return build_runner.BuildRun.unchecked(side, f"The build couldn't run: {e}").as_dict()
+        if run.status == BuildStatus.FAILED.value:
+            build.problems = (build.problems + run.problems)[:_BUILD_PROBLEM_CAP]
+            build.status = BuildStatus.FAILED.value
+        return run.as_dict()
 
     def _complete(
         self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions

@@ -263,7 +263,9 @@ PIP: dict[str, tuple[str, str]] = {
     "django": ("Django", ">=5.0,<6"),
     "rest_framework": ("djangorestframework", ">=3.15,<4"),
     "corsheaders": ("django-cors-headers", ">=4.3,<5"),
-    "sqlalchemy": ("SQLAlchemy", ">=2.0,<3"),
+    # <2.1: SQLAlchemy 2.1 made psycopg 3 the driver behind a plain `postgresql://`,
+    # and the scaffold installs psycopg2 for one — found by the real build (#75).
+    "sqlalchemy": ("SQLAlchemy", ">=2.0,<2.1"),
     "alembic": ("alembic", ">=1.13,<2"),
     "sqlmodel": ("sqlmodel", ">=0.0.16,<1"),
     "psycopg2": ("psycopg2-binary", ">=2.9,<3"),

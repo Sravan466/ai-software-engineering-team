@@ -736,7 +736,18 @@ class _Run:
         stack = charter_violations(ctx.charter, agent.key, output) if settings.enforce_stack_charter else []
         build = agent._build_check(ctx, output)
         if build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
-            build, output, errors, stack = self._fix_build(build, output, errors, stack)
+            build, output, errors, stack, _ = self._fix_build(build, output, errors, stack)
+        # Once it parses, for real (#75): installed, built and started in a sandbox —
+        # and one round on the files that build names, before the fix loop sees it.
+        build_run = agent._run_build(ctx, output, build)
+        if (
+            build is not None
+            and build_run is not None
+            and build_run.get("status") == BuildStatus.FAILED.value
+            and settings.schema_repair_rounds > 0
+        ):
+            build, output, errors, stack, rerun = self._fix_build(build, output, errors, stack, real=True)
+            build_run = rerun or build_run
 
         never = [
             p for p in self.unwritten
@@ -806,6 +817,7 @@ class _Run:
             skills_used=list(plan.skills_used),
             handoff=record,
             truncated_replies=self.truncated,
+            build_run=build_run,
         )
 
     def _assemble(self) -> tuple[dict, list[str]]:
@@ -823,12 +835,15 @@ class _Run:
         return output, errors
 
     def _fix_build(
-        self, build: BuildCheck, output: dict, errors: list[str], stack: list[str]
-    ) -> tuple[BuildCheck, dict, list[str], list[str]]:
+        self, build: BuildCheck, output: dict, errors: list[str], stack: list[str], real: bool = False
+    ) -> tuple[BuildCheck, dict, list[str], list[str], Optional[dict]]:
         """The whole-tree check failed: one round on the files it names, then check again.
 
         Only for what the per-file check could not see — an import, a name, a JavaScript
         parse. A file that already failed its own repair round has had its round.
+
+        `real`: the problems came from the real build (#75), so the re-check builds
+        again once the files parse, and the new build's record is returned last.
         """
         named: dict[str, list[Problem]] = {}
         for p in build.problems:
@@ -837,7 +852,7 @@ class _Run:
                 named.setdefault(p.path, []).append(p)
 
         if not named:
-            return build, output, errors, stack
+            return build, output, errors, stack, None
         failing: list[_Written] = []
         for path, problems in named.items():
             w = self.written[path]
@@ -863,15 +878,16 @@ class _Run:
         output2, errors2 = self._assemble()
         stack2 = charter_violations(self.ctx.charter, self.agent.key, output2) if settings.enforce_stack_charter else []
         build2 = self.agent._build_check(self.ctx, output2)
+        run2 = self.agent._run_build(self.ctx, output2, build2) if real else None
         for path in named:
             activity.file(path, "ok" if not any(p.path == path for p in (build2.problems if build2 else [])) else "failed")
         # The second check is kept only when it is no worse than the first.
         if build2 is not None and len(build2.problems) <= len(build.problems):
-            return build2, output2, errors2, stack2
+            return build2, output2, errors2, stack2, run2
         self.written = before
         for path in named:
             activity.file(path, "failed")
-        return build, output, errors, stack
+        return build, output, errors, stack, None
 
 
     def _whole(self, reason: str) -> AgentResult:

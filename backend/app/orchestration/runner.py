@@ -605,6 +605,42 @@ class PipelineRunner:
         )
         return True
 
+    @_as_owner
+    def fix_deploy(self, db: Session, project: Project, problems: list[dict]) -> Project:
+        """Send a build Vercel failed back to the Frontend Engineer, with Vercel's errors (#75).
+
+        The build was finished, so this is the Ship review's per-file redo: the frontend
+        is re-run with the problems as its note — and built for real again — and every
+        phase after it is rebuilt on top. The round belongs to the frontend's own
+        `build:` track, so the loop's rules apply from here: it re-checks, goes again,
+        or parks as needs-help. The route has already claimed the build.
+        """
+        phase = Phase.FRONTEND_ENGINEER.value
+        name = autofix.build_track(phase)
+        data = autofix.load(project)
+        t = autofix.track(data, name)
+        # A build the crew called finished failing on Vercel is a new problem: its own
+        # episode and budget, whatever was accepted or stopped before.
+        t["accepted"] = None
+        autofix.settle(t)
+        keyed = autofix.deploy_problems(problems, phase)
+        record = autofix.start_round(t, remediation.strategy_for(1), [phase], keyed)
+        record["source"] = "vercel"
+        autofix.save(project, data)
+        # Positioned at the end, as at the Ship review, so the redo rewinds everything
+        # after the frontend rather than leaving tests and findings for the old code.
+        project.current_phase = PHASE_ORDER[-1].value
+        db.commit()
+        log.info("Vercel failed %s: %d problem(s) back to the Frontend Engineer.", project.id, len(keyed))
+        return self.redo(
+            db,
+            project,
+            phase,
+            autofix.code_note(keyed, 1, None, self._standing_fix_note(data, phase)),
+            continue_after=True,
+            fix_track=name,
+        )
+
     def _remediate(self, db: Session, project: Project) -> bool:
         """Send serious findings back to the agents that own them. True if it fired.
 
@@ -1291,6 +1327,7 @@ class PipelineRunner:
         row.stack_note = violations or None
         row.build_status = lr.get("build_status")
         row.build_note = lr.get("build_problems") or None
+        row.build_run = lr.get("build_run") or None
         # Provenance, not a verdict: which procedures this deliverable was written
         # with. Empty stays empty rather than becoming null — "this phase was
         # offered skills and none fitted" is a different fact from "this row was
@@ -1651,6 +1688,9 @@ class PipelineRunner:
         project.last_error_provider = None
         project.gate_kind = None
         project.gate_note = None
+        if project.deploy_status == "fixing":
+            # The crew's fix of a failed Vercel build is finished: deploy it again.
+            project.deploy_status = "fixed"
         db.commit()
         self._write_memory(project, values)
 

@@ -4,10 +4,12 @@ import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 
 import {
   ApiError,
   api,
+  type DeployFix,
   type DeployState,
   type GithubPushResult,
   type ShipInfo,
 } from "@/lib/api";
+import { AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
 
@@ -578,7 +580,9 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
         const next = await api.deployState(id);
         if (stop) return;
         setState(next);
-        if (next.status === "ready" || next.status === "error") onChange();
+        // `fixing`: Vercel failed it and the crew has it now (#75) — the build is
+        // running again, so the page around this card reloads too.
+        if (next.status === "ready" || next.status === "error" || next.status === "fixing") onChange();
       } catch {
         // The next poll tries again.
       }
@@ -588,6 +592,29 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
       clearInterval(t);
     };
   }, [live, id, onChange]);
+
+  // While the crew fixes what Vercel rejected, follow its rounds — slower than a
+  // deploy, since a round is minutes — until it finishes or asks for help.
+  const fixing = status === "fixing";
+  const crewAtWork = fixing && (!state.fix || state.fix.state === "fixing");
+  useEffect(() => {
+    if (!crewAtWork) return;
+    let stop = false;
+    const t = setInterval(async () => {
+      try {
+        const next = await api.deployState(id);
+        if (stop) return;
+        setState(next);
+        if (next.status !== "fixing" || next.fix?.state !== "fixing") onChange();
+      } catch {
+        // The next poll tries again.
+      }
+    }, 4000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [crewAtWork, id, onChange]);
 
   async function start() {
     setBusy(true);
@@ -643,7 +670,15 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
     const b = until && seen.current[until] ? seen.current[until] : Date.now();
     return `${Math.max(0, Math.round((b - a) / 1000))}s`;
   };
-  const failedAt = status === "error" ? (seen.current.building ? "Building" : "Uploading files") : null;
+  // A build the crew is fixing (or fixed) failed on Vercel's side, after the upload.
+  const sentBack = status === "fixing" || status === "fixed";
+  const failedAt = sentBack
+    ? "Building"
+    : status === "error"
+      ? seen.current.building || state.log.length > 0
+        ? "Building"
+        : "Uploading files"
+      : null;
   const steps: { label: string; state: StepState; time?: string }[] = [
     {
       label: "Uploading files",
@@ -682,11 +717,13 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
         </span>
       </div>
 
-      {status && (
+      {status && status !== "fixed" && (
         <div aria-live="polite">
           <Steps steps={steps} />
         </div>
       )}
+
+      {sentBack && state.fix && <CrewFix fix={state.fix} />}
 
       {status === "ready" && state.url && (
         <div className="notice notice-ok">
@@ -711,23 +748,125 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
           {state.error}
         </Problem>
       )}
-      {status === "error" && state.log.length > 0 && (
+      {(status === "error" || sentBack) && state.log.length > 0 && (
         <details className="ship-log">
-          <summary>Last {state.log.length} lines of the build log</summary>
-          <pre className="mono">{state.log.join("\n")}</pre>
+          <summary>
+            {sentBack ? "What Vercel said" : "Build log"} · last {state.log.length} lines
+          </summary>
+          <pre className="mono" tabIndex={0}>
+            {state.log.join("\n")}
+          </pre>
         </details>
       )}
       {error && <Problem title="Couldn't start the deploy">{error}</Problem>}
 
       <div className="ship-actions">
-        <button type="button" className="btn btn-primary ship-go" onClick={start} disabled={busy || Boolean(live) || !info.ready}>
+        <button
+          type="button"
+          className="btn btn-primary ship-go"
+          onClick={start}
+          disabled={busy || Boolean(live) || fixing || !info.ready}
+        >
           {(busy || live) && <span className="btn-spinner" aria-hidden="true" />}
-          {live ? "Deploying…" : status === "ready" ? "Redeploy" : status === "error" ? "Retry" : "Deploy to Vercel"}
+          {live
+            ? "Deploying…"
+            : status === "ready"
+              ? "Redeploy"
+              : status === "fixed"
+                ? "Deploy again"
+                : fixing
+                  ? "Deploy again once it's fixed"
+                  : status === "error"
+                    ? "Retry"
+                    : "Deploy to Vercel"}
         </button>
         {!status && (
           <span className="field-hint">Uploads the frontend straight to your Vercel. No GitHub needed.</span>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Vercel failed the build, and the crew has it (#75): which round, of how many, and
+ * how it ended. No decision is needed while it works — the person reads progress, then
+ * deploys again once the build has finished on the fixed code.
+ */
+function CrewFix({ fix }: { fix: DeployFix }) {
+  const who = AGENT_BY_KEY.frontend_engineer;
+  const name = who ? `${who.codename}, the ${who.role}` : "the Frontend Engineer";
+  const round = Math.max(fix.round, 1);
+  const of = Math.max(fix.of, round);
+  const errors = fix.problems === 1 ? "error" : `${fix.problems} errors`;
+
+  if (fix.state === "fixed") {
+    return (
+      <div className="notice notice-ok ship-fix" role="status">
+        {Icon.check}
+        <div className="notice-body">
+          <span className="notice-title">The crew fixed what Vercel rejected</span>
+          <span className="notice-text">
+            The frontend was rebuilt from Vercel&apos;s {errors} and built cleanly here. Deploy again to put it live.
+          </span>
+        </div>
+      </div>
+    );
+  }
+  if (fix.state === "stuck") {
+    return (
+      <div className="notice notice-bad ship-fix" role="status">
+        {Icon.alert}
+        <div className="notice-body">
+          <span className="notice-title">The crew couldn&apos;t fix it on its own</span>
+          <span className="notice-text">
+            It stopped after {round} round{round === 1 ? "" : "s"}. Open the Build tab to keep trying or decide what to do.
+          </span>
+        </div>
+      </div>
+    );
+  }
+  if (fix.state === "review") {
+    return (
+      <div className="notice notice-warn ship-fix" role="status">
+        {Icon.check}
+        <div className="notice-body">
+          <span className="notice-title">Fixed. It&apos;s waiting for your review</span>
+          <span className="notice-text">
+            Approve it on the Build tab. Then deploy again.
+          </span>
+        </div>
+      </div>
+    );
+  }
+  if (fix.state === "stopped") {
+    return (
+      <div className="notice ship-fix" role="status">
+        {Icon.stop}
+        <div className="notice-body">
+          <span className="notice-title">The fix was stopped</span>
+          <span className="notice-text">Resume the build on the Build tab to carry on.</span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="notice notice-run ship-fix" role="status">
+      <span className="ship-fix-spin" aria-hidden="true">
+        {Icon.rotate}
+      </span>
+      <div className="notice-body">
+        <span className="notice-title">
+          The crew is fixing it (round {round} of {of})
+        </span>
+        <span className="notice-text">
+          Vercel&apos;s {errors} went back to {name}. The steps after it rebuild on the fix.
+        </span>
+      </div>
+      <span className="badge badge-run ship-fix-badge">
+        <span className="dot dot-run dot-pulse" aria-hidden="true" />
+        No decision needed
+      </span>
     </div>
   );
 }

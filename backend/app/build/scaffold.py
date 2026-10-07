@@ -443,11 +443,11 @@ def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str)
     sc.add(
         fe("next.config.js"),
         "/** @type {import('next').NextConfig} */\n"
-        "// Written by the platform. Type and lint errors are reported by the build's own\n"
-        "// compile check before it ships; `next build` fails only on what cannot run.\n"
+        "// Written by the platform. `next build` type-checks the app: the crew runs it\n"
+        "// before shipping, so a type error is fixed here rather than found on Vercel.\n"
+        "// Linting is left out because the platform writes no lint config.\n"
         "module.exports = {\n"
         "  reactStrictMode: true,\n"
-        "  typescript: { ignoreBuildErrors: true },\n"
         "  eslint: { ignoreDuringBuilds: true },\n"
         "};\n",
         "Next.js configuration.",
