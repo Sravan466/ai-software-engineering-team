@@ -354,6 +354,15 @@ def test_a_failed_vercel_build_shows_the_scrubbed_log(client, fakes):
     body = r.json()
     assert body["status"] == "error" and "Build failed" in body["error"]
     assert "> vite build" in body["log"] and GOOD_VERCEL not in r.text
+    # #75: the whole log is kept, scrubbed, and stays on screen on the next poll too.
+    kept = _row(pid).deploy_log
+    assert kept and "> vite build" in kept and all(GOOD_VERCEL not in line for line in kept)
+    again = client.get(f"/api/projects/{pid}/deploy").json()
+    assert again["log"] == body["log"]
+    # This build was never run by the pipeline here — there is no run to rewind — so
+    # the log is shown and nothing is sent back. `test_build_runner.py` covers the
+    # build that is.
+    assert again["fix"] is None and _row(pid).status == "completed"
 
 
 def test_only_public_database_values_reach_vercel(client, fakes):

@@ -298,6 +298,23 @@ class Settings(BaseSettings):
     #: Seconds one compile check may take before it is reported as unchecked.
     build_check_timeout_seconds: BlankTolerantInt(90) = 90
 
+    # ── The real build (#75): install, build and start the generated code ──
+    #: Once a code phase's files parse, install and build them in a sandbox — `npm
+    #: install` + `npm run build`, a Python import, a Node boot — and send what fails
+    #: back through the fix loop. Needs Docker on this computer, or a builder service.
+    build_run_enabled: bool = True
+    #: The whole build's budget, every step included. Pulling an image isn't counted.
+    build_run_timeout_seconds: BlankTolerantInt(300) = 300
+    #: Builds at once across every project. Each project builds one at a time.
+    build_run_concurrency: BlankTolerantInt(2) = 2
+    build_run_memory_mb: BlankTolerantInt(2048) = 2048
+    build_run_cpus: BlankTolerantFloat(2.0) = 2.0
+    #: A builder service to run builds in, for a backend with no Docker of its own
+    #: (docker-compose sets http://builder:8100). Blank: Docker on this computer.
+    build_runner_url: str = ""
+    #: Shared with the builder service, which refuses requests without it when set.
+    build_runner_token: Optional[SecretStr] = None
+
     # ── Cloud providers ──
     #: Keys are `SecretStr`, so a repr, a debug dump or an error report of these
     #: settings prints `**********` rather than the key.

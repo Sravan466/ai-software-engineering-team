@@ -967,6 +967,10 @@ function BuildTab({
               v={`${((Number(analytics.avg_latency_ms) || 0) / 1000).toFixed(1)}s`}
               l="Avg per phase"
             />
+            {Number(analytics.builds) > 0 && (
+              // The sandbox's time (#75): installing, building and starting the code.
+              <Stat v={`${Math.round(Number(analytics.build_seconds) || 0)}s`} l="Building it" />
+            )}
           </div>
         </div>
       )}
@@ -1368,6 +1372,7 @@ function SummaryTab({
               state={art.build?.status ?? null}
               problems={art.build?.problems.length ?? 0}
               commands={art.scaffold?.commands ?? []}
+              runs={art.build?.runs}
             />
             <FileBrowser files={artifactFiles(art.files)} />
           </div>

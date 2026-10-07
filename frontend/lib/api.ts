@@ -57,6 +57,12 @@ export type PhaseResult = {
   build_status: "ok" | "failed" | "unchecked" | null;
   /** What still does not compile, after the one repair round. */
   build_note: BuildProblem[] | null;
+  /**
+   * The real build (#75): what installing, building and starting this phase's code in
+   * a sandbox did. `null` when nothing was built — a phase that isn't built, code
+   * that didn't parse, or a row from before real builds.
+   */
+  build_run?: BuildRun | null;
 
   /**
    * The procedural skills this phase was actually given, by name and in the order
@@ -128,7 +134,8 @@ export type ActivityFileState = "planned" | "writing" | "ok" | "fixing" | "faile
 /** What the running phase is doing inside itself (#81). */
 export type Activity = {
   phase: string;
-  stage: "planning" | "writing" | "fixing" | "checking";
+  /** `building`: installing, building and starting the code in a sandbox (#75). */
+  stage: "planning" | "writing" | "fixing" | "checking" | "building";
   label: string;
   done: number;
   total: number;
@@ -144,11 +151,62 @@ export type Activity = {
 export type BuildProblem = {
   path: string;
   line: number | null;
-  /** syntax | reference | import | package */
+  /** syntax | reference | import | package | type | runtime | build */
   kind: string;
   message: string;
   /** Set when gathered across phases: the agent that wrote the file. */
   phase?: string;
+  /** Which step of a real build found it (#75). Absent for what the parser found. */
+  step?: BuildStepName | "vercel";
+};
+
+export type BuildStepName = "install" | "build" | "boot";
+
+/** One step of a real build: `npm install`, `next build`, `node server.js`. */
+export type BuildRunStep = {
+  name: BuildStepName;
+  label: string;
+  exit_code: number | null;
+  seconds: number;
+  ok: boolean;
+  timed_out: boolean;
+  skipped: boolean;
+  /** It ran until it reached for a database or the network the sandbox doesn't have. */
+  inconclusive?: boolean;
+  /** The last lines of its output. */
+  tail: string;
+};
+
+/** What installing, building and starting a code phase's output did (#75). */
+export type BuildRun = {
+  status: "ok" | "failed" | "unchecked";
+  side: string;
+  /** nextjs | vite | node | python */
+  stack: string | null;
+  /** docker | builder — where it ran. */
+  runner: string | null;
+  image: string | null;
+  /** "Installed 105 packages · `next build` passed in 12 s" */
+  summary: string;
+  /** Why it was unchecked. */
+  reason: string | null;
+  /** A step left out, and why. */
+  note: string | null;
+  seconds: number;
+  packages: number | null;
+  steps: BuildRunStep[];
+  problems: BuildProblem[];
+  at: string;
+};
+
+/** What runs the real builds, for the Settings row. */
+export type BuildRunnerStatus = {
+  kind: "docker" | "builder" | "none" | "off";
+  available: boolean;
+  reason: string | null;
+  /** "Docker 29.4.0", or the builder service's address. */
+  detail?: string | null;
+  images?: string[];
 };
 
 /** One security finding, and what has actually been done about it. */
@@ -193,6 +251,8 @@ export type AutoFixProblem = {
   /** The phase that was sent back to fix it. */
   phase: string;
   kind: "security" | "build" | "stack";
+  /** Which step of a real build found it (#75); absent for the parser's own. */
+  step?: BuildStepName | "vercel";
 };
 
 export type AutoFixRound = {
@@ -200,6 +260,8 @@ export type AutoFixRound = {
   strategy: "guided" | "with_code" | "stronger_model";
   phases: string[];
   problems: AutoFixProblem[];
+  /** `vercel`: the round was opened by a failed Vercel deploy (#75). */
+  source?: "vercel";
   /** Keys the re-check no longer reports. `null` while the round is still running. */
   fixed: string[] | null;
   remaining?: string[];
@@ -829,6 +891,8 @@ export const api = {
   // ── Settings: will each model run, and how it is tuned ──
   /** Every model on every answering source, checked. The first ask describes each. */
   getCompatibility: () => req<Compatibility>("/api/settings/compatibility", {}, LLM_TIMEOUT_MS),
+  /** What builds the generated code for real (#75): Docker, a builder service, or nothing. */
+  getBuildRunner: () => req<BuildRunnerStatus>("/api/settings/build-runner"),
   getModelGeneration: (spec: string) =>
     req<ModelGeneration>(`/api/settings/models/generation?spec=${encodeURIComponent(spec)}`),
   /** Replaces what is saved for this model; a field left out goes back to its default. */
@@ -1105,7 +1169,29 @@ export type VercelTokenResult = {
   vercel: VercelConnection;
 };
 
-export type DeployStatus = "queued" | "uploading" | "building" | "ready" | "error" | "handed_off";
+export type DeployStatus =
+  | "queued"
+  | "uploading"
+  | "building"
+  | "ready"
+  | "error"
+  | "handed_off"
+  /** Vercel failed the build and the crew is fixing it (#75). */
+  | "fixing"
+  /** The crew's fix is done: deploy again. */
+  | "fixed";
+
+/** The crew's fix of a failed Vercel build (#75). */
+export type DeployFix = {
+  /** fixing · review (fixed, waiting at a review) · stuck (asked for help) · fixed · stopped */
+  state: "fixing" | "review" | "stuck" | "fixed" | "stopped";
+  round: number;
+  of: number;
+  problems: number;
+  attempt: number;
+  /** The rebuilt frontend was itself built for real — not only parsed. */
+  verified?: boolean;
+};
 
 export type DeployState = {
   target: "vercel" | "render" | null;
@@ -1115,6 +1201,8 @@ export type DeployState = {
   deployed_at: string | null;
   /** The last lines of a failed build's log, scrubbed. */
   log: string[];
+  /** Set while — and after — the crew fixes what Vercel rejected. */
+  fix?: DeployFix | null;
 };
 
 export type ShipInfo = {
@@ -1635,6 +1723,8 @@ export type Artifacts = {
     status: "ok" | "failed" | "unchecked" | null;
     phases: Record<string, string | null>;
     problems: BuildProblem[];
+    /** Each built phase's real build (#75): its outcome and one-line summary. */
+    runs?: Record<string, { status: BuildRun["status"]; summary: string }>;
   };
 };
 

@@ -165,13 +165,18 @@ class Project(Base):
     deploy_target: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     #: The live URL: Vercel's, or the one the user pasted back from Render.
     deploy_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    #: `queued`, `uploading`, `building`, `ready`, `error`, or `handed_off` for Render.
+    #: `queued`, `uploading`, `building`, `ready`, `error`, or `handed_off` for Render —
+    #: and, once a failed Vercel build is sent back to the crew (#75), `fixing` while it
+    #: works on it and `fixed` once the build finishes again, ready to deploy again.
     deploy_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     #: Vercel's deployment id, polled for its state.
     deploy_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     deployed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     #: Why the last deploy failed, scrubbed, in words a person can act on.
     deploy_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: A failed Vercel build's whole event log, scrubbed, line by line (#75) — what the
+    #: crew's fix round was given, and what the page shows. Null until one fails.
+    deploy_log: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     # ── the stack this build is held to ──────────────────────────────────────
     #: Frozen once the architecture is settled, and binding on every phase after it:
@@ -346,6 +351,11 @@ class PhaseResult(Base):
     # for phases that write no code at all.
     build_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     build_note: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    #: What installing, building and starting this phase's code in a sandbox did (#75):
+    #: `{status, summary, runner, steps: [{name, label, exit_code, seconds, tail}], …}`.
+    #: Null for rows from before real builds, phases that aren't built, and code that
+    #: didn't parse — there was nothing to build.
+    build_run: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     #: The skills this phase was actually given, by name, in the order they were
     #: injected. What was *selected* is a different fact: a skill that did not fit

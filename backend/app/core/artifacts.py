@@ -217,8 +217,14 @@ def assemble(project: Project) -> dict:
 
     pm = next((ph.output for ph in phases if ph.phase == "product_manager" and isinstance(ph.output, dict)), {})
     product = str(pm.get("product_name") or project.name or project.idea or "app")
+    # Type errors fail `next build` only for a frontend that really built clean (#75).
+    # Anything else — never built, or built with errors a person shipped anyway —
+    # would first be type-checked on Vercel, failing there on what was accepted here.
+    frontend = next((ph for ph in phases if ph.phase == "frontend_engineer"), None)
+    run = getattr(frontend, "build_run", None) if frontend is not None else None
+    built = isinstance(run, dict) and run.get("status") == BuildStatus.OK.value
     scaffold = scaffold_build(
-        {p: f["content"] for p, f in files.items()}, charter, design, product
+        {p: f["content"] for p, f in files.items()}, charter, design, product, type_check=built
     )
 
     for path, (content, notes) in scaffold.rewrites.items():
@@ -275,6 +281,13 @@ def assemble(project: Project) -> dict:
             "status": state,
             "phases": statuses,
             "problems": problems,
+            # What the real build did for each built phase (#75): ok | failed |
+            # unchecked, and its one-line summary.
+            "runs": {
+                ph.phase: {"status": ph.build_run.get("status"), "summary": ph.build_run.get("summary")}
+                for ph in phases
+                if isinstance(getattr(ph, "build_run", None), dict)
+            },
         },
     }
 

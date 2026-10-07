@@ -444,6 +444,20 @@ def _drive_redo(project_id: str, phase: str, feedback: str, token: str) -> None:
         db.close()
 
 
+def _drive_deploy_fix(project_id: str, problems: list[dict], token: str) -> None:
+    """Background task: a build Vercel failed, back to the crew with its errors (#75)."""
+    db = SessionLocal()
+    try:
+        project = db.get(Project, project_id)
+        if project is not None:
+            runner.fix_deploy(db, project, problems, claim_token=token)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Deploy fix task crashed for %s", project_id)
+        _strand(db, project_id, str(e), token)
+    finally:
+        db.close()
+
+
 #: What a reviewer is told when the platform itself fell over, rather than a model.
 #: The exception text goes to the log, where someone can act on it; a field the UI
 #: renders should not read "UPDATE statement on table 'phase_results'".

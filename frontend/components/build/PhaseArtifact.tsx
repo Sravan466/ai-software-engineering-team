@@ -7,6 +7,7 @@ import Markdown from "@/components/ui/Markdown";
 import { Icon } from "@/components/shell/icons";
 import DetailFields from "./DetailFields";
 import { HowWritten } from "./CodeWriting";
+import BuildRunLine from "./BuildRunLine";
 
 import FileBrowser from "./FileBrowser";
 import Mermaid from "./Mermaid";
@@ -87,6 +88,10 @@ export default function PhaseArtifact({
           Checks and later phases can&apos;t read it. Send it back to try again.
         </p>
       )}
+
+      {/* Whether the code installs, builds and starts (#75): outcome first, the
+          terminal folded under it — open when it failed. */}
+      <BuildRunLine run={row.build_run} />
 
       {views.length > 1 && (
         <div className="artifact-bar">

@@ -5,7 +5,9 @@
     DELETE /api/deploy/vercel/token            forget it
     GET    /api/projects/{id}/ship             what "Deploy it" will do for this build
     POST   /api/projects/{id}/deploy           deploy (Vercel) or hand off (Render)
-    GET    /api/projects/{id}/deploy           the deploy's state, polled
+    GET    /api/projects/{id}/deploy           the deploy's state, polled — and, when
+                                               Vercel fails the build, the crew is sent
+                                               its errors to fix (#75)
     PUT    /api/projects/{id}/deploy/url       the live URL pasted back from Render
 
 A frontend-only build goes straight to Vercel through its API: no GitHub needed.
@@ -36,12 +38,13 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_project
 from app.api.routes import github as github_routes
 from app.api.routes.settings import _trusted_host
-from app.build import blueprint, dbconnect, scaffold
+from app.build import blueprint, buildlog, dbconnect, scaffold
 from app.build.layout import FRONTEND
 from app.core import artifacts, deploy_store, project_secrets, scrub, secretbox, vercel
 from app.core import github_publish as gh
 from app.core.config import settings
-from app.core.constants import PipelineStatus
+from app.core.constants import Phase, PipelineStatus
+from app.orchestration import autofix
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
 from app.db.models import Project
@@ -187,6 +190,10 @@ def ship(request: Request, project: Project = Depends(get_project)) -> dict:
     assembled = artifacts.assemble(project)
     info = assembled.get("scaffold") or {}
     kind = blueprint.kind(info) if assembled["files"] else None
+    if project.deploy_target == "vercel" and project.deploy_status in ("fixing", "fixed") and kind is None:
+        # Mid-fix the frontend being rebuilt has no current output yet, so the build
+        # assembles as empty. It was a Vercel build, and it still is (#75).
+        kind = blueprint.FRONTEND_ONLY
     files = {f["path"]: f["content"] for f in assembled["files"]}
     render = (
         blueprint.summary(
@@ -217,15 +224,64 @@ def ship(request: Request, project: Project = Depends(get_project)) -> dict:
     }
 
 
+#: Lines of a failed build's log the page is sent; the whole log stays on the row.
+_LOG_SHOWN = 40
+#: Deploy states that come with the failed build's log.
+_WITH_LOG = ("error", "fixing", "fixed")
+
+
 def _deploy_state(project: Project, log_lines: Optional[list[str]] = None) -> dict:
+    kept = project.deploy_log if project.deploy_status in _WITH_LOG else None
     return {
         "target": project.deploy_target,
         "status": project.deploy_status,
         "url": project.deploy_url,
         "error": project.deploy_error,
         "deployed_at": _iso(project.deployed_at),
-        "log": log_lines or [],
+        "log": log_lines if log_lines is not None else list(kept or [])[-_LOG_SHOWN:],
+        "fix": _fix_state(project),
     }
+
+
+def _fix_state(project: Project) -> Optional[dict]:
+    """The crew's fix of a failed Vercel build (#75): which round, of how many, and how
+    it ended — `fixing`, `stuck` (it parked asking for help) or `fixed`."""
+    if project.deploy_status not in ("fixing", "fixed"):
+        return None
+    data = autofix.load(project)
+    t = data["tracks"].get(autofix.build_track(Phase.FRONTEND_ENGINEER.value)) or {}
+    rounds = t.get("rounds") or []
+    start = max((i for i, r in enumerate(rounds) if r.get("source") == "vercel"), default=None)
+    since = rounds[start:] if start is not None else []
+    # The budget the round started with: the track's own moves on once it settles.
+    budget = rounds[start].get("of") if start is not None else None
+    allowed = max(int(budget or (int(t.get("allowed") or 0) - (start or 0))), len(since))
+    stuck = bool(t.get("stopped")) and not t.get("accepted")
+    if project.deploy_status == "fixed":
+        state = "fixed"
+    elif project.status == PipelineStatus.RUNNING.value:
+        state = "fixing"
+    elif project.status == PipelineStatus.AWAITING_APPROVAL.value:
+        # Parked: asking for help, or — fixed — waiting at a review before it finishes.
+        state = "stuck" if stuck else "review"
+    else:
+        state = "stopped"
+    return {
+        "state": state,
+        "round": len(since),
+        "of": allowed,
+        "problems": len(rounds[start].get("problems") or []) if start is not None else 0,
+        "attempt": int((data.get("vercel") or {}).get("attempts") or 0),
+        # Whether the rebuilt frontend was itself built for real. Without a runner the
+        # re-check only parsed it, and can't say Vercel's error is gone.
+        "verified": _frontend_built(project) if state == "fixed" else False,
+    }
+
+
+def _frontend_built(project: Project) -> bool:
+    row = next((ph for ph in artifacts.current_phases(project) if ph.phase == Phase.FRONTEND_ENGINEER.value), None)
+    run = row.build_run if row is not None else None
+    return isinstance(run, dict) and run.get("status") == "ok"
 
 
 def _settle_interrupted(project: Project) -> None:
@@ -298,7 +354,7 @@ def _claim_deploy(db: Session, project: Project, target: str, status: str) -> bo
             Project.id == project.id,
             or_(Project.deploy_status.is_(None), Project.deploy_status.notin_(IN_FLIGHT)),
         )
-        .values(deploy_target=target, deploy_status=status, deploy_error=None, deploy_id=None)
+        .values(deploy_target=target, deploy_status=status, deploy_error=None, deploy_id=None, deploy_log=None)
     )
     db.commit()
     db.refresh(project)
@@ -437,6 +493,7 @@ def deploy(
 @router.get("/api/projects/{project_id}/deploy")
 def deploy_status(
     request: Request,
+    background: BackgroundTasks,
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -462,14 +519,94 @@ def deploy_status(
         project.deploy_status = "ready"
         project.deploy_url = vercel.live_url(found) or project.deploy_url
         project.deployed_at = _now()
+        data = autofix.load(project)
+        if data.get("vercel"):
+            # It built: the next failure, if there is one, starts the count again.
+            data["vercel"]["attempts"] = 0
+            autofix.save(project, data)
         db.commit()
     elif state in ("ERROR", "CANCELED"):
-        project.deploy_status = "error"
-        reason = found.get("errorMessage") or ("The build was cancelled." if state == "CANCELED" else "")
-        project.deploy_error = scrub.scrub(f"Build failed on Vercel — see the log. {reason}".strip())[:500]
+        # The page polls every few seconds, and a slow poll can still be reading the
+        # log when the next one arrives. The move off `building` is one conditional
+        # write: only the poll that wins it reads the log and may send the build back.
+        won = db.execute(
+            update(Project)
+            .where(Project.id == project.id, Project.deploy_status == "building",
+                   Project.deploy_id == project.deploy_id)
+            .values(deploy_status="error")
+        ).rowcount == 1
         db.commit()
-        return _deploy_state(project, vercel.log_tail(token, project.deploy_id))
+        db.refresh(project)
+        if not won:
+            return _deploy_state(project)
+        lines = vercel.events(token, project.deploy_id)
+        if project.deployed_at is None:
+            # Never went live: its address would only ever show Vercel's error page.
+            project.deploy_url = None
+        reason = vercel.failure(found) or ("The build was cancelled." if state == "CANCELED" else "")
+        project.deploy_error = scrub.scrub(f"Build failed on Vercel — see the log. {reason}".strip())[:500]
+        project.deploy_log = lines or None
+        db.commit()
+        if state == "ERROR":
+            _send_back(db, project, lines, background)
+        return _deploy_state(project, lines[-_LOG_SHOWN:])
     return _deploy_state(project)
+
+
+def _send_back(db: Session, project: Project, lines: list[str], background: BackgroundTasks) -> bool:
+    """Vercel failed the build: hand its errors to the crew, as a fix round (#75).
+
+    The same loop a compile error goes through — `build:frontend_engineer` — with
+    Vercel's own errors as the problems. Only for a finished build the platform ran
+    (a checkpoint to rewind), only when an error is in a file the crew wrote (a
+    missing variable in the Vercel project isn't the code's fault), and at most
+    `auto_fix_max_rounds` times in a row without a deploy that builds.
+    """
+    from app.api.routes.projects import _claim, _drive_deploy_fix
+    from app.orchestration.runner import PipelineRunner
+
+    if project.status != PipelineStatus.COMPLETED.value or not lines:
+        return False
+    started, _ = PipelineRunner._graph_position(project.id)
+    if not started:
+        return False
+    assembled = artifacts.assemble(project)
+    prefix = FRONTEND + "/"
+    crew = {
+        f["path"] for f in assembled["files"]
+        if f["path"].startswith(prefix) and f.get("phase") == Phase.FRONTEND_ENGINEER.value
+    }
+    names = [f["path"][len(prefix):] for f in assembled["files"] if f["path"].startswith(prefix)]
+    problems = buildlog.prefixed(buildlog.vercel_problems(lines, names), FRONTEND)
+    # The manifest is the platform's, written from the crew's imports: a package npm
+    # can't install is fixed by importing something else, which is the crew's to do.
+    manifest = f"{FRONTEND}/package.json"
+    if not any(p.path in crew or (p.path == manifest and p.kind == "package") for p in problems):
+        project.deploy_error = (
+            f"{project.deploy_error} The error isn't in a file the crew wrote, so it wasn't sent back."
+        )[:500]
+        db.commit()
+        return False
+    attempts = int((autofix.load(project).get("vercel") or {}).get("attempts") or 0)
+    if attempts >= max(int(settings.auto_fix_max_rounds), 0):
+        project.deploy_error = (
+            f"Vercel still fails after the crew fixed it {attempts} time{'s' if attempts != 1 else ''}. "
+            "Read the log, or send the frontend back with a note."
+        )
+        db.commit()
+        return False
+    token = _claim(db, project, {PipelineStatus.COMPLETED.value})
+    if not token:
+        return False  # resumed or redone a moment ago: the deploy stays failed, with its log
+    # Counted once the crew has the build: an attempt that never started isn't one.
+    data = autofix.load(project)
+    data.setdefault("vercel", {}).update(attempts=attempts + 1, deploy_id=project.deploy_id)
+    autofix.save(project, data)
+    project.deploy_status = "fixing"
+    db.commit()
+    log.info("Vercel failed %s; sending %d problem(s) back to the Frontend Engineer.", project.id, len(problems))
+    background.add_task(_drive_deploy_fix, project.id, [p.as_dict() for p in problems], token)
+    return True
 
 
 class LiveUrl(BaseModel):

@@ -27,6 +27,7 @@ import AgentSprite from "@/components/agents/AgentSprite";
 import { CheckDetail, VerdictChip } from "@/components/models/ModelCheck";
 import ModelTune from "@/components/models/ModelTune";
 import DeploySettings from "@/components/deploy/DeploySettings";
+import BuildRunnerSettings from "@/components/build/BuildRunnerSettings";
 import { ago, useNow } from "@/components/setup/parts";
 
 const PROVIDERS: {
@@ -86,6 +87,7 @@ export default function SettingsPage() {
         <RoleModelCard refreshKey={changed} />
         <ApiKeysCard />
         <DeploySettings />
+        <BuildRunnerSettings />
       </div>
     </div>
   );

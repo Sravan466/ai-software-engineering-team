@@ -49,6 +49,11 @@ async def lifespan(app: FastAPI):
     from app.build import toolchain
 
     toolchain.warm_up()
+    # And the images the real build runs in (#75), so the first Frontend phase isn't
+    # the one that waits on `docker pull`.
+    from app.build import runner as build_runner
+
+    build_runner.warm_up()
     # Find the model runtimes on this machine now rather than inside the first
     # request that needs one. Loopback only; in the background, so a runtime that is
     # slow to answer never holds up startup.

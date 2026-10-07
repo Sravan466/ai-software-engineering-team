@@ -12,9 +12,9 @@ failures that stop a build before it runs:
   **import**    — a relative import of a file nobody wrote, or a package the platform
                   cannot put in the manifest
 
-Type errors are deliberately not on the list. They are real, but a build with them
-still runs, and failing a 7B model's phase over a mistyped prop would send correct
-work back for a reason `next build` itself is configured to ignore.
+Type errors are not on this list: a parser can't judge them without the packages
+installed. The real build does (`runner.py`, #75) — once a phase parses, it is
+installed and built with `next build`, which type-checks, in a sandbox.
 """
 from __future__ import annotations
 
@@ -50,15 +50,21 @@ _TOTAL = 24
 class Problem:
     path: str
     message: str
-    kind: str  # syntax | reference | import | package
+    kind: str  # syntax | reference | import | package | type | runtime | build
     line: Optional[int] = None
+    #: Which step of a real build found it (#75) — install | build | boot | vercel.
+    #: None for what the parser found.
+    step: Optional[str] = None
 
     def text(self) -> str:
         where = f"`{self.path}`" + (f" line {self.line}" if self.line else "")
         return f"{where} — {self.message}"
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "line": self.line, "kind": self.kind, "message": self.message}
+        out = {"path": self.path, "line": self.line, "kind": self.kind, "message": self.message}
+        if self.step:
+            out["step"] = self.step
+        return out
 
 
 @dataclass

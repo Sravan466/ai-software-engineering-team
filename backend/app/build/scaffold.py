@@ -401,7 +401,7 @@ def _frontend_env(files: dict[str, str], required: tuple[str, ...] = ()) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str) -> None:
+def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str, type_check: bool = True) -> None:
     ts = any(p.endswith(_TS_EXT) for p in files)
     src = "src/" if any(p.startswith(("src/app/", "src/pages/")) for p in files) else ""
     app_router = any(re.match(rf"{src}app/.*page\.[jt]sx?$", p) for p in files)
@@ -440,15 +440,27 @@ def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str)
         }),
         "Dependencies derived from what the frontend imports, pinned to known-good ranges.",
     )
+    # `next build` type-checks only a frontend the crew really built (#75): then a type
+    # error was found and fixed before shipping, and what Vercel fails on, the crew
+    # failed on first. A build nothing compiled for real keeps ignoring type errors,
+    # as it always did — failing it on Vercel would fail it where nobody can see why.
+    typescript = "" if type_check else "  typescript: { ignoreBuildErrors: true },\n"
+    note = (
+        "// Written by the platform. `next build` type-checks the app: the crew built it\n"
+        "// before shipping, so a type error was fixed there rather than found on Vercel.\n"
+        if type_check
+        else "// Written by the platform. Type errors don't fail the build: this one wasn't\n"
+        "// built for real before shipping, only parsed.\n"
+    )
     sc.add(
         fe("next.config.js"),
         "/** @type {import('next').NextConfig} */\n"
-        "// Written by the platform. Type and lint errors are reported by the build's own\n"
-        "// compile check before it ships; `next build` fails only on what cannot run.\n"
+        + note
+        + "// Linting is left out because the platform writes no lint config.\n"
         "module.exports = {\n"
         "  reactStrictMode: true,\n"
-        "  typescript: { ignoreBuildErrors: true },\n"
-        "  eslint: { ignoreDuringBuilds: true },\n"
+        + typescript
+        + "  eslint: { ignoreDuringBuilds: true },\n"
         "};\n",
         "Next.js configuration.",
     )
@@ -1042,8 +1054,13 @@ def build(
     charter=None,
     design_output: Optional[dict] = None,
     product: str = "app",
+    type_check: bool = True,
 ) -> Scaffold:
-    """Everything the platform writes for this build, from what the agents wrote."""
+    """Everything the platform writes for this build, from what the agents wrote.
+
+    `type_check`: whether the generated Next.js config lets `next build` fail on type
+    errors — on for the real build, and for an archive whose frontend was built (#75).
+    """
     sc = Scaffold()
     slug = _slug(product)
     frontend_files = _side_files(tree, FRONTEND)
@@ -1078,7 +1095,7 @@ def build(
     dialect = database if database in ("postgres", "mysql") else "sqlite"
 
     if sc.frontend == "nextjs":
-        _scaffold_next(sc, frontend_files, slug, product)
+        _scaffold_next(sc, frontend_files, slug, product, type_check)
     elif sc.frontend in ("react", "vue", "svelte"):
         _scaffold_vite(sc, frontend_files, slug, product, sc.frontend)
     elif sc.frontend:

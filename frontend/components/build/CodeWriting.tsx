@@ -66,6 +66,14 @@ export function ActivityLine({ activity, fallback }: { activity: Activity | null
       return <span className="working-verb">is planning the files</span>;
     case "checking":
       return <span className="working-verb">is checking the build</span>;
+    case "building":
+      // The real build (#75): which command is running in the sandbox right now.
+      return (
+        <span className="working-verb working-act">
+          is building it
+          {activity.detail && <code className="working-file">{activity.detail}</code>}
+        </span>
+      );
     case "fixing":
     case "writing":
       return (

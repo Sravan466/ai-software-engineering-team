@@ -300,3 +300,32 @@
 .ship-badges a:hover .badge { border-color: var(--line-3); }
 .ship-badges .badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .ship-badges svg { width: 12px; height: 12px; flex: none; }
+
+/* ── Vercel failed it, and the crew has it (#75) ──────────────────────────
+   The run colour, as everywhere a crew is at work; the badge says no one is
+   being asked anything. */
+.notice-run { border-color: rgba(34, 184, 207, 0.4); background: var(--run-soft); }
+.ship-fix { align-items: flex-start; }
+.ship-fix-spin { display: inline-flex; flex: none; margin-top: 1px; color: var(--run); }
+.ship-fix-spin svg { width: 18px; height: 18px; animation: spin 2.4s linear infinite; }
+.ship-fix-badge { flex: none; margin-left: auto; align-self: flex-start; }
+.ship-log pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ship-log pre::selection { background: var(--accent-soft); color: var(--ink); }
+@media (max-width: 560px) {
+  .ship-fix { flex-wrap: wrap; }
+  .ship-fix .notice-body { flex: 1 1 calc(100% - 30px); }
+  .ship-fix-badge { margin-left: 30px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ship-fix-spin svg { animation: none; }
+}
+
+/* Settings → Build runner (#75): the same row as a connected account. */
+.runner-mark { color: var(--ink-3); }
+.runner-row[data-ok] .runner-mark { color: var(--ok); }
+.runner-reason { display: block; margin-top: 2px; font-size: var(--t-xs); color: var(--ink-3); }
+.runner-row .ship-conn-actions .btn svg { width: 13px; height: 13px; }
+@media (max-width: 560px) {
+  .runner-row .ship-conn-actions { flex-basis: 100%; }
+  .runner-row .ship-conn-actions .btn { min-height: 44px; }
+}

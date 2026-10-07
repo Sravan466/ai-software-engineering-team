@@ -67,6 +67,33 @@ function openRound(t: AutoFixTrack): AutoFixRound | null {
   return last && last.fixed === null ? last : null;
 }
 
+/** What a build problem broke, by the step that found it (#75). */
+const BROKE: Record<string, string> = {
+  install: "doesn't install",
+  build: "fails the build",
+  boot: "crashes on start",
+  vercel: "failed on Vercel",
+};
+
+/** Where a real build found a problem, as a tag beside it. */
+const FOUND_BY: Record<string, string> = {
+  install: "Install",
+  build: "Build",
+  boot: "Start-up",
+  vercel: "Vercel",
+};
+
+/** A problem's first line as its title; a pasted log under it, as a terminal. */
+function ProblemTitle({ title }: { title: string }) {
+  const [head, ...rest] = title.split("\n");
+  return (
+    <>
+      <b className="fix-item-title">{head}</b>
+      {rest.length > 0 && <pre className="fix-item-tail mono">{rest.join("\n")}</pre>}
+    </>
+  );
+}
+
 function trackLabel(name: string): string {
   if (name === "security") return "security findings";
   const phase = name.replace(/^build:/, "");
@@ -122,6 +149,7 @@ export function FixingPanel({ project }: { project: Project }) {
     <section className="fixing" aria-labelledby="fixing-title" aria-live="polite">
       {live.map(([name, t, round]) => {
         const count = round.problems.length;
+        const fromVercel = round.source === "vercel";
         const onIt = round.phases.includes(project.current_phase ?? "")
           ? project.current_phase
           : null;
@@ -134,8 +162,9 @@ export function FixingPanel({ project }: { project: Project }) {
               <span className="fixing-mark" aria-hidden="true">{Icon.rotate}</span>
               <div className="fixing-headings">
                 <h2 id="fixing-title">
-                  Fixing {count} serious {name === "security" ? "issue" : "problem"}
-                  {count === 1 ? "" : "s"}
+                  {fromVercel
+                    ? `Fixing what Vercel rejected: ${count} problem${count === 1 ? "" : "s"}`
+                    : `Fixing ${count} serious ${name === "security" ? "issue" : "problem"}${count === 1 ? "" : "s"}`}
                 </h2>
                 <p>
                   {/* Counted within this episode: a fresh problem gets a fresh budget. */}
@@ -164,9 +193,10 @@ export function FixingPanel({ project }: { project: Project }) {
                 <li key={p.key} className="fix-item">
                   <div className="fix-item-main">
                     {p.severity && <span className="badge badge-bad">{p.severity}</span>}
-                    <b className="fix-item-title">{p.title}</b>
+                    <ProblemTitle title={p.title} />
                   </div>
                   <div className="fix-item-meta">
+                    {p.step && <span className="fix-item-step">{FOUND_BY[p.step] ?? p.step}</span>}
                     {p.where && <code className="mono">{p.where}</code>}
                     <Owner phase={p.phase} />
                     <StepRail step={stepFor(p, name, project.current_phase)} />
@@ -350,9 +380,9 @@ function CodeLeft({ track }: { track: AutoFixTrack }) {
         <li key={p.key} className="fix-item" data-left>
           <div className="fix-item-main">
             <span className="badge badge-bad">
-              {p.kind === "stack" ? "contradicts the stack" : "doesn't compile"}
+              {p.kind === "stack" ? "contradicts the stack" : BROKE[p.step ?? ""] ?? "doesn't compile"}
             </span>
-            <b className="fix-item-title">{p.title}</b>
+            <ProblemTitle title={p.title} />
           </div>
           {p.where && (
             <div className="fix-item-meta">

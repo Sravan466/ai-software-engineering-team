@@ -24,6 +24,10 @@ os.environ["ENABLE_DEBATE"] = "true"
 # has TypeScript installed, the gate reads JavaScript with it; otherwise JavaScript is
 # reported unchecked and the tests that need a parser skip themselves.
 os.environ["BUILD_CHECK_PROVISION"] = "false"
+# Nor does it build anything in Docker (#75): the real build is off unless a test puts
+# a fake engine in `app.build.runner.engine` and switches it on.
+os.environ["BUILD_RUN_ENABLED"] = "false"
+os.environ["BUILD_RUNNER_URL"] = ""
 # Model sources: none. Left alone, the suite would find whatever runtimes the machine
 # running it has on loopback — and the developer's `.env` would add its own — so a
 # test's answer would depend on what happened to be running.

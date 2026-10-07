@@ -10,7 +10,8 @@ in; it is held encrypted by `app.core.deploy_store` and handed in per call.
                                            `missing_files` with the ones it lacks …
     POST /v2/files                         … which are uploaded, and it is sent again
     GET  /v13/deployments/{id}             QUEUED → BUILDING → READY | ERROR
-    GET  /v3/deployments/{id}/events       the build log, for a failed build
+    GET  /v3/deployments/{id}/events       the build log, for a failed build — kept,
+                                           and sent back to the crew (#75)
 
 Sending the list first means a redeploy uploads only what changed. The project is
 named after the build, so every redeploy lands on the same `<name>.vercel.app`.
@@ -180,27 +181,45 @@ def status(token: str, deployment_id: str) -> dict:
     return r.json()
 
 
-def log_tail(token: str, deployment_id: str, lines: int = 40) -> list[str]:
-    """The last `lines` lines of the build log, scrubbed. Empty when it can't be read."""
+#: Lines of a failed build's log kept (#75): a `next build` failure is a few hundred.
+LOG_LINES = 3000
+
+
+def events(token: str, deployment_id: str) -> list[str]:
+    """The whole build log, line by line, scrubbed. Empty when it can't be read.
+
+    Every event, not only `stderr`: `next build` prints "Failed to compile." and the
+    file under it on stdout, and the parsers need both.
+    """
     try:
         with _client(token) as c:
-            r = c.get(f"/v3/deployments/{deployment_id}/events", params={"limit": 200})
+            # -1: every event Vercel kept, not the default page.
+            r = c.get(f"/v3/deployments/{deployment_id}/events", params={"limit": -1, "builds": 1})
     except httpx.HTTPError:
         return []
     if r.status_code != 200:
         return []
     try:
-        events = r.json()
+        found = r.json()
     except ValueError:
         return []
     out: list[str] = []
-    for event in events if isinstance(events, list) else []:
+    for event in found if isinstance(found, list) else []:
         if not isinstance(event, dict):
             continue
         text = event.get("text") or (event.get("payload") or {}).get("text")
         if isinstance(text, str) and text.strip():
             out.extend(line for line in text.splitlines() if line.strip())
-    return [scrub.scrub(line)[:400] for line in out[-lines:]]
+    return [scrub.scrub(line)[:400] for line in out[-LOG_LINES:]]
+
+
+def failure(deployment: dict) -> str:
+    """Why Vercel says a deployment failed — its message, code and step — in one line."""
+    text = str(deployment.get("errorMessage") or "").strip()
+    code = str(deployment.get("errorCode") or "").strip()
+    step = str(deployment.get("errorStep") or "").strip()
+    extra = ", ".join(x for x in (code, f"during {step}" if step else "") if x)
+    return f"{text} ({extra})" if text and extra else (text or extra)
 
 
 def live_url(deployment: dict) -> Optional[str]:

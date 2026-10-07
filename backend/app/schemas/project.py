@@ -191,6 +191,9 @@ class PhaseResultOut(BaseModel):
     build_status: Optional[str] = None
     #: `[{path, line, kind, message}]` for what still does not compile.
     build_note: Optional[list[dict]] = None
+    #: The real build (#75): `{status, summary, runner, seconds, steps: [{name, label,
+    #: exit_code, seconds, ok, tail}], problems, reason}`. `None` when nothing was built.
+    build_run: Optional[dict] = None
 
     #: The procedural skills this phase was actually given, by name and in the order
     #: they were injected. `None` on rows written before the library existed — which

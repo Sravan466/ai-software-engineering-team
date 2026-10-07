@@ -706,6 +706,89 @@
 .artifact-skills-label { font-size: var(--t-xs); color: var(--ink-3); margin-right: 2px; }
 .artifact-skills .pick { font-size: 11px; }
 
+/* ── the real build (#75): one line, the terminal folded under it ──────────
+   The same band language as "What this agent saw", at the top of the card
+   because it is an outcome, not provenance. State is said in words and by the
+   mark's shape; the colour only agrees. */
+.buildrun { border-bottom: 1px solid var(--line); background: var(--bg-panel); }
+.buildrun[data-state="failed"] { background: var(--bad-soft); border-bottom-color: rgba(240, 82, 82, 0.4); }
+.buildrun > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 9px 14px;
+  list-style: none;
+  cursor: pointer;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.buildrun > summary::-webkit-details-marker { display: none; }
+.buildrun > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.buildrun-chev { display: inline-flex; color: var(--ink-3); transition: transform var(--tr); }
+.buildrun-chev svg { width: 12px; height: 12px; }
+.buildrun[open] .buildrun-chev { transform: rotate(90deg); }
+.buildrun-mark { display: inline-flex; }
+.buildrun-mark svg { width: 15px; height: 15px; }
+.buildrun[data-state="ok"] .buildrun-mark { color: var(--ok); }
+.buildrun[data-state="failed"] .buildrun-mark { color: var(--bad); }
+.buildrun[data-state="unchecked"] .buildrun-mark { color: var(--ink-3); }
+.buildrun-title { color: var(--ink); font-weight: 600; }
+.buildrun-summary { min-width: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.buildrun[data-state="failed"] .buildrun-summary { color: var(--ink); }
+.buildrun > summary:hover .buildrun-summary { color: var(--ink); }
+.buildrun-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink);
+}
+.buildrun-where { margin-left: auto; font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+.buildrun-body { padding: 0 14px 12px 34px; display: flex; flex-direction: column; gap: 10px; }
+.buildrun-note { margin: 0; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.5; }
+.buildrun-steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.buildrun-step { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.buildrun-step-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+.buildrun-step-mark { display: inline-flex; color: var(--ink-3); }
+.buildrun-step-mark svg { width: 13px; height: 13px; }
+.buildrun-step[data-state="ok"] .buildrun-step-mark { color: var(--ok); }
+.buildrun-step[data-state="bad"] .buildrun-step-mark { color: var(--bad); }
+.buildrun-step[data-state="env"] .buildrun-step-mark { color: var(--warn); }
+.buildrun-cmd { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink); }
+.buildrun-step[data-state="skip"] .buildrun-cmd { color: var(--ink-3); }
+.buildrun-step-meta { font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.buildrun-term {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.6;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-color: var(--line-3) transparent;
+  scrollbar-width: thin;
+}
+.buildrun-step[data-state="bad"] .buildrun-term { border-color: rgba(240, 82, 82, 0.35); color: var(--ink); }
+.buildrun-term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.buildrun-term::selection { background: var(--accent-soft); color: var(--ink); }
+@media (max-width: 560px) {
+  .buildrun > summary { min-height: 44px; }
+  .buildrun-body { padding-left: 14px; }
+  .buildrun-where { margin-left: 0; flex-basis: 100%; padding-left: 41px; white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .buildrun-chev { transition: none; }
+}
+
 /* ── what the agent was handed: provenance, folded away ──
    Same band as "Worked from" above it, so the two read as one footer. */
 .artifact-saw { border-top: 1px solid var(--line); background: var(--bg-panel); }
@@ -1159,7 +1242,32 @@
 }
 .fix-item[data-left] { border-color: rgba(240, 82, 82, 0.4); background: var(--bad-soft); }
 .fix-item-main { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-width: 0; }
-.fix-item-title { font-size: var(--t-base); font-weight: 600; color: var(--ink); line-height: 1.35; }
+.fix-item-title { font-size: var(--t-base); font-weight: 600; color: var(--ink); line-height: 1.35; overflow-wrap: anywhere; }
+/* A problem no line of output pinned to a file (#75): the build's last lines. */
+.fix-item-tail {
+  flex-basis: 100%;
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  font-size: var(--t-xs);
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Which step of the real build found it — Build, Start-up, Vercel. */
+.fix-item-step {
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--ink-2);
+}
 .fix-item-meta {
   display: flex;
   align-items: center;
