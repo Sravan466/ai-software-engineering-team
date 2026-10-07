@@ -934,3 +934,48 @@ def test_a_fix_vercel_cant_be_checked_against_is_not_called_fixed(client, monkey
     client.get(f"/api/projects/{pid}/deploy")
     state = client.get(f"/api/projects/{pid}/deploy").json()
     assert state["status"] == "fixed" and state["fix"]["verified"] is False
+
+
+# ── what the third review found (PR #84) ─────────────────────────────────────
+def test_two_different_unpinned_errors_are_two_problems():
+    from app.orchestration import autofix
+
+    a = autofix._build_problem({"path": "frontend/package.json", "message": "`next build` failed. Its last lines:\nError: Cannot find module 'x'\nchunk 1a2b3c4d"}, "frontend_engineer")
+    b = autofix._build_problem({"path": "frontend/package.json", "message": "`next build` failed. Its last lines:\nError: Cannot find module 'x'\nchunk 9f8e7d6c"}, "frontend_engineer")
+    c = autofix._build_problem({"path": "frontend/package.json", "message": "`next build` failed. Its last lines:\nSyntaxError: Unexpected end of JSON input"}, "frontend_engineer")
+    assert a["key"] == b["key"] != c["key"]
+
+
+def test_a_killed_build_worker_is_the_memory_cap_and_a_125_of_the_codes_own_is_not_docker(real_build):
+    real_build(lambda step, files: (1, "Next.js build worker exited with code: null and signal: SIGKILL") if step.name == "build" else _ok(step, files))
+    run = build_runner.run_build(_next_files(), "frontend")
+    assert run.status == "unchecked" and "ran out of memory" in run.reason
+    real_build(lambda step, files: (125, "exiting with 125 on purpose") if step.name == "build" else _ok(step, files))
+    assert build_runner.run_build(_next_files(), "frontend").status == "failed"
+
+
+def test_a_stop_just_before_the_engine_registers_still_reaches_it(real_build, monkeypatch):
+    from app.router import inflight
+
+    told: list[str] = []
+
+    class Engine:
+        kind = "docker"
+
+        def run(self, image, files, steps, limits, on_cancel, on_step):
+            # Stop lands after the slot was taken and before this engine registers.
+            build = inflight.current()
+            inflight.cancel(build["id"])
+            on_cancel(lambda: told.append("stopped"))
+            return [StepResult(s.name, s.label, None, 0.0, skipped=True) for s in steps]
+
+    monkeypatch.setattr(settings, "build_run_enabled", True)
+    monkeypatch.setattr(build_runner, "engine", Engine())
+    with SessionLocal() as db:
+        p = Project(idea="stopped at the start", owner_id=TEST_USER_ID, status="running")
+        db.add(p)
+        db.commit()
+        pid = p.id
+    with inflight.building(pid):
+        run = build_runner.run_build(_next_files(), "frontend")
+    assert told == ["stopped"] and run.status == "unchecked" and "stopped" in run.reason

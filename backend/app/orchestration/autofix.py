@@ -241,11 +241,14 @@ def _build_problem(p: dict, phase: str) -> dict:
     message = str(p.get("message") or "does not compile")
     path = str(p.get("path") or "")
     line = p.get("line")
-    # The first line only: a problem no line of output pinned down carries the build's
-    # last lines under it (#75), and those change every round while the problem doesn't.
-    head = message.split("\n", 1)[0]
+    # A problem no line of output pinned down carries the build's last lines under its
+    # first (#75). Keyed on that first line and the first error among them, not the
+    # whole tail: chunk hashes and timings change every round while the error doesn't,
+    # and two different errors still get two keys.
+    head, _, tail = message.partition("\n")
+    cause = next((l.strip() for l in tail.splitlines() if re.search(r"error", l, re.IGNORECASE)), "")
     out = {
-        "key": _key("build", path, re.sub(r"\d+", "#", head)),
+        "key": _key("build", path, re.sub(r"\d+", "#", head), re.sub(r"[0-9a-f]{6,}|\d+", "#", cause)),
         "title": message.replace("`", ""),
         "kind": "build",
         "where": f"{path}:{line}" if path and line else (path or None),

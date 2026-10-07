@@ -274,7 +274,7 @@ def _fix_state(project: Project) -> Optional[dict]:
         "attempt": int((data.get("vercel") or {}).get("attempts") or 0),
         # Whether the rebuilt frontend was itself built for real. Without a runner the
         # re-check only parsed it, and can't say Vercel's error is gone.
-        "verified": _frontend_built(project),
+        "verified": _frontend_built(project) if state == "fixed" else False,
     }
 
 

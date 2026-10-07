@@ -369,6 +369,10 @@ class BuildRun:
         }
 
 
+#: A build worker the memory cap killed: Next prints the signal, V8 its heap.
+_OUT_OF_MEMORY = re.compile(r"signal: SIGKILL|JavaScript heap out of memory|Killed\s*$", re.MULTILINE)
+
+
 def _tail(output: str, lines: int = TAIL_LINES) -> str:
     kept = [l.rstrip() for l in buildlog.clean(output).splitlines()]
     while kept and not kept[-1]:
@@ -410,12 +414,15 @@ def judge(plan: Plan, results: list[StepResult], side: str, files: dict[str, str
             continue
         if r.ok:
             continue
-        if r.exit_code == 125:
+        if r.exit_code == 125 and re.search(r"^docker: |Error response from daemon", r.output, re.MULTILINE):
             # `docker run` itself failed — a full disk, a daemon error — before the code ran.
             unchecked = unchecked or f"Docker couldn't start `{r.label}`, so the build wasn't finished."
             continue
-        if r.exit_code == 137 and not buildlog.node_problems(r.output) and not buildlog.python_problems(r.output):
-            # Killed: the memory cap, not a crash of the code's own.
+        if (r.exit_code == 137 or _OUT_OF_MEMORY.search(r.output)) and not (
+            buildlog.node_problems(r.output) or buildlog.python_problems(r.output)
+        ):
+            # Killed — the step, or the build worker under it: the memory cap, not a
+            # crash of the code's own.
             unchecked = unchecked or (
                 f"`{r.label}` ran out of memory ({settings.build_run_memory_mb} MB), so the build wasn't finished."
             )
@@ -540,7 +547,14 @@ def run_build(files: dict[str, str], side: str) -> BuildRun:
 
     def stop_all() -> None:
         stopped.set()
-        for stop in stopper:
+        for stop in list(stopper):
+            stop()
+
+    def on_cancel(stop: Callable[[], None]) -> None:
+        # An engine registers its stop as it starts; a Stop that landed a moment
+        # before is passed straight on, rather than lost in between.
+        stopper.append(stop)
+        if stopped.is_set():
             stop()
 
     # Stop is heard from here on — while the build waits for its turn as well as while
@@ -552,13 +566,15 @@ def run_build(files: dict[str, str], side: str) -> BuildRun:
                 if _wait(slot, stopped):
                     try:
                         if not stopped.is_set():
-                            results = chosen.run(plan.image, mine, plan.steps, limits, stopper.append, on_step)
-                    except sandbox.SandboxError as e:
-                        log.warning("The %s build couldn't run: %s", side, e)
-                        return BuildRun.unchecked(side, str(e), stack=plan.stack, runner=chosen.kind)
+                            results = chosen.run(plan.image, mine, plan.steps, limits, on_cancel, on_step)
                     except Exception as e:  # noqa: BLE001 - the runner must never become the failure
-                        log.exception("The %s build crashed", side)
-                        return BuildRun.unchecked(side, f"The build runner failed: {e}", stack=plan.stack, runner=chosen.kind)
+                        if not stopped.is_set():
+                            if isinstance(e, sandbox.SandboxError):
+                                log.warning("The %s build couldn't run: %s", side, e)
+                                return BuildRun.unchecked(side, str(e), stack=plan.stack, runner=chosen.kind)
+                            log.exception("The %s build crashed", side)
+                            return BuildRun.unchecked(side, f"The build runner failed: {e}", stack=plan.stack, runner=chosen.kind)
+                        # Stopped, and the stop is what broke it: settled as a stop below.
                     finally:
                         slot.release()
             finally:
