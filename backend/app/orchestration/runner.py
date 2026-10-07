@@ -593,7 +593,7 @@ class PipelineRunner:
             # Failing differently from what a person waived: a new problem.
             t["accepted"] = None
             autofix.settle(t)
-        autofix.close_round(t, keys)
+        # (The round this attempt answers was closed by `_judge_tests_round`.)
         if not problems:
             autofix.settle(t)
             autofix.save(project, data)
@@ -674,6 +674,9 @@ class PipelineRunner:
             "handoff": row.handoff,
             # Reused as it is when the kept files hash the same (no second build).
             "build_run": row.build_run,
+            # The attempt this code was first written in — a mockup drawn from it is
+            # a picture of this same code.
+            "kept_from": (row.handoff or {}).get("kept_from") or row.id,
         }
 
     def _fix_code(self, db: Session, project: Project, row: PhaseResult) -> bool:
@@ -947,7 +950,11 @@ class PipelineRunner:
                 except Exception:  # noqa: BLE001
                     title = phase
                 what = f"{left} code problem{'' if left == 1 else 's'} in {title}'s work"
-            if t["stopped"]["reason"] == autofix.STOP_NO_PROGRESS:
+            last = (t.get("rounds") or [None])[-1] or {}
+            if last.get("unjudged_all"):
+                # Not the crew's failure: the tests couldn't run again to check its fix.
+                why = f"the tests couldn't run again to check the fix ({str(last.get('unjudged')).rstrip('.')})"
+            elif t["stopped"]["reason"] == autofix.STOP_NO_PROGRESS:
                 why = "the last round fixed none of them"
             elif rounds:
                 why = f"after {rounds} fix round{'' if rounds == 1 else 's'}"
@@ -1633,7 +1640,11 @@ class PipelineRunner:
                     # drawing. A picture of the version that was replaced is worse than
                     # no picture, and the Ship review captions it as current.
                     current = self.latest_row(db, project, Phase.FRONTEND_ENGINEER.value)
-                    if current is None or current.id != source_row_id:
+                    # A kept copy (#76) is the same code under a new row: still wanted.
+                    same = current is not None and (
+                        current.id == source_row_id or (current.handoff or {}).get("kept_from") == source_row_id
+                    )
+                    if not same:
                         log.info("Dropped a mockup of a replaced front end (%s).", project_id)
                         return False
                     return not self._has_mockup(db, project_id)

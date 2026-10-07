@@ -563,8 +563,10 @@ def test_a_re_check_that_could_not_run_is_never_counted_as_fixed(client, monkeyp
     # The owner's round couldn't be judged: nothing fixed, the test carried, and why.
     assert first["fixed"] == [] and "registry" in first["unjudged"]
     assert [p["key"] for p in first["carried"]] == [p["key"] for p in first["problems"]]
-    # So it went on, to QA — and a run that did happen judged it.
-    assert second["phases"] == ["qa_engineer"] and second["fixed"] == [first["problems"][0]["key"]]
+    assert first["unjudged_all"] is True
+    # Not counted as PRISM's turn — its fix was never tested — so PRISM goes again, and a
+    # run that did happen judges it.
+    assert second["phases"] == ["frontend_engineer"] and second["fixed"] == [first["problems"][0]["key"]]
     assert project["status"] == "completed", project.get("gate_note")
     assert _current(project, "qa_engineer")["test_run"]["status"] == "ok"
 
@@ -807,3 +809,108 @@ def test_docker_a_real_vitest_run_on_a_vite_frontend(monkeypatch):
     run = build_runner.run_tests(files, "frontend")
     assert (run.status, run.passed, run.failed) == ("ok", 1, 0), run.as_dict()
     assert run.coverage is not None and run.coverage.tool == "vitest (v8)"
+
+
+# ── what the final review before merge found ─────────────────────────────────
+def _round(*problems, fixed=None):
+    return {"rounds": [{"n": 1, "problems": list(problems), "fixed": fixed}], "episode_start": 0}
+
+
+def test_a_report_cut_to_fit_judges_nothing_it_dropped():
+    t = _round({"key": "k", "side": "frontend", "path": "frontend/__tests__/a.test.js"})
+    run = testrun.combine([testrun.TestRun(status="failed", side="frontend", framework="jest", passed=1, failed=150,
+                                           files=["frontend/__tests__/a.test.js"], truncated=True)])
+    assert autofix.judge_tests_round(t, run) == [] and t["rounds"][0]["remaining"] == ["k"]
+
+
+def test_a_test_qa_deleted_is_judged_and_one_that_never_compiled_is_not():
+    deleted = _round({"key": "k", "side": "frontend", "path": "frontend/__tests__/old.test.js"})
+    run = testrun.combine([testrun.TestRun(status="ok", side="frontend", framework="jest", passed=3,
+                                           files=["frontend/__tests__/new.test.js"])])
+    assert autofix.judge_tests_round(deleted, run) == ["k"]
+    gone = _round({"key": "k", "side": "frontend", "path": "frontend/__tests__/old.test.js"})
+    assert autofix.judge_tests_round(gone, testrun.combine([], "QA wrote no test files.", no_tests=True)) == ["k"]
+    uncompiled = _round({"key": "k", "side": "frontend", "path": "frontend/__tests__/old.test.js"})
+    assert autofix.judge_tests_round(uncompiled, testrun.combine([], "The tests don't compile yet, so they weren't run.")) == []
+
+
+def test_a_round_from_before_sides_were_recorded_is_still_judged():
+    t = _round({"key": "k", "where": "backend/tests/test_a.py:4"})
+    run = testrun.combine([testrun.TestRun(status="ok", side="backend", framework="pytest", passed=2,
+                                           files=["backend/tests/test_a.py"])])
+    assert autofix.judge_tests_round(t, run) == ["k"]
+
+
+def test_a_round_nobody_could_judge_is_not_a_turn_and_not_no_progress():
+    t = {"rounds": [], "allowed": 3, "resumed_after": 0, "episode_start": 0, "stopped": None, "accepted": None}
+    problem = {"key": "k", "side": "frontend", "path": "frontend/__tests__/a.test.js", "owner": "frontend_engineer",
+               "failure": "assertion", "title": "t\nm"}
+    autofix.start_round(t, "guided", ["frontend_engineer"], autofix.route_tests(t, [problem]))
+    outage = testrun.combine([testrun.TestRun.not_run("frontend", "The package registry couldn't be reached.",
+                                                      files=["frontend/__tests__/a.test.js"])])
+    autofix.judge_tests_round(t, outage)
+    assert t["rounds"][0]["unjudged_all"] is True
+    assert autofix.next_step(t) == "fix"  # not "no progress": nothing was judged
+    # And the owner goes again — their fix was never tested — rather than QA.
+    assert [p["phase"] for p in autofix.route_tests(t, [problem])] == ["frontend_engineer"]
+
+
+def test_a_waiver_holds_per_failure_and_a_second_waiver_adds_to_it():
+    run = testrun.combine([
+        testrun.TestRun(status="failed", side="backend", framework="pytest", passed=1, failed=1,
+                        failures=[testrun.TestFailure("backend/tests/test_a.py", "test_a", "assert 1 == 2", 3)]),
+        testrun.TestRun(status="failed", side="frontend", reason="The frontend has no test runner set up."),
+    ])
+    data = {"tracks": {}}
+    failing = autofix.test_failures(run)
+    autofix.accept_tests(data, "accepted_risk", "known", [f["key"] for f in failing])
+    [left] = autofix.unwaived_tests(data, run)  # the accepted test stays accepted
+    assert left["test"] == "frontend suite"
+    autofix.accept_tests(data, "accepted_risk", "tested by hand", [left["key"]])
+    assert autofix.unwaived_tests(data, run) == []
+    assert len(data["tracks"]["tests"]["accepted"]["keys"]) == 2
+
+
+def test_only_a_finished_build_is_reused_for_a_kept_phase(monkeypatch):
+    from app.agents import get_agent
+    from app.agents.base import AgentContext
+    from app.build.check import BuildCheck
+
+    monkeypatch.setattr(settings, "build_run_enabled", True)
+    calls = []
+    monkeypatch.setattr(build_runner, "run_build", lambda files, side: calls.append(side) or build_runner.BuildRun(status="ok", side=side))
+    agent = get_agent("frontend_engineer")
+    output = {"files": [{"path": "app/page.jsx", "code": "export default function P() { return <main />; }\n"}]}
+    files, _ = __import__("app.build.check", fromlist=["phase_tree"]).phase_tree({}, "frontend_engineer", output, None)
+    print_ = build_runner.fingerprint(build_runner.side_files(files, "frontend"))
+    ctx = AgentContext(idea="x")
+    agent._run_build(ctx, output, BuildCheck(), reuse={"status": "ok", "side": "frontend", "fingerprint": print_})
+    assert calls == []  # the same files, built before: reused
+    agent._run_build(ctx, output, BuildCheck(), reuse={"status": "unchecked", "side": "frontend", "fingerprint": print_})
+    assert calls == ["frontend"]  # a build that never finished is built again
+
+
+def test_next_leaves_every_test_folder_out_of_its_type_check():
+    files = _tree({
+        "frontend/app/page.tsx": "export default function Home() { return <main />; }\n",
+        "frontend/components/__tests__/Button.test.tsx": "test('x', () => {});\n",
+    })
+    exclude = json.loads(files["frontend/tsconfig.json"])["exclude"]
+    assert {"**/__tests__/**", "**/tests/**", "**/test/**"} <= set(exclude)
+
+
+def test_the_ship_review_is_told_which_suites_could_not_run():
+    from app.core.artifacts import _tests_summary
+
+    run = testrun.combine([
+        testrun.TestRun(status="failed", side="frontend", reason="The frontend has no test runner set up."),
+        testrun.TestRun(status="failed", side="backend", framework="pytest",
+                        problems=[testrun.Problem("backend/tests/test_a.py", "won't load", "test", 1, "test")]),
+    ])
+    summary = _tests_summary([SimpleNamespace(phase="qa_engineer", test_run=run)])
+    assert [r["unrunnable"] for r in summary["runs"]] == [True, False]
+    mixed = testrun.combine([
+        testrun.TestRun(status="ok", side="backend", framework="pytest", passed=2),
+        testrun.TestRun(status="failed", side="frontend", reason="The frontend has no test runner set up."),
+    ])
+    assert mixed["summary"] == "2 passed across 1 suite · 1 suite couldn't run"

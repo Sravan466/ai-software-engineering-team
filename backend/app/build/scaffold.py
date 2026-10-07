@@ -554,7 +554,8 @@ def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str,
                 # The suite is run by Jest (#76), not compiled by `next build`: a test's
                 # matcher types are no reason for a deploy to fail.
                 "exclude": ["node_modules"] + (
-                    ["__tests__", "**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"] if tests else []
+                    ["**/__tests__/**", "**/tests/**", "**/test/**", "**/*.test.ts", "**/*.test.tsx",
+                     "**/*.spec.ts", "**/*.spec.tsx"] if tests else []
                 ),
             }),
             "TypeScript configuration, with the @/ import alias.",

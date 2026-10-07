@@ -392,7 +392,9 @@ class BaseAgent:
             build_status=build.status if build else None,
             build_problems=build.as_list() if build else [],
             skills_used=list(kept.get("skills_used") or []),
-            handoff={**(kept.get("handoff") or {}), "kept": True},
+            # `kept_from`: the attempt this code was first written in, whose mockup
+            # draw is still of this code.
+            handoff={**(kept.get("handoff") or {}), "kept": True, "kept_from": kept.get("kept_from")},
             build_run=build_run,
             test_run=test_run,
             kept=True,
@@ -511,6 +513,9 @@ class BaseAgent:
             if (
                 isinstance(reuse, dict)
                 and reuse.get("fingerprint")
+                # Only a verdict: a build that never finished (registry down, out of
+                # time, stopped) says nothing, and is run again.
+                and reuse.get("status") in (BuildStatus.OK.value, BuildStatus.FAILED.value)
                 and reuse["fingerprint"] == build_runner.fingerprint(build_runner.side_files(files, side))
             ):
                 run = build_runner.BuildRun.from_dict(reuse)

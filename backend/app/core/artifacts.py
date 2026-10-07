@@ -337,8 +337,13 @@ def _tests_summary(phases: list) -> Optional[dict]:
             if isinstance(f, dict)
         ],
         "runs": [
-            {k: r.get(k) for k in ("side", "framework", "status", "summary", "passed", "failed", "errored",
-                                   "skipped", "coverage", "reason", "seconds")}
+            {
+                **{k: r.get(k) for k in ("side", "framework", "status", "summary", "passed", "failed", "errored",
+                                         "skipped", "coverage", "reason", "seconds")},
+                # The same rule the Ship gate holds on (`autofix.test_failures`): failed,
+                # nothing ran, and nothing anyone was sent to fix.
+                "unrunnable": r.get("status") == "failed" and not r.get("total") and not r.get("problems"),
+            }
             for r in run.get("runs") or []
         ],
     }

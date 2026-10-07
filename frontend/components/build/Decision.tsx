@@ -664,8 +664,9 @@ function TestsReview({
   const waived = project.auto_fix?.tracks?.tests?.accepted;
   const ready = Boolean(kind) && reason.trim().length >= 3;
   const count = tests.failures.length;
-  // A side whose suite couldn't run at all: no test to list, and never a pass.
-  const unrunnable = tests.runs.filter((r) => r.status === "failed" && !r.passed && !r.failed && !r.errored);
+  // A side whose suite couldn't run at all: no test to list, and never a pass. The
+  // server's rule, not a guess at it — the same one the Ship gate holds on.
+  const unrunnable = tests.runs.filter((r) => r.unrunnable);
   return (
     <div className="artifact-pad tests-review">
       <h3 className="tests-review-head">

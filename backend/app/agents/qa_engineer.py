@@ -67,7 +67,7 @@ class QAEngineerAgent(BaseAgent):
                 }
             )
             if not sides:
-                return testrun.combine([], "QA wrote no test files.")
+                return testrun.combine([], "QA wrote no test files.", no_tests=True)
             runs = []
             activity.begin(self.key)
             try:

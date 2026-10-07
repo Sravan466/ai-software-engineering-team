@@ -1806,7 +1806,10 @@ export type Artifacts = {
     summary: string;
     reason: string | null;
     failures: (TestFailure & { side: string })[];
-    runs: Pick<TestRunSide, "side" | "framework" | "status" | "summary" | "passed" | "failed" | "errored" | "skipped" | "coverage" | "reason" | "seconds">[];
+    runs: (Pick<TestRunSide, "side" | "framework" | "status" | "summary" | "passed" | "failed" | "errored" | "skipped" | "coverage" | "reason" | "seconds"> & {
+      /** Failed with nothing run and nothing anyone was sent to fix: holds Ship until waived. */
+      unrunnable?: boolean;
+    })[];
   } | null;
 };
 

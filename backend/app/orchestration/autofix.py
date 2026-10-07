@@ -121,7 +121,10 @@ def next_step(t: dict) -> str:
     # A round that only asked the code's owners to fix failing tests hands what it
     # didn't fix to QA, rather than stopping: "the code is right, the test is wrong"
     # is the other half of the question, and nobody has been asked it yet (#76).
-    if judged and judged[-1].get("fixed") == [] and not judged[-1].get("handover"):
+    # Nor does a round whose re-check couldn't run at all (#76): it tried nothing that
+    # anyone could judge, so it says nothing about progress — the limit still holds.
+    last = judged[-1] if judged else None
+    if last and last.get("fixed") == [] and not last.get("handover") and not last.get("unjudged_all"):
         return STOP_NO_PROGRESS
     if len(rounds) >= int(t.get("allowed") or 0):
         return STOP_LIMIT
@@ -216,7 +219,8 @@ def accept_tests(data: dict, kind: str, reason: str, keys: list[str]) -> None:
     met at the Ship review is waived the same way as one the crew gave up on — and for
     exactly these failures: a different test failing later is a new problem."""
     t = track(data, TESTS)
-    t["accepted"] = {"kind": kind, "reason": reason, "keys": list(keys), "at": _now()}
+    before = list((t.get("accepted") or {}).get("keys") or [])
+    t["accepted"] = {"kind": kind, "reason": reason, "keys": list(dict.fromkeys(before + list(keys))), "at": _now()}
 
 
 def accepted(data: dict, name: str) -> bool:
@@ -362,15 +366,32 @@ def test_failures(run: object, unrunnable: bool = False) -> list[dict]:
 
 def judged(problem: dict, run: object) -> bool:
     """Whether `run` can say anything about this failing test: its side's suite ran,
-    and its file wasn't one that couldn't even load. A test the run never reached is
-    not fixed — nobody knows."""
+    its file loaded, and the report wasn't cut short. A test the run never reached is
+    not fixed — nobody knows. A test that no longer exists (QA deleted the file, or
+    every test on its side) is judged: the suite says nothing failed because nothing
+    is there, and that was QA's call to make."""
     if not isinstance(run, dict):
         return False
-    side = next((r for r in run.get("runs") or [] if r.get("side") == problem.get("side")), None)
-    if side is None or side.get("status") not in (TestStatus.OK.value, TestStatus.FAILED.value) or not side.get("total"):
+    path = str(problem.get("path") or "")
+    if not path and problem.get("where"):
+        path = str(problem["where"]).rsplit(":", 1)[0]
+    # A round from before tests had sides recorded: the side is the path's first folder.
+    side_name = problem.get("side") or (path.split("/", 1)[0] if "/" in path else None)
+    runs = run.get("runs") or []
+    if not runs:
+        return bool(run.get("no_tests"))
+    side = next((r for r in runs if r.get("side") == side_name), None)
+    if side is None:
+        return True  # no tests on this side any more
+    files = side.get("files") or []
+    if files and path and path not in files:
+        return True  # its file is gone
+    if side.get("status") not in (TestStatus.OK.value, TestStatus.FAILED.value) or not side.get("total"):
+        return False
+    if side.get("truncated"):
         return False
     broken = {str(p.get("path") or "") for p in side.get("problems") or [] if isinstance(p, dict)}
-    return str(problem.get("path") or "") not in broken
+    return path not in broken
 
 
 def test_problems(t: dict, run: object) -> tuple[list[dict], list[dict]]:
@@ -387,7 +408,7 @@ def test_problems(t: dict, run: object) -> tuple[list[dict], list[dict]]:
     last = rounds[-1] if len(rounds) > int(t.get("episode_start") or 0) else None
     if last is None:
         return current, []
-    pending = last.get("problems") or [] if last.get("fixed") is None else last.get("carried") or []
+    pending = (last.get("problems") or []) if last.get("fixed") is None else (last.get("carried") or [])
     carried = [p for p in pending if p.get("key") not in keys and not judged(p, run)]
     return current + carried, carried
 
@@ -398,9 +419,10 @@ def unwaived_tests(data: dict, run: object) -> list[dict]:
     suite couldn't run at all counts too: never a pass, so never shipped silently."""
     failures = test_failures(run, unrunnable=True)
     t = data["tracks"].get(TESTS)
-    if failures and t is not None and covers(t, [f["key"] for f in failures]):
-        return []
-    return failures
+    # Per failure: what a person waived stays waived, and only what they never saw
+    # (a new failure, a suite that stopped running) holds the review again.
+    waived = set(((t or {}).get("accepted") or {}).get("keys") or [])
+    return [f for f in failures if f["key"] not in waived]
 
 
 def judge_tests_round(t: dict, run: object, reason: Optional[str] = None) -> Optional[list[str]]:
@@ -415,6 +437,8 @@ def judge_tests_round(t: dict, run: object, reason: Optional[str] = None) -> Opt
     if carried:
         last["carried"] = carried
         last["unjudged"] = reason or "Some tests couldn't run again to check the fix."
+        sent = {p.get("key") for p in last.get("problems") or []}
+        last["unjudged_all"] = sent <= {p.get("key") for p in carried}
     return fixed
 
 
@@ -428,8 +452,11 @@ def route_tests(t: dict, problems: list[dict]) -> list[dict]:
     """
     last_to: dict[str, str] = {}
     for r in (t.get("rounds") or [])[int(t.get("episode_start") or 0):]:
+        unseen = {p.get("key") for p in r.get("carried") or []}
         for p in r.get("problems") or []:
-            last_to[p.get("key")] = p.get("phase")
+            # A turn whose result nobody could see isn't a turn: the same phase goes again.
+            if p.get("key") not in unseen:
+                last_to[p.get("key")] = p.get("phase")
     routed = []
     for p in problems:
         owner = p.get("owner") or QA

@@ -107,6 +107,9 @@ class TestRun:
     problems: list[Problem] = field(default_factory=list)
     #: The test files this run was for, as tree paths.
     files: list[str] = field(default_factory=list)
+    #: Fewer failures described than counted (the report was cut to fit): a failing test
+    #: missing from `failures` may still be failing.
+    truncated: bool = False
 
     @classmethod
     def not_run(cls, side: str, reason: str, **kw) -> "TestRun":
@@ -158,6 +161,7 @@ class TestRun:
             "steps": self.steps,
             "problems": [p.as_dict() for p in self.problems],
             "files": self.files,
+            "truncated": self.truncated,
         }
 
 
@@ -169,7 +173,7 @@ def _lower_first(text: str) -> str:
     return text[:1].lower() + text[1:] if text[:2] != text[:2].upper() else text
 
 
-def combine(runs: list[TestRun], reason: Optional[str] = None) -> dict:
+def combine(runs: list[TestRun], reason: Optional[str] = None, no_tests: bool = False) -> dict:
     """Every side's run as the one record a phase keeps: `{status, summary, runs}`.
 
     Failed if any side failed, ok only if every side that has tests ran green, and
@@ -182,6 +186,8 @@ def combine(runs: list[TestRun], reason: Optional[str] = None) -> dict:
             "summary": f"Not run: {_lower_first(why)}",
             "reason": why,
             "runs": [],
+            # There are no tests at all — as opposed to tests that couldn't be run.
+            "no_tests": no_tests,
             "at": _now(),
         }
     statuses = {r.status for r in runs}
@@ -211,7 +217,12 @@ def combine(runs: list[TestRun], reason: Optional[str] = None) -> dict:
             bits.append(f"{failed} failed")
         if errored:
             bits.append(f"{errored} couldn't run")
-        summary = " · ".join(bits) + f" across {len(ran)} suite{'s' if len(ran) != 1 else ''}"
+        # A suite that never ran isn't one of the suites the counts came from.
+        stuck = [r for r in ran if r.status == TestStatus.FAILED.value and r.total == 0]
+        counted = len(ran) - len(stuck)
+        summary = " · ".join(bits) + f" across {counted} suite{'s' if counted != 1 else ''}"
+        if stuck:
+            summary += f" · {len(stuck)} suite{'s' if len(stuck) != 1 else ''} couldn't run"
         why = None
     return {
         "status": status,
@@ -588,6 +599,7 @@ def judge(plan: TestPlan, results: list[StepResult], side: str, files: list[str]
         run.coverage = Coverage(_num(cov.get("lines_pct")), _num(cov.get("branches_pct")), tool)
     elif plan.framework == "mocha":
         run.reason = "Mocha has no coverage tool in this build, so coverage wasn't measured."
+    run.truncated = bool(report.get("truncated")) or len(run.failures) < run.failed
     if run.total == 0 and not run.problems:
         run.problems = [Problem(first, f"{plan.framework} found no tests to run. Name them so it finds them "
                                        "(test_*.py with test_ functions, or *.test.js with it()/test()).",
