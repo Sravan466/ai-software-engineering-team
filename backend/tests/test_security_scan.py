@@ -633,7 +633,11 @@ def test_settings_say_when_warden_reviews_on_the_builders_model():
     rows[2]["assigned"] = "ollama:qwen3:1.7b"
     assert not ModelRouter._auditor_shares_builders(rows, "ollama:qwen2.5:7b")
     rows[2]["assigned"] = None
+    # One builder on its own model, the other on the default Warden runs on: Warden
+    # reviews that one's code on the model that wrote it.
     rows[0]["assigned"] = "ollama:qwen3:1.7b"
+    assert ModelRouter._auditor_shares_builders(rows, "ollama:qwen2.5:7b")
+    rows[1]["assigned"] = "ollama:llama3.2:3b"
     assert not ModelRouter._auditor_shares_builders(rows, "ollama:qwen2.5:7b")
     assert not ModelRouter._auditor_shares_builders(rows, None)
 
@@ -747,3 +751,85 @@ def test_the_scan_shares_one_budget_across_its_sandboxes(monkeypatch):
     monkeypatch.setattr(runner, "engine", Slow())
     scan.run_scan({**_TREE, "frontend/package.json": "{}"}, {})
     assert budgets[0] == 420 and budgets[1] <= 120
+
+
+# ── what the re-review found (#77, PR #88) ───────────────────────────────────
+def test_a_note_beside_a_scanner_finding_about_something_else_is_kept(client):
+    from app.db.base import SessionLocal
+
+    idor = {"title": "Any visitor can read any user's record", "severity": "critical", "category": "Authorization",
+            "path": "backend/app/index.js", "line": 4, "description": "d", "recommendation": "r"}
+    sqli = {"title": "SQL injection in the lookup", "severity": "critical", "category": "SQL injection",
+            "path": "backend/app/index.js", "line": 6, "description": "d", "recommendation": "r"}
+    with SessionLocal() as db:
+        project = _project(db, client)
+        rows = remediation.sync_dispositions(db, project, {"findings": [idor, sqli]}, scan=_scan(_hit(5)))
+        # The SQL note repeats the scanner's finding; the IDOR one is about something else.
+        assert sorted((r.source, r.category) for r in rows) == [("model", "Authorization"), ("tool", "SQL injection")]
+
+
+def test_a_rescan_led_by_another_rule_is_the_same_finding_and_keeps_its_waiver(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+
+    lead = _hit(40, rule="a.sql")
+    lead.also = ["semgrep:b.sql"]
+    with SessionLocal() as db:
+        project = _project(db, client)
+        (row,) = remediation.sync_dispositions(db, project, {"findings": []}, scan=_scan(lead))
+        assert set(row.rules) == {"semgrep:a.sql", "semgrep:b.sql"}
+        row.status = FindingStatus.WAIVED.value
+        db.commit()
+        # The rebuild changed the code so only the second rule still matches it.
+        (row,) = remediation.sync_dispositions(db, project, {"findings": []}, scan=_scan(_hit(40, "fp-2", rule="b.sql")))
+        assert row.status == "waived"
+
+
+def test_a_waived_note_does_not_stop_the_next_audit(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+
+    note = {"title": "IDOR", "severity": "high", "category": "Authorization", "path": "routes.js", "line": 3,
+            "description": "d", "recommendation": "r"}
+    with SessionLocal() as db:
+        project = _project(db, client)
+        (row,) = remediation.sync_dispositions(db, project, {"findings": [note]}, scan=_scan())
+        assert remediation.open_notes(db, project) == [row]
+        row.status = FindingStatus.WAIVED.value
+        db.commit()
+        remediation.sync_dispositions(db, project, {"findings": [note]}, scan=_scan())
+        assert remediation.open_notes(db, project) == []
+
+    class P:
+        effective_approval_mode = ApprovalMode.CHECKPOINTS.value
+        cost_cap_usd = None
+
+    # The report still says it; the dispositions say it's settled. The dispositions win.
+    assert decide_gate(P(), Phase.SECURITY_ENGINEER.value, {"findings": [note]}, "valid",
+                       tool_findings=[], review_notes=[]) is None
+
+
+def test_with_only_the_dependency_audits_run_warden_still_checks_the_code():
+    result = scan.ScanResult(status="ok", tools={"npm audit": {"status": "ran"}, "semgrep": {"status": "failed"}})
+    block = scan.prompt_block(result)
+    assert "npm audit ran" in block and "code scanners couldn't run" in block and "injection" in block
+    ran = scan.ScanResult(status="ok", tools={"semgrep": {"status": "ran"}})
+    assert "code scanners" not in scan.prompt_block(ran)
+
+
+def test_npm_audit_audits_what_ships_and_installs_take_a_lock():
+    (step,) = scan.plan_node({"frontend/package.json": "{}"}).steps
+    assert "npm audit --omit=dev --json" in step.command
+    install = scan.plan_python(_TREE).steps[0].command
+    assert 'mkdir "$T.lock"' in install and 'rm -rf "$T" "$T".part-*' in install
+    assert install.index('mkdir "$T.lock"') < install.index("pip install --no-input")
+
+
+def test_one_helper_marks_a_round_nobody_could_judge():
+    from app.orchestration import autofix
+
+    record = {"problems": [{"key": "a"}, {"key": "b"}]}
+    autofix.mark_unjudged(record, ["a"], "Docker isn't running.")
+    assert record["unjudged"] == "Docker isn't running." and record["unjudged_all"] is False
+    autofix.mark_unjudged(record, ["a", "b"], "Docker isn't running.")
+    assert record["unjudged_all"] is True

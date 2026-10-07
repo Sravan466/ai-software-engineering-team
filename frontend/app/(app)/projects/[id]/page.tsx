@@ -1057,7 +1057,12 @@ function PhaseList({
 
             {hasDoc && isOpen && row && (
               <div className="phase-body">
-                <PhaseArtifact row={row} maxHeight={420} focus={focus?.key === ph.key ? focus : undefined} />
+                <PhaseArtifact
+                  row={row}
+                  maxHeight={420}
+                  focus={focus?.key === ph.key ? focus : undefined}
+                  onFocused={() => setFocus(null)}
+                />
                 {row.feedback && (
                   <p className="phase-feedback">
                     <strong style={{ color: "var(--bad)" }}>

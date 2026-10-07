@@ -72,8 +72,10 @@ function statusOf(f: SecurityFinding) {
  * (`…injection.tainted-sql-string` → `tainted-sql-string`), Bandit's test id. The full
  * id is the link's title and its accessible name.
  */
-export function ruleName(rule: string | null | undefined): string {
+export function ruleName(rule: string | null | undefined, tool?: string | null): string {
   if (!rule) return "";
+  // A dependency audit's "rule" is the package itself: `socket.io` is not `io`.
+  if (tool === "npm audit" || tool === "pip-audit") return rule;
   if (/^B\d{3}:/.test(rule)) return rule.split(":")[0];
   const parts = rule.split(".");
   return parts.length > 1 ? parts[parts.length - 1] : rule;
@@ -400,12 +402,12 @@ function Provenance({ f }: { f: SecurityFinding }) {
             title={f.rule_id}
             aria-label={`Rule ${f.rule_id} — opens the rule's page`}
           >
-            {ruleName(f.rule_id)}
+            {ruleName(f.rule_id, f.tool)}
             {Icon.external}
           </a>
         ) : (
           <span className="finding-rule mono" title={f.rule_id}>
-            {ruleName(f.rule_id)}
+            {ruleName(f.rule_id, f.tool)}
           </span>
         )
       )}
@@ -419,7 +421,8 @@ function Provenance({ f }: { f: SecurityFinding }) {
         ))}
       {!(f.source === "tool" && f.cwe) && f.category && <span>{f.category}</span>}
       {at &&
-        (f.owner_phase && f.path ? (
+        // A manifest is the platform's file, not in its owner's Files view: no link.
+        (f.owner_phase && f.path && !(f.tool === "npm audit" || f.tool === "pip-audit") ? (
           <button
             type="button"
             className="finding-where mono"
@@ -497,7 +500,7 @@ function FindingCard({
         <p className="finding-proof">
           {Icon.check}
           <span>
-            {f.tool} {f.rule_id ? <code className="mono">{ruleName(f.rule_id)}</code> : null} no longer reports{" "}
+            {f.tool} {f.rule_id ? <code className="mono">{ruleName(f.rule_id, f.tool)}</code> : null} no longer reports{" "}
             <code className="mono">{where(f)}</code>
             {f.fixed_round ? ` (round ${f.fixed_round})` : ""}.
           </span>
@@ -614,7 +617,7 @@ function FixedByCrew({ findings }: { findings: SecurityFinding[] }) {
             <span className="fixed-crew-proof">
               {f.source === "tool" && f.tool ? (
                 <>
-                  {f.tool} <code className="mono">{ruleName(f.rule_id)}</code> no longer reports{" "}
+                  {f.tool} <code className="mono">{ruleName(f.rule_id, f.tool)}</code> no longer reports{" "}
                   <code className="mono">{where(f)}</code>
                 </>
               ) : (

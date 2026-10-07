@@ -427,12 +427,38 @@ def same_tool_finding(row, f: Finding) -> bool:
     file, and either within three lines of where it was or on the very same code — a
     fix that added an import above it moved it, and did not fix it.
     """
-    rules = {f"{f.tool}:{f.rule_id}", *f.also}
-    if f"{row.tool}:{row.rule_id}" not in rules or not _same_file(row.path, f.path):
+    if not (rules_of(row) & {f"{f.tool}:{f.rule_id}", *f.also}) or not _same_file(row.path, f.path):
         return False
     if row.line is None and f.line is None:
         return True
     return _near(row.line, f.line) or bool(row.fingerprint and row.fingerprint == f.fingerprint)
+
+
+def rules_of(row) -> set[str]:
+    """Every rule a tracked scanner finding has been reported by, lead included."""
+    return {*(row.rules or []), f"{row.tool}:{row.rule_id}"}
+
+
+#: Words too common to say two findings are about the same problem.
+_COMMON = frozenset({
+    "missing", "data", "user", "users", "input", "code", "security", "issue", "found", "with",
+    "from", "when", "into", "that", "this", "detected", "detection", "audit", "possible", "lang",
+    "python", "javascript", "typescript", "react", "express", "flask", "django", "should", "could",
+})
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) >= 4 and w not in _COMMON}
+
+
+def repeats(note: Finding, tool: Finding) -> bool:
+    """Whether a review note is a scanner's finding said again: the same place (file,
+    within three lines) *and* the same problem — the note's words share one with the
+    scanner's category, title or rule. An IDOR note beside an XSS finding is not one."""
+    if not (_same_file(tool.path, note.path) and _near(tool.line, note.line)):
+        return False
+    about = _words(f"{tool.category} {tool.title} {(tool.rule_id or '').replace('.', ' ').replace('-', ' ')}")
+    return bool(_words(f"{note.category} {note.title}") & about)
 
 
 def same_model_finding(row, f: Finding) -> bool:
@@ -790,7 +816,7 @@ def sync_dispositions(
     # ── Warden's review notes ──
     notes = read_findings(output, project)
     for f in notes:
-        if any(_same_file(t.path, f.path) and _near(t.line, f.line) for t in current):
+        if any(repeats(f, t) for t in current):
             # A repeat of what a scanner already reported there: the scanner's finding
             # is the one tracked, with its rule and its rescan.
             continue
@@ -867,6 +893,7 @@ def _fill(row, f: Finding, keep_title: bool = False) -> None:
     row.path = f.path
     row.line = f.line
     row.fingerprint = f.fingerprint or row.fingerprint
+    row.rules = sorted(set(row.rules or []) | {f"{f.tool}:{f.rule_id}", *f.also})
 
 
 def _resolve(row, project, why: str) -> None:
@@ -919,6 +946,25 @@ def as_finding(row) -> Finding:
         url=row.rule_url,
         fingerprint=row.fingerprint,
     )
+
+
+def open_notes(db, project) -> list:
+    """Warden's critical and high review notes nobody has settled — what the Security
+    stop asks a person to read. From the dispositions, so a waived note stays waived
+    however many re-audits repeat it, and a note folded into a scanner's finding isn't
+    asked about twice."""
+    from app.db.models import SecurityDisposition
+
+    return [
+        row
+        for row in db.query(SecurityDisposition)
+        .filter(SecurityDisposition.project_id == project.id)
+        .order_by(SecurityDisposition.created_at)
+        .all()
+        if row_source(row) == SOURCE_MODEL
+        and row.severity in STOPPING_SEVERITIES
+        and row.status not in FindingStatus.settled()
+    ]
 
 
 def unresolved(db, project, serious: Optional[bool] = None) -> list:

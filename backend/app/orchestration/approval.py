@@ -236,6 +236,7 @@ def decide_gate(
     build_problems: Optional[list] = None,
     failing_tests: Optional[list] = None,
     tool_findings: Optional[list] = None,
+    review_notes: Optional[list] = None,
 ) -> Optional[Gate]:
     """Should the pipeline stop after `phase_key`? Returns the gate, or None.
 
@@ -254,6 +255,8 @@ def decide_gate(
     are a person's call rather than the crew's — critical or high, not yet fixed or
     waived (`remediation.unresolved(serious=False)`). They stop here too; one already
     waived does not, however many times a re-audit's scanner reports it again.
+    `review_notes` are Warden's own critical and high notes, unsettled, read the same
+    way (`remediation.open_notes`); without them, they are read off `output`.
     """
     mode = project.effective_approval_mode
 
@@ -329,7 +332,7 @@ def decide_gate(
         # Since #77 everything Warden itself reports is a review note — never the
         # crew's — so its severe ones are all asked about here, beside the scanners'
         # severe findings that are small (a dependency, or under the auto-fix bar).
-        severe = severe_findings(output)
+        severe = list(review_notes) if review_notes is not None else severe_findings(output)
         tools = list(tool_findings or [])
         if severe or tools:
             # Both facts, not the louder one. "Warden raised a critical" read alone
@@ -427,12 +430,18 @@ def cost_overrun_note(project, output: object) -> Optional[str]:
     )
 
 
-def _security_note(severe: list[dict], tools: Optional[list] = None) -> str:
+def _label(finding: object) -> str:
+    """A finding's category (else its title), whether it is a row, a `Finding` or a dict."""
+    if isinstance(finding, dict):
+        return str(finding.get("category") or finding.get("title") or "").strip()
+    return str(getattr(finding, "category", "") or getattr(finding, "title", "") or "").strip()
+
+
+def _security_note(severe: list, tools: Optional[list] = None) -> str:
     """"The scanners raised 1 finding and Warden 2 review notes for you to decide on —
     Vulnerable dependency, IDOR, XSS." """
     tools = tools or []
-    named = [str(f.category or f.title or "").strip() for f in tools]
-    named += [str(f.get("category") or f.get("title") or "").strip() for f in severe]
+    named = [_label(f) for f in tools] + [_label(f) for f in severe]
     # Deduplicate before taking three, or four findings across three categories can
     # report two of them and drop the one the reviewer most needed to see.
     kinds = list(dict.fromkeys(k for k in named if k))[:3]

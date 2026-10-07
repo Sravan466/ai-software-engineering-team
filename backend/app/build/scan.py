@@ -253,7 +253,8 @@ class ScanResult:
     def summary(self) -> str:
         """"semgrep 1.139.0 · bandit 1.8.6 · npm audit · 9.1 s" — the Warden card's line."""
         if self.status == SKIPPED:
-            return f"Scanners not available: {_lower_first(self.reason or 'no sandbox could run them.')}"
+            # The reason as written: it often starts with a name ("Docker isn't running").
+            return f"Scanners not available: {self.reason or 'no sandbox could run them.'}"
         parts = []
         for name in TOOLS:
             t = self.tools.get(name) or {}
@@ -289,10 +290,6 @@ class ScanResult:
             truncated=bool(data.get("truncated")),
             rules=data.get("rules"),
         )
-
-
-def _lower_first(text: str) -> str:
-    return text[:1].lower() + text[1:] if text[:2] != text[:2].upper() else text
 
 
 # ── severity, per tool ───────────────────────────────────────────────────────
@@ -668,12 +665,25 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
         "set -e\n"
         f"T={_TOOLS_DIR}\n"
         'if [ ! -f "$T/.ok" ]; then\n'
-        '  P="$T.part-$(cat /proc/sys/kernel/random/uuid)"\n'
-        '  pip install --no-input --prefer-binary --disable-pip-version-check --quiet --target "$P" '
+        # One installer at a time in the shared cache: `mkdir` is atomic, and a lock
+        # older than ten minutes belongs to an install that died holding it.
+        '  until mkdir "$T.lock" 2>/dev/null; do\n'
+        '    if [ -n "$(find "$T.lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then rm -rf "$T.lock"; fi\n'
+        "    sleep 2\n"
+        "  done\n"
+        '  trap \'rm -rf "$T.lock"\' EXIT\n'
+        '  if [ ! -f "$T/.ok" ]; then\n'
+        # Whatever a failed install left behind goes first, under the lock.
+        '    rm -rf "$T" "$T".part-*\n'
+        '    P="$T.part-$$"\n'
+        '    pip install --no-input --prefer-binary --disable-pip-version-check --quiet --target "$P" '
         f"semgrep=={SEMGREP_VERSION} bandit=={BANDIT_VERSION} pip-audit=={PIP_AUDIT_VERSION}\n"
-        '  touch "$P/.ok"\n'
-        '  if [ ! -f "$T/.ok" ]; then rm -rf "$T"; mv "$P" "$T"; else rm -rf "$P"; fi\n'
-        "  echo 'installed the scanners'\n"
+        '    touch "$P/.ok"\n'
+        '    mv "$P" "$T"\n'
+        "    echo 'installed the scanners'\n"
+        "  fi\n"
+        '  rm -rf "$T.lock"\n'
+        "  trap - EXIT\n"
         "else echo 'scanners already installed'; fi\n"
         # Only the tools' own install may fail this step. A side whose requirements
         # don't resolve is that side's pip-audit's problem, never Semgrep's or Bandit's.
@@ -752,7 +762,9 @@ def plan_node(files: dict[str, str]) -> Optional[ScanPlan]:
             _heredoc("/tmp/aiteam-read.cjs", _NODE_READER)
             + f"cd /work/{side} && npm install --package-lock-only --ignore-scripts --no-audit --no-fund "
             f"--loglevel=error >/tmp/lock-{side}.log 2>&1; lc=$?\n"
-            + f"if [ $lc = 0 ]; then npm audit --json > /tmp/audit-{side}.json 2>/tmp/audit-{side}.err; fi\n"
+            # What ships: the production dependencies. A dev-only build tool's advisory
+            # (a file watcher under Tailwind) never reaches a user.
+            + f"if [ $lc = 0 ]; then npm audit --omit=dev --json > /tmp/audit-{side}.json 2>/tmp/audit-{side}.err; fi\n"
             + f"node /tmp/aiteam-read.cjs {side} $lc 0 \"$(npm --version)\"\n"
             "exit 0\n"
         )
@@ -1180,15 +1192,22 @@ def prompt_block(result: Optional[ScanResult]) -> str:
         )
     shown = capped(result.findings)
     ran = ", ".join(n for n in TOOLS if result.ran(n))
+    # The dependency audits read manifests, not code: with neither code scanner run,
+    # nobody has looked for injection or a secret in the code yet.
+    unscanned = (
+        ""
+        if result.ran(SEMGREP) or result.ran(BANDIT)
+        else "\nThe code scanners couldn't run, so also check for injection, XSS, CSRF and secrets written into the code."
+    )
     if not shown:
-        return f"# Scanner findings\n{ran} ran and reported nothing. Don't re-report what they check for."
+        return f"# Scanner findings\n{ran} ran and reported nothing. Don't re-report what they check for.{unscanned}"
     lines = [f"# Scanner findings (known — don't repeat them)\n{ran} ran. Already reported:"]
     for f in shown:
         lines.append(f"- [{f.severity}] {f.location}: {f.category or f.rule_id} ({f.tool})")
     hidden = len(result.findings) - len(shown)
     if hidden > 0:
         lines.append(f"- …and {hidden} more.")
-    return "\n".join(lines)
+    return "\n".join(lines) + unscanned
 
 
 def findings_of(scan: object) -> list[ToolFinding]:

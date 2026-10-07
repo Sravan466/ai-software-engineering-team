@@ -45,11 +45,15 @@ export default function PhaseArtifact({
    *  a browsing disclosure does, because that is the moment it matters. */
   maxHeight = 420,
   focus,
+  onFocused,
 }: {
   row: PhaseResult;
   maxHeight?: number;
   /** A file a finding asked to see (#77): opens Files on it, at its line. */
   focus?: FileFocus;
+  /** Told once the ask is taken, so the parent can forget it: a remount mustn't
+   *  snap the view back to Files. */
+  onFocused?: () => void;
 }) {
   const { files, mermaid, fields } = useMemo(() => {
     const output = row.output || {};
@@ -73,9 +77,14 @@ export default function PhaseArtifact({
 
   const [view, setView] = useState<ViewKey>(views[0]?.key ?? "summary");
   const active = views.find((v) => v.key === view) ?? views[0];
-  // A finding's `path:line` was clicked: show this phase's files, on that one.
+  // A finding's `path:line` was clicked: show this phase's files, on that one. Kept
+  // here once taken — the parent forgets the ask, and the file browser still needs it.
+  const [held, setHeld] = useState<FileFocus | undefined>(focus);
   useEffect(() => {
-    if (focus && files.some((f) => samePath(f.path, focus.path))) setView("files");
+    if (!focus) return;
+    setHeld(focus);
+    if (files.some((f) => samePath(f.path, focus.path))) setView("files");
+    onFocused?.();
     // Keyed on the request, not on `files`: a poll mustn't drag the view back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.n]);
@@ -138,7 +147,7 @@ export default function PhaseArtifact({
             <Markdown>{row.content_md}</Markdown>
           </div>
         )}
-        {active?.key === "files" && <FileBrowser files={files} focus={focus} />}
+        {active?.key === "files" && <FileBrowser files={files} focus={held} />}
         {active?.key === "diagram" && mermaid && (
           <div className="artifact-pad">
             <Mermaid source={mermaid} id={row.id} />

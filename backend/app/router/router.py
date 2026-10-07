@@ -1116,7 +1116,8 @@ class ModelRouter:
 
         Only when nobody chose a model for Warden: a choice, even of the same model, is
         a decision made with this in view. The builders are compared by what they run
-        on — their own choice, or the default everyone without one shares.
+        on — their own choice, or the default everyone without one shares — and one is
+        enough: Warden then reviews that builder's code on the model that wrote it.
         """
         from app.core.constants import Phase
 
@@ -1125,7 +1126,7 @@ class ModelRouter:
         if warden is None or warden.get("assigned") or not default_model:
             return False
         builders = (Phase.BACKEND_ENGINEER.value, Phase.FRONTEND_ENGINEER.value)
-        return all((by_role.get(b) or {}).get("assigned") in (None, default_model) for b in builders)
+        return any((by_role.get(b) or {}).get("assigned") in (None, default_model) for b in builders)
 
     def _tried(self) -> list[str]:
         """Every address a runtime was looked for at and none answered, once each.

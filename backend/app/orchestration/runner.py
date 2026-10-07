@@ -357,7 +357,14 @@ class PipelineRunner:
             # Only the Ship review reads it, so only the Ship review pays for it.
             self.failing_tests(project) if row.phase == SHIP_GATE_PHASE.value else None,
             tool_findings=self._small_tool_findings(project) if row.phase == Phase.SECURITY_ENGINEER.value else None,
+            review_notes=self._open_notes(project) if row.phase == Phase.SECURITY_ENGINEER.value else None,
         )
+
+    @staticmethod
+    def _open_notes(project: Project) -> Optional[list]:
+        """Warden's severe review notes nobody settled (#77), from the dispositions."""
+        db = object_session(project)
+        return remediation.open_notes(db, project) if db is not None else None
 
     @staticmethod
     def _small_tool_findings(project: Project) -> list:
@@ -827,8 +834,7 @@ class PipelineRunner:
         fixed = autofix.close_round(t, [f.finding_key for f in outstanding])
         if live is not None and unjudged:
             rescan = scan.ScanResult.from_dict(row.scan if isinstance(row.scan, dict) else None)
-            live["unjudged"] = (rescan.reason if rescan else None) or "The scanners didn't run again."
-            live["unjudged_all"] = {p.get("key") for p in live.get("problems") or []} <= set(unjudged)
+            autofix.mark_unjudged(live, unjudged, (rescan.reason if rescan else None) or "The scanners didn't run again.")
         if fixed:
             last = t["rounds"][-1]
             for record in self._dispositions(db, project, fixed):

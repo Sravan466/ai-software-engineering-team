@@ -232,7 +232,7 @@ export function FixingPanel({ project }: { project: Project }) {
                     {p.tool && <span className="fix-item-step">{p.tool}</span>}
                     {p.rule_id && (
                       <code className="mono" title={p.rule_id}>
-                        {ruleName(p.rule_id)}
+                        {ruleName(p.rule_id, p.tool)}
                       </code>
                     )}
                     {p.where && <code className="mono">{p.where}</code>}

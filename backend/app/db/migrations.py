@@ -149,6 +149,7 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "path",
         "line",
         "fingerprint",
+        "rules",
     ),
 }
 

@@ -571,6 +571,10 @@ class SecurityDisposition(Base):
     #: A hash of the code the rule matched: how the finding is recognised after a fix
     #: moved it further down the file.
     fingerprint: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: Every rule that has reported it, as `tool:rule_id` — the lead and the ones that
+    #: reported the same problem beside it. A rescan whose lead is one of the others is
+    #: still this finding, not a fix of it and a new one.
+    rules: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
