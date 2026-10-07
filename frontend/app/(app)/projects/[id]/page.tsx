@@ -269,9 +269,16 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   // behaviour this issue is about. `awaiting_approval` looks static but isn't:
   // another tab can approve, stop or reject it, and a tab showing a gate that no
   // longer exists is how one click's worth of intent used to advance two phases.
+  // Stopped, a run still has someone finishing the call Stop can't interrupt — its
+  // row says `running` until that call returns — and the row's steps say "stopping
+  // once this step finishes" (#86). Keep watching until it has.
+  const finishing =
+    project?.status === "cancelled" &&
+    !!project.current_phase &&
+    latestRow(project, project.current_phase)?.status === "running";
   const pollMs = !project
     ? 0
-    : project.status === "running" && !project.stalled
+    : (project.status === "running" && !project.stalled) || finishing
       ? 2500
       : project.status === "running" || project.status === "awaiting_approval"
         ? 10000
@@ -1017,7 +1024,14 @@ function PhaseList({
             </button>
 
             {/* What the agent has done and is doing, step by step, as it happens. */}
-            <PhaseSteps running={ns === "running"} project={project} phaseKey={ph.key} state={state} seen={seenSteps} />
+            <PhaseSteps
+              running={ns === "running"}
+              finished={ns === "done" || ns === "gate"}
+              project={project}
+              phaseKey={ph.key}
+              state={state}
+              seen={seenSteps}
+            />
 
             {/* Any phase that produced something can be read in full, whenever —
                 including the one under review, which the decision above also shows. */}

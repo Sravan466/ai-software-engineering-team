@@ -233,13 +233,13 @@ class _Run:
     def run(self) -> AgentResult:
         agent, ctx = self.agent, self.ctx
         agent._pin(ctx)
-        activity.begin(agent.key)
+        board = activity.begin(agent.key)
         try:
             result = self._run()
         except BaseException:
-            activity.end(finished=False)
+            activity.end(board, finished=False)
             raise
-        activity.end()
+        activity.end(board)
         return result
 
     def _run(self) -> AgentResult:

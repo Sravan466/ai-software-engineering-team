@@ -69,14 +69,14 @@ class QAEngineerAgent(BaseAgent):
             if not sides:
                 return testrun.combine([], "QA wrote no test files.", no_tests=True)
             runs = []
-            activity.begin(self.key)
+            board = activity.begin(self.key)
             try:
                 for side in sides:
                     runs.append(build_runner.run_tests(files, side))
             except BaseException:
-                activity.end(finished=False)
+                activity.end(board, finished=False)
                 raise
-            activity.end()
+            activity.end(board)
         except (RequestCancelled, Superseded):
             raise
         except Exception as e:  # noqa: BLE001 - the runner must not become the failure

@@ -133,14 +133,19 @@ def _project() -> Optional[str]:
     return build["id"] if build else None
 
 
-def begin(phase: str) -> None:
-    """A phase in this build has started reporting. Replaces whatever was there."""
+def begin(phase: str) -> Optional[object]:
+    """A phase in this build has started reporting. Replaces whatever was there.
+
+    Returns the phase's board, for `end()`: a driver that a newer run took over (#41)
+    may still be finishing, and its end must not close the newer run's board.
+    """
     pid = _project()
     if pid is None:
-        return
+        return None
     with _lock:
-        _board[pid] = _Activity(phase=phase)
+        board = _board[pid] = _Activity(phase=phase)
         _ended.pop(pid, None)
+        return board
 
 
 def stage(name: str, *, total: Optional[int] = None, detail: str = "", done: Optional[int] = None) -> None:
@@ -197,17 +202,20 @@ def per_call(n: int) -> None:
     _update(per_call=n)
 
 
-def end(finished: bool = True) -> None:
+def end(board: Optional[object] = None, *, finished: bool = True) -> None:
     """The phase stopped reporting.
 
     Finished, its step in hand is done and the snapshot is kept, marked `ended`. A
     phase that raised keeps nothing: the step it was on never finished, and the run
-    is about to say so itself.
+    is about to say so itself. Given the `board` that `begin()` returned, it only
+    ends that one — never a newer run's.
     """
     pid = _project()
     if pid is None:
         return
     with _lock:
+        if board is not None and _board.get(pid) is not board:
+            return
         found = _board.pop(pid, None)
         _ended.pop(pid, None)
         if found is None or not finished:

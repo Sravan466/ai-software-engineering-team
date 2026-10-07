@@ -147,7 +147,10 @@ export function stepsFor(project: Project, key: string, agent: Persona, state: s
     // has fallen off the front of the trail. A phase that reports only its last part
     // (QA's test run) did its writing first, and says so.
     const planned = a.files.length > 0 || a.stage === "planning" || trail.some((t) => t.stage === "planning");
-    const settled = trail.some((t) => t.stage === "writing");
+    const wroteInTrail = trail.some((t) => t.stage === "writing");
+    // Writing comes straight after planning, so once planning has fallen off the front
+    // of the trail, writing is over too even if its own entry went with it.
+    const settled = wroteInTrail || (dropped > 0 && !trail.some((t) => t.stage === "planning"));
     let n = 0;
     let filed = false;
     const files = () => {
@@ -160,6 +163,7 @@ export function stepsFor(project: Project, key: string, agent: Persona, state: s
     // front doesn't shift every id after it.
     if (dropped > 0) lines.push({ id: id("earlier"), state: "done", title: plural(dropped, "earlier step") });
     n += dropped;
+    if (settled && !wroteInTrail) files();
 
     for (const t of trail) {
       const at = n++;
@@ -182,8 +186,12 @@ export function stepsFor(project: Project, key: string, agent: Persona, state: s
       lines.push({ id: id(n), state: "live", title: "Wrapping up", past: "Wrapped up" });
     } else if ((a.stage === "writing" || a.stage === "fixing") && !settled) {
       files();
-      // The file in hand has the id its finished line will have: it settles in place.
-      lines.push({ id: a.detail ? id(`file:${a.detail}`) : id(n), state: "live", ...currentStep(a) });
+      // The file in hand has the id its finished line will have, so it settles in place
+      // — unless it has already landed and has that line (the poll caught the moment
+      // between its check and the next call).
+      const own = a.detail ? id(`file:${a.detail}`) : null;
+      const landed = own !== null && lines.some((l) => l.id === own);
+      lines.push({ id: own && !landed ? own : id(n), state: "live", ...currentStep(a) });
     } else {
       lines.push({ id: id(n), state: "live", ...currentStep(a) });
     }
@@ -375,7 +383,15 @@ const FOLD_MS = 380;
  * hands over they fold away (the last step settling as they go) rather than vanish
  * and drop every row below by their height in one frame.
  */
-export default function RowSteps({ running, ...props }: StepsProps & { running: boolean }) {
+export default function RowSteps({
+  running,
+  finished,
+  ...props
+}: StepsProps & {
+  running: boolean;
+  /** The phase finished (rather than failing or being stopped): its last step is done. */
+  finished: boolean;
+}) {
   const [shown, setShown] = useState(running);
   useEffect(() => {
     if (running) {
@@ -388,18 +404,28 @@ export default function RowSteps({ running, ...props }: StepsProps & { running: 
   if (!running && !shown) return null;
   return (
     <div className="phase-writing">
-      <PhaseSteps {...props} closing={!running} />
+      <PhaseSteps {...props} closing={!running} finished={finished} />
     </div>
   );
 }
 
-function PhaseSteps({ project, phaseKey, state, seen, closing }: StepsProps & { closing: boolean }) {
+function PhaseSteps({
+  project,
+  phaseKey,
+  state,
+  seen,
+  closing,
+  finished,
+}: StepsProps & { closing: boolean; finished: boolean }) {
   const agent = AGENT_BY_KEY[phaseKey];
   // Folding away, the row is no longer this phase's to describe — the poll has moved
-  // on — so it shows what it last said, with the step in hand settled.
+  // on — so it shows what it last said. The step in hand settles into its past tense
+  // only if the phase finished; one that failed or was stopped is held as it was.
   const said = useRef<Line[]>([]);
+  const settle = (l: Line): Line =>
+    finished ? { ...l, state: "done", title: l.past ?? l.title, count: undefined } : { ...l, state: "held" };
   const lines = closing
-    ? said.current.map((l) => (l.state === "live" ? { ...l, state: "done" as const, title: l.past ?? l.title, count: undefined } : l))
+    ? said.current.map((l) => (l.state === "live" ? settle(l) : l))
     : agent
       ? stepsFor(project, phaseKey, agent, state)
       : [];

@@ -266,5 +266,7 @@
   .ap-line.is-new > .ap-line-in,
   .ap-wrap.is-new,
   .ap-wrap.is-new > .ap { animation-name: ap-fade; }
+  /* Handing over without the fold: the steps fade where they are, then go. */
+  .ap-wrap.is-closing { animation-name: ap-out; }
   .ap-dots i { animation: none; opacity: 0.6; }
 }

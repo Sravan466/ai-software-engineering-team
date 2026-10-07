@@ -55,18 +55,9 @@ function activityShare(activity: Activity | null): number | null {
   return Math.min(activity.done / activity.total, 1);
 }
 
-/** The file list under a running code phase: fills in as files land. */
+/** The plan, file by file, filling in as files land — behind the running row's "Planned N files" (#86). */
 export function FileProgress({ activity }: { activity: Activity }) {
-  if (activity.stage === "planning" || activity.files.length === 0) {
-    return (
-      <div className="writing writing-planning">
-        <p className="writing-head">
-          <span className="writing-count">Planning the files</span>
-          <span className="writing-meta">each one is written next, a few per call</span>
-        </p>
-      </div>
-    );
-  }
+  if (activity.files.length === 0) return null;
   const share = activityShare(activity) ?? 0;
   const perCall =
     activity.per_call > 1 ? `${activity.per_call} files per call` : "one file per call";

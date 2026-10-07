@@ -291,8 +291,10 @@ class Project(Base):
         """What the phase running now is doing — planning, or which file it is writing —
         from the run in this process (#81). None when nothing is reporting. Once the
         phase stops reporting, its last snapshot (`ended`) stands in until the next
-        phase begins, so the steps it took don't vanish while its row is saved (#86)."""
-        if self.status != "running":
+        phase begins, so the steps it took don't vanish while its row is saved (#86).
+        Cancelled and paused runs keep theirs too: Stop lets the call in flight finish,
+        and a paused run picks up where it was — the steps are still the account."""
+        if self.status not in ("running", "cancelled", "paused"):
             return None
         from app.orchestration import activity
 

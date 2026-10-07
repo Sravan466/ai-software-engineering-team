@@ -466,6 +466,15 @@ def test_the_build_says_which_file_is_being_written_while_it_is(client, monkeypa
     assert client.get(f"/api/projects/{pid}").json()["activity"] is None
 
 
+@pytest.fixture(autouse=True)
+def _no_progress_left_behind():
+    """The progress board is process-global: nothing one test leaves may reach the next."""
+    yield
+    with activity._lock:
+        activity._board.clear()
+        activity._ended.clear()
+
+
 def test_each_command_is_a_step_and_writing_and_fixing_are_one():
     with inflight.building("p-trail"):
         activity.begin("frontend_engineer")
@@ -533,10 +542,31 @@ def test_a_phase_that_has_named_no_stage_is_not_planning():
 
 def test_a_phase_that_raised_keeps_nothing():
     with inflight.building("p-boom"):
-        activity.begin("frontend_engineer")
+        board = activity.begin("frontend_engineer")
         activity.stage("building", detail="next build")
-        activity.end(finished=False)
+        activity.end(board, finished=False)
     assert activity.latest("p-boom") is None
+
+
+def test_a_superseded_run_cannot_end_the_newer_runs_board():
+    with inflight.building("p-taken"):
+        old = activity.begin("frontend_engineer")
+        new = activity.begin("frontend_engineer")  # a newer run took over (#41)
+        activity.stage("writing", detail="a.tsx", total=2)
+        activity.end(old)  # the old driver's last call returns
+        out = activity.latest("p-taken")
+        activity.end(new)
+    assert out["ended"] is False and out["stage"] == "writing"
+
+
+def test_the_api_keeps_the_steps_of_a_stopped_or_paused_run():
+    with inflight.building("p-stop"):
+        activity.begin("backend_engineer")
+        activity.stage("building", detail="pip install")
+    for status in ("cancelled", "paused"):
+        project = Project(id="p-stop", status=status, current_phase="backend_engineer")
+        assert project.activity["detail"] == "pip install"
+    assert Project(id="p-stop", status="failed", current_phase="backend_engineer").activity is None
 
 
 def test_ended_snapshots_are_bounded():
