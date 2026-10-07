@@ -521,6 +521,12 @@ export type Project = {
   deploy_target?: "vercel" | "render" | null;
   deploy_url?: string | null;
   deploy_status?: string | null;
+  /** The version the build is at (#79), and the change being made on it, if one is. */
+  current_version?: VersionSummary | null;
+  change?: ChangeRequest | null;
+  /** Which version the last deploy and the last GitHub push sent. */
+  deployed_version?: number | null;
+  github_pushed_version?: number | null;
 
   /**
    * The technology decisions frozen after the architecture was approved. `null`
@@ -581,6 +587,81 @@ const KEY_CHECK_TIMEOUT_MS = 60000;
  */
 /** Fired on `window` whenever the backend says nobody is signed in. */
 export const SIGNED_OUT_EVENT = "aiteam:signed-out";
+
+// ── Change requests and versions (#79) ──
+export type ChangeState =
+  | "planning"
+  | "running"
+  | "awaiting_approval"
+  | "needs_help"
+  | "stopped"
+  | "done"
+  | "failed"
+  | "discarded";
+
+export type ChangePlan = {
+  summary: string;
+  phases: string[];
+  files_likely: string[];
+  needs_design: boolean;
+  needs_db_change: boolean;
+  /** The planner named nothing usable, so the request's words picked who edits. */
+  guessed?: boolean;
+};
+
+export type ChangeRequest = {
+  id: string;
+  number: number;
+  text: string;
+  status: ChangeState;
+  plan: ChangePlan | null;
+  /** Why it failed or was discarded. */
+  note: string | null;
+  /** The version it became, once kept. */
+  version: number | null;
+  created_at: string | null;
+  finished_at: string | null;
+};
+
+export type VersionSummary = {
+  number: number;
+  label: string;
+  kind: "first_build" | "change" | "restore" | "edit";
+  created_at: string | null;
+  /** How many versions the build has. */
+  count: number;
+};
+
+export type Version = {
+  id: string;
+  number: number;
+  label: string;
+  kind: VersionSummary["kind"];
+  change_request_id: string | null;
+  restored_from: number | null;
+  created_at: string | null;
+  current: boolean;
+  deployed: boolean;
+  pushed: boolean;
+  files: number;
+};
+
+export type DiffFile = {
+  path: string;
+  status: "added" | "changed" | "deleted";
+  phase: string | null;
+  added: number;
+  removed: number;
+  /** Unified diff lines, each starting with "+", "-", " " or "@@". */
+  lines: string[];
+  truncated: boolean;
+};
+
+export type Diff = {
+  base: number | null;
+  files: DiffFile[];
+  counts: { added: number; changed: number; deleted: number };
+};
 
 export type Account = {
   id: string;
@@ -897,9 +978,43 @@ export const api = {
   analytics: (id: string) => req<any>(`/api/analytics/projects/${id}`),
 
   // ── Generated-project artifacts (Preview / Summary / Download) ──
-  getArtifacts: (id: string) => req<Artifacts>(`/api/projects/${id}/artifacts`),
-  downloadUrl: (id: string, includeCredentials = false) =>
-    `${BASE}/api/projects/${id}/download${includeCredentials ? "?include_credentials=true" : ""}`,
+  /** What ships by default — while a change is open, the version it is made on.
+   *  `live` is the build as it stands, which is what a review is about. */
+  getArtifacts: (id: string, opts: { live?: boolean; version?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.live) q.set("live", "true");
+    if (opts.version) q.set("version", String(opts.version));
+    const qs = q.toString();
+    return req<Artifacts>(`/api/projects/${id}/artifacts${qs ? `?${qs}` : ""}`);
+  },
+  downloadUrl: (id: string, includeCredentials = false, version?: number) => {
+    const q = new URLSearchParams();
+    if (includeCredentials) q.set("include_credentials", "true");
+    if (version) q.set("version", String(version));
+    const qs = q.toString();
+    return `${BASE}/api/projects/${id}/download${qs ? `?${qs}` : ""}`;
+  },
+
+  // ── Keep talking after a build (#79) ──
+  startChange: (id: string, text: string) =>
+    req<RunResponse & { change: ChangeRequest }>(`/api/projects/${id}/changes`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  listChanges: (id: string) => req<{ changes: ChangeRequest[] }>(`/api/projects/${id}/changes`),
+  discardChange: (id: string, changeId: string, reason?: string) =>
+    req<RunResponse>(`/api/projects/${id}/changes/${changeId}/discard`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    }),
+  changeDiff: (id: string, changeId: string) => req<Diff>(`/api/projects/${id}/changes/${changeId}/diff`),
+  listVersions: (id: string) =>
+    req<{ versions: Version[]; current: number | null; deployed: number | null; pushed: number | null }>(
+      `/api/projects/${id}/versions`,
+    ),
+  versionDiff: (id: string, n: number) => req<Diff>(`/api/projects/${id}/versions/${n}/diff`),
+  restoreVersion: (id: string, n: number) =>
+    req<RunResponse>(`/api/projects/${id}/versions/${n}/restore`, { method: "POST" }),
 
   // ── The build's database (write-only: values go in, hints come back) ──
   getDatabase: (id: string, provider?: string) =>
@@ -1395,6 +1510,10 @@ export type ShipInfo = {
   github_pushed_at: string | null;
   deploy: DeployState;
   connections: { github: GithubStatus; vercel: VercelConnection };
+  /** The version Deploy and a push send, and the ones that went out last (#79). */
+  version?: number | null;
+  deployed_version?: number | null;
+  pushed_version?: number | null;
 };
 
 export type DeployStart = {
@@ -1960,6 +2079,8 @@ export type Artifacts = {
   name: string | null;
   status: string;
   readme: string;
+  /** The version these files are (#79); null for a build that never finished. */
+  version?: number | null;
   files: GenFile[];
   setup_instructions: string[];
   docs: GenDoc[];

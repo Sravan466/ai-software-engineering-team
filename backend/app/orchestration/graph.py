@@ -29,7 +29,7 @@ from app.core.constants import PHASE_ORDER, RoutingMode, Phase, PHASE_LABELS
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.memory.store import memory_store
-from app.orchestration import claim, debate as debate_step
+from app.orchestration import changes, claim, debate as debate_step
 from app.orchestration.charter import binding_on, freeze
 from app.orchestration.debate import conduct_debate, decision_summary
 from app.orchestration.state import PipelineState
@@ -267,9 +267,14 @@ def _make_node(phase: Phase):
         extra = ""
         updates: dict = {}
         verdict: Optional[dict] = None
+        # A change request on the finished build (#79): this phase edits what it
+        # delivered rather than writing it again.
+        change = state.get("change") or None
+        editing = changes.editing(change, phase.value)
 
-        # The debate runs once, immediately before the architecture it is about.
-        if phase == Phase.SYSTEM_DESIGN:
+        # The debate runs once, immediately before the architecture it is about — not
+        # again when a change edits that architecture: the team settled that question.
+        if phase == Phase.SYSTEM_DESIGN and not editing:
             verdict, extra = run_debate(state)
             if verdict is not None:
                 updates["debates"] = [*state.get("debates", []), verdict]
@@ -296,10 +301,14 @@ def _make_node(phase: Phase):
             # capable model. Set by `redo`, cleared by the next one.
             escalate=phase.value in (state.get("escalate") or []),
         )
+        if editing:
+            edit_context(ctx, change, phase.value, (change.get("base") or {}).get(phase.value))
         result = agent.run(ctx)
         # Before LangGraph checkpoints this step: a run stopped and resumed while the
         # agent was generating no longer owns the build, and its step must not land.
         claim.check()
+        if editing:
+            updates["change"] = changes.landed(change, phase.value, result.output)
 
         outputs = {**state.get("prior_outputs", {}), phase.value: result.output}
         if phase == Phase.SYSTEM_DESIGN:
@@ -323,6 +332,18 @@ def _make_node(phase: Phase):
         return updates
 
     return node
+
+
+def edit_context(ctx: AgentContext, change: dict, phase_key: str, base: Optional[dict]) -> None:
+    """Point `ctx` at an edit (#79): the change as this phase is told it, the
+    deliverable it changes, the files whose code it is shown whole. The change's own
+    note is not repeated as "reviewer feedback" — that slot is for a fix round's."""
+    note = changes.note_for(change, phase_key)
+    ctx.change = note
+    ctx.base_output = base if isinstance(base, dict) else {}
+    ctx.likely_files = tuple((change.get("plan") or {}).get("files_likely") or ())
+    if ctx.feedback == note:
+        ctx.feedback = None
 
 
 def _recheck(state: PipelineState, phase: Phase, agent, kept: dict) -> dict:

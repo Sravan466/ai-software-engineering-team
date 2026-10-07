@@ -54,3 +54,9 @@ class PipelineState(TypedDict, total=False):
     #: suite, while an engineer fixes the code it tests: the node re-checks and re-runs
     #: it with no model call, then drops it from here.
     kept: dict
+
+    #: The change request being made on this finished build (#79), or None: `{id,
+    #: number, text, plan, decisions, edit: [phases that edit their deliverable], base:
+    #: {phase: the deliverable it edits}, done: [phases that already landed an edit]}`.
+    #: Set when the change starts, cleared when it is kept or discarded.
+    change: Optional[dict]

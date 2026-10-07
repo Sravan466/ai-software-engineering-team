@@ -31,7 +31,7 @@ from app.build.check import BuildCheck, check_phase, phase_tree
 from app.core.config import settings
 from app.core.constants import CODE_PHASES, PHASE_ORDER, BuildStatus, Phase, RoutingMode, SchemaStatus
 from app.core.logging import get_logger
-from app.core.reading import json_object
+from app.core.reading import has_content, json_object
 from app.orchestration.charter import Charter
 from app.orchestration.charter import violations as charter_violations
 from app.orchestration.claim import Superseded
@@ -64,6 +64,8 @@ _PERSON_SHARE = {
     # served whole when they fit and cut to this share when they don't. Empty for
     # every agent but Warden, so nobody else pays for it.
     "scan": 0.12,
+    # A change request (#79): the person's words and the plan. Empty on every other run.
+    "change": 0.15,
 }
 #: How whatever remains is divided between the sections the pipeline assembles.
 #: `skills` is a claimant here rather than a constant of its own, and that is the
@@ -76,7 +78,20 @@ _CONTEXT_SHARE = {
     "rag": 0.19,
     "skills": 0.18,
     "memory": 0.08,
+    # The deliverable a change edits (#79). Present only then, so every other run's
+    # shares renormalise to exactly what they were.
+    "current": 0.45,
 }
+#: How the deliverable being changed is introduced, and how the edit is asked for (#79).
+_CURRENT_FRAME = "# What you delivered before — change it, don't start over\n{body}\n"
+_CHANGE_FRAME = "# The change to make\n{body}\n"
+_EDIT_TASK = (
+    "You are changing an existing app, not building it again. Return the JSON object "
+    "with the change made. In every list of files (`files`, `test_files`, …) return ONLY "
+    "the files you add or change, each complete, and put the paths of files you remove in "
+    "`deleted`. Every file you don't return is kept exactly as it is; every other field "
+    "you leave out keeps its current value."
+)
 #: The text wrapping each optional section. Written once and used twice — to build
 #: the section, and to charge its cost against the budget — because a frame that is
 #: estimated on one side and printed on the other is a frame the prompt overruns by
@@ -124,6 +139,18 @@ class AgentContext:
     pin_model: Optional[str] = None
     #: A change made on the app preview (#78): the attempt says its own site style.
     revising: bool = False
+    #: A change request on a finished build (#79): what to change, in the person's words
+    #: plus the plan's, and this phase's current deliverable to change it in. Set
+    #: together: with both, the agent *edits* — it is shown what it wrote and returns
+    #: only what it adds or changes — instead of writing the deliverable again.
+    change: str = ""
+    base_output: Optional[dict] = None
+    #: Paths the change is likely to touch, whose current code is shown in full.
+    likely_files: tuple[str, ...] = ()
+
+    @property
+    def editing(self) -> bool:
+        return bool(self.change) and self.base_output is not None
 
 
 class RevisionRefused(Exception):
@@ -238,7 +265,7 @@ class BaseAgent:
             ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
         )
         ask = self._build_messages(ctx, profile)
-        options = GenerationOptions(json_mode=True, json_schema=self.response_schema())
+        options = GenerationOptions(json_mode=True, json_schema=self._schema_for(ctx))
 
         resp = self._complete(ask.messages, ctx, options)
         responses = [resp]
@@ -556,6 +583,29 @@ class BaseAgent:
     def _complexity(self, ctx: AgentContext) -> str:
         return "high" if ctx.escalate else self.complexity
 
+    # ── editing a deliverable (#79) ─────────────────────────────────────────
+    def _schema_for(self, ctx: AgentContext) -> dict:
+        """The decoding constraint: the shape, plus `deleted` when the agent is editing —
+        a constrained decoder can't name a removed file in a key the schema lacks."""
+        schema = self.response_schema()
+        if not ctx.editing:
+            return schema
+        props = dict(schema.get("properties") or {})
+        props.setdefault("deleted", {"type": "array", "items": {"type": "string"}})
+        return {**schema, "properties": props}
+
+    def merge_edit(self, base: dict, raw: object) -> dict:
+        """An edit laid over what was there: files by path (`deleted` removes them),
+        every other field replaced only when the reply says something for it."""
+        return merge_edit(base, raw)
+
+    def _task_for(self, ctx: AgentContext) -> str:
+        return self.edit_task_text() if ctx.editing else self.task_text()
+
+    def edit_task_text(self) -> str:
+        """The ask when this agent is changing what it delivered (#79)."""
+        return f"{_EDIT_TASK}\n\n{self.task_text()}"
+
     def _check(self, raw: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
         """Everything wrong with one attempt: its shape, and its stack.
 
@@ -565,7 +615,12 @@ class BaseAgent:
         Running the charter check as a separate pass afterwards would mean an agent
         that wrote Mongoose under a Postgres charter is only ever told so by a
         security review three phases later, which is where this started.
+
+        An edit (#79) is checked as the deliverable it makes: what came back, laid over
+        what was there.
         """
+        if ctx.editing:
+            raw = self.merge_edit(ctx.base_output or {}, raw)
         output, errors = self._validate(raw)
         if not errors:
             output, own = self.own_checks(output, ctx)
@@ -850,13 +905,22 @@ class BaseAgent:
             parts.append(
                 f"# Team decision to honour\n{_clip(ctx.extra_context, budget['extra'])}\n"
             )
+        if ctx.editing:
+            # Last before the ask, where a small model weights it most: what is there
+            # now, then what to change about it (#79).
+            parts.append(
+                _CURRENT_FRAME.format(
+                    body=current_text(ctx.base_output or {}, budget.get("current", 0), ctx.likely_files)
+                )
+            )
+            parts.append(_CHANGE_FRAME.format(body=_clip(ctx.change, budget.get("change", 0))))
         if ctx.feedback:
             parts.append(
                 "# Reviewer feedback on your previous attempt — address it directly\n"
                 f"{_clip(ctx.feedback, budget['feedback'])}\n"
             )
 
-        parts.append(self.task_text())
+        parts.append(self._task_for(ctx))
         return "\n".join(parts)
 
     def _section_budgets(
@@ -919,6 +983,7 @@ class BaseAgent:
         # the prompt back over the top.
         written = {
             "idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context, "scan": ctx.scan_context,
+            "change": ctx.change if ctx.editing else "",
         }
         budget = {
             name: min(len(written[name]), int(free * share))
@@ -931,6 +996,7 @@ class BaseAgent:
             "rag": bool(ctx.rag_context),
             "skills": bool(ctx.skills),
             "memory": bool(ctx.memory_context),
+            "current": ctx.editing,
         }
         share_total = sum(_CONTEXT_SHARE[n] for n, has in present.items() if has)
 
@@ -1012,6 +1078,11 @@ class BaseAgent:
             f"these problems:\n{problems}\n\n"
             "Return the COMPLETE JSON object again — every key from the shape, "
             "not a patch and not an apology. Keep everything that was already correct."
+            + (
+                " File lists still hold only the files you add or change."
+                if ctx.editing
+                else ""
+            )
         )
         echo_budget = max(profile.prompt_char_budget // 4, 1000)
         echo = _clip(attempt, echo_budget)
@@ -1172,6 +1243,80 @@ def _pack_skills(skills: tuple[Selected, ...], limit: int) -> tuple[str, list[st
         used.append(chosen.skill.name)
         spent += cost
     return "\n\n".join(blocks), used
+
+
+def _file_lists(output: dict) -> list[str]:
+    """The keys of `output` that hold lists of files (`files`, `test_files`, …)."""
+    keys = []
+    for key, value in (output or {}).items():
+        if isinstance(value, list) and value and all(isinstance(v, dict) and "path" in v for v in value):
+            keys.append(key)
+    return keys
+
+
+def merge_edit(base: dict, raw: object) -> dict:
+    """What an edit (#79) makes of `base`: each list of files merged by path — a file
+    that came back replaces the one at its path, a new path is added, a path in `deleted`
+    goes — and every other field replaced only when the reply has something for it.
+    Files the reply doesn't mention are kept byte for byte."""
+    from copy import deepcopy
+
+    reply = raw if isinstance(raw, dict) else {}
+    merged = deepcopy(base or {})
+    gone = {str(p).strip().lstrip("/") for p in reply.get("deleted") or [] if isinstance(p, str)}
+    lists = set(_file_lists(merged)) | set(_file_lists(reply))
+    for key, value in reply.items():
+        if key == "deleted" or key in lists:
+            continue
+        if has_content(value):
+            merged[key] = value
+    for key in lists:
+        current = [dict(f) for f in merged.get(key) or [] if isinstance(f, dict)]
+        index = {str(f.get("path") or "").strip().lstrip("/"): i for i, f in enumerate(current)}
+        for item in reply.get(key) or []:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                continue
+            path = item["path"].strip().lstrip("/")
+            if path in index:
+                old = current[index[path]]
+                if "code" in item or "content" in item:
+                    # The new text wins whichever key it came under: readers take
+                    # `code` before `content`, so a stale `code` would shadow it.
+                    old = {k: v for k, v in old.items() if k not in ("code", "content")}
+                current[index[path]] = {**old, **item}
+            else:
+                index[path] = len(current)
+                current.append(dict(item))
+        merged[key] = [f for f in current if str(f.get("path") or "").strip().lstrip("/") not in gone]
+    return merged
+
+
+def current_text(base: dict, limit: int, likely: tuple = ()) -> str:
+    """The deliverable a change edits, as the prompt shows it (#79), cut to `limit`.
+
+    The file list first — every path with what it is for, which is the map of the app —
+    then the whole code of the files the change is likely to touch, then the rest of the
+    deliverable's fields. A file not shown whole is still on the list, by path."""
+    lists = _file_lists(base)
+    parts: list[str] = []
+    files = [f for key in lists for f in base.get(key) or [] if isinstance(f, dict)]
+    if files:
+        lines = ["Files (kept exactly as they are unless you return them):"]
+        for f in files:
+            purpose = str(f.get("purpose") or f.get("targets") or "").strip()
+            lines.append(f"- `{f.get('path')}`" + (f" — {purpose[:120]}" if purpose else ""))
+        parts.append("\n".join(lines))
+        wanted = [str(p).strip().lstrip("/") for p in likely if str(p).strip()]
+        for f in files:
+            path = str(f.get("path") or "").strip().lstrip("/")
+            if not any(path == w or path.endswith("/" + w) or w.endswith("/" + path) for w in wanted):
+                continue
+            code = f.get("code") if isinstance(f.get("code"), str) else str(f.get("content") or "")
+            parts.append(f"### {path}\n```\n{code}{'' if code.endswith(chr(10)) else chr(10)}```")
+    rest = {k: v for k, v in (base or {}).items() if k not in lists}
+    if rest:
+        parts.append("```json\n" + json.dumps(rest, ensure_ascii=False, default=str) + "\n```")
+    return _clip("\n\n".join(parts), limit)
 
 
 def _clip(text: str, limit: int) -> str:

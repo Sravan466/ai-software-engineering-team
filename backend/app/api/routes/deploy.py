@@ -185,9 +185,9 @@ def _label(info: dict, database: Optional[str]) -> str:
 
 
 @router.get("/api/projects/{project_id}/ship")
-def ship(request: Request, project: Project = Depends(get_project)) -> dict:
+def ship(request: Request, project: Project = Depends(get_project), db: Session = Depends(get_db)) -> dict:
     user_id = _user_id(request)
-    assembled = artifacts.assemble(project)
+    assembled, shipped = _shipping(db, project)
     info = assembled.get("scaffold") or {}
     kind = blueprint.kind(info) if assembled["files"] else None
     if project.deploy_target == "vercel" and project.deploy_status in ("fixing", "fixed") and kind is None:
@@ -211,7 +211,11 @@ def ship(request: Request, project: Project = Depends(get_project)) -> dict:
         "target": blueprint.target(kind),
         "stack": _label(info, info.get("database")),
         "frontend": info.get("frontend"),
-        "ready": project.status == PipelineStatus.COMPLETED.value and bool(assembled["files"]),
+        "ready": _shippable(db, project) and bool(assembled["files"]),
+        # Which version Deploy and a push send, and which went out last (#79).
+        "version": shipped.number if shipped is not None else None,
+        "deployed_version": project.deployed_version,
+        "pushed_version": project.github_pushed_version,
         "render": render,
         "github_repo": project.github_repo,
         "github_branch": project.github_branch,
@@ -305,6 +309,25 @@ class DeployRequest(BaseModel):
     #: For a Render deploy whose build isn't on GitHub yet: the repo to create.
     name: Optional[str] = None
     private: bool = True
+    #: The version to deploy (#79); the one that ships when left out.
+    version: Optional[int] = None
+
+
+def _shipping(db: Session, project: Project, number: Optional[int] = None):
+    """(the archive, its version) — what a deploy sends (#79)."""
+    from app.orchestration import versions
+
+    try:
+        return versions.shipping(db, project, number)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+def _shippable(db: Session, project: Project) -> bool:
+    """A finished build, or one being changed on top of a version that still ships."""
+    from app.orchestration import versions
+
+    return project.status == PipelineStatus.COMPLETED.value or versions.current(db, project) is not None
 
 
 def _public_env(project: Project, frontend_files: dict[str, str]) -> dict[str, str]:
@@ -361,7 +384,7 @@ def _claim_deploy(db: Session, project: Project, target: str, status: str) -> bo
     return result.rowcount == 1
 
 
-def _run_vercel(project_id: str, user_id: str) -> None:
+def _run_vercel(project_id: str, user_id: str, number: Optional[int] = None) -> None:
     """Background: upload the frontend and start the deployment. The route has
     already put `project_id` in `_uploading`; this takes it out when done."""
     try:
@@ -374,7 +397,8 @@ def _run_vercel(project_id: str, user_id: str) -> None:
                 project.deploy_status, project.deploy_error = "error", "Connect Vercel first."
                 db.commit()
                 return
-            assembled = artifacts.assemble(project)
+            # The version the route chose (#79), not whatever the build holds by now.
+            assembled, _ = _shipping(db, project, number)
             prefix = FRONTEND + "/"
             # The frontend's own folder, sent as the project root: its package.json is
             # complete on its own, and Vercel needs no `rootDirectory`.
@@ -424,9 +448,10 @@ def deploy(
     db: Session = Depends(get_db),
 ):
     user_id = _user_id(request)
-    if project.status != PipelineStatus.COMPLETED.value:
+    if not _shippable(db, project):
         raise HTTPException(409, "Deploy is ready once the build is complete.")
-    assembled = artifacts.assemble(project)
+    assembled, shipped = _shipping(db, project, body.version)
+    number = shipped.number if shipped is not None else None
     kind = blueprint.kind(assembled.get("scaffold") or {}) if assembled["files"] else None
     target = blueprint.target(kind)
     if target is None:
@@ -451,8 +476,10 @@ def deploy(
             with _uploading_lock:
                 _uploading.discard(project.id)
             raise HTTPException(409, "A deploy of this build is already running — wait for it to finish.")
-        background.add_task(_run_vercel, project.id, user_id)
-        return {"target": "vercel", "deploy": _deploy_state(project)}
+        project.deployed_version = number
+        db.commit()
+        background.add_task(_run_vercel, project.id, user_id, number)
+        return {"target": "vercel", "version": number, "deploy": _deploy_state(project)}
 
     # Render: from the build's GitHub repo, pushed again first so it is current.
     if not github_routes._configured():  # noqa: SLF001
@@ -475,7 +502,7 @@ def deploy(
         raise HTTPException(429, f"That's {settings.deploys_per_hour} deploys this hour — try again later.")
     try:
         pushed = github_routes.push_for(
-            user_id, project, db, github_routes.PushRequest(name=body.name, private=body.private)
+            user_id, project, db, github_routes.PushRequest(name=body.name, private=body.private, version=number)
         )
     except gh.GitHubConflict as e:
         return github_routes.conflict_response(e)
@@ -486,6 +513,7 @@ def deploy(
     project.deploy_target = "render"
     project.deploy_status = "handed_off"
     project.deploy_error = None
+    project.deployed_version = number
     db.commit()
     return {"target": "render", "handoff_url": handoff, "push": pushed, "deploy": _deploy_state(project)}
 

@@ -141,7 +141,11 @@ class FakeGitHub:
         if rest == "git/trees":
             data = json.loads(body)
             files = dict(self.trees[data["base_tree"]])
-            files.update({e["path"]: e["content"] for e in data["tree"]})
+            for e in data["tree"]:
+                if "content" in e:
+                    files[e["path"]] = e["content"]
+                elif e.get("sha", "") is None:
+                    files.pop(e["path"], None)  # a null sha deletes the path
             return httpx.Response(201, json={"sha": self._tree_sha(files)})
         if rest == "git/commits":
             data = json.loads(body)

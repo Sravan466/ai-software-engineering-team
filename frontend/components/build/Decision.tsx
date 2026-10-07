@@ -33,6 +33,7 @@ import { TestFailures } from "./TestRunLine";
 import { ReasonKinds } from "./ReasonKinds";
 import BuildProgress from "@/components/preview/BuildProgress";
 import { artifactFiles, latestRow, type PayloadFile } from "./payload";
+import { ChangeDiff, DiscardChange, planSentence } from "./Changes";
 
 /**
  * The decision the pipeline is waiting on, and everything it is a decision about.
@@ -218,8 +219,10 @@ export default function Decision({
     // A failed fetch is not "still loading". Collapsing the two left the Ship review
     // showing placeholder bars forever above a live Ship it button — approving a
     // build whose files, findings and costs were never actually on screen.
+    // The build under review, as it stands — not the version a change is made on,
+    // which is what the plain call returns while one is open (#79).
     api
-      .getArtifacts(id)
+      .getArtifacts(id, { live: true })
       .then((a) => {
         setArt(a);
         setArtError("");
@@ -306,7 +309,7 @@ export default function Decision({
   // A Ship stop over failing tests alone is about the tests, not about compiling.
   const failingTests = kind === "build" && art?.tests?.status === "failed" ? art.tests : null;
   const onlyTests = Boolean(failingTests) && !(art?.build?.problems?.length);
-  const shown = onlyTests
+  const tested = onlyTests
     ? {
         ...copy,
         title: "Tests fail",
@@ -314,6 +317,26 @@ export default function Decision({
         after: "Approving ships a build whose tests fail, with your waiver on the record.",
       }
     : copy;
+  // A whole-build review while a change is open is the change's review (#79): what
+  // was asked, what changed, and keeping it makes the next version.
+  const change = wantsBuild ? project.change ?? null : null;
+  const next = (project.current_version?.number ?? 0) + 1;
+  const shown = change
+    ? {
+        ...tested,
+        title:
+          kind === "ship"
+            ? "Change review"
+            : kind === "cost"
+              ? "Change review · over budget"
+              : onlyTests
+                ? "Change review · tests fail"
+                : "Change review · doesn't compile",
+        blurb: planSentence(change.plan) || tested.blurb,
+        approve: kind === "ship" ? `Keep as v${next}` : `Keep as v${next} anyway`,
+        after: `Keeping it makes it v${next}, what Deploy and Download send. Discarding puts v${next - 1} back.`,
+      }
+    : tested;
 
   if (kind === "database") {
     return <DatabaseGate project={project} id={id} busy={busy} act={act} />;
@@ -358,6 +381,11 @@ export default function Decision({
         </span>
         <div className="decision-headings">
           <h2 id="decision-title">{shown.title}</h2>
+          {change && (
+            <p className="decision-asked">
+              <span className="mono">#{change.number}</span> {change.text}
+            </p>
+          )}
           <p>{shown.blurb}</p>
         </div>
         <span className="badge badge-warn">
@@ -470,6 +498,7 @@ export default function Decision({
             onFindingsChanged={() => setFindingsTick((n) => n + 1)}
             onRedo={aim}
             onRedoFile={(file) => file.phase && aim(file.phase, file.path)}
+            changeId={change?.id ?? null}
           />
         )}
       </div>
@@ -502,6 +531,7 @@ export default function Decision({
                     : ". Send each one back to be fixed, or waive it with a reason.")
               : shown.after}
           </span>
+          {change && <DiscardChange project={project} id={id} busy={busy} act={act} compact />}
           {onSketch && !blocked && testsHeld === 0 && (
             <p className="decision-caution" id="approve-on-sketch">
               {Icon.alert}
@@ -747,7 +777,7 @@ function TestsReview({
 }
 
 // ── ship: the whole build in one pass ────────────────────────────────────────
-type ShipView = "files" | "mockup" | "security" | "cost" | "stack";
+type ShipView = "changes" | "files" | "mockup" | "security" | "cost" | "stack";
 
 /** True when the sketch was drawn from an older Frontend attempt than the current one —
  *  exact since #78 (the sketch records the attempt), by timestamp for older sketches. */
@@ -773,11 +803,14 @@ function ShipReview({
   onFindingsChanged,
   onRedo,
   onRedoFile,
+  changeId,
 }: {
   project: Project;
   id: string;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<boolean>;
+  /** An open change (#79): the review opens on what it changed. */
+  changeId: string | null;
   art: Artifacts | null;
   error: string;
   onRetry: () => void;
@@ -793,6 +826,7 @@ function ShipReview({
   const stale = mockupIsStale(project, preview);
 
   const views: { key: ShipView; label: string; icon: ReactNode; count?: number }[] = [];
+  if (changeId) views.push({ key: "changes", label: "Changes", icon: Icon.layers });
   if (files.length) views.push({ key: "files", label: "Files", icon: Icon.file, count: files.length });
   const showsApp = preview?.source === "app";
   if (showsApp) views.push({ key: "mockup", label: "App", icon: Icon.monitor });
@@ -811,7 +845,7 @@ function ShipReview({
   // but present, because a stack nobody can see is a stack nobody can disagree with.
   views.push({ key: "stack", label: "Stack", icon: Icon.diagram });
 
-  const [view, setView] = useState<ShipView>("files");
+  const [view, setView] = useState<ShipView>(changeId ? "changes" : "files");
   const platformCount = files.filter((f) => f.platform).length;
   const buildState = art?.build?.status ?? null;
   const active = views.find((v) => v.key === view) ?? views[0];
@@ -870,6 +904,22 @@ function ShipReview({
         </span>
       </div>
 
+      {active?.key === "changes" && changeId && (
+        <div className="artifact-view" style={{ maxHeight: 620 }}>
+          <div className="artifact-pad">
+            {art.tests && (
+              <p
+                className="build-line-strip change-checks"
+                data-state={art.tests.status === "ok" ? "ok" : art.tests.status === "failed" ? "failed" : "unchecked"}
+              >
+                {art.tests.status === "ok" ? Icon.check : art.tests.status === "failed" ? Icon.alert : Icon.info}
+                <span>Tests: {art.tests.summary}</span>
+              </p>
+            )}
+            <ChangeDiff load={() => api.changeDiff(id, changeId)} reloadKey={`${changeId}:${project.updated_at}`} />
+          </div>
+        </div>
+      )}
       {active?.key === "files" && (
         <div className="artifact-view artifact-files" style={{ height: 560 }}>
           <BuildLine

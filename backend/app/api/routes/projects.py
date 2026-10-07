@@ -247,23 +247,43 @@ def delete_project(project: Project = Depends(get_project), db: Session = Depend
 
 # ── Generated-project artifacts (preview + download) ─────────────────────────
 @router.get("/{project_id}/artifacts")
-def get_artifacts(project: Project = Depends(get_project)) -> dict:
-    """Assembled files + docs + setup steps the agents produced (for Preview/Summary)."""
-    assembled = artifacts.assemble(project)
+def get_artifacts(
+    version: Optional[int] = None,
+    live: bool = False,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Assembled files + docs + setup steps the agents produced (for Preview/Summary).
+
+    What ships, by default (#79): while a change is being made, the version it is made
+    on. `live` is the build as it stands — what a review is about; `version` names one."""
+    assembled, shipped = _shipping(db, project, version, live)
     return {
         "idea": project.idea,
         "name": project.name,
         "status": project.status,
         "readme": artifacts.readme_md(project, assembled),
+        "version": shipped.number if shipped is not None else None,
         **assembled,
     }
+
+
+def _shipping(db: Session, project: Project, version: Optional[int], live: bool = False):
+    from app.orchestration import versions
+
+    try:
+        return versions.shipping(db, project, version, live=live)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.get("/{project_id}/download")
 def download_project(
     request: Request,
     include_credentials: bool = False,
+    version: Optional[int] = None,
     project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
 ):
     """Stream the generated project as a .zip (code + docs + README).
 
@@ -291,14 +311,16 @@ def download_project(
             env = {**project_secrets.reveal(project.owner_id, project.id), **connectors.values_for(project)}
         except secretbox.SecretsLocked as e:
             raise HTTPException(503, str(e))
-    assembled = artifacts.assemble(project)
+    # A named version (#79): the one asked for, else the one that ships.
+    assembled, shipped = _shipping(db, project, version)
     if env is not None:
         try:
             client_env = artifacts.frontend_env(project, assembled)
         except secretbox.SecretsLocked as e:
             raise HTTPException(503, str(e))
     data = artifacts.build_zip(project, assembled, env=env, client_env=client_env)
-    filename = artifacts.slug(project.name or project.idea) + ".zip"
+    suffix = f"-v{shipped.number}" if shipped is not None else ""
+    filename = artifacts.slug(project.name or project.idea) + suffix + ".zip"
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/zip",

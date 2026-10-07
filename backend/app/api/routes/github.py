@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_project
-from app.core import deploy_store, github_publish as gh
+from app.core import artifacts, deploy_store, github_publish as gh
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.base import get_db
@@ -176,6 +176,8 @@ class PushRequest(BaseModel):
     description: Optional[str] = None
     #: Push into the empty repository of that name the user already has.
     use_existing: bool = False
+    #: The version to push (#79); the one that ships when left out.
+    version: Optional[int] = None
 
 
 def push_for(user_id: str, project: Project, db: Session, body: PushRequest) -> dict:
@@ -188,6 +190,23 @@ def push_for(user_id: str, project: Project, db: Session, body: PushRequest) -> 
     token = token_for(user_id)
     if not token:
         raise HTTPException(409, "Connect your GitHub account first.")
+    from app.orchestration import versions
+
+    try:
+        assembled, shipped = versions.shipping(db, project, body.version)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    removed: tuple = ()
+    last = (
+        versions.by_number(db, project, project.github_pushed_version)
+        if project.github_repo and project.github_pushed_version
+        else None
+    )
+    if last is not None:
+        # What the last push sent and this one doesn't: deleted in the same commit,
+        # so the repository holds exactly the version pushed (#79).
+        sent = set(artifacts.ship_files(project, versions.assemble(project, last)))
+        removed = tuple(sorted(sent - set(artifacts.ship_files(project, assembled))))
     try:
         result = gh.push_project(
             token,
@@ -196,6 +215,9 @@ def push_for(user_id: str, project: Project, db: Session, body: PushRequest) -> 
             private=body.private,
             description=body.description,
             use_existing=body.use_existing,
+            assembled=assembled,
+            version=shipped.number if shipped is not None else None,
+            removed=removed,
         )
     except gh.GitHubRevoked as e:
         forget_revoked(user_id)
@@ -207,8 +229,9 @@ def push_for(user_id: str, project: Project, db: Session, body: PushRequest) -> 
     project.github_repo = result["full_name"]
     project.github_branch = result["branch"]
     project.github_pushed_at = datetime.now(timezone.utc)
+    project.github_pushed_version = shipped.number if shipped is not None else None
     db.commit()
-    return result
+    return {**result, "version": project.github_pushed_version}
 
 
 @router.post("/push/{project_id}")

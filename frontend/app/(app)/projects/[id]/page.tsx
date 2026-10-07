@@ -16,6 +16,8 @@ import PhaseArtifact from "@/components/build/PhaseArtifact";
 import FileBrowser from "@/components/build/FileBrowser";
 import BuildLine from "@/components/build/BuildLine";
 import Decision from "@/components/build/Decision";
+import { ChangeStrip, Finished } from "@/components/build/Changes";
+import Versions from "@/components/deploy/Versions";
 import { databaseUnconnected } from "@/lib/database";
 import { DatabasePanel } from "@/components/build/DatabaseConnect";
 import { IntegrationsPanel } from "@/components/connectors/Integrations";
@@ -596,6 +598,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         {tab === "summary" && (
           <SummaryTab
             id={id}
+            project={project}
             analytics={analytics}
             onDatabaseChanged={load}
             shipIntent={shipIntent}
@@ -773,6 +776,11 @@ function BuildTab({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* A change in flight (#79): what was asked and who is on it. At its review the
+          Ship review is the change's own surface, so the strip steps aside. */}
+      {project.change && project.change.status !== "awaiting_approval" && (
+        <ChangeStrip project={project} id={id} busy={busy} act={act} />
+      )}
       {interrupted && <RunInterrupted project={project} busy={busy} act={act} id={id} />}
 
       {/* The crew fixing its own serious problems: progress, not a question. */}
@@ -785,36 +793,19 @@ function BuildTab({
         <Decision project={project} id={id} busy={busy} act={act} />
       )}
 
-      {/* The same slot, for the one ending that isn't a dead end. The header used
-          to carry Publish and Download here; a finished run needs one sentence
-          about what it produced and one door, not two duplicated buttons. */}
+      {/* The same slot, for the one ending that isn't a dead end — and the start of
+          the next turn (#79): what to change, and what was changed before. Counted,
+          not assumed: a run can reach `completed` with a phase that produced nothing. */}
       {state === "completed" && (
-        <div className="notice notice-ok">
-          {Icon.check}
-          <div className="notice-body">
-            {/* Counted, not assumed: a run can reach `completed` with a phase that
-                never produced anything, and the header used to say nothing at all. */}
-            <span className="notice-title">
-              {doneCount === PHASES.length
-                ? "All eight phases approved"
-                : `Finished with ${doneCount} of ${PHASES.length} phases approved`}
-            </span>
-            <span className="notice-text">
-              Deploy it, push it to GitHub, or download a .zip from Deliver.
-            </span>
-            <div className="notice-actions">
-              <button className="btn btn-sm btn-primary" onClick={() => onDeliver("deploy")}>
-                Deploy it
-              </button>
-              <button className="btn btn-sm" onClick={() => onDeliver("github")}>
-                {Icon.github} Connect to GitHub
-              </button>
-              <button className="btn btn-sm btn-ghost" onClick={() => onDeliver()}>
-                Open Deliver {Icon.arrowRight}
-              </button>
-            </div>
-          </div>
-        </div>
+        <Finished
+          project={project}
+          id={id}
+          busy={busy}
+          act={act}
+          doneCount={doneCount}
+          total={PHASES.length}
+          onDeliver={onDeliver}
+        />
       )}
 
 
@@ -1148,12 +1139,14 @@ function stillRunning(status: string): boolean {
 
 function SummaryTab({
   id,
+  project,
   analytics,
   onDatabaseChanged,
   shipIntent,
   onShipIntentUsed,
 }: {
   id: string;
+  project: Project;
   analytics: any;
   onDatabaseChanged: () => void;
   shipIntent: ShipIntent | null;
@@ -1174,9 +1167,12 @@ function SummaryTab({
     [onDatabaseChanged],
   );
 
+  // What ships (#79): refetched when the version does — a change kept, a version
+  // restored — so this tab never describes a build that has moved on.
+  const versionKey = `${project.current_version?.number ?? 0}:${project.status === "running" ? "r" : "s"}`;
   useEffect(() => {
     api.getArtifacts(id).then(setArt).catch((e) => setError(e.message));
-  }, [id]);
+  }, [id, versionKey]);
 
   if (error) {
     return (
@@ -1356,6 +1352,9 @@ function SummaryTab({
                 {art.files.length === 1 ? "file" : "files"}, {art.docs.length}{" "}
                 {art.docs.length === 1 ? "document" : "documents"} and a generated{" "}
                 <code>README.md</code>. Nothing leaves your machine.
+                {art.version && project.change
+                  ? ` This is v${art.version}: the change in progress isn't in it until you keep it.`
+                  : ""}
               </>
             ) : (
               <>Nothing to download yet. No phase has produced a file or document.</>
@@ -1363,7 +1362,7 @@ function SummaryTab({
           </p>
           {hasOutput && (
             <a className="btn btn-primary" href={api.downloadUrl(id, withEnv)} download>
-              {Icon.download} Download .zip
+              {Icon.download} {art.version ? `Download v${art.version}` : "Download .zip"}
             </a>
           )}
         </div>
@@ -1385,6 +1384,14 @@ function SummaryTab({
             </p>
           </div>
         )}
+        {/* Every version, in the card that takes a copy of one (#79). */}
+        <Versions
+          id={id}
+          status={project.status}
+          changeOpen={Boolean(project.change)}
+          currentKey={versionKey}
+          onRestored={onDatabaseChanged}
+        />
       </div>
 
     </div>

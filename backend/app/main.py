@@ -124,6 +124,7 @@ app.add_middleware(AppPreviewMiddleware)
 from app.api.routes import (  # noqa: E402
     analytics,
     auth as auth_routes,
+    changes as changes_routes,
     connector as connector_routes,
     connectors as connectors_routes,
     database as database_routes,
@@ -141,6 +142,7 @@ from app.api.routes import (  # noqa: E402
 
 app.include_router(auth_routes.router)
 app.include_router(projects.router)
+app.include_router(changes_routes.router)
 app.include_router(database_routes.router)
 app.include_router(integrations_routes.router)
 app.include_router(connectors_routes.router)
