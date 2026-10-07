@@ -93,8 +93,11 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "current_version_id",
         "deployed_version",
         "github_pushed_version",
+        "deploying_version",
         "decisions",
     ),
+    # Nullable (#79): a version recorded before it was counted is counted when listed.
+    "versions": ("file_count",),
     "phase_results": (
         # Nullable (#63): only a phase that fell back past a refused key has one.
         "fallback_note",

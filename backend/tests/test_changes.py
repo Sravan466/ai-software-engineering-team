@@ -309,3 +309,79 @@ def test_a_push_records_the_version_it_sent(client, script, fakes):  # noqa: F81
     # Pushing an earlier version by number sends that version.
     r = client.post(f"/api/github/push/{pid}", json={"version": 1})
     assert r.json()["version"] == 1 and "backend/routes/health.py" not in gh.files(full)
+
+
+# ── what the review found (#79) ───────────────────────────────────────────────
+def test_a_diff_keeps_content_lines_that_look_like_headers():
+    from app.orchestration import versions
+
+    before = {"files": [{"path": "db.sql", "content": "-- add users table\nCREATE TABLE u (id int);\n", "phase": "backend_engineer"}]}
+    after = {"files": [{"path": "db.sql", "content": "CREATE TABLE u (id int);\n++count;\n", "phase": "backend_engineer"}]}
+    found = versions.diff(before, after)["files"][0]
+    assert "--- add users table" in found["lines"] and "+++count;" in found["lines"]
+    assert (found["added"], found["removed"]) == (1, 1)
+
+
+def test_two_requests_at_once_record_one_first_version(client, script):
+    import threading
+
+    from app.db.base import SessionLocal
+    from app.db.models import Project, Version
+    from app.orchestration import versions
+
+    pid = _finished(client)
+    with SessionLocal() as db:
+        db.query(Version).filter(Version.project_id == pid).delete()
+        db.get(Project, pid).current_version_id = None
+        db.commit()
+
+    def first():
+        with SessionLocal() as db:
+            versions.ensure_first(db, db.get(Project, pid))
+
+    threads = [threading.Thread(target=first) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    listed = client.get(f"/api/projects/{pid}/versions").json()
+    assert [v["number"] for v in listed["versions"]] == [1]
+
+
+def test_a_change_never_rewrites_a_file_it_cant_show_or_whose_reply_was_cut(client, script, monkeypatch):
+    pid = _finished(client)
+    before = _code(_zip(client, pid))
+    script.edits["backend_engineer"] = {"summary": "Touch main", "files": [{"path": "backend/main.py", "purpose": "add a route"}]}
+    real = script.__call__
+
+    def cut(messages, **kwargs):
+        resp = real(messages, **kwargs)
+        if kwargs.get("role") == "backend_engineer" and "# The change to make" in messages[-1].content and not getattr(kwargs.get("options"), "json_schema", None):
+            # The reply runs out of room halfway through the file.
+            return LLMResponse(text="### backend/main.py\n```python\ndef main(:\n", provider="mock", model="mock-model",
+                               usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2), latency_ms=1, finish_reason="length")
+        return resp
+
+    stub(monkeypatch, "complete", cut)
+    client.post(f"/api/projects/{pid}/changes", json={"text": "add a route to main"})
+    project = client.get(f"/api/projects/{pid}").json()
+    backend = next(p for p in project["phases"] if p["phase"] == "backend_engineer" and p["status"] == "approved")
+    assert backend["handoff"]["change"]["cut_off"] == ["backend/main.py"]
+    # The working file stays as it was.
+    assert _code(_zip(client, pid))["backend/main.py"] == before["backend/main.py"]
+
+
+def test_a_failed_deploy_doesnt_relabel_whats_live(client, script):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+
+    pid = _finished(client)
+    with SessionLocal() as db:
+        p = db.get(Project, pid)
+        p.deployed_version, p.deploy_status = 1, "error"
+        db.commit()
+    assert not client.get(f"/api/projects/{pid}/versions").json()["versions"][0]["deployed"]
+    with SessionLocal() as db:
+        db.get(Project, pid).deploy_status = "ready"
+        db.commit()
+    assert client.get(f"/api/projects/{pid}/versions").json()["versions"][0]["deployed"]

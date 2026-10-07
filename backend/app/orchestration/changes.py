@@ -42,9 +42,6 @@ TESTERS = (Phase.QA_ENGINEER.value,)
 #: Re-run in full on every change: an audit and an estimate are of the whole app.
 REVIEWERS = (Phase.SECURITY_ENGINEER.value, Phase.COST_ESTIMATION.value)
 
-#: The longest change request a person can send; a paragraph, not a spec.
-MAX_TEXT = 2000
-
 #: Words that point at one side when the scoping call can't say (no model, or a reply
 #: naming nothing it knows). A miss falls back to every code phase the app has.
 _BACKEND_WORDS = re.compile(

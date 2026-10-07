@@ -35,11 +35,14 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["changes"])
 
 #: A change can be thrown away from wherever it stopped — but not while it runs.
+#: `completed` too: a build can only be finished with a change open if finishing was
+#: cut short before the change was closed, and discarding is how it gets unstuck.
 _DISCARDABLE = {
     PipelineStatus.AWAITING_APPROVAL.value,
     PipelineStatus.FAILED.value,
     PipelineStatus.CANCELLED.value,
     PipelineStatus.PAUSED.value,
+    PipelineStatus.COMPLETED.value,
 }
 
 
@@ -144,7 +147,7 @@ def start_change(
 @router.get("/{project_id}/changes")
 def list_changes(project: Project = Depends(get_project), db: Session = Depends(get_db)) -> dict:
     found = changes.all_for(db, project)
-    by_id = {v.id: v for v in versions.all_for(db, project)}
+    by_id = {v.id: v for v in versions.all_for(db, project, light=True)}
     return {"changes": [changes.out(project, c, by_id) for c in found]}
 
 
@@ -208,7 +211,7 @@ def change_diff(change_id: str, project: Project = Depends(get_project), db: Ses
 @router.get("/{project_id}/versions")
 def list_versions(project: Project = Depends(get_project), db: Session = Depends(get_db)) -> dict:
     versions.ensure_first(db, project)
-    found = versions.all_for(db, project)
+    found = versions.all_for(db, project, light=True)
     current = versions.current(db, project)
     return {
         "versions": [versions.out(v, project) for v in reversed(found)],

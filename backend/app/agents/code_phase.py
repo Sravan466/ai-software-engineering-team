@@ -285,6 +285,9 @@ class _Run:
         #: path -> what the change asks of that file.
         self.asks: dict[str, str] = {}
         self.change_mode = False
+        #: Files a change left as they were: too long to show, or the reply cut off.
+        self.too_long: list[str] = []
+        self.cut_off: list[str] = []
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -483,7 +486,7 @@ class _Run:
             self.planned = [p for p in self.planned if p.path != path]
             self.written.pop(path, None)
 
-        too_long: list[str] = []
+        too_long = self.too_long
         room = int(self.profile.prompt_char_budget * 0.6)
         for item in out.get("files") or []:
             if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not layout.clean(item["path"]):
@@ -533,8 +536,12 @@ class _Run:
         while queue:
             claim.between_calls()
             batch, queue = queue[:1], queue[1:]
-            queue = self._write(batch) + queue
-            queue = [p for p in queue if p.path not in self.landed]
+            try:
+                queue = self._write(batch) + queue
+            except _NoRoom as e:
+                too_long.append(e.path)
+                activity.file(e.path, "missing")
+            queue = [p for p in queue if p.path not in self.landed and p.path not in self.cut_off]
 
         result = self._finish()
         changed = sorted(
@@ -552,8 +559,11 @@ class _Run:
                 "added": added,
                 "deleted": deleted,
                 # Asked for and not changed: the model sent it back as it was, or never.
-                "unchanged": sorted(p for p in self.changing if p not in changed),
+                "unchanged": sorted(
+                    p for p in self.changing if p not in changed and p not in too_long and p not in self.cut_off
+                ),
                 "too_long": too_long,
+                "cut_off": list(self.cut_off),
                 "kept": len([p for p in self.existing if p not in changed and p not in deleted]),
             },
         }
@@ -605,6 +615,12 @@ class _Run:
                 self.cap = max(1, len(batch) // 2)
                 log.info("%s: a reply was cut off at the output limit; batches of %d now.", self.agent.title, self.cap)
                 again = missing
+            elif self.change_mode and batch[0].path in self.changing:
+                # A change (#79) to a file that exists: splitting it would write it anew
+                # from nothing, and a cut-off copy would replace working code. It stays
+                # as it was, and the change's record says why.
+                self.cut_off.append(batch[0].path)
+                activity.file(batch[0].path, "missing")
             else:
                 landed += self._split(batch[0], partial.get(batch[0].path))
         else:
@@ -786,8 +802,13 @@ class _Run:
     def _call(self, messages: list[ChatMessage], batch: list[_Planned], doing: str) -> LLMResponse:
         agent, ctx = self.agent, self.ctx
         first = batch[0].path
-        number = len([p for p in self.planned if p.path in self.written]) + 1
-        total = len(self.planned)
+        if self.change_mode and self.edits:
+            # A change counts its own files, not the ones it keeps (#79).
+            number = len([e for e in self.edits if e.path in self.landed]) + 1
+            total = len(self.edits)
+        else:
+            number = len([p for p in self.planned if p.path in self.written]) + 1
+            total = len(self.planned)
         more = f" and {len(batch) - 1} more" if len(batch) > 1 else ""
         label = f"{agent.title} — {doing} {first}{more} ({min(number, total)} of {total})"
         activity.stage(doing, detail=first, total=total)
@@ -854,7 +875,9 @@ class _Run:
                 if p.path in self.changing:
                     was = _Written(p.path, self.existing[p.path], self.written[p.path].language if p.path in self.written else "", p.purpose)
                     if not put(f"echo:{p.path}", _echo(was, max(len(was.code) + 200, 400), _EDIT_ECHO)):
-                        log.warning("%s: %s didn't fit beside the ask; written without it.", self.agent.title, p.path)
+                        # Never asked for blind: a file the model can't see would be
+                        # written from its purpose alone, and everything else in it lost.
+                        raise _NoRoom(p.path)
 
         for compact in (0, 1, 2):
             if put("plan", self._plan_text(batch, compact)):
@@ -1287,6 +1310,14 @@ class _Run:
 # ── helpers ─────────────────────────────────────────────────────────────────
 #: `_fix_build`'s answer when the tree it was given is still the one that ships.
 _UNCHANGED = object()
+
+
+class _NoRoom(Exception):
+    """A file a change would edit doesn't fit in this model's window beside the ask."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.path = path
 
 
 def _choice(value: object) -> object:

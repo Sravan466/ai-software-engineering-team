@@ -326,13 +326,17 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
       let ok = false;
       let failure = "";
       try {
-        const result = (await fn()) as RunResponse | undefined;
+        const result = (await fn()) as (RunResponse & { change?: Project["change"] }) | undefined;
         ok = true;
         // Control endpoints return the status they just committed. Applying it
         // before the reload means the badge flips the instant the click lands,
-        // instead of reading "Waiting for you" while an agent is generating.
+        // instead of reading "Waiting for you" while an agent is generating. A change
+        // just started comes back too (#79), so its strip takes the finished slot in
+        // the same frame instead of leaving it empty until the reload.
         if (result && typeof result.status === "string") {
-          setProject((p) => (p ? { ...p, status: result.status } : p));
+          setProject((p) =>
+            p ? { ...p, status: result.status, ...(result.change ? { change: result.change } : {}) } : p,
+          );
         }
       } catch (e: any) {
         failure = e.message;
@@ -731,6 +735,9 @@ function RunInterrupted({
 /** Where the page is being sent: a phase, and — from a finding — a file in it (#77). */
 type Jump = { key: string; file?: { path: string; line?: number | null } };
 
+/** The gates whose review covers the whole build — a change's review is one of these. */
+const WHOLE_BUILD_GATES = new Set(["ship", "cost", "build"]);
+
 function BuildTab({
   project,
   analytics,
@@ -777,10 +784,13 @@ function BuildTab({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* A change in flight (#79): what was asked and who is on it. At its review the
-          Ship review is the change's own surface, so the strip steps aside. */}
-      {project.change && project.change.status !== "awaiting_approval" && (
-        <ChangeStrip project={project} id={id} busy={busy} act={act} />
-      )}
+          whole-build review is the change's own surface, so the strip steps aside;
+          at any other stop (the plan, a security stop, the database) it stays, with
+          the way back to the version before. */}
+      {project.change &&
+        !(project.change.status === "awaiting_approval" && WHOLE_BUILD_GATES.has(project.gate_kind ?? "")) && (
+          <ChangeStrip project={project} id={id} busy={busy} act={act} />
+        )}
       {interrupted && <RunInterrupted project={project} busy={busy} act={act} id={id} />}
 
       {/* The crew fixing its own serious problems: progress, not a question. */}

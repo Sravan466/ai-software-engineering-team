@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_project
+from app.api.deps import get_project, shipping_or_404
 from app.api.routes import github as github_routes
 from app.api.routes.settings import _trusted_host
 from app.build import blueprint, buildlog, dbconnect, scaffold
@@ -315,12 +315,7 @@ class DeployRequest(BaseModel):
 
 def _shipping(db: Session, project: Project, number: Optional[int] = None):
     """(the archive, its version) — what a deploy sends (#79)."""
-    from app.orchestration import versions
-
-    try:
-        return versions.shipping(db, project, number)
-    except LookupError as e:
-        raise HTTPException(404, str(e))
+    return shipping_or_404(db, project, number)
 
 
 def _shippable(db: Session, project: Project) -> bool:
@@ -476,7 +471,8 @@ def deploy(
             with _uploading_lock:
                 _uploading.discard(project.id)
             raise HTTPException(409, "A deploy of this build is already running — wait for it to finish.")
-        project.deployed_version = number
+        # Live only once Vercel says it built: `deploy_status` promotes it then.
+        project.deploying_version = number
         db.commit()
         background.add_task(_run_vercel, project.id, user_id, number)
         return {"target": "vercel", "version": number, "deploy": _deploy_state(project)}
@@ -547,6 +543,9 @@ def deploy_status(
         project.deploy_status = "ready"
         project.deploy_url = vercel.live_url(found) or project.deploy_url
         project.deployed_at = _now()
+        # The version that just went live (#79).
+        if project.deploying_version is not None:
+            project.deployed_version = project.deploying_version
         data = autofix.load(project)
         if data.get("vercel"):
             # It built: the next failure, if there is one, starts the count again.

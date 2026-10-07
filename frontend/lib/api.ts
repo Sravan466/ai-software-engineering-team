@@ -628,8 +628,6 @@ export type VersionSummary = {
   label: string;
   kind: "first_build" | "change" | "restore" | "edit";
   created_at: string | null;
-  /** How many versions the build has. */
-  count: number;
 };
 
 export type Version = {

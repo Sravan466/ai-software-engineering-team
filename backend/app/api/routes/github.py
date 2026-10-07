@@ -190,12 +190,10 @@ def push_for(user_id: str, project: Project, db: Session, body: PushRequest) -> 
     token = token_for(user_id)
     if not token:
         raise HTTPException(409, "Connect your GitHub account first.")
+    from app.api.deps import shipping_or_404
     from app.orchestration import versions
 
-    try:
-        assembled, shipped = versions.shipping(db, project, body.version)
-    except LookupError as e:
-        raise HTTPException(404, str(e))
+    assembled, shipped = shipping_or_404(db, project, body.version)
     removed: tuple = ()
     last = (
         versions.by_number(db, project, project.github_pushed_version)

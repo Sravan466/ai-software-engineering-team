@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.connector.hub import hub
-from app.api.deps import current_user, get_project
+from app.api.deps import current_user, get_project, shipping_or_404
 from app.build import dbconnect, scan
 from app.core import artifacts, model_roles, project_secrets, secretbox
 from app.core.config import settings
@@ -269,12 +269,7 @@ def get_artifacts(
 
 
 def _shipping(db: Session, project: Project, version: Optional[int], live: bool = False):
-    from app.orchestration import versions
-
-    try:
-        return versions.shipping(db, project, version, live=live)
-    except LookupError as e:
-        raise HTTPException(404, str(e))
+    return shipping_or_404(db, project, version, live)
 
 
 @router.get("/{project_id}/download")

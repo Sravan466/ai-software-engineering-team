@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import settings
@@ -204,6 +204,9 @@ class Project(Base):
     #: nothing went out since versions existed.
     deployed_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     github_pushed_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: The version a Vercel deploy in flight is sending; it becomes `deployed_version`
+    #: once Vercel reports it ready, so a deploy that fails doesn't relabel what's live.
+    deploying_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     #: What this app has settled on, one line each — its stack, then every change kept
     #: ("v2: Add login with email + password"). Handed to the crew when it changes the
     #: app, so a change doesn't undo an earlier one. Null until the build finishes.
@@ -507,6 +510,8 @@ class Version(Base):
     """
 
     __tablename__ = "versions"
+    # One v2 per build: two writers racing for the next number can't both take it.
+    __table_args__ = (UniqueConstraint("project_id", "number", name="uq_versions_project_number"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
@@ -523,6 +528,9 @@ class Version(Base):
     #: `{"charter": …, "phases": [{id, phase, agent, output, content_md, …}]}` — enough
     #: to assemble the archive and to make the version current again.
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: How many files it holds, counted once when recorded, so a list of versions
+    #: doesn't read every version's code to say so.
+    file_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -17,11 +17,15 @@ after v3 records v4 — the way v0 and Lovable do it.
 from __future__ import annotations
 
 import difflib
+import threading
+import weakref
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Optional
+from typing import Iterator, Optional
 
-from sqlalchemy.orm import Session, object_session
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, defer, object_session
 
 from app.core import artifacts
 from app.core.constants import PHASE_ORDER, PhaseStatus, PipelineStatus
@@ -77,30 +81,57 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
 
 
+# ── one writer of a build's version numbers at a time ─────────────────────────
+#
+# A version's number is the next one after the newest, read and then inserted — so two
+# writers at once (a page loading `/artifacts` and `/versions` together on an old
+# build, or a finishing run and a refetch) would both take the same number. Each build
+# gets a lock, held from the read to the commit; the unique constraint on the table is
+# the backstop for anything that gets past it (another process). Weak values, so the
+# table holds only builds someone is writing right now.
+_locks: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
+_locks_guard = threading.Lock()
+
+
+@contextmanager
+def writing(project_id: str) -> Iterator[None]:
+    """Hold this build's version numbers; commit inside, before leaving."""
+    with _locks_guard:
+        lock = _locks.get(project_id)
+        if lock is None:
+            lock = threading.RLock()
+            _locks[project_id] = lock
+    with lock:
+        yield
+
+
 # ── reading ───────────────────────────────────────────────────────────────────
-def _rows(db: Session, project: Project) -> list[PhaseResult]:
-    return (
-        db.query(PhaseResult)
-        .filter(PhaseResult.project_id == project.id)
-        .order_by(PhaseResult.created_at, PhaseResult.id)
-        .all()
-    )
-
-
 def current_rows(db: Session, project: Project) -> list[PhaseResult]:
     """The attempt that counts for each phase — what the build is right now."""
-    return artifacts._current(_rows(db, project))  # noqa: SLF001 - the one definition
+    return artifacts._current(artifacts._rows(project))  # noqa: SLF001 - the one definition
 
 
-def all_for(db: Session, project: Project) -> list[Version]:
-    return db.query(Version).filter(Version.project_id == project.id).order_by(Version.number).all()
+def current_ids(db: Session, project: Project) -> list[str]:
+    """The ids of the attempts that count, finished ones only."""
+    return [r.id for r in current_rows(db, project) if r.status != PhaseStatus.RUNNING.value]
+
+
+def all_for(db: Session, project: Project, light: bool = False) -> list[Version]:
+    """Every version, oldest first. `light` leaves the snapshots unread — a list needs
+    labels and counts, not every phase's code."""
+    query = db.query(Version).filter(Version.project_id == project.id)
+    if light:
+        query = query.options(defer(Version.snapshot))
+    return query.order_by(Version.number).all()
 
 
 def by_number(db: Session, project: Project, number: int) -> Optional[Version]:
+    # The first one recorded, should a duplicate from before the constraint exist.
     return (
         db.query(Version)
         .filter(Version.project_id == project.id, Version.number == number)
-        .one_or_none()
+        .order_by(Version.created_at, Version.id)
+        .first()
     )
 
 
@@ -123,11 +154,11 @@ def latest_number(db: Session, project: Project) -> int:
 
 
 def summary_of(project: Project) -> Optional[dict]:
-    """`{number, label, kind, created_at, count}` for the page — reads, never writes."""
+    """`{number, label, kind, created_at}` for the page — one lookup, never a write."""
     db = object_session(project)
     if db is None or not project.current_version_id:
         return None
-    found = db.get(Version, project.current_version_id)
+    found = db.get(Version, project.current_version_id, options=[defer(Version.snapshot)])
     if found is None:
         return None
     return {
@@ -135,18 +166,21 @@ def summary_of(project: Project) -> Optional[dict]:
         "label": found.label,
         "kind": found.kind,
         "created_at": _iso(found.created_at),
-        "count": latest_number(db, project),
     }
+
+
+def _file_count(snap: dict) -> int:
+    return sum(
+        1
+        for item in (snap or {}).get("phases") or []
+        for _ in artifacts.iter_files(item.get("output") if isinstance(item.get("output"), dict) else {})
+    )
 
 
 def out(version: Version, project: Project) -> dict:
     """One version as the API shows it."""
-    phases = (version.snapshot or {}).get("phases") or []
-    files = sum(
-        1
-        for item in phases
-        for _ in artifacts.iter_files(item.get("output") if isinstance(item.get("output"), dict) else {})
-    )
+    files = version.file_count if version.file_count is not None else _file_count(version.snapshot)
+    live = project.deploy_status in ("ready", "handed_off")
     return {
         "id": version.id,
         "number": version.number,
@@ -156,7 +190,8 @@ def out(version: Version, project: Project) -> dict:
         "restored_from": version.restored_from,
         "created_at": _iso(version.created_at),
         "current": project.current_version_id == version.id,
-        "deployed": project.deployed_version == version.number,
+        # What is live, not what was last sent: a deploy that failed changes nothing.
+        "deployed": live and project.deployed_version == version.number,
         "pushed": project.github_pushed_version == version.number,
         "files": files,
     }
@@ -185,7 +220,8 @@ def record(
 ) -> Version:
     """Name what the build holds now as its next version, and make it current.
 
-    The caller commits — with whatever else made this version, in one transaction."""
+    The caller commits — with whatever else made this version, in one transaction —
+    inside `writing(project.id)`, which it holds from before this call."""
     ids, snap = snapshot(db, project)
     version = Version(
         project_id=project.id,
@@ -196,6 +232,7 @@ def record(
         restored_from=restored_from,
         phase_result_ids=ids,
         snapshot=snap,
+        file_count=_file_count(snap),
     )
     db.add(version)
     db.flush()
@@ -215,15 +252,26 @@ def ensure_first(db: Session, project: Project) -> Optional[Version]:
         return found
     if project.status != PipelineStatus.COMPLETED.value:
         return None
-    existing = all_for(db, project)
-    if existing:
-        # A pointer lost to an interrupted write: the newest is where the build is.
-        project.current_version_id = existing[-1].id
-        db.commit()
-        return existing[-1]
-    version = record(db, project, "First build", FIRST_BUILD)
-    db.commit()
-    return version
+    with writing(project.id):
+        # Asked again under the lock: another request may have recorded it meanwhile.
+        db.refresh(project, ["current_version_id", "status"])
+        found = current(db, project)
+        if found is not None:
+            return found
+        existing = all_for(db, project, light=True)
+        if existing:
+            # A pointer lost to an interrupted write: the newest is where the build is.
+            project.current_version_id = existing[-1].id
+            db.commit()
+            return existing[-1]
+        try:
+            version = record(db, project, "First build", FIRST_BUILD)
+            db.commit()
+        except IntegrityError:
+            # Another process got there first; theirs is v1.
+            db.rollback()
+            return current(db, project) or by_number(db, project, 1)
+        return version
 
 
 def matches_current(db: Session, project: Project, version: Optional[Version] = None) -> bool:
@@ -231,8 +279,7 @@ def matches_current(db: Session, project: Project, version: Optional[Version] = 
     version = version or current(db, project)
     if version is None:
         return False
-    ids, _ = snapshot(db, project)
-    return set(ids) == set(version.phase_result_ids or [])
+    return set(current_ids(db, project)) == set(version.phase_result_ids or [])
 
 
 # ── assembling one ────────────────────────────────────────────────────────────
@@ -291,7 +338,7 @@ def restore_rows(db: Session, project: Project, version: Version, note: str) -> 
     dead one (running with nothing driving it, or failed) is dropped. Returns the rows
     now current, by phase. The caller commits.
     """
-    rows = _rows(db, project)
+    rows = artifacts._rows(project)  # noqa: SLF001 - the one query
     by_phase: dict[str, list[PhaseResult]] = {}
     for row in rows:
         by_phase.setdefault(row.phase, []).append(row)
@@ -356,11 +403,9 @@ def diff(before: dict, after: dict) -> dict:
             lines = [f"-{line}" for line in (old or "").splitlines()]
         else:
             status = "changed"
-            lines = [
-                line
-                for line in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=3)
-                if not line.startswith(("---", "+++"))
-            ]
+            # The first two lines are the `---`/`+++` file headers. Only those: a removed
+            # `-- comment` reads `--- comment`, and it is a line of the change.
+            lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=3))[2:]
         counts[status] += 1
         added = sum(1 for line in lines if line.startswith("+"))
         removed = sum(1 for line in lines if line.startswith("-"))

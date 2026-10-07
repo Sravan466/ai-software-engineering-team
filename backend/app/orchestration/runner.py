@@ -1108,9 +1108,12 @@ class PipelineRunner:
     def restore_version(self, db: Session, project: Project, version: Version) -> Version:
         """Bring an earlier version back as the newest one: restoring v1 after v3 makes v4."""
         self._reinstate(db, project, version, f"Restored from v{version.number}.")
-        restored = versions.record(db, project, f"Restored v{version.number}", versions.RESTORE, restored_from=version.number)
-        changes.remember(project, f"v{restored.number}: restored v{version.number}")
-        self._finished_again(db, project)
+        with versions.writing(project.id):
+            restored = versions.record(
+                db, project, f"Restored v{version.number}", versions.RESTORE, restored_from=version.number
+            )
+            changes.remember(project, f"v{restored.number}: restored v{version.number}")
+            self._finished_again(db, project)
         return restored
 
     def _reinstate(self, db: Session, project: Project, version: Version, note: str) -> None:
@@ -1150,10 +1153,14 @@ class PipelineRunner:
         activity.clear(project.id)
         db.commit()
 
-    def _version_on_finish(self, db: Session, project: Project) -> None:
+    def _version_on_finish(self, db: Session, project: Project) -> bool:
         """Every way of finishing names a version (#79): the first build is v1, a kept
         change the next, and anything else that changed the build — an edit made on the
-        app preview, a fix after Vercel failed — one more."""
+        app preview, a fix after Vercel failed — one more.
+
+        Writes nothing itself: `_finalize` commits it with the build's COMPLETED, so a
+        failure in between can't leave a finished build holding an open change. True
+        when a change was kept, and the checkpoint's record of it is to be cleared."""
         found = changes.open_change(db, project)
         if found is not None:
             if not self._change_started(project):
@@ -1161,27 +1168,20 @@ class PipelineRunner:
                 found.status = changes.FAILED
                 found.note = "The change stopped before anything was changed."
                 found.finished_at = _now()
-                db.commit()
-                return
+                return False
             version = versions.record(db, project, found.text, versions.CHANGE, change_id=found.id)
             found.status = changes.DONE
             found.version_id = version.id
             found.finished_at = _now()
             changes.remember(project, f"v{version.number}: {found.text}")
-            with _checkpoint_lock(project.id):
-                graph.update_state(
-                    _config(project.id), {"change": None, "feedback": {}}, as_node=versions.phase_order_last()
-                )
-            db.commit()
-            return
+            return True
         current = versions.current(db, project)
         if current is None:
-            if not versions.all_for(db, project):
+            if not versions.all_for(db, project, light=True):
                 versions.record(db, project, "First build", versions.FIRST_BUILD)
                 if not project.decisions:
                     project.decisions = changes.first_decisions(project) or None
-                db.commit()
-            return
+            return False
         if not versions.matches_current(db, project, current):
             record = app_state.edit(project) or {}
             frontend = next(
@@ -1198,7 +1198,7 @@ class PipelineRunner:
                 else "Rebuilt"
             )
             versions.record(db, project, label, versions.EDIT)
-            db.commit()
+        return False
 
     def draw_sketch_for(self, project_id: str, row_id: str, owner_id: Optional[str]) -> None:
         """Draw the sketch for a frontend whose app preview couldn't run (#78): the
@@ -2445,8 +2445,17 @@ class PipelineRunner:
         if project.deploy_status == "fixing":
             # The crew's fix of a failed Vercel build is finished: deploy it again.
             project.deploy_status = "fixed"
-        db.commit()
-        self._version_on_finish(db, project)
+        # Finished and its version named in one commit (#79).
+        with versions.writing(project.id):
+            kept_change = self._version_on_finish(db, project)
+            db.commit()
+        if kept_change:
+            # The change is over: the next one starts from this version, told nothing
+            # of this one but what `decisions` keeps.
+            with _checkpoint_lock(project.id):
+                graph.update_state(
+                    _config(project.id), {"change": None, "feedback": {}}, as_node=versions.phase_order_last()
+                )
         self._write_memory(project, values)
 
     def _record_usage(self, db: Session, project: Project, lr: dict) -> None:

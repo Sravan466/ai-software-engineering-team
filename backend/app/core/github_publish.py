@@ -150,6 +150,18 @@ def _init_empty(c: httpx.Client, full: str, branch: Optional[str]) -> None:
         raise _fail(r, "start the empty repository")
 
 
+def _paths(c: httpx.Client, full: str, tree_sha: str) -> set[str]:
+    """Every file path in a tree. Empty when GitHub won't list it whole (a truncated
+    listing can't say a path is absent), so nothing is deleted on a guess."""
+    r = c.get(f"/repos/{full}/git/trees/{tree_sha}", params={"recursive": "1"})
+    if r.status_code != 200:
+        return set()
+    data = r.json()
+    if data.get("truncated"):
+        return set()
+    return {e.get("path") for e in data.get("tree") or [] if e.get("type") == "blob" and e.get("path")}
+
+
 def _commit(
     c: httpx.Client, full: str, branch: str, files: dict[str, str], message: str, removed: tuple = ()
 ) -> tuple[str, bool]:
@@ -168,8 +180,14 @@ def _commit(
     base_tree = cm.json()["tree"]["sha"]
 
     tree = [{"path": p, "mode": "100644", "type": "blob", "content": content} for p, content in files.items()]
+    gone = [p for p in removed if p not in files]
+    if gone:
+        # Only paths still there: someone may have deleted or moved one on GitHub, and
+        # deleting a path the tree doesn't have can fail the whole tree.
+        there = _paths(c, full, base_tree)
+        gone = [p for p in gone if p in there]
     # A null sha with no content deletes the path from the base tree.
-    tree += [{"path": p, "mode": "100644", "type": "blob", "sha": None} for p in removed if p not in files]
+    tree += [{"path": p, "mode": "100644", "type": "blob", "sha": None} for p in gone]
     tr = c.post(f"/repos/{full}/git/trees", json={"base_tree": base_tree, "tree": tree})
     if tr.status_code not in (200, 201):
         raise _fail(tr, "build the file tree")
