@@ -203,11 +203,11 @@ export function stepsFor(project: Project, key: string, agent: Persona, state: s
   if (STOPPED_VERB[state]) {
     tail.state = "held";
     lines.push({ id: id("stopped"), state: "stopped", title: STOPPED_VERB[state] });
-  } else if (state === "paused") {
-    tail.state = "held";
-    lines.push({ id: id("paused"), state: "waiting", title: "Paused until your computer reconnects" });
   } else if (state === "cancelled") {
-    lines.push({ id: id("stopping"), state: "waiting", title: "Stopping once this step finishes" });
+    // Stopped after the phase's last step had already finished: the run stops before
+    // the next phase, not after "this step".
+    const done = !!a?.ended;
+    lines.push({ id: id("stopping"), state: "waiting", title: done ? "Stopping before the next phase" : "Stopping once this step finishes" });
   }
   return lines;
 }

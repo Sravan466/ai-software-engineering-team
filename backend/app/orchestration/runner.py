@@ -241,6 +241,10 @@ def _as_owner(method):
                         project.id,
                     )
                     return project
+                finally:
+                    # The run has stopped driving: the last phase's word, kept while
+                    # its row was saved (#86), is history now.
+                    activity.drop_ended(project.id)
 
     return bound
 

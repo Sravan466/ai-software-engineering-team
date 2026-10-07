@@ -260,8 +260,13 @@ class Project(Base):
         Background tasks die with the process, so a `running` row that outlives its
         server is unrecoverable on its own — and used to poll forever. A missing
         heartbeat is proof there is no live runner: only the runner writes one.
+
+        A `cancelled` run can be stalled too (#86): Stop lets the call in flight finish,
+        and the page watches for that — unless the process died before it did. Every
+        reader checks the status alongside this, so a long-stopped run reading True
+        changes nothing.
         """
-        if self.status != "running":
+        if self.status not in ("running", "cancelled"):
             return False
         beat = _aware(self.heartbeat_at) or _aware(self.phase_started_at)
         if beat is None:
@@ -292,9 +297,9 @@ class Project(Base):
         from the run in this process (#81). None when nothing is reporting. Once the
         phase stops reporting, its last snapshot (`ended`) stands in until the next
         phase begins, so the steps it took don't vanish while its row is saved (#86).
-        Cancelled and paused runs keep theirs too: Stop lets the call in flight finish,
-        and a paused run picks up where it was — the steps are still the account."""
-        if self.status not in ("running", "cancelled", "paused"):
+        A cancelled run keeps them too: Stop lets the call in flight finish, and the
+        steps are still the account of it until the run stops driving."""
+        if self.status not in ("running", "cancelled"):
             return None
         from app.orchestration import activity
 

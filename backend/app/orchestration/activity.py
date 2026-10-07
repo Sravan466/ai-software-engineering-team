@@ -8,9 +8,10 @@ and the file list filling in as files land.
 The steps it has finished are kept too (#86), so the build page can show them as a
 feed — "Planned 9 files", "Ran npm install" — rather than only the one in hand. A
 command that ran between two polls, or before a reload, is still there to read.
-When the phase stops reporting, its last snapshot is kept, marked `ended`, until
-the next phase begins: the runner is still saving the row for a moment after the
-agent returns, and a feed that lost every step in that gap would jump backwards.
+When the phase stops reporting, its snapshot stays, marked `ended`, until the next
+phase begins or the run stops driving: the runner is still saving the row for a
+moment after the agent returns, and a feed that lost every step in that gap would
+jump backwards.
 
 Process-local, like the mockup's progress (`preview/jobs.py`): the run is a thread in
 this process, so is every request that reads it, and a restart that loses the run
@@ -47,9 +48,6 @@ FILE_STAGES = ("writing", "fixing")
 TRAIL_MAX = 24
 #: The planner's summary, as the page shows it under "Planned 9 files".
 NOTE_MAX = 280
-#: Ended snapshots kept at once, across projects. Each is only read while its own row
-#: is still `running`, so the oldest can always go.
-ENDED_MAX = 32
 
 
 def _step(stage: str, detail: str) -> tuple[str, str]:
@@ -124,8 +122,6 @@ class _Activity:
 
 _lock = threading.Lock()
 _board: dict[str, _Activity] = {}
-#: What each project's last phase said as it stopped reporting (see the module doc).
-_ended: dict[str, _Activity] = {}
 
 
 def _project() -> Optional[str]:
@@ -144,7 +140,6 @@ def begin(phase: str) -> Optional[object]:
         return None
     with _lock:
         board = _board[pid] = _Activity(phase=phase)
-        _ended.pop(pid, None)
         return board
 
 
@@ -155,7 +150,7 @@ def stage(name: str, *, total: Optional[int] = None, detail: str = "", done: Opt
         return
     with _lock:
         found = _board.get(pid)
-        if found is None:
+        if found is None or found.ended:
             return
         moved = _step(name, detail) != _step(found.stage, found.detail)
         if found.opened and moved:
@@ -176,7 +171,7 @@ def plan(paths: Iterable[str], per_call: int, note: str = "") -> None:
         return
     with _lock:
         found = _board.get(pid)
-        if found is None:
+        if found is None or found.ended:
             return
         found.files = {p: "planned" for p in paths}
         found.total = len(found.files)
@@ -191,7 +186,7 @@ def file(path: str, state: str) -> None:
         return
     with _lock:
         found = _board.get(pid)
-        if found is None:
+        if found is None or found.ended:
             return
         found.files[path] = state
         found.total = max(found.total, len(found.files))
@@ -205,41 +200,46 @@ def per_call(n: int) -> None:
 def end(board: Optional[object] = None, *, finished: bool = True) -> None:
     """The phase stopped reporting.
 
-    Finished, its step in hand is done and the snapshot is kept, marked `ended`. A
-    phase that raised keeps nothing: the step it was on never finished, and the run
-    is about to say so itself. Given the `board` that `begin()` returned, it only
-    ends that one — never a newer run's.
+    Finished, its step in hand is done and the board stays, marked `ended`. A phase
+    that raised keeps nothing: the step it was on never finished, and the run is about
+    to say so itself. Given the `board` that `begin()` returned, it only ends that
+    one — never a newer run's.
     """
     pid = _project()
     if pid is None:
         return
     with _lock:
-        if board is not None and _board.get(pid) is not board:
+        found = _board.get(pid)
+        if found is None or (board is not None and found is not board):
             return
-        found = _board.pop(pid, None)
-        _ended.pop(pid, None)
-        if found is None or not finished:
+        if not finished:
+            del _board[pid]
             return
         if found.opened:
             found.file_step()
             found.opened = ""
         found.ended = True
-        _ended[pid] = found
-        while len(_ended) > ENDED_MAX:
-            del _ended[next(iter(_ended))]
 
 
 def clear(project_id: str) -> None:
-    """Forget the project's progress, live and ended. A new phase starts clean."""
+    """Forget the project's progress. A new phase starts clean."""
     with _lock:
         _board.pop(project_id, None)
-        _ended.pop(project_id, None)
+
+
+def drop_ended(project_id: str) -> None:
+    """The run stopped driving: a phase's last word is history now. A live board — a
+    newer run's, mid-phase — is left alone."""
+    with _lock:
+        found = _board.get(project_id)
+        if found is not None and found.ended:
+            del _board[project_id]
 
 
 def latest(project_id: str) -> Optional[dict]:
     """The phase reporting now, or else the last word of the one that just stopped."""
     with _lock:
-        found = _board.get(project_id) or _ended.get(project_id)
+        found = _board.get(project_id)
         return found.as_dict() if found is not None else None
 
 
@@ -249,7 +249,7 @@ def _update(**changes) -> None:
         return
     with _lock:
         found = _board.get(pid)
-        if found is None:
+        if found is None or found.ended:
             return
         for key, value in changes.items():
             if value is not None:

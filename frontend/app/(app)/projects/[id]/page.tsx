@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
 import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
@@ -272,8 +272,10 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   // Stopped, a run still has someone finishing the call Stop can't interrupt — its
   // row says `running` until that call returns — and the row's steps say "stopping
   // once this step finishes" (#86). Keep watching until it has.
+  // A stopped run whose process died before its call returned never will: `stalled`.
   const finishing =
     project?.status === "cancelled" &&
+    !project.stalled &&
     !!project.current_phase &&
     latestRow(project, project.current_phase)?.status === "running";
   const pollMs = !project
@@ -885,16 +887,15 @@ function PhaseList({
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [landed, setLanded] = useState<string | null>(null);
   const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
-  const state = effectiveStatus(project);
+  // A stopped run still finishing its call is live; one whose process died since is
+  // as stalled as a running one would be.
+  const state = project.status === "cancelled" && project.stalled ? "stalled" : effectiveStatus(project);
   // The steps every running row has shown (#86). If nothing is running as the list
   // first renders, whatever runs next is news and opens; otherwise the running row
   // fills this in itself, and what was already on screen at load renders still.
-  const seenSteps = useRef<Set<string> | null>(null);
-  const seenInit = useRef(false);
-  if (!seenInit.current) {
-    seenInit.current = true;
-    if (!PHASES.some((ph) => nodeStateFor(project, ph.key) === "running")) seenSteps.current = new Set();
-  }
+  const [seenSteps] = useState<MutableRefObject<Set<string> | null>>(() => ({
+    current: PHASES.some((ph) => nodeStateFor(project, ph.key) === "running") ? null : new Set(),
+  }));
 
   // The scroll and the highlight outlive the instruction that started them, so
   // they are torn down on unmount rather than by the effect below — which

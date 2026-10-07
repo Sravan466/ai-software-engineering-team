@@ -472,7 +472,6 @@ def _no_progress_left_behind():
     yield
     with activity._lock:
         activity._board.clear()
-        activity._ended.clear()
 
 
 def test_each_command_is_a_step_and_writing_and_fixing_are_one():
@@ -559,25 +558,49 @@ def test_a_superseded_run_cannot_end_the_newer_runs_board():
     assert out["ended"] is False and out["stage"] == "writing"
 
 
-def test_the_api_keeps_the_steps_of_a_stopped_or_paused_run():
+def test_a_stopped_run_whose_process_died_reads_as_stalled():
+    from datetime import datetime, timedelta, timezone
+
+    long_ago = datetime.now(timezone.utc) - timedelta(seconds=settings.stall_after_seconds + 60)
+    assert Project(id="p-dead", status="cancelled", heartbeat_at=long_ago).stalled is True
+    assert Project(id="p-dead", status="cancelled", heartbeat_at=datetime.now(timezone.utc)).stalled is False
+    assert Project(id="p-dead", status="failed", heartbeat_at=long_ago).stalled is False
+
+
+def test_the_api_keeps_the_steps_of_a_stopped_run():
     with inflight.building("p-stop"):
         activity.begin("backend_engineer")
         activity.stage("building", detail="pip install")
-    for status in ("cancelled", "paused"):
-        project = Project(id="p-stop", status=status, current_phase="backend_engineer")
-        assert project.activity["detail"] == "pip install"
-    assert Project(id="p-stop", status="failed", current_phase="backend_engineer").activity is None
+    project = Project(id="p-stop", status="cancelled", current_phase="backend_engineer")
+    assert project.activity["detail"] == "pip install"
+    # A disconnect abandons the row before the run pauses, so a paused run has no
+    # phase in hand to describe; a failed one has said so already.
+    for status in ("paused", "failed"):
+        assert Project(id="p-stop", status=status, current_phase="backend_engineer").activity is None
 
 
-def test_ended_snapshots_are_bounded():
-    for i in range(activity.ENDED_MAX + 3):
-        with inflight.building(f"p-many-{i}"):
-            activity.begin("backend_engineer")
-            activity.end()
-    assert activity.latest("p-many-0") is None
-    assert activity.latest(f"p-many-{activity.ENDED_MAX + 2}")["ended"] is True
-    for i in range(activity.ENDED_MAX + 3):
-        activity.clear(f"p-many-{i}")
+def test_the_run_stopping_drops_a_last_word_but_not_a_live_board():
+    with inflight.building("p-done"):
+        activity.begin("backend_engineer")
+        activity.end()
+    activity.drop_ended("p-done")
+    assert activity.latest("p-done") is None
+    with inflight.building("p-live"):
+        activity.begin("backend_engineer")
+        activity.stage("planning")
+    activity.drop_ended("p-live")  # a superseded driver leaving: the newer run's board stays
+    assert activity.latest("p-live")["stage"] == "planning"
+
+
+def test_an_ended_board_takes_no_more_writes():
+    with inflight.building("p-shut"):
+        activity.begin("backend_engineer")
+        activity.stage("checking")
+        activity.end()
+        activity.stage("building", detail="late")
+        activity.file("x.py", "ok")
+        out = activity.latest("p-shut")
+    assert out["ended"] is True and out["detail"] == "" and out["files"] == []
     activity.clear("p-qa")
 
 
