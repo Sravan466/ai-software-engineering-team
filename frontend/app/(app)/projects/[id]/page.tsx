@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
-import { APPROVAL_BY_ID, PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
+import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
 import { AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
@@ -23,8 +23,7 @@ import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { FixingPanel } from "@/components/build/AutoFix";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
-import { Elapsed, formatDuration } from "@/components/build/Elapsed";
-import { ActivityLine, FileProgress, activityFor, activityShare } from "@/components/build/CodeWriting";
+import PhaseSteps from "@/components/build/PhaseSteps";
 
 import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
 
@@ -270,9 +269,18 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   // behaviour this issue is about. `awaiting_approval` looks static but isn't:
   // another tab can approve, stop or reject it, and a tab showing a gate that no
   // longer exists is how one click's worth of intent used to advance two phases.
+  // Stopped, a run still has someone finishing the call Stop can't interrupt — its
+  // row says `running` until that call returns — and the row's steps say "stopping
+  // once this step finishes" (#86). Keep watching until it has.
+  // A stopped run whose process died before its call returned never will: `stalled`.
+  const finishing =
+    project?.status === "cancelled" &&
+    !project.stalled &&
+    !!project.current_phase &&
+    latestRow(project, project.current_phase)?.status === "running";
   const pollMs = !project
     ? 0
-    : project.status === "running" && !project.stalled
+    : (project.status === "running" && !project.stalled) || finishing
       ? 2500
       : project.status === "running" || project.status === "awaiting_approval"
         ? 10000
@@ -705,131 +713,6 @@ function RunInterrupted({
   );
 }
 
-/**
- * A finished span between two instants, or null if it can't be read.
- *
- * `Elapsed` deliberately renders nothing when it isn't live — it owns the ticking
- * clock and schedules no timers for anything else — so a duration that has stopped
- * growing needs its own path rather than a frozen ticker.
- */
-function staticDuration(fromIso: string | null, toIso: string | null): string | null {
-  if (!fromIso || !toIso) return null;
-  const from = Date.parse(fromIso);
-  const to = Date.parse(toIso);
-  if (Number.isNaN(from) || Number.isNaN(to) || to < from) return null;
-  return formatDuration((to - from) / 1000);
-}
-
-// Why an agent that a phase row still calls `running` isn't. Keyed by the run's
-// effective status, so each ending is named the way its notice above names it.
-//
-// `cancelled` is deliberately not here. `runner.stop` marks the project cancelled
-// the instant you click Stop, but it cannot interrupt the model call in flight —
-// the loop honours the flag when the agent returns. So a cancelled run with a
-// `running` row still has someone generating, for minutes on a local 7B, and it
-// gets the live treatment with a verb that says what is happening.
-const STOPPED_VERB: Record<string, string> = {
-  stalled: "was mid-phase when the build stopped responding",
-  failed: "was mid-phase when the run failed",
-};
-
-/**
- * Who has the work, right now, and for how long.
- *
- * The single most useful thing the build view can say while a model generates — and
- * for eight phases it said nothing at all, because `current_phase` was only written
- * after an agent finished.
- *
- * A phase row says `running` from the moment generation begins, and nothing rewrites
- * it when the runner dies with its process. So the row on its own cannot tell you
- * whether an agent *is* working or *was* working, and this panel used to assume the
- * first: a stalled build rendered an animating sprite, a present-tense voice line,
- * a sweeping "in flight" bar and a clock ticking up in real time — directly beneath
- * a notice explaining that nothing had reported progress in fifteen minutes. The
- * project's effective status is what knows the difference, so it decides here too.
- *
- * "Not running" is narrower than "not `running`", though: a cancelled run is still
- * finishing the model call that Stop could not interrupt, so it keeps the live
- * treatment and says so. Only `stalled` and `failed` mean nobody is generating.
- */
-function NowWorking({ project }: { project: Project }) {
-  const key = project.current_phase;
-  const row = key ? latestRow(project, key) : undefined;
-  if (!key || row?.status !== "running") return null;
-
-  const agent = AGENT_BY_KEY[key];
-  const meta = PHASE_BY_KEY[key];
-  if (!agent) return null;
-
-  const state = effectiveStatus(project);
-  // Is anyone actually generating? Only a stalled or failed run has genuinely
-  // stopped mid-phase; a cancelled one is still finishing the call it can't cancel.
-  const stopped = state === "stalled" || state === "failed";
-  const startIso = row.started_at ?? project.phase_started_at;
-
-  // How long it actually ran, rather than how long ago it started: the heartbeat
-  // is the last moment the runner was alive, so start → heartbeat is the honest
-  // span. A clock still counting past that is the lie this panel was telling.
-  //
-  // Null when the run predates the columns that carry those instants, and the
-  // clock is then omitted rather than guessed at: the panel's load-bearing fact
-  // is *who* held the work, and inventing a duration to fill the slot would put
-  // back the kind of confident wrong number this whole change is about.
-  const ranFor = stopped ? staticDuration(startIso, project.heartbeat_at) : null;
-  // A code phase says which file it's on (#81); every other phase keeps its voice.
-  const activity = stopped ? null : activityFor(project, key);
-  const share = activityShare(activity);
-
-  return (
-
-    <div
-      className={"working" + (stopped ? " working-stopped" : "")}
-      style={{ ["--agent" as string]: agent.accent }}
-      // Kept in both states, and it matters most in the transition between them:
-      // this is how a screen reader hears that the run it was following stopped,
-      // rather than a ticker that silently quit updating. The live clock inside
-      // carries role="timer", whose implicit aria-live="off" keeps it from
-      // re-announcing the panel every second.
-      aria-live="polite"
-      aria-atomic="true"
-    >
-      {/* Dimmed and static. There is no sprite state for "died mid-phase", and
-          `queued` is the one that reads as not-currently-doing-anything. */}
-      <AgentSprite agent={agent} size={40} state={stopped ? "queued" : "working"} />
-      <div className="working-body">
-        <div className="working-line">
-          <b className="agent-line-name">{agent.codename}</b>
-          {stopped ? (
-            <span className="working-verb">{STOPPED_VERB[state] ?? "is no longer running"}</span>
-          ) : state === "cancelled" ? (
-            <span className="working-verb">is finishing this phase, then stopping</span>
-          ) : (
-            <ActivityLine activity={activity} fallback={agent.lines.working.toLowerCase()} />
-          )}
-          {meta && !activity && <span className="phase-deliver">{meta.deliver}</span>}
-        </div>
-        {/* The sweep says "in flight". Nothing is in flight. Once a code phase has
-            a plan it has real progress to report, and the bar fills instead. */}
-        {!stopped && (
-          <div className={"working-bar" + (share !== null ? " working-bar-fill" : "")} aria-hidden="true">
-            <span style={share !== null ? { transform: `scaleX(${share})` } : undefined} />
-          </div>
-        )}
-
-      </div>
-      {stopped ? (
-        ranFor && (
-          <span className="elapsed mono" aria-label="How long this phase ran before it stopped">
-            {ranFor}
-          </span>
-        )
-      ) : (
-        <Elapsed startIso={startIso} live />
-      )}
-    </div>
-  );
-}
-
 function BuildTab({
   project,
   analytics,
@@ -919,7 +802,6 @@ function BuildTab({
         </div>
       )}
 
-      <NowWorking project={project} />
 
       <div className="card" style={{ padding: "16px 20px" }}>
         <div className="meter">
@@ -1005,6 +887,15 @@ function PhaseList({
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [landed, setLanded] = useState<string | null>(null);
   const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
+  // A stopped run still finishing its call is live; one whose process died since is
+  // as stalled as a running one would be.
+  const state = project.status === "cancelled" && project.stalled ? "stalled" : effectiveStatus(project);
+  // The steps every running row has shown (#86). If nothing is running as the list
+  // first renders, whatever runs next is news and opens; otherwise the running row
+  // fills this in itself, and what was already on screen at load renders still.
+  const [seenSteps] = useState<MutableRefObject<Set<string> | null>>(() => ({
+    current: PHASES.some((ph) => nodeStateFor(project, ph.key) === "running") ? null : new Set(),
+  }));
 
   // The scroll and the highlight outlive the instruction that started them, so
   // they are torn down on unmount rather than by the effect below — which
@@ -1054,7 +945,6 @@ function PhaseList({
         const isOpen =
           open[ph.key] ?? (isGate && project.gate_kind === "needs_help");
         const agent = AGENT_BY_KEY[ph.key];
-        const writing = ns === "running" ? activityFor(project, ph.key) : null;
 
         return (
           <div
@@ -1092,27 +982,24 @@ function PhaseList({
                   {row && <SchemaBadge row={row} />}
                 </span>
                 {/* The agent's own status line, in their voice — and, for a phase
-                    that hasn't started, the plain reason it hasn't. */}
-                <span className={"agent-say" + (ns === "running" ? " live" : "")}>
-                  {ns === "pending"
-                    ? waitingFor(project, i)
-                    : (VOICE_FOR[ns] === "done" && ph.key === "qa_engineer" && suiteLine(row?.test_run)) ||
-                      agent.lines[VOICE_FOR[ns]]}
-                  {hasDoc && (
-                    <span className="phase-deliver" style={{ marginLeft: 8 }}>
-                      {ph.deliver}
-                    </span>
-                  )}
-                </span>
-                {ns === "running" && (
-                  <span className="phase-progress" aria-hidden="true">
-                    <span />
+                    that hasn't started, the plain reason it hasn't. The running row
+                    tells its steps beneath instead (#86). */}
+                {ns !== "running" && (
+                  <span className="agent-say">
+                    {ns === "pending"
+                      ? waitingFor(project, i)
+                      : (VOICE_FOR[ns] === "done" && ph.key === "qa_engineer" && suiteLine(row?.test_run)) ||
+                        agent.lines[VOICE_FOR[ns]]}
+                    {hasDoc && (
+                      <span className="phase-deliver" style={{ marginLeft: 8 }}>
+                        {ph.deliver}
+                      </span>
+                    )}
                   </span>
                 )}
               </span>
 
               <span className="phase-side">
-                {ns === "running" && <Elapsed startIso={row?.started_at ?? null} live />}
                 {ns !== "running" && row?.total_tokens ? (
                   <span className="phase-tokens mono">
                     {row.total_tokens.toLocaleString()} tok
@@ -1137,12 +1024,15 @@ function PhaseList({
               </span>
             </button>
 
-            {/* A code phase writing its files: which file, and the list filling in. */}
-            {writing && !project.stalled && (
-              <div className="phase-writing" aria-live="polite">
-                <FileProgress activity={writing} />
-              </div>
-            )}
+            {/* What the agent has done and is doing, step by step, as it happens. */}
+            <PhaseSteps
+              running={ns === "running"}
+              finished={ns === "done" || ns === "gate"}
+              project={project}
+              phaseKey={ph.key}
+              state={state}
+              seen={seenSteps}
+            />
 
             {/* Any phase that produced something can be read in full, whenever —
                 including the one under review, which the decision above also shows. */}

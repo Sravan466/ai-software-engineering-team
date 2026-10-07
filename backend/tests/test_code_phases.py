@@ -56,9 +56,11 @@ class Scripted:
         code: Optional[dict[str, str]] = None,
         reply: Optional[Callable[["Scripted", list[str], int], Optional[str]]] = None,
         finish: Optional[Callable[["Scripted", int], Optional[str]]] = None,
+        summary: Optional[str] = None,
     ) -> None:
         self.role = role
         self.plan_files = plan_files
+        self.summary = summary
         self.code = code or {}
         self.reply = reply
         self.finish = finish
@@ -77,6 +79,8 @@ class Scripted:
             self.plans += 1
             payload = json.loads(resp.text)
             payload["files"] = self.plan_files
+            if self.summary is not None:
+                payload["summary"] = self.summary
             return resp.model_copy(update={"text": json.dumps(payload)})
         wanted = asked_files(messages)
         self.writes.append(wanted)
@@ -362,7 +366,8 @@ def test_stop_between_two_files_stops_before_the_next_call(client, monkeypatch):
         with pytest.raises(RequestCancelled):
             _run(monkeypatch, "backend_engineer", model, SMALL)
     assert model.writes == [["backend/app/mod1.py"], ["backend/app/mod2.py"]]
-    assert activity.get(pid) is None
+    # Stopped mid-phase: nothing is kept, not even as an ended snapshot.
+    assert activity.latest(pid) is None
 
 
 def test_a_second_driver_is_noticed_between_files_and_the_first_stops(client, monkeypatch):
@@ -445,15 +450,186 @@ def test_the_build_says_which_file_is_being_written_while_it_is(client, monkeypa
         seen.append((out, inflight.current_agent()))
         return None
 
-    model = Scripted("Backend Engineer", _files(3), reply=reply)
+    model = Scripted("Backend Engineer", _files(3), reply=reply, summary="Three   modules:\n the loans,\tthe tools, the people.")
     pid = _build_until_backend(client, monkeypatch, model)
     out, label = seen[1]
     assert out["phase"] == "backend_engineer" and out["stage"] == "writing"
     assert out["detail"] == "backend/app/mod2.py" and out["total"] == 3 and out["done"] == 1
     assert [f["state"] for f in out["files"]] == ["ok", "writing", "planned"]
     assert label == "Backend Engineer — writing backend/app/mod2.py (2 of 3)"
+    # The feed (#86): planning is a finished step, file after file is still one step,
+    # and the plan's summary is there to show under it.
+    assert out["trail"] == [{"stage": "planning", "detail": "", "done": 0, "total": 3}]
+    assert seen[2][0]["trail"] == out["trail"]
+    assert out["note"] == "Three modules: the loans, the tools, the people."
     # And nothing once the phase is over.
     assert client.get(f"/api/projects/{pid}").json()["activity"] is None
+
+
+@pytest.fixture(autouse=True)
+def _no_progress_left_behind():
+    """The progress board is process-global: nothing one test leaves may reach the next."""
+    yield
+    with activity._lock:
+        activity._board.clear()
+
+
+def test_each_command_is_a_step_and_writing_and_fixing_are_one():
+    with inflight.building("p-trail"):
+        activity.begin("frontend_engineer")
+        activity.stage("planning")
+        activity.plan(["a.tsx", "b.tsx"], 1, note="x " * 400)
+        activity.stage("writing", detail="a.tsx", total=2)
+        activity.stage("fixing", detail="a.tsx", total=2)
+        activity.stage("writing", detail="b.tsx", total=2)
+        activity.file("a.tsx", "ok")
+        activity.file("b.tsx", "ok")
+        activity.stage("checking", total=2)
+        activity.stage("building", detail="npm install")
+        activity.stage("building", detail="npm install")  # the same command again is not a new step
+        activity.stage("building", detail="next build")
+        out = activity.latest("p-trail")
+        activity.end()
+        ended = activity.latest("p-trail")
+    assert [(t["stage"], t["detail"]) for t in out["trail"]] == [
+        ("planning", ""), ("writing", ""), ("checking", ""), ("building", "npm install"),
+    ]
+    assert out["trail"][1]["done"] == 2 and out["trail"][1]["total"] == 2
+    assert (out["stage"], out["detail"]) == ("building", "next build")
+    assert len(out["note"]) <= activity.NOTE_MAX and out["note"].endswith("…")
+    assert out["ended"] is False
+    # Once the phase stops reporting, its last word is kept, with the step it was on
+    # filed as done, until the next phase begins.
+    assert ended["ended"] is True
+    assert ended["trail"][-1] == {"stage": "building", "detail": "next build", "done": 2, "total": 2}
+    activity.clear("p-trail")
+    assert activity.latest("p-trail") is None
+
+
+def test_a_new_phase_starts_without_the_last_ones_ended_steps():
+    with inflight.building("p-next"):
+        activity.begin("backend_engineer")
+        activity.stage("planning")
+        activity.end()
+        assert activity.latest("p-next")["phase"] == "backend_engineer"
+        activity.begin("frontend_engineer")
+        out = activity.latest("p-next")
+        activity.end()
+    assert out["phase"] == "frontend_engineer" and out["trail"] == [] and out["ended"] is False
+    activity.clear("p-next")
+
+
+def test_a_phase_that_never_plans_does_not_report_a_planning_step():
+    with inflight.building("p-qa"):
+        activity.begin("qa_engineer")
+        activity.stage("testing", detail="npm install")
+        activity.stage("testing", detail="jest")
+        out = activity.latest("p-qa")
+        activity.end()
+    assert [(t["stage"], t["detail"]) for t in out["trail"]] == [("testing", "npm install")]
+    assert out["note"] == ""
+
+
+def test_a_phase_that_has_named_no_stage_is_not_planning():
+    with inflight.building("p-setup"):
+        activity.begin("qa_engineer")
+        out = activity.latest("p-setup")
+        activity.end()
+    assert out["stage"] == "" and out["trail"] == []
+    activity.clear("p-setup")
+
+
+def test_a_phase_that_raised_keeps_nothing():
+    with inflight.building("p-boom"):
+        board = activity.begin("frontend_engineer")
+        activity.stage("building", detail="next build")
+        activity.end(board, finished=False)
+    assert activity.latest("p-boom") is None
+
+
+def test_a_superseded_run_cannot_end_the_newer_runs_board():
+    with inflight.building("p-taken"):
+        old = activity.begin("frontend_engineer")
+        new = activity.begin("frontend_engineer")  # a newer run took over (#41)
+        activity.stage("writing", detail="a.tsx", total=2)
+        activity.end(old)  # the old driver's last call returns
+        out = activity.latest("p-taken")
+        activity.end(new)
+    assert out["ended"] is False and out["stage"] == "writing"
+
+
+def test_a_stopped_run_whose_process_died_reads_as_stalled():
+    from datetime import datetime, timedelta, timezone
+
+    long_ago = datetime.now(timezone.utc) - timedelta(seconds=settings.stall_after_seconds + 60)
+    assert Project(id="p-dead", status="cancelled", heartbeat_at=long_ago).stalled is True
+    assert Project(id="p-dead", status="cancelled", heartbeat_at=datetime.now(timezone.utc)).stalled is False
+    assert Project(id="p-dead", status="failed", heartbeat_at=long_ago).stalled is False
+
+
+def test_the_api_keeps_the_steps_of_a_stopped_run():
+    with inflight.building("p-stop"):
+        activity.begin("backend_engineer")
+        activity.stage("building", detail="pip install")
+    project = Project(id="p-stop", status="cancelled", current_phase="backend_engineer")
+    assert project.activity["detail"] == "pip install"
+    # A disconnect abandons the row before the run pauses, so a paused run has no
+    # phase in hand to describe; a failed one has said so already.
+    for status in ("paused", "failed"):
+        assert Project(id="p-stop", status=status, current_phase="backend_engineer").activity is None
+
+
+def test_the_run_stopping_drops_a_last_word_but_not_a_live_board():
+    with inflight.building("p-done"):
+        activity.begin("backend_engineer")
+        activity.end()
+    activity.drop_ended("p-done")
+    assert activity.latest("p-done") is None
+    with inflight.building("p-live"):
+        activity.begin("backend_engineer")
+        activity.stage("planning")
+    activity.drop_ended("p-live")  # a superseded driver leaving: the newer run's board stays
+    assert activity.latest("p-live")["stage"] == "planning"
+
+
+def test_an_ended_board_takes_no_more_writes():
+    with inflight.building("p-shut"):
+        activity.begin("backend_engineer")
+        activity.stage("checking")
+        activity.end()
+        activity.stage("building", detail="late")
+        activity.file("x.py", "ok")
+        out = activity.latest("p-shut")
+    assert out["ended"] is True and out["detail"] == "" and out["files"] == []
+    activity.clear("p-qa")
+
+
+def test_the_api_shows_a_phases_last_word_while_its_row_is_saved():
+    with inflight.building("p-api"):
+        activity.begin("backend_engineer")
+        activity.stage("planning")
+        activity.end()
+    project = Project(id="p-api", status="running", current_phase="backend_engineer")
+    assert project.activity["ended"] is True
+    assert project.activity["trail"] == [{"stage": "planning", "detail": "", "done": 0, "total": 0}]
+    # Never someone else's: the next phase's row shows nothing until it reports.
+    project.current_phase = "frontend_engineer"
+    assert project.activity is None
+    activity.clear("p-api")
+
+
+def test_the_trail_keeps_only_the_latest_steps():
+    with inflight.building("p-long"):
+        activity.begin("backend_engineer")
+        for i in range(activity.TRAIL_MAX + 5):
+            activity.stage("building", detail=f"step {i}")
+        out = activity.latest("p-long")
+        activity.end()
+    assert len(out["trail"]) == activity.TRAIL_MAX
+    assert out["trail"][-1]["detail"] == f"step {activity.TRAIL_MAX + 3}"
+    # What fell off the front is counted, so the page can keep numbering lines stably.
+    assert out["dropped"] == 4
+    activity.clear("p-long")
 
 
 # ── the old path, when there is no plan to write from ────────────────────────

@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import type { Activity, ActivityFileState, Generation, Project } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
+import { plural } from "@/lib/text";
 
 /**
  * How a code phase writes its code (#81), while it does and after.
@@ -48,68 +49,15 @@ const FILE_STATE: Record<ActivityFileState, { label: string; icon: ReactNode; hi
   missing: { label: "Not written", icon: Icon.close, hint: "Asked for twice and never returned." },
 };
 
-/**
- * The activity line for the "now working" panel: what the agent is doing inside
- * its phase. `fallback` is the agent's own voice line, for a phase that reports
- * nothing finer — every phase that is not writing code.
- */
-export function ActivityLine({ activity, fallback }: { activity: Activity | null; fallback: string }) {
-  if (!activity) return <span className="working-verb">{fallback}</span>;
-  const count =
-    activity.total > 0 ? (
-      <span className="working-count">
-        {Math.min(activity.done + 1, activity.total)} of {activity.total}
-      </span>
-    ) : null;
-  switch (activity.stage) {
-    case "planning":
-      return <span className="working-verb">is planning the files</span>;
-    case "checking":
-      return <span className="working-verb">is checking the build</span>;
-    case "building":
-      // The real build (#75): which command is running in the sandbox right now.
-      return (
-        <span className="working-verb working-act">
-          is building it
-          {activity.detail && <code className="working-file">{activity.detail}</code>}
-        </span>
-      );
-    case "fixing":
-    case "writing":
-      return (
-        <span className="working-verb working-act">
-          {activity.stage === "fixing" ? "is fixing" : "is writing"}
-          {activity.detail && (
-            <code className="working-file">
-              <FilePath path={activity.detail} />
-            </code>
-          )}
-          {count}
-        </span>
-      );
-    default:
-      return <span className="working-verb">{fallback}</span>;
-  }
-}
-
 /** How far through its plan the phase is, 0–1, or null when there is no plan yet. */
-export function activityShare(activity: Activity | null): number | null {
+function activityShare(activity: Activity | null): number | null {
   if (!activity || activity.stage === "planning" || activity.total <= 0) return null;
   return Math.min(activity.done / activity.total, 1);
 }
 
-/** The file list under a running code phase: fills in as files land. */
+/** The plan, file by file, filling in as files land — behind the running row's "Planned N files" (#86). */
 export function FileProgress({ activity }: { activity: Activity }) {
-  if (activity.stage === "planning" || activity.files.length === 0) {
-    return (
-      <div className="writing writing-planning">
-        <p className="writing-head">
-          <span className="writing-count">Planning the files</span>
-          <span className="writing-meta">each one is written next, a few per call</span>
-        </p>
-      </div>
-    );
-  }
+  if (activity.files.length === 0) return null;
   const share = activityShare(activity) ?? 0;
   const perCall =
     activity.per_call > 1 ? `${activity.per_call} files per call` : "one file per call";
@@ -158,10 +106,6 @@ const MODE: Record<Generation["mode"], string> = {
   batch: "In batches",
   whole: "In one reply",
 };
-
-function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
 
 /**
  * How a finished code phase wrote its code, and the plan it wrote from — shown in

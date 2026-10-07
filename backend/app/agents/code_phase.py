@@ -233,11 +233,14 @@ class _Run:
     def run(self) -> AgentResult:
         agent, ctx = self.agent, self.ctx
         agent._pin(ctx)
-        activity.begin(agent.key)
+        board = activity.begin(agent.key)
         try:
-            return self._run()
-        finally:
-            activity.end()
+            result = self._run()
+        except BaseException:
+            activity.end(board, finished=False)
+            raise
+        activity.end(board)
+        return result
 
     def _run(self) -> AgentResult:
         agent, ctx = self.agent, self.ctx
@@ -266,7 +269,9 @@ class _Run:
             if isinstance(ctx.prior_outputs.get(dep), dict)
         }
         queue = list(self.planned)
-        activity.plan([p.path for p in queue], self._batch_size(len(queue)))
+        # The plan's own summary is the build page's "here's what I'll write" (#86).
+        summary = plan.output.get("summary") if isinstance(plan.output, dict) else None
+        activity.plan([p.path for p in queue], self._batch_size(len(queue)), note=summary if isinstance(summary, str) else "")
 
         while queue:
             claim.between_calls()
@@ -897,6 +902,7 @@ class _Run:
     def _whole(self, reason: str) -> AgentResult:
         """No plan to write from: the one-reply path, with the plan's calls counted."""
         log.warning("%s: %s", self.agent.title, reason)
+        activity.stage("writing", total=0)
         result = BaseAgent.run(self.agent, self.ctx)
         calls = self.calls + list(result.calls or [result.response])
         result.calls = calls

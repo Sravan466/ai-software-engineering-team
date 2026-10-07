@@ -140,8 +140,11 @@ export type ActivityFileState = "planned" | "writing" | "ok" | "fixing" | "faile
 /** What the running phase is doing inside itself (#81). */
 export type Activity = {
   phase: string;
-  /** `building`: installing, building and starting the code in a sandbox (#75). */
-  stage: "planning" | "writing" | "fixing" | "checking" | "building" | "testing";
+  /**
+   * `building`: installing, building and starting the code in a sandbox (#75).
+   * Empty until the phase names one (QA setting up its test run, #86).
+   */
+  stage: "" | "planning" | "writing" | "fixing" | "checking" | "building" | "testing";
   label: string;
   done: number;
   total: number;
@@ -150,7 +153,21 @@ export type Activity = {
   per_call: number;
   files: { path: string; state: ActivityFileState }[];
   elapsed_s: number;
+  /**
+   * The steps this phase has finished, oldest first (#86): a stage change, or a new
+   * command while building or testing. Writing and fixing are one step. Capped.
+   */
+  trail?: ActivityStep[];
+  /** Steps that fell off the front of `trail`, so lines can be numbered stably. */
+  dropped?: number;
+  /** The code plan's own summary — what the phase is about to write. */
+  note?: string;
+  /** The phase stopped reporting and its row is being saved: every step is done. */
+  ended?: boolean;
 };
+
+/** One finished step of the running phase (#86). `detail` is the command, if any. */
+export type ActivityStep = { stage: string; detail: string; done: number; total: number };
 
 
 /** One reason a generated file does not compile. */
