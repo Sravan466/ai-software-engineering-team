@@ -813,12 +813,16 @@ function CrewFix({ fix }: { fix: DeployFix }) {
 
   if (fix.state === "fixed") {
     return (
-      <div className="notice notice-ok ship-fix" role="status">
-        {Icon.check}
+      <div className={`notice ${fix.verified ? "notice-ok" : "notice-warn"} ship-fix`} role="status">
+        {fix.verified ? Icon.check : Icon.info}
         <div className="notice-body">
-          <span className="notice-title">The crew fixed what Vercel rejected</span>
+          <span className="notice-title">
+            {fix.verified ? "The crew fixed what Vercel rejected" : "The crew rebuilt what Vercel rejected"}
+          </span>
           <span className="notice-text">
-            The frontend was rebuilt from Vercel&apos;s {errors} and built cleanly here. Deploy again to put it live.
+            {fix.verified
+              ? `The frontend was rebuilt from Vercel's ${errors} and built cleanly here. Deploy again to put it live.`
+              : `The frontend was rebuilt from Vercel's ${errors}, but it couldn't be built here to check. Deploy again to see if Vercel takes it.`}
           </span>
         </div>
       </div>

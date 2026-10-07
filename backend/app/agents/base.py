@@ -25,6 +25,7 @@ from app.agents import handoff
 from app.router import inflight
 from app.build import contract as build_contract
 from app.build import layout as build_layout
+from app.build import buildlog
 from app.build import runner as build_runner
 from app.build.check import BuildCheck, check_phase, phase_tree
 from app.core.config import settings
@@ -50,8 +51,6 @@ _BUILT_SIDES = {
     Phase.FRONTEND_ENGINEER.value: build_layout.FRONTEND,
     Phase.BACKEND_ENGINEER.value: build_layout.BACKEND,
 }
-#: The compile gate's total cap, kept for the real build's problems too.
-_BUILD_PROBLEM_CAP = 24
 
 #: What a person wrote gets whatever it needs, up to this share of the budget each.
 #: These are normally a sentence or two, so the cap almost never binds — but `idea`
@@ -453,7 +452,8 @@ class BaseAgent:
             log.warning("%s: the build couldn't run: %s", self.title, e)
             return build_runner.BuildRun.unchecked(side, f"The build couldn't run: {e}").as_dict()
         if run.status == BuildStatus.FAILED.value:
-            build.problems = (build.problems + run.problems)[:_BUILD_PROBLEM_CAP]
+            # The compile gate's caps on the two together: five a file, twenty-four in all.
+            build.problems = buildlog.capped(build.problems + run.problems)
             build.status = BuildStatus.FAILED.value
         elif (
             run.status == BuildStatus.OK.value

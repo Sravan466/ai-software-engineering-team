@@ -30,8 +30,9 @@ _PER_FILE = 5
 _TOTAL = 24
 _TAIL_LINES = 30
 
-#: Where the sandbox puts the project. Paths in tool output are made relative to it.
-_ROOT = "/work/"
+#: Where a build puts the project — the sandbox's `/work`, Vercel's `/vercel/path0`.
+#: Paths in tool output are made relative to it.
+_ROOT = re.compile(r"^(?:/work|/vercel/path\d+)(?:/|$)")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _SRC_EXT = r"(?:tsx?|jsx?|mjs|cjs|mts|cts|vue|svelte|css|scss|json|py)"
 
@@ -63,11 +64,7 @@ def clean(output: str) -> str:
 
 def rel(path: str) -> str:
     """A path as the project knows it: no `/work/`, no `./`."""
-    p = path.strip().strip("'\"`")
-    if p.startswith(_ROOT):
-        p = p[len(_ROOT):]
-    elif p.startswith("/work"):
-        p = p[len("/work"):].lstrip("/")
+    p = _ROOT.sub("", path.strip().strip("'\"`"), count=1)
     while p.startswith("./"):
         p = p[2:]
     return posixpath.normpath(p) if p else p
@@ -78,7 +75,7 @@ def _ours(path: str) -> bool:
     p = path.strip()
     if not p or p.startswith(("node:", "internal/", "<")):
         return False
-    if p.startswith("/") and not p.startswith(_ROOT):
+    if p.startswith("/") and not _ROOT.match(p):
         return False
     r = rel(p)
     return bool(r) and not r.startswith(("node_modules/", ".deps/", ".next/", "dist/", "../")) and "/node_modules/" not in r and "site-packages" not in r
@@ -157,7 +154,7 @@ def pip_problems(output: str, manifest: str = "requirements.txt") -> list[Proble
 # ── next build / tsc / vite ──────────────────────────────────────────────────
 _LOC_HEAD = re.compile(rf"^(?:\./)?(?P<path>[\w@~.\[\]()+\-/ ]+?\.{_SRC_EXT})(?::(?P<line>\d+)(?::(?P<col>\d+))?)?\s*$")
 _TSC = re.compile(rf"^(?P<path>[\w@~.\[\]()+\-/]+?\.{_SRC_EXT})\((?P<line>\d+),(?P<col>\d+)\):\s*error\s+(?P<code>TS\d+):\s*(?P<msg>.+)$")
-_ESBUILD = re.compile(rf"^(?:/work/)?(?P<path>[\w@~.\[\]()+\-/]+?\.{_SRC_EXT}):(?P<line>\d+):(?P<col>\d+):\s*ERROR:\s*(?P<msg>.+)$")
+_ESBUILD = re.compile(rf"^(?:/work/|/vercel/path\d+/)?(?P<path>[\w@~.\[\]()+\-/]+?\.{_SRC_EXT}):(?P<line>\d+):(?P<col>\d+):\s*ERROR:\s*(?P<msg>.+)$")
 _ESBUILD_X = re.compile(r"^\s*✘\s*\[ERROR\]\s*(?P<msg>.+)$")
 _ESBUILD_LOC = re.compile(rf"^\s+(?P<path>[\w@~.\[\]()+\-/]+?\.{_SRC_EXT}):(?P<line>\d+):(?P<col>\d+):\s*$")
 _ROLLUP_RESOLVE = re.compile(r'Rollup failed to resolve import "(?P<spec>[^"]+)" from "(?P<path>[^"]+)"')

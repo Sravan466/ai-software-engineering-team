@@ -1189,6 +1189,8 @@ export type DeployFix = {
   of: number;
   problems: number;
   attempt: number;
+  /** The rebuilt frontend was itself built for real — not only parsed. */
+  verified?: boolean;
 };
 
 export type DeployState = {

@@ -195,18 +195,35 @@ def ensure_image(image: str, timeout: float = 600.0) -> None:
         raise SandboxError(f"Docker couldn't pull {image}: {(pulled.stderr or '').strip()[-200:]}")
 
 
+#: A build volume older than this is a crashed run's leftover, never a live build's:
+#: every build is killed well inside it (`build_run_timeout_seconds`, capped at 900).
+SWEEP_AFTER_SECONDS = 3600
+
+
 def sweep() -> None:
-    """Remove volumes a crashed run left behind. In-use volumes are refused by Docker."""
+    """Remove volumes a crashed run left behind — only old ones.
+
+    Between two steps a live build's volume has no container on it, so "not in use"
+    doesn't mean "abandoned": another process's build may be mid-way. Each volume
+    carries the time it was made, and only ones older than an hour go.
+    """
     cli = docker()
     if cli is None:
         return
     try:
         listed = subprocess.run(
-            [cli, "volume", "ls", "-q", "--filter", f"label={LABEL}"], capture_output=True, text=True, timeout=30
+            [cli, "volume", "ls", "--filter", f"label={LABEL}",
+             "--format", '{{.Name}} {{index .Labels "aiteam.created"}}'],
+            capture_output=True, text=True, timeout=30,
         )
-        names = [n for n in listed.stdout.split() if n.startswith("aiteam-build-")]
-        if names:
-            subprocess.run([cli, "volume", "rm", *names], capture_output=True, timeout=60)
+        now = time.time()
+        old = []
+        for line in listed.stdout.splitlines():
+            name, _, made = line.partition(" ")
+            if name.startswith("aiteam-build-") and made.strip().isdigit() and now - int(made) > SWEEP_AFTER_SECONDS:
+                old.append(name)
+        if old:
+            subprocess.run([cli, "volume", "rm", *old], capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         pass
 
@@ -323,7 +340,8 @@ class Sandbox:
         start = time.monotonic()
         deadline = start + self.limits.seconds
         made = subprocess.run(
-            [self.cli, "volume", "create", "--label", LABEL, self.volume], capture_output=True, text=True, timeout=60
+            [self.cli, "volume", "create", "--label", LABEL, "--label", f"aiteam.created={int(time.time())}", self.volume],
+            capture_output=True, text=True, timeout=60,
         )
         if made.returncode != 0:
             raise SandboxError(f"Docker couldn't make the build's volume: {made.stderr.strip()[-200:]}")

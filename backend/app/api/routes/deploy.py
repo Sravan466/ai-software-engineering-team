@@ -272,7 +272,16 @@ def _fix_state(project: Project) -> Optional[dict]:
         "of": allowed,
         "problems": len(rounds[start].get("problems") or []) if start is not None else 0,
         "attempt": int((data.get("vercel") or {}).get("attempts") or 0),
+        # Whether the rebuilt frontend was itself built for real. Without a runner the
+        # re-check only parsed it, and can't say Vercel's error is gone.
+        "verified": _frontend_built(project),
     }
+
+
+def _frontend_built(project: Project) -> bool:
+    row = next((ph for ph in artifacts.current_phases(project) if ph.phase == Phase.FRONTEND_ENGINEER.value), None)
+    run = row.build_run if row is not None else None
+    return isinstance(run, dict) and run.get("status") == "ok"
 
 
 def _settle_interrupted(project: Project) -> None:

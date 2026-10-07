@@ -175,8 +175,15 @@ def plan_for(files: dict[str, str], side: str) -> tuple[Optional[Plan], Optional
         tests = [p for p in files if p.endswith(".py") and re.search(r"(^|/)(test_[^/]*|[^/]*_test)\.py$", p)]
         if tests and re.search(r"(?im)^pytest\b", files["requirements.txt"]):
             steps.append(
-                Step("boot", "pytest --collect-only", "python -m pytest --collect-only -q -p no:cacheprovider",
-                     timeout=120, env=boot_env)
+                Step(
+                    "boot",
+                    "pytest --collect-only",
+                    # 5 is "collected no tests": nothing to run is not a failure here.
+                    "python -m pytest --collect-only -q -p no:cacheprovider; code=$?; "
+                    "if [ $code -eq 5 ]; then exit 0; fi; exit $code",
+                    timeout=120,
+                    env=boot_env,
+                )
             )
         return Plan("python", PYTHON_IMAGE, steps, "requirements.txt", note), None
     return None, "Nothing here the platform knows how to build yet, so it was only parsed."
@@ -403,6 +410,16 @@ def judge(plan: Plan, results: list[StepResult], side: str, files: dict[str, str
             continue
         if r.ok:
             continue
+        if r.exit_code == 125:
+            # `docker run` itself failed — a full disk, a daemon error — before the code ran.
+            unchecked = unchecked or f"Docker couldn't start `{r.label}`, so the build wasn't finished."
+            continue
+        if r.exit_code == 137 and not buildlog.node_problems(r.output) and not buildlog.python_problems(r.output):
+            # Killed: the memory cap, not a crash of the code's own.
+            unchecked = unchecked or (
+                f"`{r.label}` ran out of memory ({settings.build_run_memory_mb} MB), so the build wasn't finished."
+            )
+            continue
         found: list[Problem] = []
         if r.name == "install":
             if r.label.startswith("install scripts"):
@@ -474,6 +491,14 @@ def _project_lock(project_id: Optional[str]) -> threading.Lock:
         return _project_locks.setdefault(project_id or "-", threading.Lock())
 
 
+def _wait(lock, stopped: threading.Event) -> bool:
+    """Take `lock`, unless the build is stopped first. True once it's held."""
+    while not stopped.is_set():
+        if lock.acquire(timeout=0.5):
+            return True
+    return False
+
+
 def side_files(files: dict[str, str], side: str) -> dict[str, str]:
     prefix = f"{side}/"
     return {p[len(prefix):]: c for p, c in files.items() if p.startswith(prefix)}
@@ -510,17 +535,35 @@ def run_build(files: dict[str, str], side: str) -> BuildRun:
     activity.stage("building", detail=plan.steps[0].label)
     started = time.monotonic()
     cancelled = False
-    with _project_lock(build.get("id")), _slot():
-        try:
-            with inflight.track(call_id, lambda: [stop() for stop in stopper]):
-                results = chosen.run(plan.image, mine, plan.steps, limits, stopper.append, on_step)
-                cancelled = inflight.was_cancelled(call_id)
-        except sandbox.SandboxError as e:
-            log.warning("The %s build couldn't run: %s", side, e)
-            return BuildRun.unchecked(side, str(e), stack=plan.stack, runner=chosen.kind)
-        except Exception as e:  # noqa: BLE001 - the runner must never become the failure
-            log.exception("The %s build crashed", side)
-            return BuildRun.unchecked(side, f"The build runner failed: {e}", stack=plan.stack, runner=chosen.kind)
+    results: list[StepResult] = []
+    stopped = threading.Event()
+
+    def stop_all() -> None:
+        stopped.set()
+        for stop in stopper:
+            stop()
+
+    # Stop is heard from here on — while the build waits for its turn as well as while
+    # it runs. A queued build that was stopped never takes a slot.
+    with inflight.track(call_id, stop_all):
+        project_lock, slot = _project_lock(build.get("id")), _slot()
+        if _wait(project_lock, stopped):
+            try:
+                if _wait(slot, stopped):
+                    try:
+                        if not stopped.is_set():
+                            results = chosen.run(plan.image, mine, plan.steps, limits, stopper.append, on_step)
+                    except sandbox.SandboxError as e:
+                        log.warning("The %s build couldn't run: %s", side, e)
+                        return BuildRun.unchecked(side, str(e), stack=plan.stack, runner=chosen.kind)
+                    except Exception as e:  # noqa: BLE001 - the runner must never become the failure
+                        log.exception("The %s build crashed", side)
+                        return BuildRun.unchecked(side, f"The build runner failed: {e}", stack=plan.stack, runner=chosen.kind)
+                    finally:
+                        slot.release()
+            finally:
+                project_lock.release()
+        cancelled = stopped.is_set() or inflight.was_cancelled(call_id)
     if cancelled:
         # Stopped: the run settles it the way it settles a cancelled model call.
         claim.between_calls()

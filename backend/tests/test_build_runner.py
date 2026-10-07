@@ -586,6 +586,7 @@ def test_a_failed_vercel_deploy_reopens_the_fix_loop_with_vercels_errors(client,
 
     state = client.get(f"/api/projects/{pid}/deploy").json()
     assert state["status"] == "fixed" and state["fix"]["state"] == "fixed" and state["fix"]["round"] == 1
+    assert state["fix"]["verified"], "the rebuilt frontend was built for real"
     assert state["log"], "the failed build's log stays on screen until the next deploy"
 
 
@@ -754,6 +755,8 @@ def test_next_type_checks_only_a_frontend_that_was_really_built():
     # first to type-check it.
     assert "ignoreBuildErrors: true" in config(project(None))
     assert "ignoreBuildErrors: true" in config(project({"status": "unchecked"}))
+    # Built with errors a person shipped anyway: Vercel mustn't fail it on those.
+    assert "ignoreBuildErrors: true" in config(project({"status": "failed"}))
     built = config(project({"status": "ok", "summary": "ok"}))
     assert "ignoreBuildErrors" not in built and "ignoreDuringBuilds: true" in built
 
@@ -800,3 +803,134 @@ def test_compose_runs_generated_code_in_the_builder_not_the_backend():
     assert "/var/run/docker.sock:/var/run/docker.sock" in builder and "Dockerfile.builder" in builder
     # It has none of the platform's data, keys or database, and isn't published.
     assert "backend_data" not in builder and "backend_secrets" not in builder and "ports:" not in builder
+
+
+
+# ── what the second review found (PR #84) ────────────────────────────────────
+def test_vercels_own_absolute_paths_are_the_projects_files():
+    out = buildlog.vercel_problems(
+        [
+            "/vercel/path0/src/App.tsx:3:7: ERROR: Expected \";\" but found \"b\"",
+            '[vite]: Rollup failed to resolve import "axios" from "/vercel/path0/src/main.tsx".',
+        ],
+        ["src/App.tsx", "src/main.tsx"],
+    )
+    assert [(p.path, p.line) for p in out] == [("src/App.tsx", 3), ("src/main.tsx", None)]
+
+
+def test_a_problem_keeps_its_key_when_only_its_log_lines_change():
+    from app.orchestration import autofix
+
+    a = autofix._build_problem({"path": "frontend/package.json", "message": "`next build` failed. Its last lines:\nchunk 1a2b"}, "frontend_engineer")
+    b = autofix._build_problem({"path": "frontend/package.json", "message": "`next build` failed. Its last lines:\nchunk 9f8e\nmore"}, "frontend_engineer")
+    assert a["key"] == b["key"]
+
+
+@pytest.mark.parametrize("code, words", [(125, "Docker couldn't start"), (137, "ran out of memory")])
+def test_docker_failing_or_the_memory_cap_is_not_the_codes_fault(real_build, code, words):
+    real_build(lambda step, files: (code, "docker: Error response from daemon: no space left on device") if step.name == "build" else _ok(step, files))
+    run = build_runner.run_build(_next_files(), "frontend")
+    assert run.status == "unchecked" and words in run.reason and not run.problems
+
+
+def test_no_tests_to_collect_is_not_a_failure():
+    plan, _ = build_runner.plan_for(
+        {"requirements.txt": "fastapi\npytest\n", "main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+         "tests/test_helpers.py": "def helper():\n    return 1\n"},
+        "backend",
+    )
+    collect = plan.steps[-1]
+    assert collect.label == "pytest --collect-only" and "$code -eq 5" in collect.command
+
+
+def test_stop_while_a_build_waits_for_a_slot_never_runs_it(real_build, monkeypatch):
+    import threading
+    import time
+
+    from app.router import inflight
+
+    engine = real_build(_ok)
+    monkeypatch.setattr(settings, "build_run_concurrency", 1)
+    with SessionLocal() as db:
+        queued = Project(idea="queued build", owner_id=TEST_USER_ID, status="running")
+        db.add(queued)
+        db.commit()
+        pid = queued.id
+    slot = build_runner._slot()
+    slot.acquire()  # another project's build has the only slot
+    outcome: dict = {}
+    try:
+        def go():
+            with inflight.building(pid):
+                outcome["run"] = build_runner.run_build(_next_files(), "frontend")
+
+        t = threading.Thread(target=go)
+        t.start()
+        time.sleep(0.4)
+        assert inflight.cancel(pid) == 1, "the queued build couldn't be stopped"
+        t.join(5)
+        assert not t.is_alive()
+    finally:
+        slot.release()
+    assert outcome["run"].status == "unchecked" and "stopped" in outcome["run"].reason and engine.runs == []
+
+
+def test_the_builder_service_hears_a_cancel_while_the_build_queues(monkeypatch):
+    import threading
+    import time
+
+    from app.build import builder_service
+
+    monkeypatch.setattr(sandbox, "docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(sandbox, "ensure_image", lambda image, timeout=600.0: pytest.fail("pulled after a cancel"))
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: pytest.fail("ran docker after a cancel"))
+    full = threading.BoundedSemaphore(1)
+    full.acquire()
+    monkeypatch.setattr(builder_service, "_slots", full)
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.update(builder_service.run(
+        {"id": "b1", "image": sandbox.NODE_IMAGE, "files": {"a": "b"}, "steps": [{"name": "build", "label": "next build"}]})))
+    t.start()
+    time.sleep(0.3)
+    assert builder_service.cancel("b1")
+    full.release()
+    t.join(5)
+    assert out["steps"][0]["skipped"]
+
+
+def test_sweep_leaves_a_live_builds_volume_alone(monkeypatch):
+    import time
+
+    calls: list = []
+
+    class Done:
+        def __init__(self, stdout=""):
+            self.stdout, self.returncode = stdout, 0
+
+    now = int(time.time())
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["volume", "ls"]:
+            return Done(f"aiteam-build-old {now - 7200}\naiteam-build-live {now - 30}\n")
+        return Done()
+
+    monkeypatch.setattr(sandbox, "docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(sandbox.subprocess, "run", run)
+    sandbox.sweep()
+    removed = [a for a in calls if a[1:3] == ["volume", "rm"]]
+    assert removed == [["/usr/bin/docker", "volume", "rm", "aiteam-build-old"]]
+
+
+def test_a_fix_vercel_cant_be_checked_against_is_not_called_fixed(client, monkeypatch, real_build, vercel_fake):
+    from app.router.router import router as model_router
+
+    real_build(_ok)
+    monkeypatch.setattr(model_router, "complete", Frontend(lambda prompt: "failed the build on Vercel" in prompt))
+    pid = _unattended(client, "A counter page rebuilt with no runner")
+    # The runner is gone by the time Vercel fails it: the redo is only parsed.
+    monkeypatch.setattr(settings, "build_run_enabled", False)
+    _building(pid)
+    client.get(f"/api/projects/{pid}/deploy")
+    state = client.get(f"/api/projects/{pid}/deploy").json()
+    assert state["status"] == "fixed" and state["fix"]["verified"] is False

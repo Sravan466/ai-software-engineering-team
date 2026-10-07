@@ -217,11 +217,12 @@ def assemble(project: Project) -> dict:
 
     pm = next((ph.output for ph in phases if ph.phase == "product_manager" and isinstance(ph.output, dict)), {})
     product = str(pm.get("product_name") or project.name or project.idea or "app")
-    # Type errors fail `next build` only for a frontend the crew really built (#75):
-    # anything else would first be type-checked on Vercel, with no one to fix it.
+    # Type errors fail `next build` only for a frontend that really built clean (#75).
+    # Anything else — never built, or built with errors a person shipped anyway —
+    # would first be type-checked on Vercel, failing there on what was accepted here.
     frontend = next((ph for ph in phases if ph.phase == "frontend_engineer"), None)
     run = getattr(frontend, "build_run", None) if frontend is not None else None
-    built = isinstance(run, dict) and run.get("status") in (BuildStatus.OK.value, BuildStatus.FAILED.value)
+    built = isinstance(run, dict) and run.get("status") == BuildStatus.OK.value
     scaffold = scaffold_build(
         {p: f["content"] for p, f in files.items()}, charter, design, product, type_check=built
     )

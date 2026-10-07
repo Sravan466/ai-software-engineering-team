@@ -241,8 +241,11 @@ def _build_problem(p: dict, phase: str) -> dict:
     message = str(p.get("message") or "does not compile")
     path = str(p.get("path") or "")
     line = p.get("line")
+    # The first line only: a problem no line of output pinned down carries the build's
+    # last lines under it (#75), and those change every round while the problem doesn't.
+    head = message.split("\n", 1)[0]
     out = {
-        "key": _key("build", path, re.sub(r"\d+", "#", message)),
+        "key": _key("build", path, re.sub(r"\d+", "#", head)),
         "title": message.replace("`", ""),
         "kind": "build",
         "where": f"{path}:{line}" if path and line else (path or None),

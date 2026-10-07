@@ -67,19 +67,21 @@ def run(body: dict) -> dict:
         raise ValueError("No steps to run.")
     build_id = str(body.get("id") or "")
     limits = _limits(body.get("limits") or {})
-    with _slots:
-        box = sandbox.Sandbox(image, limits)
-        # Registered before the pull, so a cancel during it runs nothing after it.
+    box = sandbox.Sandbox(image, limits)
+    # Registered before it queues for a slot and before the pull, so a cancel at any
+    # point means nothing more runs.
+    if build_id:
+        with _running_lock:
+            _running[build_id] = box
+    try:
+        with _slots:
+            if not box.cancelled:
+                sandbox.ensure_image(image)
+            results = box.run(files, steps)
+    finally:
         if build_id:
             with _running_lock:
-                _running[build_id] = box
-        try:
-            sandbox.ensure_image(image)
-            results = box.run(files, steps)
-        finally:
-            if build_id:
-                with _running_lock:
-                    _running.pop(build_id, None)
+                _running.pop(build_id, None)
     return {"steps": [r.as_dict() for r in results]}
 
 
