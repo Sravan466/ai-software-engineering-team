@@ -690,6 +690,10 @@ def approve_phase(
     if not token:
         raise _conflict(project, "approve")
 
+    if project.gate_kind == GateKind.SECURITY.value:
+        # Approving past the Security stop is reading its review notes (#77).
+        remediation.mark_notes_read(db, project)
+        db.commit()
     runner.approve_current(db, project)
     background.add_task(_drive, project.id, token)
     return RunResponse(
@@ -756,6 +760,7 @@ def list_findings(
     )
     track = autofix.track(autofix.load(project), autofix.SECURITY)
     warden = runner.latest_row(db, project, Phase.SECURITY_ENGINEER.value)
+    read = remediation.notes_read(project)
     return {
         "findings": [
             {
@@ -783,6 +788,12 @@ def list_findings(
                 "cwe": row.cwe,
                 "path": row.path,
                 "line": row.line,
+                # A review note a person approved past at a Security stop (#77).
+                "read": row.finding_key in read,
+                # A review note the scanner now reports itself: `tool:rule` (#77).
+                "superseded_by": row.rule_id
+                if remediation.row_source(row) == remediation.SOURCE_MODEL and row.rule_id
+                else None,
             }
             for row in rows
         ],

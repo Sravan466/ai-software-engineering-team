@@ -40,11 +40,13 @@ class SecurityEngineerAgent(BaseAgent):
         the phase: what they report is what the fix loop acts on, and what a rescan has
         to stop reporting before anything is called fixed.
         """
-        from app.orchestration import activity
+        from app.orchestration import activity, claim
 
         board = activity.begin(self.key)
         try:
             result = scan.scan_build(ctx.prior_outputs, ctx.charter)
+            # A Stop pressed during the scan stops the phase here, before a model call.
+            claim.between_calls()
             ctx.scan_context = scan.prompt_block(result)
             activity.stage("reviewing")
             out = super().run(ctx)

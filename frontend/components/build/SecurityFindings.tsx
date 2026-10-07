@@ -64,6 +64,12 @@ const NOTE_STATUS: Partial<Record<SecurityFinding["status"], { label: string; cl
 };
 
 function statusOf(f: SecurityFinding) {
+  if (f.source === "model") {
+    // The scanner reports this one itself now, with a rule and a rescan.
+    if (f.superseded_by && f.status === "gone") return { label: "Now a scanner finding", cls: "badge" };
+    // Approved past at a Security stop: read, and not asked about again.
+    if (f.read && f.status === "open") return { label: "Read", cls: "badge" };
+  }
   return (f.source === "model" && NOTE_STATUS[f.status]) || STATUS_COPY[f.status];
 }
 

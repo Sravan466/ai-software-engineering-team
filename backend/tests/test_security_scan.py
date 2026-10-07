@@ -910,7 +910,7 @@ def test_scans_honour_the_sandbox_switch(monkeypatch):
 def test_the_same_tree_is_scanned_once_within_the_hour(monkeypatch):
     calls = []
 
-    def fake_run(files, owners):
+    def fake_run(files, owners, tree=None):
         calls.append(1)
         tools = {t: {"status": "ran"} for t in scan.TOOLS}
         return scan.ScanResult(status="ok", tools=tools)
@@ -961,7 +961,11 @@ def test_a_repeat_note_keeps_its_record_while_the_scanner_still_reports_the_prob
         db.commit()
         rows = remediation.sync_dispositions(db, project, {"findings": [note]}, scan=_scan(_hit(5)))
         note_row = next(r for r in rows if r.source == "model")
-        assert note_row.status == "open"  # not "fixed": the scanner still reports it
+        # Not "fixed" (the scanner still reports it), and not reopened beside the
+        # scanner's finding: superseded by it.
+        assert note_row.status == "gone"
+        assert note_row.rule_id == "semgrep:aiteam.javascript.sql-built-from-request"
+        assert remediation.open_notes(db, project) == []
         assert len(rows) == 2
 
 
@@ -1032,3 +1036,55 @@ def test_a_legacy_round_of_model_findings_is_not_counted_as_fixed(client):
         assert unsettled == {row.finding_key}
         fixed = autofix.close_round(autofix.track(autofix.load(db.get(Project, project.id)), autofix.SECURITY), list(unsettled))
         assert fixed == []
+
+
+# ── what the final review found (#77, PR #88) ────────────────────────────────
+def test_approving_a_security_stop_reads_its_notes(client, monkeypatch):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+
+    idor = {"title": "IDOR", "severity": "critical", "category": "Authorization", "path": "backend/app/index.js",
+            "line": 40, "description": "d", "recommendation": "r"}
+    from tests.test_autofix import _build
+
+    pid, crew, _ = _build(client, monkeypatch, [[]], audits=[[idor]], mode="checkpoints")
+    assert client.post(f"/api/projects/{pid}/approve").status_code == 200  # the plan review
+    assert client.get(f"/api/projects/{pid}").json()["gate_kind"] == "security"
+    assert client.post(f"/api/projects/{pid}/approve").status_code == 200  # read and accepted
+    note = next(f for f in client.get(f"/api/projects/{pid}/security").json()["findings"] if f["category"] == "Authorization")
+    assert note["read"] is True and note["status"] == "open"
+    with SessionLocal() as db:
+        assert remediation.open_notes(db, db.get(Project, pid)) == []
+
+
+def test_a_file_the_rescan_wasnt_given_gets_no_verdict_and_a_deleted_one_is_gone():
+    result = scan.ScanResult(status="ok", tools={"semgrep": {"status": "ran"}},
+                             scanned=["backend/app.js"], tree=["backend/app.js", "backend/tests/app.test.js"])
+    assert result.covers("semgrep", "backend/app.js", "aiteam.x")
+    assert not result.covers("semgrep", "backend/tests/app.test.js", "aiteam.x")  # still there, not scanned
+    assert result.covers("semgrep", "backend/old.js", "aiteam.x")  # gone from the tree
+
+
+def test_the_sql_rule_only_matches_sql_and_a_fatal_run_falls_back_to_own_rules():
+    import yaml
+
+    rule = yaml.safe_load(scan.OWN_RULES)["rules"][0]
+    assert rule["id"] == "aiteam.javascript.sql-built-from-request"
+    text = json.dumps(rule)
+    assert '\\"$SQL\\" +' in text and "select|insert|update|delete" in text and "^(params|query|body|headers|cookies)$" in text
+    semgrep = next(s for s in scan.plan_python(_TREE).steps if s.label == "semgrep").command
+    assert "P=''; fi" in semgrep and semgrep.count("semgrep scan") == 2
+
+
+def test_a_planned_side_with_no_report_is_not_a_side_that_ran():
+    plan = scan.ScanPlan(scan.NODE_IMAGE, [], {}, (scan.NPM_AUDIT,))
+    ran = scan.MARK + json.dumps({"tool": "npm audit", "side": "backend", "ran": True, "findings": []})
+    result = scan.judge([(plan, [StepResult("scan", "npm audit (backend)", 0, 1.0, ran),
+                                 StepResult("scan", "npm audit (frontend)", None, 180.0, timed_out=True)], None)], {}, {})
+    assert result.tools[scan.NPM_AUDIT]["sides"] == {"backend": "ran", "frontend": "skipped"}
+    assert not result.covers(scan.NPM_AUDIT, "frontend/package.json") and not scan._complete(result)
+
+
+def test_paths_below_a_renamed_root_are_the_same_file():
+    assert remediation._same_file("server/app/db.py", "backend/app/db.py")
+    assert not remediation._same_file("a/x.js", "b/x.js")

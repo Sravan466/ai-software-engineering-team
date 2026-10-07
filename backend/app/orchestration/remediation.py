@@ -400,7 +400,13 @@ def _same_file(a: Optional[str], b: Optional[str]) -> bool:
     if not a or not b:
         return False
     a, b = _unprefixed(a.lower()), _unprefixed(b.lower())
-    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+    if a == b or a.endswith("/" + b) or b.endswith("/" + a):
+        return True
+    # The tree renames an agent's own root (`server/app/x.py` is placed at
+    # `backend/app/x.py`): the same path below the first folder is the same file —
+    # the rule the page's `samePath` uses too.
+    below = lambda p: p.split("/", 1)[1] if "/" in p else ""  # noqa: E731
+    return "/" in below(a) and below(a) == below(b)
 
 
 def _unprefixed(path: str) -> str:
@@ -844,6 +850,15 @@ def sync_dispositions(
             claimed[f.key] = row
     for f in notes:
         row = claimed.get(f.key)
+        if row is not None and f.key in repeat_keys:
+            # The scanner now reports this very problem, with its rule and its rescan:
+            # the note is superseded — not reopened (it would be asked about twice),
+            # and not "fixed" (nothing was).
+            if row.status != FindingStatus.WAIVED.value:
+                row.status = FindingStatus.GONE.value
+            twin = next(t for t in current if repeats(f, t))
+            row.rule_id = f"{twin.tool}:{twin.rule_id}"
+            continue
         if row is None:
             if f.key in keys or f.key in repeat_keys:
                 continue
@@ -983,6 +998,7 @@ def open_notes(db, project) -> list:
     asked about twice."""
     from app.db.models import SecurityDisposition
 
+    read = notes_read(project)
     return [
         row
         for row in db.query(SecurityDisposition)
@@ -992,7 +1008,24 @@ def open_notes(db, project) -> list:
         if row_source(row) == SOURCE_MODEL
         and row.severity in STOPPING_SEVERITIES
         and row.status not in FindingStatus.settled()
+        and row.finding_key not in read
     ]
+
+
+def notes_read(project) -> set[str]:
+    """The review notes a person has already read and approved past at a Security stop."""
+    data = project.auto_fix if isinstance(project.auto_fix, dict) else {}
+    return set(data.get("notes_read") or [])
+
+
+def mark_notes_read(db, project) -> None:
+    """Approving a Security stop is reading its notes: a later re-audit that repeats
+    them doesn't stop the build to ask again. (A new note still does.)"""
+    from app.orchestration import autofix
+
+    data = autofix.load(project)
+    data["notes_read"] = sorted(set(data.get("notes_read") or []) | {r.finding_key for r in open_notes(db, project)})
+    autofix.save(project, data)
 
 
 def unresolved(db, project, serious: Optional[bool] = None) -> list:

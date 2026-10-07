@@ -355,6 +355,10 @@ export type SecurityFinding = {
   line: number | null;
   /** Holds the build until fixed or waived: a scanner's critical, high or serious finding. */
   blocks: boolean;
+  /** A review note a person approved past at a Security stop. */
+  read?: boolean;
+  /** A review note the scanner now reports itself, as `tool:rule`. */
+  superseded_by?: string | null;
   /** The phase that wrote the offending file. Null when nothing owns it. */
   owner_phase: string | null;
   status: "open" | "fix_requested" | "fixed" | "gone" | "waived";

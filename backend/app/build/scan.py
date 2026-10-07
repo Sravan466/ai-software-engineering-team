@@ -104,21 +104,38 @@ rules:
     metadata:
       cwe: ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"]
       confidence: HIGH
-    pattern-either:
-      - pattern: $DB.$QUERY("..." + $REQ.$PART.$X, ...)
-      - pattern: $DB.$QUERY("..." + $REQ.$PART[$X], ...)
-      - pattern: $DB.$QUERY(`...${$REQ.$PART.$X}...`, ...)
-      - pattern: $DB.$QUERY(`...${$REQ.$PART[$X]}...`, ...)
-      - patterns:
-          - pattern: $DB.$QUERY($SQL, ...)
-          - pattern-inside: |
-              $SQL = "..." + $REQ.$PART.$X;
-              ...
-      - patterns:
-          - pattern: $DB.$QUERY($SQL, ...)
-          - pattern-inside: |
-              $SQL = `...${$REQ.$PART.$X}...`;
-              ...
+    # Only SQL: a string that reads as SQL joined to a request value, or a template
+    # handed to a method that only ever takes SQL. `res.send("Hello " + req.query.name)`
+    # and `cache.get("user:" + req.params.id)` are not this rule's business.
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: $DB.$QUERY("$SQL" + $REQ.$PART.$X, ...)
+                  - pattern: $DB.$QUERY("$SQL" + $REQ.$PART[$X], ...)
+                  - patterns:
+                      - pattern: $DB.$QUERY($Q, ...)
+                      - pattern-inside: |
+                          $Q = "$SQL" + $REQ.$PART.$X;
+                          ...
+              - metavariable-regex:
+                  metavariable: $SQL
+                  regex: (?i)\b(select|insert|update|delete)\b
+          - patterns:
+              - pattern-either:
+                  - pattern: $DB.$QUERY(`...${$REQ.$PART.$X}...`, ...)
+                  - pattern: $DB.$QUERY(`...${$REQ.$PART[$X]}...`, ...)
+                  - patterns:
+                      - pattern: $DB.$QUERY($Q, ...)
+                      - pattern-inside: |
+                          $Q = `...${$REQ.$PART.$X}...`;
+                          ...
+              - metavariable-regex:
+                  metavariable: $QUERY
+                  regex: ^(query|execute|exec|raw|unsafe|prepare|\$queryRawUnsafe|\$executeRawUnsafe)$
+      - metavariable-regex:
+          metavariable: $PART
+          regex: ^(params|query|body|headers|cookies)$
   - id: aiteam.python.sql-built-from-request
     languages: [python]
     severity: ERROR
@@ -227,6 +244,11 @@ class ScanResult:
     rules: Optional[str] = None
     #: The same tree's earlier scan, reused rather than run again.
     reused: bool = False
+    #: The code files Semgrep and Bandit were given, and every file in the tree: a
+    #: finding in a file that is still there but wasn't scanned gets no verdict; one
+    #: whose file is gone is gone. None on scans from before these were kept.
+    scanned: Optional[list[str]] = None
+    tree: Optional[list[str]] = None
 
     @classmethod
     def skipped(cls, reason: str, **kw) -> "ScanResult":
@@ -249,6 +271,10 @@ class ScanResult:
             return False
         if path and path in (entry.get("unscanned") or []):
             return False
+        if tool in (SEMGREP, BANDIT) and self.scanned is not None and path not in self.scanned:
+            # Not handed to the tool this time. Gone from the tree is gone; still there
+            # (renamed to look like a test, say) is unread.
+            return self.tree is not None and path not in self.tree
         if tool == SEMGREP and entry.get("missing_packs") and not str(rule or "").startswith("aiteam."):
             return False
         if tool in DEPENDENCY_TOOLS:
@@ -280,6 +306,8 @@ class ScanResult:
             "truncated": self.truncated,
             "rules": self.rules,
             "reused": self.reused,
+            "scanned": self.scanned,
+            "tree": self.tree,
             "at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -297,6 +325,8 @@ class ScanResult:
             truncated=bool(data.get("truncated")),
             rules=data.get("rules"),
             reused=bool(data.get("reused")),
+            scanned=list(data["scanned"]) if isinstance(data.get("scanned"), list) else None,
+            tree=list(data["tree"]) if isinstance(data.get("tree"), list) else None,
         )
 
 
@@ -441,6 +471,14 @@ def scan_tree(prior_outputs: dict, charter=None) -> tuple[dict[str, str], dict[s
     return out, owners
 
 
+def tree_paths(prior_outputs: dict, charter=None) -> list[str]:
+    """Every file in the build as Warden sees it, scanned or not."""
+    from app.build.check import phase_tree
+
+    files, _ = phase_tree(prior_outputs, Phase.SECURITY_ENGINEER.value, {}, charter)
+    return sorted(files)
+
+
 def owner_of(path: str, owners: dict[str, str]) -> Optional[str]:
     return owners.get(path) or _SIDE_OWNER.get(layout.side_of(path) or "")
 
@@ -504,6 +542,8 @@ if kind == "semgrep":
             if path:
                 missed.append(rel(path))
         out["unscanned"] = sorted(set(missed))[:100]
+        if len(set(missed)) > 100:
+            out["truncated"] = True  # past the cap, an unlisted file may not have been read
         results = worst_first(d.get("results") or [], lambda r: (r.get("extra") or {}).get("severity"))
         out["total"] = len(results)
         for r in results[:MAX]:
@@ -533,7 +573,10 @@ elif kind == "bandit":
         out["ran"], out["version"] = True, version
         errs = d.get("errors") or []
         out["errors"] = len(errs)
-        out["unscanned"] = sorted({rel((e or {}).get("filename")) for e in errs if (e or {}).get("filename")})[:100]
+        missed = {rel((e or {}).get("filename")) for e in errs if (e or {}).get("filename")}
+        out["unscanned"] = sorted(missed)[:100]
+        if len(missed) > 100:
+            out["truncated"] = True
         results = worst_first(d.get("results") or [], lambda r: r.get("issue_severity"))
         out["total"] = len(results)
         for r in results[:MAX]:
@@ -614,9 +657,20 @@ process.stdout.write('\n' + MARK + JSON.stringify(out) + '\n');
 
 #: Fetches the registry packs into the scanner cache, keeping the last good copy.
 _RULES_FETCH = r"""
-import os, sys, time, urllib.request
-d, packs, max_age = sys.argv[1], sys.argv[2].split(","), float(sys.argv[3]) * 3600
+import os, subprocess, sys, tempfile, time, urllib.request
+d, packs, max_age, tools = sys.argv[1], sys.argv[2].split(","), float(sys.argv[3]) * 3600, sys.argv[4]
 os.makedirs(d, exist_ok=True)
+def accepted(path):
+    # A pack the pinned Semgrep can't parse would fail every scan: it never replaces
+    # the last good copy.
+    empty = tempfile.mkdtemp()
+    env = dict(os.environ, PYTHONPATH=tools, PATH=tools + "/bin:" + os.environ.get("PATH", ""))
+    try:
+        r = subprocess.run([tools + "/bin/semgrep", "scan", "--metrics=off", "--disable-version-check", "--quiet",
+                            "--json", "--config", path, empty], env=env, capture_output=True, timeout=180)
+    except Exception:
+        return False
+    return r.returncode in (0, 1)
 for p in packs:
     path = os.path.join(d, p + ".yml")
     if os.path.exists(path) and time.time() - os.path.getmtime(path) < max_age:
@@ -626,9 +680,12 @@ for p in packs:
         body = urllib.request.urlopen(req, timeout=60).read()
         if not body.lstrip().startswith(b"rules:"):
             raise ValueError("not a rule pack")
-        tmp = path + ".part-%d" % os.getpid()
+        tmp = path + ".part-%d.yml" % os.getpid()
         with open(tmp, "wb") as f:
             f.write(body)
+        if not accepted(tmp):
+            os.remove(tmp)
+            raise ValueError("this Semgrep can't read it")
         os.replace(tmp, path)
         print("fetched p/%s" % p)
     except Exception as e:
@@ -707,7 +764,7 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
         # don't resolve is that side's pip-audit's problem, never Semgrep's or Bandit's.
         "set +e\n"
         + _heredoc("/tmp/aiteam-fetch.py", _RULES_FETCH)
-        + f"python /tmp/aiteam-fetch.py {_RULES_DIR} {','.join(REGISTRY_PACKS)} {RULES_MAX_AGE_HOURS} || true\n"
+        + f"python /tmp/aiteam-fetch.py {_RULES_DIR} {','.join(REGISTRY_PACKS)} {RULES_MAX_AGE_HOURS} \"$T\" || true\n"
         f"mkdir -p {_SCRATCH}\n"
     )
     for side in py_sides:
@@ -733,6 +790,12 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
             + "semgrep scan --metrics=off --disable-version-check --json --quiet --timeout 30 "
             "--max-target-bytes 1000000 --exclude .aiteam-scan $C --output /tmp/semgrep.json /work "
             "2>/tmp/semgrep.err; code=$?\n"
+            # A fatal run (a pack it can't read) is retried on the platform's own rules
+            # alone, and reports no packs: their findings get no verdict from it.
+            + "if [ \"$code\" != 0 ] && [ \"$code\" != 1 ]; then "
+            f"semgrep scan --metrics=off --disable-version-check --json --quiet --timeout 30 "
+            f"--max-target-bytes 1000000 --exclude .aiteam-scan --config {_OWN_RULES_DIR}/aiteam.yml "
+            "--output /tmp/semgrep.json /work 2>>/tmp/semgrep.err; code=$?; P=''; fi\n"
             + f"python /tmp/aiteam-read.py semgrep /tmp/semgrep.json $code {_q(prefixes)} {SEMGREP_VERSION} \"$P\"\n"
             "exit 0\n"
         )
@@ -1012,6 +1075,10 @@ def judge(results_by_plan: list[tuple[ScanPlan, list[StepResult], Optional[str]]
             entry = tools.setdefault(name, {"status": SKIPPED, "version": None, "reason": None, "count": 0,
                                              "seconds": 0.0})
             entry["seconds"] = round(entry["seconds"] + r.seconds, 1)
+            if name in DEPENDENCY_TOOLS and r.label.endswith(")"):
+                # Every side the plan meant to audit, until its own report says it ran:
+                # a step that timed out or never started leaves no report behind.
+                entry.setdefault("sides", {}).setdefault(r.label[r.label.rfind("(") + 1 : -1], SKIPPED)
             if r.skipped or r.timed_out:
                 entry["reason"] = entry["reason"] or (
                     install_failed or (f"{name} ran out of time." if r.timed_out else "The scan was stopped.")
@@ -1122,7 +1189,7 @@ def _tail(output: str, n: int = 200) -> str:
 
 
 # ── running it ───────────────────────────────────────────────────────────────
-def run_scan(files: dict[str, str], owners: dict[str, str]) -> ScanResult:
+def run_scan(files: dict[str, str], owners: dict[str, str], tree: Optional[Iterable[str]] = None) -> ScanResult:
     """Run every scanner that applies to `files`. Never raises for the scan's sake:
     what can't run comes back `skipped`, with the reason."""
     from app.build import runner
@@ -1165,9 +1232,11 @@ def run_scan(files: dict[str, str], owners: dict[str, str]) -> ScanResult:
             continue
         except runner._Stopped:
             done.append((plan, unrun, "The scan was stopped."))
-            continue
+            break  # Stop means stop: no next sandbox
         done.append((plan, results, None))
     result = judge(done, files, owners)
+    result.scanned = sorted(p for p in files if p.endswith(_CODE_EXT))
+    result.tree = sorted(set(tree or ()) | set(files))
     result.runner = chosen.kind
     result.seconds = time.monotonic() - started
     log.info("Security scan (%s): %s, %d finding(s)", chosen.kind, result.summary(), len(result.findings))
@@ -1210,6 +1279,7 @@ def scan_build(prior_outputs: dict, charter=None) -> ScanResult:
 
     try:
         files, owners = scan_tree(prior_outputs, charter)
+        tree = tree_paths(prior_outputs, charter)
         key = _tree_key(files)
         now = time.monotonic()
         with _recent_lock:
@@ -1221,7 +1291,7 @@ def scan_build(prior_outputs: dict, charter=None) -> ScanResult:
             reused = ScanResult.from_dict(seen[1])
             reused.reused = True
             return reused
-        result = run_scan(files, owners)
+        result = run_scan(files, owners, tree)
         if _complete(result):
             with _recent_lock:
                 _recent[key] = (now, result.as_dict())

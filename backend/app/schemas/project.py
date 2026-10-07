@@ -209,7 +209,7 @@ class PhaseResultOut(BaseModel):
     def _scan_without_findings(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
-        out = {k: v for k, v in value.items() if k != "findings"}
+        out = {k: v for k, v in value.items() if k not in ("findings", "scanned", "tree")}
         out["found"] = len(value.get("findings") or [])
         return out
 
