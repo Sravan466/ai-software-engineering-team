@@ -320,11 +320,18 @@ def _qa(out: dict) -> QADigest:
     )
 
 
+def _where(finding: dict) -> str:
+    """A review note's place: `path:line` since #77, `location` before it."""
+    path = str(finding.get("path") or finding.get("location") or "")
+    line = finding.get("line")
+    return f"{path}:{line}" if path and isinstance(line, int) and f":{line}" not in path else path
+
+
 def _security(out: dict) -> SecurityDigest:
     return SecurityDigest(
         rationale=_s(out.get("summary"), _RATIONALE),
         findings=[
-            _Finding(severity=_s(f.get("severity"), 12), title=_s(f.get("title"), 100), location=_s(f.get("location"), 100))
+            _Finding(severity=_s(f.get("severity"), 12), title=_s(f.get("title"), 100), location=_s(_where(f), 100))
             for f in _items(out.get("findings"))
             if isinstance(f, dict)
         ][:20],

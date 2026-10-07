@@ -13,7 +13,7 @@ import { PHASES } from "@/components/shell/phases";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
-import SecurityFindings from "./SecurityFindings";
+import SecurityFindings, { ruleName } from "./SecurityFindings";
 import { ReasonKinds } from "./ReasonKinds";
 
 /**
@@ -205,7 +205,7 @@ export function FixingPanel({ project }: { project: Project }) {
                       )}
                     </>
                   )}
-                  {!onIt && name === "security" && " · Warden is re-checking the rebuilt code"}
+                  {!onIt && name === "security" && " · The scanners run again on the rebuilt code"}
                   {!onIt && name === "tests" && " · SIEVE's suite runs again on the rebuilt code"}
                 </p>
               </div>
@@ -228,6 +228,13 @@ export function FixingPanel({ project }: { project: Project }) {
                   <div className="fix-item-meta">
                     {p.kind === "test" && <span className="fix-item-step">Test</span>}
                     {p.step && <span className="fix-item-step">{FOUND_BY[p.step] ?? p.step}</span>}
+                    {/* The rule the rescan runs again (#77). */}
+                    {p.tool && <span className="fix-item-step">{p.tool}</span>}
+                    {p.rule_id && (
+                      <code className="mono" title={p.rule_id}>
+                        {ruleName(p.rule_id, p.tool)}
+                      </code>
+                    )}
                     {p.where && <code className="mono">{p.where}</code>}
                     <Owner phase={p.phase} />
                     <StepRail step={stepFor(p, name, project.current_phase)} />
@@ -317,7 +324,9 @@ export function NeedsHelp({
             <span className="field-hint">
               {t.stopped?.reason === "no_progress"
                 ? "Stopped early. The last round fixed nothing."
-                : `Stopped after ${t.rounds.length - (t.episode_start ?? 0)} round${t.rounds.length - (t.episode_start ?? 0) === 1 ? "" : "s"}.`}
+                : t.stopped?.reason === "unchecked"
+                  ? "Stopped. The scanners couldn't run again to check the fix."
+                  : `Stopped after ${t.rounds.length - (t.episode_start ?? 0)} round${t.rounds.length - (t.episode_start ?? 0) === 1 ? "" : "s"}.`}
             </span>
           </h3>
           <RoundLedger name={name} track={t} />
@@ -327,7 +336,10 @@ export function NeedsHelp({
 
       {security && (
         <div className="help-track">
-          <h3 className="help-title">Still open</h3>
+          <h3 className="help-title">
+            Still open
+            <span className="field-hint">What the last rescan still reports, by rule and line.</span>
+          </h3>
           <SecurityFindings
             key={tick}
             id={id}

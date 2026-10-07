@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { HandoffDep, PhaseResult } from "@/lib/api";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import Markdown from "@/components/ui/Markdown";
@@ -9,8 +9,10 @@ import DetailFields from "./DetailFields";
 import { HowWritten } from "./CodeWriting";
 import BuildRunLine from "./BuildRunLine";
 import TestRunLine from "./TestRunLine";
+import ScanLine from "./ScanLine";
+import { samePath } from "@/lib/openFile";
 
-import FileBrowser from "./FileBrowser";
+import FileBrowser, { type FileFocus } from "./FileBrowser";
 import Mermaid from "./Mermaid";
 import { useSkillTitles } from "@/components/skills/skills";
 import { extractFiles, extractMermaid, fileKeys, fileSummary, toFields } from "./payload";
@@ -42,9 +44,16 @@ export default function PhaseArtifact({
   /** Where the scroll area tops out. The gate gives its artifact more room than
    *  a browsing disclosure does, because that is the moment it matters. */
   maxHeight = 420,
+  focus,
+  onFocused,
 }: {
   row: PhaseResult;
   maxHeight?: number;
+  /** A file a finding asked to see (#77): opens Files on it, at its line. */
+  focus?: FileFocus;
+  /** Told once the ask is taken, so the parent can forget it: a remount mustn't
+   *  snap the view back to Files. */
+  onFocused?: () => void;
 }) {
   const { files, mermaid, fields } = useMemo(() => {
     const output = row.output || {};
@@ -68,6 +77,22 @@ export default function PhaseArtifact({
 
   const [view, setView] = useState<ViewKey>(views[0]?.key ?? "summary");
   const active = views.find((v) => v.key === view) ?? views[0];
+  // A finding's `path:line` was clicked: show this phase's files, on that one. Kept
+  // here once taken — the parent forgets the ask, and the file browser still needs it.
+  const [held, setHeld] = useState<FileFocus | undefined>(focus);
+  useEffect(() => {
+    if (!focus) return;
+    setHeld(focus);
+    if (files.some((f) => samePath(f.path, focus.path))) setView("files");
+    onFocused?.();
+    // Keyed on the request, not on `files`: a poll mustn't drag the view back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.n]);
+  // Dropped once the file browser has it (its effects run before this one): reopening
+  // Files later must land on whatever the person chose, not on the old jump.
+  useEffect(() => {
+    if (held && view === "files") setHeld(undefined);
+  }, [held, view]);
 
   if (views.length === 0) {
     return (
@@ -95,6 +120,8 @@ export default function PhaseArtifact({
       <BuildRunLine run={row.build_run} />
       {/* QA's tests, run for real (#76): what they measured, or why nothing did. */}
       <TestRunLine run={row.test_run} />
+      {/* The scanners behind Warden's review (#77): which ran, or that none could. */}
+      <ScanLine scan={row.scan} />
 
       {views.length > 1 && (
         <div className="artifact-bar">
@@ -125,7 +152,7 @@ export default function PhaseArtifact({
             <Markdown>{row.content_md}</Markdown>
           </div>
         )}
-        {active?.key === "files" && <FileBrowser files={files} />}
+        {active?.key === "files" && <FileBrowser files={files} focus={held} />}
         {active?.key === "diagram" && mermaid && (
           <div className="artifact-pad">
             <Mermaid source={mermaid} id={row.id} />

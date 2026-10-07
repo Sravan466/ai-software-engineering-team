@@ -24,6 +24,8 @@ import { FixingPanel } from "@/components/build/AutoFix";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
 import PhaseSteps from "@/components/build/PhaseSteps";
+import { onOpenFile } from "@/lib/openFile";
+import type { FileFocus } from "@/components/build/FileBrowser";
 
 import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
 
@@ -231,8 +233,18 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   // record of where you last went: PhaseList clears it the moment it acts, or a
   // tab round-trip — which unmounts and remounts that list with the same value
   // still sitting here — would scroll you back to a phase you already left.
-  const [jump, setJump] = useState<{ key: string } | null>(null);
+  const [jump, setJump] = useState<Jump | null>(null);
   const clearJump = useCallback(() => setJump(null), []);
+  // A security finding's `path:line` (#77): the phase that wrote it, on its Files
+  // view, at that line — from wherever the finding was on screen.
+  useEffect(
+    () =>
+      onOpenFile((j) => {
+        setTab("build");
+        setJump({ key: j.phase, file: { path: j.path, line: j.line } });
+      }),
+    [],
+  );
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Whether the error on screen is a control's refusal, which the status poll must
@@ -713,6 +725,9 @@ function RunInterrupted({
   );
 }
 
+/** Where the page is being sent: a phase, and — from a finding — a file in it (#77). */
+type Jump = { key: string; file?: { path: string; line?: number | null } };
+
 function BuildTab({
   project,
   analytics,
@@ -729,7 +744,7 @@ function BuildTab({
   act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
   /** A phase the relay is asking us to go to, if any. */
-  jump: { key: string } | null;
+  jump: Jump | null;
   onJumpDone: () => void;
   onDeliver: (intent?: ShipIntent) => void;
 }) {
@@ -879,13 +894,15 @@ function PhaseList({
   atRest,
 }: {
   project: Project;
-  jump: { key: string } | null;
+  jump: Jump | null;
   onJumpDone: () => void;
   /** crewAtRest(project) — the same rule as the relay, so they never disagree. */
   atRest: boolean;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [landed, setLanded] = useState<string | null>(null);
+  // The file a finding asked for, and in which phase (#77).
+  const [focus, setFocus] = useState<(FileFocus & { key: string }) | null>(null);
   const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
   // A stopped run still finishing its call is live; one whose process died since is
   // as stalled as a running one would be.
@@ -914,6 +931,7 @@ function PhaseList({
     const row = latestRow(project, key);
     const hasDoc = Boolean(row && row.status !== "running" && (row.content_md || row.output));
     if (hasDoc) setOpen((o) => ({ ...o, [key]: true }));
+    if (jump.file) setFocus({ key, path: jump.file.path, line: jump.file.line, n: Date.now() });
     setLanded(key);
     // The tab panel it lives in mounts in this same commit, so wait a frame for
     // layout before asking the browser to scroll to it.
@@ -1039,7 +1057,12 @@ function PhaseList({
 
             {hasDoc && isOpen && row && (
               <div className="phase-body">
-                <PhaseArtifact row={row} maxHeight={420} />
+                <PhaseArtifact
+                  row={row}
+                  maxHeight={420}
+                  focus={focus?.key === ph.key ? focus : undefined}
+                  onFocused={() => setFocus(null)}
+                />
                 {row.feedback && (
                   <p className="phase-feedback">
                     <strong style={{ color: "var(--bad)" }}>

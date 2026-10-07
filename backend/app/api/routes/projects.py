@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.connector.hub import hub
 from app.api.deps import current_user, get_project
-from app.build import dbconnect
+from app.build import dbconnect, scan
 from app.core import artifacts, model_roles, project_secrets, secretbox
 from app.core.config import settings
 from app.core.constants import (
@@ -33,6 +33,7 @@ from app.core.constants import (
     ApprovalMode,
     FindingStatus,
     GateKind,
+    Phase,
     PipelineStatus,
     RoutingMode,
 )
@@ -689,6 +690,10 @@ def approve_phase(
     if not token:
         raise _conflict(project, "approve")
 
+    if project.gate_kind == GateKind.SECURITY.value:
+        # Approving past the Security stop is reading its review notes (#77).
+        remediation.mark_notes_read(db, project)
+        db.commit()
     runner.approve_current(db, project)
     background.add_task(_drive, project.id, token)
     return RunResponse(
@@ -754,6 +759,8 @@ def list_findings(
         .all()
     )
     track = autofix.track(autofix.load(project), autofix.SECURITY)
+    warden = runner.latest_row(db, project, Phase.SECURITY_ENGINEER.value)
+    read = remediation.notes_read(project)
     return {
         "findings": [
             {
@@ -768,11 +775,30 @@ def list_findings(
                 "note": row.note,
                 # The crew's to fix (true), or the reviewer's to judge.
                 "serious": remediation.row_is_serious(row),
+                # Whether it holds the build until fixed or waived (#77): a scanner's
+                # severe finding. A review note never does.
+                "blocks": remediation.row_blocks(row),
                 "fixed_round": row.fixed_round,
                 "waive_kind": row.waive_kind,
+                # Where it came from (#77): a scanner, with its rule and line, or Warden.
+                "source": remediation.row_source(row),
+                "tool": row.tool,
+                "rule_id": row.rule_id,
+                "rule_url": row.rule_url,
+                "cwe": row.cwe,
+                "path": row.path,
+                "line": row.line,
+                # A review note a person approved past at a Security stop (#77).
+                "read": remediation.is_read(read, row),
+                # A review note the scanner now reports itself: `tool:rule` (#77).
+                "superseded_by": row.rule_id
+                if remediation.row_source(row) == remediation.SOURCE_MODEL and row.rule_id
+                else None,
             }
             for row in rows
         ],
+        # Which scanners ran on the latest audit, or why none could (#77).
+        "scan": _scan_summary(warden.scan if warden is not None else None),
         "unresolved": len(remediation.unresolved(db, project)),
         # Only the small ones: what the Security stop asks about.
         "unresolved_small": len(remediation.unresolved(db, project, serious=False)),
@@ -780,6 +806,13 @@ def list_findings(
         "rounds_allowed": int(track["allowed"]),
         "auto_fix_min_severity": settings.auto_fix_min_severity,
     }
+
+
+def _scan_summary(record: object) -> Optional[dict]:
+    """The latest scan, without its findings: those are the dispositions above."""
+    if not isinstance(record, dict):
+        return None
+    return {k: record.get(k) for k in ("status", "summary", "reason", "tools", "seconds", "runner", "truncated", "rules", "at")}
 
 
 def _findings(db: Session, project: Project, key: str) -> list[SecurityDisposition]:
@@ -831,6 +864,15 @@ def fix_finding(
             "No phase owns this finding — it doesn't point at a file anyone wrote. "
             "Fix it by sending a phase back with your own note, or waive it.",
         )
+    if remediation.row_source(row) == remediation.SOURCE_TOOL and row.tool in scan.DEPENDENCY_TOOLS:
+        # The platform owns the manifests (#77): no agent can change a version, so a
+        # rebuild would come back with the same dependency and the same finding.
+        raise HTTPException(
+            400,
+            "This is a dependency's known vulnerability. The platform sets package "
+            "versions, so no agent can fix it by rebuilding. Waive it with a reason, or "
+            "update the version after you download the build.",
+        )
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (
             _conflict(project, "fix")
@@ -847,15 +889,7 @@ def fix_finding(
     for tracked in rows:
         tracked.status = FindingStatus.FIX_REQUESTED.value
     db.commit()
-    finding = remediation.Finding(
-        key=row.finding_key,
-        title=row.title,
-        severity=row.severity,
-        category=row.category,
-        location=row.location,
-        recommendation=row.recommendation,
-        owner_phase=row.owner_phase,
-    )
+    finding = remediation.as_finding(row)
     background.add_task(
         _drive_redo, project.id, row.owner_phase, remediation.fix_instruction([finding]), token
     )

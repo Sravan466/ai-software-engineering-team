@@ -558,22 +558,24 @@ class _CouldntRun(Exception):
 
 
 def _execute(image: str, mine: dict[str, str], steps: list[Step], side: str, stage: str,
-             chosen: Engine) -> list[StepResult]:
+             chosen: Engine, cache: Optional[str] = None, seconds: Optional[float] = None) -> list[StepResult]:
     """Run `steps` over `mine` in the sandbox, queued behind the project's other runs.
 
     Raises `_Stopped` when Stop was pressed (while queued or running) and `_CouldntRun`
-    when the runner failed rather than the code. Shared by the build (#75) and the
-    test run (#76), so both queue, stop and cap exactly alike.
+    when the runner failed rather than the code. Shared by the build (#75), the test
+    run (#76) and the security scan (#77), so all three queue, stop and cap alike.
+    `cache` names a package cache other than the account's own (the scanners' never
+    shares one with a build); `seconds` overrides the budget.
     """
     from app.core import identity
     from app.orchestration import activity, claim
     from app.router import inflight
 
     limits = Limits(
-        seconds=float(max(int(settings.build_run_timeout_seconds), 30)),
+        seconds=float(seconds or max(int(settings.build_run_timeout_seconds), 30)),
         memory_mb=max(int(settings.build_run_memory_mb), 256),
         cpus=max(float(settings.build_run_cpus), 0.25),
-        cache=identity.current_user_id() or "shared",
+        cache=cache or identity.current_user_id() or "shared",
     )
     build = inflight.current() or {}
     stopper: list[Callable[[], None]] = []

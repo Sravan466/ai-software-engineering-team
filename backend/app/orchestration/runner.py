@@ -29,12 +29,12 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from sqlalchemy import update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
-from app.build import dbconnect, integrations, testrun
+from app.build import dbconnect, integrations, scan, testrun
 from app.core import artifacts, identity, project_secrets
 from app.core.config import settings
 from app.core.constants import (
@@ -356,7 +356,22 @@ class PipelineRunner:
             self.build_problems(project),
             # Only the Ship review reads it, so only the Ship review pays for it.
             self.failing_tests(project) if row.phase == SHIP_GATE_PHASE.value else None,
+            tool_findings=self._small_tool_findings(project) if row.phase == Phase.SECURITY_ENGINEER.value else None,
+            review_notes=self._open_notes(project) if row.phase == Phase.SECURITY_ENGINEER.value else None,
         )
+
+    @staticmethod
+    def _open_notes(project: Project) -> Optional[list]:
+        """Warden's severe review notes nobody settled (#77), from the dispositions."""
+        db = object_session(project)
+        return remediation.open_notes(db, project) if db is not None else None
+
+    @staticmethod
+    def _small_tool_findings(project: Project) -> list:
+        """The scanners' findings a person decides, still unsettled (#77) — read from
+        the dispositions, so a waiver holds across every re-audit."""
+        db = object_session(project)
+        return remediation.unresolved(db, project, serious=False) if db is not None else []
 
     @staticmethod
     def database_question(project: Project) -> Optional[Gate]:
@@ -811,7 +826,18 @@ class PipelineRunner:
         data = autofix.load(project)
         t = autofix.track(data, autofix.SECURITY)
         outstanding = remediation.unresolved(db, project, serious=True)
-        fixed = autofix.close_round(t, [f.finding_key for f in outstanding])
+        live = autofix.open_round(t)
+        # What the round was sent and still has no verdict for (#77): a finding the
+        # rescan reported again is open, one it could speak for and didn't report is
+        # fixed — one still "sent back" is one it couldn't read where it was.
+        sent = [p.get("key") for p in (live or {}).get("problems") or []]
+        waiting = self._still_sent_back(db, project, sent) if live is not None else []
+        # Fixed means settled: a sent finding whose record is still open in any form
+        # (one from before #77 that is now a review note, say) was not fixed.
+        unsettled = {f.finding_key for f in outstanding} | self._unsettled(db, project, sent)
+        fixed = autofix.close_round(t, list(unsettled))
+        if live is not None and waiting:
+            autofix.mark_unjudged(live, waiting, self._why_unjudged(row.scan))
         if fixed:
             last = t["rounds"][-1]
             for record in self._dispositions(db, project, fixed):
@@ -824,6 +850,10 @@ class PipelineRunner:
             return False
 
         step = autofix.next_step(t)
+        if live is not None and live.get("unjudged_all"):
+            # Nothing could be checked, and the next round's rescan would run on the
+            # same missing sandbox: ask now, with the reason, rather than spend rounds.
+            step = autofix.STOP_UNCHECKED
         if step != "fix":
             autofix.stop(t, step, [f.finding_key for f in outstanding])
             autofix.save(project, data)
@@ -835,18 +865,7 @@ class PipelineRunner:
             self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))
             return True
 
-        findings = [
-            remediation.Finding(
-                key=f.finding_key,
-                title=f.title,
-                severity=f.severity,
-                category=f.category,
-                location=f.location,
-                recommendation=f.recommendation,
-                owner_phase=f.owner_phase,
-            )
-            for f in outstanding
-        ]
+        findings = [remediation.as_finding(f) for f in outstanding]
         order = [p.value for p in PHASE_ORDER]
         by_owner: dict[str, list[remediation.Finding]] = {}
         for f in findings:
@@ -874,6 +893,8 @@ class PipelineRunner:
                     "where": f.location or None,
                     "phase": remediation.route_owner(f),
                     "kind": "security",
+                    # The rule the rescan runs again (#77).
+                    **({"tool": f.tool, "rule_id": f.rule_id, "cwe": f.cwe, "path": f.path} if f.tool else {}),
                 }
                 for f in findings
             ],
@@ -903,6 +924,32 @@ class PipelineRunner:
             fix_track=autofix.SECURITY,
         )
         return True
+
+    @staticmethod
+    def _still_sent_back(db: Session, project: Project, keys: list) -> list[str]:
+        """Of `keys`, the findings the latest audit gave no verdict on (#77)."""
+        return [r.finding_key for r in PipelineRunner._dispositions(db, project, keys)
+                if r.status == FindingStatus.FIX_REQUESTED.value]
+
+    @staticmethod
+    def _unsettled(db: Session, project: Project, keys: list) -> set[str]:
+        """Of `keys`, the ones not fixed. Only a fix counts: a note superseded by a
+        scanner finding, or one simply no longer mentioned, wasn't fixed by the round."""
+        fixed = {r.finding_key for r in PipelineRunner._dispositions(db, project, keys)
+                 if r.status == FindingStatus.FIXED.value}
+        # A key with no record left can't be said to be fixed either.
+        return {k for k in keys if k not in fixed}
+
+    @staticmethod
+    def _why_unjudged(scanned: object) -> str:
+        """Why the rescan couldn't say whether a fix took."""
+        result = scan.ScanResult.from_dict(scanned)
+        if result is None or result.status != "ok":
+            return (result.reason if result else None) or "The scanners didn't run again."
+        return (
+            "The rescan couldn't read where these were: its report was cut short, it "
+            "couldn't parse the file, or a rule pack was missing."
+        )
 
     @staticmethod
     def _standing_fix_note(data: dict, phase: str) -> Optional[str]:
@@ -956,8 +1003,9 @@ class PipelineRunner:
                 what = f"{left} code problem{'' if left == 1 else 's'} in {title}'s work"
             last = (t.get("rounds") or [None])[-1] or {}
             if last.get("unjudged_all"):
-                # Not the crew's failure: the tests couldn't run again to check its fix.
-                why = f"the tests couldn't run again to check the fix ({str(last.get('unjudged')).rstrip('.')})"
+                # Not the crew's failure: nothing could run again to check its fix.
+                what_ran = "scanners" if name == autofix.SECURITY else "tests"
+                why = f"the {what_ran} couldn't run again to check the fix ({str(last.get('unjudged')).rstrip('.')})"
             elif t["stopped"]["reason"] == autofix.STOP_NO_PROGRESS:
                 why = "the last round fixed none of them"
             elif rounds:
@@ -1505,6 +1553,7 @@ class PipelineRunner:
         row.build_note = lr.get("build_problems") or None
         row.build_run = lr.get("build_run") or None
         row.test_run = lr.get("test_run") or None
+        row.scan = lr.get("scan") or None
         # Provenance, not a verdict: which procedures this deliverable was written
         # with. Empty stays empty rather than becoming null — "this phase was
         # offered skills and none fitted" is a different fact from "this row was
@@ -1532,6 +1581,9 @@ class PipelineRunner:
                 # clear a critical finding because nobody could parse the report
                 # that raised it. The UNCHECKED gate already stops that run.
                 readable=row.schema_status != SchemaStatus.INVALID.value,
+                # What the scanners reported (#77): the findings with a rule and a
+                # line, and the rescan that decides whether a fix took.
+                scan=row.scan,
             )
         return row
 

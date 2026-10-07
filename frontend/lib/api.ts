@@ -69,6 +69,12 @@ export type PhaseResult = {
    * never by the model. `null` for every other phase and for older QA rows.
    */
   test_run?: TestRun | null;
+  /**
+   * The security scanners (#77): which ran on the code Warden reviewed, and what they
+   * reported with a rule and a line — or why none could run. Written by the platform,
+   * never by the model. `null` for every other phase and for older Warden rows.
+   */
+  scan?: Scan | null;
 
   /**
    * The procedural skills this phase was actually given, by name and in the order
@@ -144,7 +150,7 @@ export type Activity = {
    * `building`: installing, building and starting the code in a sandbox (#75).
    * Empty until the phase names one (QA setting up its test run, #86).
    */
-  stage: "" | "planning" | "writing" | "fixing" | "checking" | "building" | "testing";
+  stage: "" | "planning" | "writing" | "fixing" | "checking" | "building" | "testing" | "scanning" | "reviewing";
   label: string;
   done: number;
   total: number;
@@ -285,6 +291,53 @@ export type BuildRunnerStatus = {
 };
 
 /** One security finding, and what has actually been done about it. */
+/** The scanners behind the security review (#77). */
+export type ScanToolName = "semgrep" | "bandit" | "npm audit" | "pip-audit";
+
+export type ScanTool = {
+  status: "ran" | "skipped" | "failed" | "not_needed";
+  version?: string | null;
+  reason?: string | null;
+  count?: number;
+  seconds?: number;
+  errors?: number;
+};
+
+export type ScanFinding = {
+  tool: ScanToolName;
+  rule_id: string;
+  severity: string;
+  path: string;
+  line: number | null;
+  cwe: string | null;
+  category: string;
+  title: string;
+  url: string | null;
+  owner_phase: string | null;
+  /** Other rules that reported the same problem at the same place: `tool:rule`. */
+  also: string[];
+};
+
+export type Scan = {
+  /** ok: at least one scanner ran. skipped: none could, and `reason` says why. */
+  status: "ok" | "skipped";
+  /** "semgrep 1.139.0 · bandit 1.8.6 · npm audit · 9.1 s" */
+  summary: string;
+  reason: string | null;
+  runner?: string | null;
+  seconds: number;
+  tools: Partial<Record<ScanToolName, ScanTool>>;
+  findings?: ScanFinding[];
+  /** How many findings the scan kept. The phase payload sends this, not `findings`. */
+  found?: number;
+  truncated?: boolean;
+  /** Set when Semgrep ran without some registry packs. */
+  rules?: string | null;
+  /** The same tree's earlier scan, reused rather than run again. */
+  reused?: boolean;
+  at?: string;
+};
+
 export type SecurityFinding = {
   key: string;
   title: string;
@@ -292,6 +345,20 @@ export type SecurityFinding = {
   category: string;
   location: string;
   recommendation: string;
+  /** Where it came from (#77): a scanner, with a rule and a line, or Warden's opinion. */
+  source: "tool" | "model";
+  tool: ScanToolName | null;
+  rule_id: string | null;
+  rule_url: string | null;
+  cwe: string | null;
+  path: string | null;
+  line: number | null;
+  /** Holds the build until fixed or waived: a scanner's critical, high or serious finding. */
+  blocks: boolean;
+  /** A review note a person approved past at a Security stop. */
+  read?: boolean;
+  /** A review note the scanner now reports itself, as `tool:rule`. */
+  superseded_by?: string | null;
   /** The phase that wrote the offending file. Null when nothing owns it. */
   owner_phase: string | null;
   status: "open" | "fix_requested" | "fixed" | "gone" | "waived";
@@ -309,6 +376,8 @@ export type WaiveKind = "false_positive" | "mitigated" | "accepted_risk";
 
 export type SecurityState = {
   findings: SecurityFinding[];
+  /** The latest audit's scan, without its findings (#77). */
+  scan: Omit<Scan, "findings"> | null;
   /** Critical/high findings neither fixed nor waived — what blocks approval. */
   unresolved: number;
   /** Of those, the small ones: what the Security stop asks about. */
@@ -333,6 +402,10 @@ export type AutoFixProblem = {
   failure?: TestFailure["kind"];
   /** The phase that owns the code the test checks. */
   owner?: string;
+  /** A scanner's finding (#77): the rule the rescan runs again. */
+  tool?: ScanToolName;
+  rule_id?: string;
+  cwe?: string | null;
 };
 
 export type AutoFixRound = {
@@ -346,6 +419,8 @@ export type AutoFixRound = {
   handover?: boolean;
   /** Why the re-check couldn't run (#76): the round fixed nothing anyone could confirm. */
   unjudged?: string;
+  /** Nothing the round was sent could be re-checked (#76, #77). */
+  unjudged_all?: boolean;
   /** Keys the re-check no longer reports. `null` while the round is still running. */
   fixed: string[] | null;
   remaining?: string[];
@@ -356,7 +431,8 @@ export type AutoFixRound = {
 export type AutoFixTrack = {
   allowed: number;
   rounds: AutoFixRound[];
-  stopped: { reason: "limit" | "no_progress"; left: number; at: string } | null;
+  /** `unchecked` (#77): the scanners couldn't run again to check the fix. */
+  stopped: { reason: "limit" | "no_progress" | "unchecked"; left: number; at: string } | null;
   accepted: { kind: WaiveKind; reason: string; at: string } | null;
   resumed_after: number;
   /** Where the current episode began: a fresh problem gets a fresh budget. */
@@ -1642,6 +1718,11 @@ export type RoleRow = {
 
 export type RoleSettings = {
   roles: RoleRow[];
+  /**
+   * Warden reviews, unchosen, on the very model that wrote the code (#77). The
+   * scanners carry the verdicts; this only says the model's review is no second opinion.
+   */
+  auditor_shares_builders?: boolean;
   /** What a role with no choice of its own runs on, as `source:model`. */
   default_model: string | null;
   default_origin: LocalStatus["default_origin"];

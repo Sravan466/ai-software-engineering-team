@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { samePath } from "@/lib/openFile";
 import CodeBlock from "@/components/preview/CodeBlock";
 import { Icon } from "@/components/shell/icons";
 import { fileSummary, type PayloadFile } from "./payload";
@@ -71,22 +72,43 @@ function allDirectories(nodes: Node[], into: Set<string> = new Set()): Set<strin
   return into;
 }
 
+/** A file to open, from a finding's `path:line` (#77). `n` makes each click a new ask. */
+export type FileFocus = { path: string; line?: number | null; n: number };
+
 export default function FileBrowser({
   files,
   /** Rendered in the open file's header. The Ship review puts per-file redo here,
    *  so "this one is wrong" is answered where the wrong thing is being read. */
   renderAction,
+  focus,
 }: {
   files: PayloadFile[];
   renderAction?: (file: PayloadFile) => ReactNode;
+  focus?: FileFocus;
 }) {
   const tree = useMemo(() => buildTree(files), [files]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  // Open on the first file with a problem, when there is one: that is the file the
-  // reviewer is here to read.
+  // Open on the file a finding asked for, else the first file with a problem, when
+  // there is one: that is the file the reviewer is here to read.
   const [selected, setSelected] = useState(
-    () => (files.find((f) => f.problems?.length) ?? files[0])?.path ?? "",
+    () =>
+      (focus ? files.find((f) => samePath(f.path, focus.path)) : undefined)?.path ??
+      (files.find((f) => f.problems?.length) ?? files[0])?.path ??
+      "",
   );
+  const [mark, setMark] = useState<{ path: string; line: number } | null>(() => {
+    const hit = focus?.line ? files.find((f) => samePath(f.path, focus.path)) : undefined;
+    return hit && focus?.line ? { path: hit.path, line: focus.line } : null;
+  });
+  useEffect(() => {
+    if (!focus) return;
+    const hit = files.find((f) => samePath(f.path, focus.path));
+    if (!hit) return;
+    setSelected(hit.path);
+    setMark(focus.line ? { path: hit.path, line: focus.line } : null);
+    setCollapsed(new Set());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.n]);
 
   const current = files.find((f) => f.path === selected) ?? files[0];
   if (!current) return null;
@@ -209,7 +231,12 @@ export default function FileBrowser({
           </ul>
         ) : null}
         <div className="files-code-body">
-          <CodeBlock code={current.content} path={current.path} tag={current.language} />
+          <CodeBlock
+            code={current.content}
+            path={current.path}
+            tag={current.language}
+            mark={mark?.path === current.path ? mark.line : null}
+          />
         </div>
       </div>
     </div>

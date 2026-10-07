@@ -60,6 +60,10 @@ _PERSON_SHARE = {
     "idea": 0.25,
     "feedback": 0.15,
     "extra": 0.10,
+    # Not a person's words, but sized the same way: the scanners' findings (#77) are
+    # served whole when they fit and cut to this share when they don't. Empty for
+    # every agent but Warden, so nobody else pays for it.
+    "scan": 0.12,
 }
 #: How whatever remains is divided between the sections the pipeline assembles.
 #: `skills` is a claimant here rather than a constant of its own, and that is the
@@ -107,6 +111,8 @@ class AgentContext:
     skills: tuple[Selected, ...] = ()
     feedback: Optional[str] = None  # human guidance when a phase is re-run after rejection
     extra_context: str = ""  # e.g. an agent-debate decision injected before a phase
+    #: What the security scanners already reported (#77), capped — Warden only.
+    scan_context: str = ""
     #: The technology decisions frozen after the architecture was settled. Printed
     #: into this agent's system prompt and checked against what it writes.
     charter: Optional[Charter] = None
@@ -159,6 +165,10 @@ class AgentResult:
     #: QA's tests, run for real (#76): `testrun.combine(...)`. Written by the platform,
     #: never by the model. None for every phase but QA.
     test_run: Optional[dict] = None
+    #: The security scanners' run (#77): `scan.ScanResult.as_dict()`. Written by the
+    #: platform before Warden's model call, never by the model. None for every other
+    #: phase.
+    scan: Optional[dict] = None
     #: Re-checked from an earlier attempt rather than generated (#76): the fix loop
     #: kept QA's tests while an engineer fixed the code they test. No model call.
     kept: bool = False
@@ -713,6 +723,8 @@ class BaseAgent:
             parts.append(_RAG_FRAME.format(body=_clip(ctx.rag_context, budget["rag"])))
         if ctx.memory_context:
             parts.append(_MEMORY_FRAME.format(body=_clip(ctx.memory_context, budget["memory"])))
+        if ctx.scan_context:
+            parts.append(f"{_clip(ctx.scan_context, budget['scan'])}\n")
         if ctx.extra_context:
             parts.append(
                 f"# Team decision to honour\n{_clip(ctx.extra_context, budget['extra'])}\n"
@@ -784,7 +796,9 @@ class BaseAgent:
         # share *of what is actually free*. Taking the share off the whole budget
         # instead double-counts the overhead, and on a small window that alone puts
         # the prompt back over the top.
-        written = {"idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context}
+        written = {
+            "idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context, "scan": ctx.scan_context,
+        }
         budget = {
             name: min(len(written[name]), int(free * share))
             for name, share in _PERSON_SHARE.items()

@@ -34,6 +34,8 @@ STAGES = {
     "checking": "Checking the build",
     "building": "Building and starting it",
     "testing": "Running the tests",
+    "scanning": "Running the security scanners",
+    "reviewing": "Reviewing what the scanners can't see",
 }
 
 #: A file's state in the list: planned, being written, written and parses, being
@@ -41,7 +43,7 @@ STAGES = {
 FILE_STATES = ("planned", "writing", "ok", "fixing", "failed", "missing")
 
 #: Stages whose `detail` is a command: each command is a step of its own.
-COMMAND_STAGES = ("building", "testing")
+COMMAND_STAGES = ("building", "testing", "scanning")
 #: Writing and fixing are one step, file to file — the file list carries the rest.
 FILE_STAGES = ("writing", "fixing")
 #: Finished steps kept per phase. The oldest fall off the front.

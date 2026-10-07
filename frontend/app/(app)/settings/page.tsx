@@ -1603,6 +1603,16 @@ function RoleLine({
           </span>
         </span>
       )}
+      {row.role === "security_engineer" && state.auditor_shares_builders && (
+        // #77: the scanners carry the verdicts; this is about the model's review only.
+        <span className="role-warn role-hint">
+          {Icon.info}
+          <span>
+            Warden reviews on the same model that wrote the code. Scanners check the code either
+            way; a different model here makes its review a second opinion.
+          </span>
+        </span>
+      )}
       {missing && (
         <span className="role-warn" role="status">
           {Icon.alert}

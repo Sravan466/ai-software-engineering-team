@@ -46,6 +46,9 @@ TESTS = "tests"
 #: Why a loop stopped.
 STOP_LIMIT = "limit"  # every round it was allowed has run
 STOP_NO_PROGRESS = "no_progress"  # the last round fixed nothing
+#: The re-check couldn't run at all (#77): the scanners had no sandbox, so nothing the
+#: round was sent can be called fixed or not — and another round wouldn't be either.
+STOP_UNCHECKED = "unchecked"
 
 #: Why a serious finding may be waived. GitHub's own dismissal reasons, minus the
 #: ones that do not apply to generated code: a waiver of something serious is a risk
@@ -436,10 +439,18 @@ def judge_tests_round(t: dict, run: object, reason: Optional[str] = None) -> Opt
     fixed = close_round(t, [p["key"] for p in problems])
     if carried:
         last["carried"] = carried
-        last["unjudged"] = reason or "Some tests couldn't run again to check the fix."
-        sent = {p.get("key") for p in last.get("problems") or []}
-        last["unjudged_all"] = sent <= {p.get("key") for p in carried}
+        mark_unjudged(last, [p.get("key") for p in carried], reason or "Some tests couldn't run again to check the fix.")
     return fixed
+
+
+def mark_unjudged(record: dict, keys: Iterable[str], reason: str) -> None:
+    """Say on a round that its re-check couldn't reach `keys`, and why — and whether it
+    reached nothing it was sent at all, which `next_step` and the help note read: a
+    round nobody could judge says nothing about progress. Shared by the tests track
+    (#76) and the security track (#77), so the two can't drift apart."""
+    record["unjudged"] = reason
+    sent = {p.get("key") for p in record.get("problems") or []}
+    record["unjudged_all"] = sent <= set(keys)
 
 
 def route_tests(t: dict, problems: list[dict]) -> list[dict]:
@@ -574,11 +585,13 @@ __all__ = [
     "test_failures",
     "test_note",
     "judge_tests_round",
+    "mark_unjudged",
     "judged",
     "test_problems",
     "unwaived_tests",
     "STOP_LIMIT",
     "STOP_NO_PROGRESS",
+    "STOP_UNCHECKED",
     "WAIVE_KINDS",
     "accept",
     "accepted",
