@@ -326,10 +326,15 @@ class ScriptedScanner:
         out = []
         for step in steps:
             on_step(step)
+            if step.name not in ("scan",) and step.label != "install scanners":
+                # A build's own step (the sandbox switch is on for scans): it passes.
+                out.append(StepResult(step.name, step.label, 0, 0.1, ""))
+                continue
             if step.label == "install scanners":
                 text = "scanners already installed"
             elif step.label == "semgrep":
                 text = _scan.MARK + json.dumps({"tool": "semgrep", "ran": True, "version": "1.139.0",
+                                                "packs": list(_scan.REGISTRY_PACKS),
                                                 "findings": found, "total": len(found)})
             elif step.label == "bandit":
                 text = _scan.MARK + json.dumps({"tool": "bandit", "ran": True, "version": "1.8.6", "findings": []})
@@ -351,7 +356,12 @@ def scripted_scan(monkeypatch, scans: list[list[dict]], tree: Optional[dict] = N
 
     scanner = ScriptedScanner(scans, npm)
     monkeypatch.setattr(_settings, "security_scan_enabled", True)
+    # The scans run in the sandbox, so its switch is on — and so are builds, which the
+    # scripted sandbox passes.
+    monkeypatch.setattr(_settings, "build_run_enabled", True)
     monkeypatch.setattr(_runner, "engine", scanner)
+    # Every scan here is of the same scripted tree: each must really run.
+    monkeypatch.setattr(_scan, "REUSE_SECONDS", -1)
     chosen = dict(tree or SCAN_TREE)
     if npm:
         chosen.setdefault("frontend/package.json", '{\n  "dependencies": {\n    "lodash": "4.17.15"\n  }\n}\n')

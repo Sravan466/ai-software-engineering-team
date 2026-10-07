@@ -109,11 +109,6 @@ class Finding:
         """The crew fixes this one itself. See `is_serious` and `finding_is_serious`."""
         return finding_is_serious(self.source, self.tool, self.severity, self.category, self.title)
 
-    @property
-    def blocks(self) -> bool:
-        """Holds the build until it is fixed or waived: a scanner's, severe or serious."""
-        return self.source == SOURCE_TOOL and (self.severe or self.serious)
-
 
 # ── serious (the crew fixes it) and small (a person decides) ─────────────────
 #: Severities, most severe first.
@@ -360,9 +355,11 @@ def tool_key(tool: str, rule_id: str, path: str, line: Optional[int]) -> str:
     recognise the same finding by `same_tool_finding`, not by this key — a fix that
     moves the code down the file keeps the finding it hasn't fixed.
     """
-    from app.build.scan import LINE_WINDOW
+    from app.build.scan import DEPENDENCY_TOOLS, LINE_WINDOW
 
-    bucket = (line or 0) // (LINE_WINDOW + 1)
+    # A dependency is its package in its manifest: where it sits in the file moves as
+    # packages are added above it, and says nothing about which finding it is.
+    bucket = 0 if tool in DEPENDENCY_TOOLS else (line or 0) // (LINE_WINDOW + 1)
     basis = f"{tool}:{rule_id}:{path}:{bucket}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
 
@@ -427,9 +424,11 @@ def same_tool_finding(row, f: Finding) -> bool:
     file, and either within three lines of where it was or on the very same code — a
     fix that added an import above it moved it, and did not fix it.
     """
+    from app.build.scan import DEPENDENCY_TOOLS
+
     if not (rules_of(row) & {f"{f.tool}:{f.rule_id}", *f.also}) or not _same_file(row.path, f.path):
         return False
-    if row.line is None and f.line is None:
+    if f.tool in DEPENDENCY_TOOLS or (row.line is None and f.line is None):
         return True
     return _near(row.line, f.line) or bool(row.fingerprint and row.fingerprint == f.fingerprint)
 
@@ -772,7 +771,7 @@ def sync_dispositions(
     keys = {r.finding_key for r in rows}
 
     # ── the scanners ──
-    result = scanner.ScanResult.from_dict(scan if isinstance(scan, dict) else None)
+    result = scanner.ScanResult.from_dict(scan)
     current = tool_findings(scan) if result is not None else []
     # Every row has its id from the moment it exists (the column default only lands at
     # flush), so one made a moment ago is never matched to a second report as well.
@@ -807,20 +806,35 @@ def sync_dispositions(
     for row in tools_rows:
         if row.id in matched or row.status in FindingStatus.settled():
             continue
-        if result is None or not result.covers(row.tool, row.path):
+        if result is None or not result.covers(row.tool, row.path, row.rule_id):
             # Not rescanned where it is: its tool didn't run this time, didn't read that
             # file, ran on the other side of the tree, or was cut short. Silence.
             continue
         _resolve(row, project, f"{row.tool} no longer reports it at {row.location or row.path}")
 
     # ── Warden's review notes ──
-    notes = read_findings(output, project)
+    # A repeat of what a scanner already reported there isn't tracked twice: the
+    # scanner's finding is the one tracked, with its rule and its rescan.
+    notes = [f for f in read_findings(output, project) if not any(repeats(f, t) for t in current)]
+    # Its own words first, for every note; only then a reworded one by file and line,
+    # among the rows nobody claimed — so a nearby note never takes another's row (and
+    # its waiver) because it happened to be read first.
+    claimed: dict[str, object] = {}
     for f in notes:
-        if any(repeats(f, t) for t in current):
-            # A repeat of what a scanner already reported there: the scanner's finding
-            # is the one tracked, with its rule and its rescan.
+        row = next((r for r in model_rows if r.id not in matched and r.finding_key == f.key), None)
+        if row is not None:
+            matched.add(row.id)
+            claimed[f.key] = row
+    for f in notes:
+        if f.key in claimed:
             continue
-        row = next((r for r in model_rows if r.id not in matched and same_model_finding(r, f)), None)
+        nearby = [r for r in model_rows if r.id not in matched and same_model_finding(r, f)]
+        row = min(nearby, key=lambda r: abs((r.line or 0) - (f.line or 0))) if nearby else None
+        if row is not None:
+            matched.add(row.id)
+            claimed[f.key] = row
+    for f in notes:
+        row = claimed.get(f.key)
         if row is None:
             if f.key in keys:
                 continue
@@ -844,7 +858,6 @@ def sync_dispositions(
             model_rows.append(row)
             matched.add(row.id)
             continue
-        matched.add(row.id)
         if row.status != FindingStatus.WAIVED.value:
             row.status = FindingStatus.OPEN.value
         row.severity = f.severity or row.severity

@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -224,6 +225,8 @@ class ScanResult:
     truncated: bool = False
     #: The rule packs Semgrep had, and how old the oldest was: "fetched 3 h ago".
     rules: Optional[str] = None
+    #: The same tree's earlier scan, reused rather than run again.
+    reused: bool = False
 
     @classmethod
     def skipped(cls, reason: str, **kw) -> "ScanResult":
@@ -233,17 +236,20 @@ class ScanResult:
     def ran(self, tool: str) -> bool:
         return (self.tools.get(tool) or {}).get("status") == RAN
 
-    def covers(self, tool: Optional[str], path: Optional[str]) -> bool:
+    def covers(self, tool: Optional[str], path: Optional[str], rule: Optional[str] = None) -> bool:
         """Whether this scan can say a finding of `tool`'s at `path` is gone.
 
         Only when that tool ran; its report wasn't cut short; it read that file (Semgrep
-        and Bandit list the files they couldn't parse); and, for a dependency audit, it
-        ran on that file's side of the tree. Anything less is silence, never a fix.
+        and Bandit list the files they couldn't parse); it had the rules that found it
+        (a registry pack it couldn't fetch says nothing); and, for a dependency audit,
+        it ran on that file's side of the tree. Anything less is silence, never a fix.
         """
         entry = self.tools.get(tool or "") or {}
         if entry.get("status") != RAN or entry.get("truncated"):
             return False
         if path and path in (entry.get("unscanned") or []):
+            return False
+        if tool == SEMGREP and entry.get("missing_packs") and not str(rule or "").startswith("aiteam."):
             return False
         if tool in DEPENDENCY_TOOLS:
             side = layout.side_of(path or "")
@@ -273,11 +279,12 @@ class ScanResult:
             "findings": [f.as_dict() for f in self.findings],
             "truncated": self.truncated,
             "rules": self.rules,
+            "reused": self.reused,
             "at": datetime.now(timezone.utc).isoformat(),
         }
 
     @classmethod
-    def from_dict(cls, data: Optional[dict]) -> Optional["ScanResult"]:
+    def from_dict(cls, data: object) -> Optional["ScanResult"]:
         if not isinstance(data, dict):
             return None
         return cls(
@@ -289,6 +296,7 @@ class ScanResult:
             seconds=float(data.get("seconds") or 0),
             truncated=bool(data.get("truncated")),
             rules=data.get("rules"),
+            reused=bool(data.get("reused")),
         )
 
 
@@ -472,9 +480,15 @@ def tail(p, n=600):
 out = {"tool": kind, "ran": False, "findings": [], "errors": 0, "reason": None, "version": None, "total": 0}
 if kind == "semgrep":
     report, code, prefixes, version = sys.argv[2], sys.argv[3], sys.argv[4].split(","), sys.argv[5]
+    out["packs"] = [p for p in (sys.argv[6] if len(sys.argv) > 6 else "").split(",") if p]
     d = read(report)
     if not isinstance(d, dict):
         out["reason"] = "Semgrep stopped without a report (exit %s): %s" % (code, tail("/tmp/semgrep.err", 300))
+    elif code not in ("0", "1"):
+        # A fatal error (a rule it can't parse, a bad config) still writes a report —
+        # with no results. That is not a clean scan.
+        first = ((d.get("errors") or [{}])[0] or {}).get("message") or tail("/tmp/semgrep.err", 300)
+        out["reason"] = "Semgrep failed (exit %s): %s" % (code, clip(first, 300))
     else:
         out["ran"], out["version"] = True, d.get("version") or version
         errs = d.get("errors") or []
@@ -711,11 +725,11 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
             _heredoc(f"{_OWN_RULES_DIR}/aiteam.yml", OWN_RULES).replace("cat >", f"mkdir -p {_OWN_RULES_DIR} && cat >", 1)
             + _heredoc("/tmp/aiteam-read.py", _PY_READER)
             + f"C='--config {_OWN_RULES_DIR}/aiteam.yml'\n"
-            + f"for f in {_RULES_DIR}/*.yml; do [ -f \"$f\" ] && C=\"$C --config $f\"; done\n"
+            + f"P=''; for f in {_RULES_DIR}/*.yml; do [ -f \"$f\" ] && C=\"$C --config $f\" && P=\"$P$(basename $f .yml),\"; done\n"
             + "semgrep scan --metrics=off --disable-version-check --json --quiet --timeout 30 "
             "--max-target-bytes 1000000 --exclude .aiteam-scan $C --output /tmp/semgrep.json /work "
             "2>/tmp/semgrep.err; code=$?\n"
-            + f"python /tmp/aiteam-read.py semgrep /tmp/semgrep.json $code {_q(prefixes)} {SEMGREP_VERSION}\n"
+            + f"python /tmp/aiteam-read.py semgrep /tmp/semgrep.json $code {_q(prefixes)} {SEMGREP_VERSION} \"$P\"\n"
             "exit 0\n"
         )
         steps.append(Step("scan", "semgrep", semgrep, timeout=min(budget, 240), env=env))
@@ -1021,6 +1035,10 @@ def judge(results_by_plan: list[tuple[ScanPlan, list[StepResult], Optional[str]]
                     entry["errors"] = int(entry.get("errors") or 0) + int(rep["errors"])
                 if rep.get("unscanned"):
                     entry["unscanned"] = sorted(set(entry.get("unscanned") or []) | {str(x) for x in rep["unscanned"]})
+                if name == SEMGREP and rep.get("ran"):
+                    # Which registry packs this run had: a finding from a pack it didn't
+                    # have can't be called gone by it.
+                    entry["missing_packs"] = sorted(set(REGISTRY_PACKS) - {str(p) for p in rep.get("packs") or []})
                 for raw in rep.get("findings") or []:
                     if not isinstance(raw, dict):
                         continue
@@ -1105,6 +1123,9 @@ def run_scan(files: dict[str, str], owners: dict[str, str]) -> ScanResult:
 
     if not settings.security_scan_enabled:
         return ScanResult.skipped("Security scanners are switched off (SECURITY_SCAN_ENABLED=false).")
+    if not settings.build_run_enabled:
+        # The operator's switch for every sandbox: no containers, scans included.
+        return ScanResult.skipped("Sandboxes are switched off (BUILD_RUN_ENABLED=false), so nothing was scanned.")
     plans = [p for p in (plan_python(files), plan_node(files)) if p is not None]
     if not plans:
         result = ScanResult(status=SKIPPED, reason="There's no code or manifest to scan.")
@@ -1146,6 +1167,31 @@ def run_scan(files: dict[str, str], owners: dict[str, str]) -> ScanResult:
     return result
 
 
+#: A complete scan of a tree, reused when the same tree is scanned again within this
+#: long: a Warden re-run with feedback only, or a retry after a provider failure, is the
+#: same code, and the same tools say the same thing about it. A fix changes the tree.
+REUSE_SECONDS = 3600
+_recent: dict[str, tuple[float, dict]] = {}
+_recent_lock = threading.Lock()
+
+
+def _tree_key(files: dict[str, str]) -> str:
+    from app.core import identity
+
+    h = hashlib.sha256((identity.current_user_id() or "").encode("utf-8") + b"\0")
+    for path in sorted(files):
+        h.update(path.encode("utf-8") + b"\0" + files[path].encode("utf-8") + b"\0")
+    return h.hexdigest()
+
+
+def _complete(result: ScanResult) -> bool:
+    """Every tool that applied ran, whole: the only kind of scan worth reusing."""
+    return result.status == "ok" and all(
+        t.get("status") in (RAN, NOT_NEEDED) and not t.get("truncated") and not t.get("missing_packs")
+        for t in result.tools.values()
+    )
+
+
 def scan_build(prior_outputs: dict, charter=None) -> ScanResult:
     """The build as Warden is about to review it, scanned. Never raises for the scan's
     sake (a Stop still stops it)."""
@@ -1154,7 +1200,22 @@ def scan_build(prior_outputs: dict, charter=None) -> ScanResult:
 
     try:
         files, owners = scan_tree(prior_outputs, charter)
-        return run_scan(files, owners)
+        key = _tree_key(files)
+        now = time.monotonic()
+        with _recent_lock:
+            for k in [k for k, (at, _) in _recent.items() if now - at > REUSE_SECONDS]:
+                del _recent[k]
+            seen = _recent.get(key)
+        if seen is not None:
+            log.info("Security scan reused: the same tree was scanned %d s ago.", now - seen[0])
+            reused = ScanResult.from_dict(seen[1])
+            reused.reused = True
+            return reused
+        result = run_scan(files, owners)
+        if _complete(result):
+            with _recent_lock:
+                _recent[key] = (now, result.as_dict())
+        return result
     except (RequestCancelled, Superseded):
         raise
     except Exception as e:  # noqa: BLE001 - the scanners must never become the failure
@@ -1212,7 +1273,7 @@ def prompt_block(result: Optional[ScanResult]) -> str:
 
 def findings_of(scan: object) -> list[ToolFinding]:
     """A phase row's stored scan, as findings."""
-    result = ScanResult.from_dict(scan if isinstance(scan, dict) else None)
+    result = ScanResult.from_dict(scan)
     return result.findings if result is not None else []
 
 

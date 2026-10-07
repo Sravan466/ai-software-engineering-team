@@ -833,7 +833,7 @@ class PipelineRunner:
         unjudged = self._unrescanned(live, row.scan) if live is not None else []
         fixed = autofix.close_round(t, [f.finding_key for f in outstanding])
         if live is not None and unjudged:
-            rescan = scan.ScanResult.from_dict(row.scan if isinstance(row.scan, dict) else None)
+            rescan = scan.ScanResult.from_dict(row.scan)
             autofix.mark_unjudged(live, unjudged, (rescan.reason if rescan else None) or "The scanners didn't run again.")
         if fixed:
             last = t["rounds"][-1]
@@ -925,12 +925,15 @@ class PipelineRunner:
     @staticmethod
     def _unrescanned(live: dict, scanned: object) -> list[str]:
         """The keys a round was sent whose tool didn't run on the rebuilt code (#77)."""
-        result = scan.ScanResult.from_dict(scanned if isinstance(scanned, dict) else None)
+        result = scan.ScanResult.from_dict(scanned)
         return [
             p.get("key")
             for p in live.get("problems") or []
             if p.get("tool")
-            and (result is None or not result.covers(p["tool"], p.get("path") or (p.get("where") or "").rsplit(":", 1)[0]))
+            and (
+                result is None
+                or not result.covers(p["tool"], p.get("path") or (p.get("where") or "").rsplit(":", 1)[0], p.get("rule_id"))
+            )
         ]
 
     @staticmethod

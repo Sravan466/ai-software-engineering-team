@@ -61,7 +61,10 @@ export default function ScanLine({ scan }: { scan: Scan | null | undefined }) {
           {found ? plural(found, "finding") : "nothing reported"}
           {scan.truncated ? " (more not shown)" : ""}
         </span>
-        <span className="scanline-where">Docker sandbox · no code run</span>
+        <span className="scanline-where">
+          {scan.runner === "builder" ? "Builder service" : "Docker sandbox"} · no code run
+          {scan.reused ? " · same code, earlier scan" : ""}
+        </span>
       </summary>
 
       <div className="scanline-body">

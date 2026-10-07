@@ -88,6 +88,11 @@ export default function PhaseArtifact({
     // Keyed on the request, not on `files`: a poll mustn't drag the view back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.n]);
+  // Dropped once the file browser has it (its effects run before this one): reopening
+  // Files later must land on whatever the person chose, not on the old jump.
+  useEffect(() => {
+    if (held && view === "files") setHeld(undefined);
+  }, [held, view]);
 
   if (views.length === 0) {
     return (

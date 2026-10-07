@@ -333,6 +333,8 @@ export type Scan = {
   truncated?: boolean;
   /** Set when Semgrep ran without some registry packs. */
   rules?: string | null;
+  /** The same tree's earlier scan, reused rather than run again. */
+  reused?: boolean;
   at?: string;
 };
 

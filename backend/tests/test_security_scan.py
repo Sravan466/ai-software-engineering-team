@@ -140,7 +140,7 @@ def _read(tmp_path, kind: str, report: dict, *args: str) -> str:
     if kind == "pip-audit":
         argv = [kind, args[0], str(data), "0", "0"]
     elif kind == "semgrep":
-        argv = [kind, str(data), "0", "cache.rules.,tmp.aiteam-rules.", "1.139.0"]
+        argv = [kind, str(data), "0", "cache.rules.,tmp.aiteam-rules.", "1.139.0", "default,owasp-top-ten,secrets,"]
     else:
         argv = [kind, str(data), "0", "1.8.6"]
     done = subprocess.run([sys.executable, "-I", str(reader), *argv], capture_output=True, text=True, timeout=30)
@@ -166,6 +166,7 @@ def test_the_readers_turn_each_tools_json_into_findings_with_a_rule_and_a_line(t
     # A file Semgrep couldn't parse is one it says nothing about.
     assert result.tools[scan.SEMGREP]["unscanned"] == ["backend/broken.py"]
     assert not result.covers(scan.SEMGREP, "backend/broken.py") and result.covers(scan.SEMGREP, "backend/main.py")
+    assert result.tools[scan.SEMGREP]["missing_packs"] == []
     # pip-audit ran for the backend, so the backend's manifest is covered.
     assert result.covers(scan.PIP_AUDIT, "backend/requirements.txt")
     sqli = next(f for f in result.findings if f.cwe == "CWE-89")
@@ -287,6 +288,7 @@ def test_scanners_use_a_cache_no_build_mounts(monkeypatch):
     from app.build import runner
 
     monkeypatch.setattr(settings, "security_scan_enabled", True)
+    monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(runner, "engine", Engine())
     scan.run_scan({**_TREE, "frontend/package.json": "{}"}, {})
     assert ("python:3.12-slim", "scan-tools") in seen
@@ -514,6 +516,7 @@ def test_runner_unavailable_means_scanners_skipped_and_the_card_says_so(client, 
     from app.build import runner
 
     monkeypatch.setattr(settings, "security_scan_enabled", True)
+    monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(runner, "engine", None)
     monkeypatch.setattr(settings, "build_runner_url", "")
     monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None: (dict(SCAN_TREE), dict(SCAN_OWNERS)))
@@ -654,6 +657,7 @@ def test_the_real_scanners_find_the_injection_the_secret_and_the_dependency(monk
     from app.build import runner
 
     monkeypatch.setattr(settings, "security_scan_enabled", True)
+    monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(runner, "engine", None)
     files = {
         **_TREE,
@@ -747,6 +751,7 @@ def test_the_scan_shares_one_budget_across_its_sandboxes(monkeypatch):
     clock = iter([0.0, 0.0, 300.0, 300.0, 300.0, 300.0])
     monkeypatch.setattr(scan.time, "monotonic", lambda: next(clock, 300.0))
     monkeypatch.setattr(settings, "security_scan_enabled", True)
+    monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(settings, "security_scan_timeout_seconds", 420)
     monkeypatch.setattr(runner, "engine", Slow())
     scan.run_scan({**_TREE, "frontend/package.json": "{}"}, {})
@@ -833,3 +838,90 @@ def test_one_helper_marks_a_round_nobody_could_judge():
     assert record["unjudged"] == "Docker isn't running." and record["unjudged_all"] is False
     autofix.mark_unjudged(record, ["a", "b"], "Docker isn't running.")
     assert record["unjudged_all"] is True
+
+
+# ── what the third review found (#77, PR #88) ────────────────────────────────
+def test_a_note_keeps_its_own_row_and_a_neighbours_waiver_stays_with_the_neighbour(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+
+    rate = {"title": "Missing rate limit", "severity": "medium", "category": "Business logic",
+            "path": "routes/users.js", "line": 10, "description": "d", "recommendation": "r"}
+    idor = {"title": "IDOR on GET /users/:id", "severity": "critical", "category": "Authorization",
+            "path": "routes/users.js", "line": 12, "description": "d", "recommendation": "r"}
+    with SessionLocal() as db:
+        project = _project(db, client)
+        rows = remediation.sync_dispositions(db, project, {"findings": [rate, idor]}, scan=_scan())
+        by = {r.category: r for r in rows}
+        by["Business logic"].status = FindingStatus.WAIVED.value
+        db.commit()
+        # Only the IDOR is reported this time: it keeps its own row, open; the waived
+        # rate-limit note is the one that went.
+        rows = remediation.sync_dispositions(db, project, {"findings": [idor]}, scan=_scan())
+        by = {r.category: r for r in rows}
+        assert by["Authorization"].status == "open" and by["Authorization"].severity == "critical"
+        assert by["Business logic"].status == "waived"
+        assert remediation.open_notes(db, project) == [by["Authorization"]]
+
+
+def test_a_dependency_is_its_package_wherever_the_manifest_puts_it(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+
+    def dep(line):
+        return scan.ToolFinding(tool="npm audit", rule_id="lodash", severity="high", path="backend/package.json",
+                                line=line, category="Vulnerable dependency", title="lodash has a known vulnerability")
+
+    with SessionLocal() as db:
+        project = _project(db, client)
+        (row,) = remediation.sync_dispositions(db, project, {"findings": []}, scan=_scan(dep(14)))
+        row.status = FindingStatus.WAIVED.value
+        db.commit()
+        (row,) = remediation.sync_dispositions(db, project, {"findings": []}, scan=_scan(dep(18)))
+        assert row.status == "waived" and row.line == 18
+
+
+def test_a_fatal_semgrep_run_is_not_a_clean_one(tmp_path):
+    """Exit 7 (a rule it can't parse) still writes a report — with no results."""
+    reader = tmp_path / "read.py"
+    reader.write_text(scan._PY_READER)
+    data = tmp_path / "semgrep.json"
+    data.write_text(json.dumps({"version": "1.139.0", "results": [], "errors": [{"message": "Invalid rule schema"}]}))
+    done = subprocess.run([sys.executable, "-I", str(reader), "semgrep", str(data), "7", "x.", "1.139.0", ""],
+                          capture_output=True, text=True, timeout=30)
+    result = scan.judge([(_plan(scan.SEMGREP), [StepResult("scan", "semgrep", 0, 1.0, done.stdout)], None)], {}, {})
+    assert result.tools[scan.SEMGREP]["status"] == "failed" and "exit 7" in result.tools[scan.SEMGREP]["reason"]
+    assert not result.covers(scan.SEMGREP, "backend/main.py", "aiteam.javascript.sql-built-from-request")
+
+
+def test_a_rescan_without_a_registry_pack_only_speaks_for_the_platforms_rules():
+    result = scan.ScanResult(status="ok", tools={"semgrep": {"status": "ran", "missing_packs": ["default"]}})
+    assert result.covers("semgrep", "backend/a.js", "aiteam.secrets.credentials-in-connection-string")
+    assert not result.covers("semgrep", "backend/a.js", "javascript.express.security.injection.tainted-sql-string")
+
+
+def test_scans_honour_the_sandbox_switch(monkeypatch):
+    monkeypatch.setattr(settings, "security_scan_enabled", True)
+    monkeypatch.setattr(settings, "build_run_enabled", False)
+    result = scan.run_scan(dict(_TREE), {})
+    assert result.status == "skipped" and "BUILD_RUN_ENABLED=false" in result.reason
+
+
+def test_the_same_tree_is_scanned_once_within_the_hour(monkeypatch):
+    calls = []
+
+    def fake_run(files, owners):
+        calls.append(1)
+        tools = {t: {"status": "ran"} for t in scan.TOOLS}
+        return scan.ScanResult(status="ok", tools=tools)
+
+    monkeypatch.setattr(scan, "run_scan", fake_run)
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None: ({"backend/a.py": "x"}, {}))
+    monkeypatch.setattr(scan, "_recent", {})
+    first = scan.scan_build({})
+    again = scan.scan_build({})
+    assert len(calls) == 1 and not first.reused and again.reused
+    # A different tree is scanned for real.
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None: ({"backend/a.py": "y"}, {}))
+    scan.scan_build({})
+    assert len(calls) == 2
