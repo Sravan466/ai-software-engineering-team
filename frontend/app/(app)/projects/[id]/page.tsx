@@ -23,9 +23,7 @@ import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { FixingPanel } from "@/components/build/AutoFix";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
-import { Elapsed } from "@/components/build/Elapsed";
-import { FileProgress, activityFor } from "@/components/build/CodeWriting";
-import AgentProgress from "@/components/build/AgentProgress";
+import PhaseSteps from "@/components/build/PhaseSteps";
 
 import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
 
@@ -566,7 +564,6 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             act={act}
             id={id}
             jump={jump}
-            onJump={(key) => setJump({ key })}
             onJumpDone={clearJump}
             onDeliver={(intent) => {
               setShipIntent(intent ?? null);
@@ -714,7 +711,6 @@ function BuildTab({
   act,
   id,
   jump,
-  onJump,
   onJumpDone,
   onDeliver,
 }: {
@@ -725,8 +721,6 @@ function BuildTab({
   id: string;
   /** A phase the relay is asking us to go to, if any. */
   jump: { key: string } | null;
-  /** Go to a phase's row below — the progress feed's "See …" uses it, as the relay does. */
-  onJump: (key: string) => void;
   onJumpDone: () => void;
   onDeliver: (intent?: ShipIntent) => void;
 }) {
@@ -799,8 +793,6 @@ function BuildTab({
         </div>
       )}
 
-      {/* Who has the work and what they've done, as it happens (#86). */}
-      <AgentProgress project={project} state={state} onJump={onJump} />
 
       <div className="card" style={{ padding: "16px 20px" }}>
         <div className="meter">
@@ -886,6 +878,16 @@ function PhaseList({
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [landed, setLanded] = useState<string | null>(null);
   const timers = useRef<{ raf?: number; fade?: ReturnType<typeof setTimeout> }>({});
+  const state = effectiveStatus(project);
+  // The steps every running row has shown (#86). If nothing is running as the list
+  // first renders, whatever runs next is news and opens; otherwise the running row
+  // fills this in itself, and what was already on screen at load renders still.
+  const seenSteps = useRef<Set<string> | null>(null);
+  const seenInit = useRef(false);
+  if (!seenInit.current) {
+    seenInit.current = true;
+    if (!PHASES.some((ph) => nodeStateFor(project, ph.key) === "running")) seenSteps.current = new Set();
+  }
 
   // The scroll and the highlight outlive the instruction that started them, so
   // they are torn down on unmount rather than by the effect below — which
@@ -935,7 +937,6 @@ function PhaseList({
         const isOpen =
           open[ph.key] ?? (isGate && project.gate_kind === "needs_help");
         const agent = AGENT_BY_KEY[ph.key];
-        const writing = ns === "running" ? activityFor(project, ph.key) : null;
 
         return (
           <div
@@ -973,27 +974,24 @@ function PhaseList({
                   {row && <SchemaBadge row={row} />}
                 </span>
                 {/* The agent's own status line, in their voice — and, for a phase
-                    that hasn't started, the plain reason it hasn't. */}
-                <span className={"agent-say" + (ns === "running" ? " live" : "")}>
-                  {ns === "pending"
-                    ? waitingFor(project, i)
-                    : (VOICE_FOR[ns] === "done" && ph.key === "qa_engineer" && suiteLine(row?.test_run)) ||
-                      agent.lines[VOICE_FOR[ns]]}
-                  {hasDoc && (
-                    <span className="phase-deliver" style={{ marginLeft: 8 }}>
-                      {ph.deliver}
-                    </span>
-                  )}
-                </span>
-                {ns === "running" && (
-                  <span className="phase-progress" aria-hidden="true">
-                    <span />
+                    that hasn't started, the plain reason it hasn't. The running row
+                    tells its steps beneath instead (#86). */}
+                {ns !== "running" && (
+                  <span className="agent-say">
+                    {ns === "pending"
+                      ? waitingFor(project, i)
+                      : (VOICE_FOR[ns] === "done" && ph.key === "qa_engineer" && suiteLine(row?.test_run)) ||
+                        agent.lines[VOICE_FOR[ns]]}
+                    {hasDoc && (
+                      <span className="phase-deliver" style={{ marginLeft: 8 }}>
+                        {ph.deliver}
+                      </span>
+                    )}
                   </span>
                 )}
               </span>
 
               <span className="phase-side">
-                {ns === "running" && <Elapsed startIso={row?.started_at ?? null} live />}
                 {ns !== "running" && row?.total_tokens ? (
                   <span className="phase-tokens mono">
                     {row.total_tokens.toLocaleString()} tok
@@ -1018,12 +1016,8 @@ function PhaseList({
               </span>
             </button>
 
-            {/* A code phase writing its files: which file, and the list filling in. */}
-            {writing && !project.stalled && (
-              <div className="phase-writing" aria-live="polite">
-                <FileProgress activity={writing} />
-              </div>
-            )}
+            {/* What the agent has done and is doing, step by step, as it happens. */}
+            <PhaseSteps running={ns === "running"} project={project} phaseKey={ph.key} state={state} seen={seenSteps} />
 
             {/* Any phase that produced something can be read in full, whenever —
                 including the one under review, which the decision above also shows. */}

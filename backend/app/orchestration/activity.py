@@ -47,6 +47,9 @@ FILE_STAGES = ("writing", "fixing")
 TRAIL_MAX = 24
 #: The planner's summary, as the page shows it under "Planned 9 files".
 NOTE_MAX = 280
+#: Ended snapshots kept at once, across projects. Each is only read while its own row
+#: is still `running`, so the oldest can always go.
+ENDED_MAX = 32
 
 
 def _step(stage: str, detail: str) -> tuple[str, str]:
@@ -65,7 +68,9 @@ def _clip(text: str, limit: int) -> str:
 @dataclass
 class _Activity:
     phase: str
-    stage: str = "planning"
+    #: Empty until the phase names a stage: a phase that never plans (QA's test run)
+    #: must not read as "planning the files" while it sets up.
+    stage: str = ""
     done: int = 0
     total: int = 0
     detail: str = ""
@@ -171,7 +176,7 @@ def plan(paths: Iterable[str], per_call: int, note: str = "") -> None:
         found.files = {p: "planned" for p in paths}
         found.total = len(found.files)
         found.per_call = per_call
-        found.note = _clip(note, NOTE_MAX) if isinstance(note, str) else ""
+        found.note = _clip(note, NOTE_MAX)
 
 
 def file(path: str, state: str) -> None:
@@ -192,20 +197,28 @@ def per_call(n: int) -> None:
     _update(per_call=n)
 
 
-def end() -> None:
-    """The phase stopped reporting: its step in hand is done, and the snapshot is kept."""
+def end(finished: bool = True) -> None:
+    """The phase stopped reporting.
+
+    Finished, its step in hand is done and the snapshot is kept, marked `ended`. A
+    phase that raised keeps nothing: the step it was on never finished, and the run
+    is about to say so itself.
+    """
     pid = _project()
     if pid is None:
         return
     with _lock:
         found = _board.pop(pid, None)
-        if found is None:
+        _ended.pop(pid, None)
+        if found is None or not finished:
             return
         if found.opened:
             found.file_step()
             found.opened = ""
         found.ended = True
         _ended[pid] = found
+        while len(_ended) > ENDED_MAX:
+            del _ended[next(iter(_ended))]
 
 
 def clear(project_id: str) -> None:
@@ -213,13 +226,6 @@ def clear(project_id: str) -> None:
     with _lock:
         _board.pop(project_id, None)
         _ended.pop(project_id, None)
-
-
-def get(project_id: str) -> Optional[dict]:
-    """The phase reporting now, or None."""
-    with _lock:
-        found = _board.get(project_id)
-        return found.as_dict() if found is not None else None
 
 
 def latest(project_id: str) -> Optional[dict]:

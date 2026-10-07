@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import type { Activity, ActivityFileState, Generation, Project } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
+import { plural } from "@/lib/text";
 
 /**
  * How a code phase writes its code (#81), while it does and after.
@@ -114,10 +115,6 @@ const MODE: Record<Generation["mode"], string> = {
   batch: "In batches",
   whole: "In one reply",
 };
-
-export function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
 
 /**
  * How a finished code phase wrote its code, and the plan it wrote from — shown in

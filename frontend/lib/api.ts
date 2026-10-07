@@ -140,8 +140,11 @@ export type ActivityFileState = "planned" | "writing" | "ok" | "fixing" | "faile
 /** What the running phase is doing inside itself (#81). */
 export type Activity = {
   phase: string;
-  /** `building`: installing, building and starting the code in a sandbox (#75). */
-  stage: "planning" | "writing" | "fixing" | "checking" | "building" | "testing";
+  /**
+   * `building`: installing, building and starting the code in a sandbox (#75).
+   * Empty until the phase names one (QA setting up its test run, #86).
+   */
+  stage: "" | "planning" | "writing" | "fixing" | "checking" | "building" | "testing";
   label: string;
   done: number;
   total: number;

@@ -1,77 +1,67 @@
 /* ===========================================================================
-   AGENT PROGRESS — the run as an account, not a clock (#86)
+   PHASE STEPS — the running row, told as the steps it is taking (#86)
 
-   One motion idea, carried through: words settle. A step in hand is lit in its
+   One motion idea, carried through: words settle. The step in hand is lit in its
    agent's colour with a sheen passing over it; when it finishes, the same words
    cool to the quiet ink of everything already done, and the next step grows in
-   beneath. Nothing jumps — new lines open their own height, the card's height
-   follows its content, and a new sentence is laid out at full size before it
-   types itself in. Every duration is short and decelerating: this is feedback on
-   work in progress, not choreography to sit through.
+   beneath. Nothing jumps — a new line opens its own height, a new sentence is laid
+   out full-size before it types itself in, a phase starting opens its block, and a
+   phase handing over folds its block away rather than dropping it. Every
+   duration is short and decelerating: feedback on work in progress, not
+   choreography to sit through.
 
    Colour stays where it means something: the live line in the agent's own lit
-   tone, a gate in the pipeline's amber, everything finished in --ink-3.
+   tone, a pause in the pipeline's amber, everything finished in --ink-3.
    =========================================================================== */
-.ap {
+.ap-wrap {
   --ap-ease: cubic-bezier(0.16, 1, 0.3, 1);
-  box-sizing: content-box; /* the height it follows is the content's; the border sits outside it */
-  position: relative;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--agent) 30%, var(--line));
-  border-radius: var(--r-lg);
-  background: var(--bg-panel);
-  transition: border-color 700ms var(--ap-ease);
-}
-.ap[data-sized] {
-  transition:
-    height 440ms var(--ap-ease),
-    border-color 700ms var(--ap-ease);
-}
-.ap-in { padding: 16px 20px 18px; }
-
-.ap-groups,
-.ap-lines { list-style: none; margin: 0; padding: 0; }
-.ap-groups { display: flex; flex-direction: column; gap: 10px; }
-
-.ap-group {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  column-gap: 12px;
-  align-items: start;
+  grid-template-rows: 1fr;
+  min-width: 0;
 }
-/* The avatar sits on the first line's centre. A live sprite is taller than the
-   line and may hang into the gap below; it's a figure, not a box. */
-.ap-av {
-  display: grid;
-  place-items: center;
-  height: 28px;
-  animation: ap-fade 360ms var(--ap-ease) both;
-}
-.ap-group:not(.has-live) .ap-av { opacity: 0.9; }
+.ap-wrap > .ap { min-height: 0; }
+.ap { position: relative; overflow: hidden; }
+/* Room for the stretched toggle's focus ring, which sits just outside the text; the
+   bottom padding is the row's, inside the fold so it folds away with the steps. */
+.ap-in { padding: 2px 10px 14px 2px; }
 
-.ap-lines { display: flex; flex-direction: column; min-width: 0; }
+.ap-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
 
 /* ── a line, and how it arrives ──
    The row opens its own height (grid 0fr → 1fr) while its words rise and come into
-   focus, so whatever sits below — the dots, the next card — slides rather than
-   jumps. The class comes off when it lands, so the row is plain afterwards. */
+   focus, so whatever sits below — the dots, the next phase — slides rather than
+   jumps. One duration for both halves: the class comes off when the row's own
+   animation ends, and the rise must not be cut off before it lands. */
 .ap-line { display: grid; grid-template-rows: 1fr; min-width: 0; }
 .ap-line-in { min-width: 0; min-height: 0; }
-/* One duration for both halves: the class comes off when the row's own animation
-   ends, and the rise must not be cut off before it lands. */
-.ap-line.is-new {
+.ap-line.is-new,
+.ap-wrap.is-new {
   animation: ap-grow 520ms var(--ap-ease) var(--ap-delay, 0ms) both;
 }
-.ap-line.is-new > .ap-line-in {
+.ap-line.is-new > .ap-line-in,
+.ap-wrap.is-new > .ap {
   overflow: hidden;
   animation: ap-rise 520ms var(--ap-ease) var(--ap-delay, 0ms) both;
 }
 @keyframes ap-grow { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
+
+/* Handing over: the block folds shut as its words fade. Quicker than it opened. */
+.ap-wrap.is-closing { animation: ap-fold 380ms var(--ap-ease) forwards; }
+.ap-wrap.is-closing > .ap { animation: ap-out 260ms ease-out forwards; }
+@keyframes ap-fold { from { grid-template-rows: 1fr; } to { grid-template-rows: 0fr; } }
+@keyframes ap-out { to { opacity: 0; } }
 @keyframes ap-rise {
   from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
   to   { opacity: 1; transform: none; filter: none; }
 }
-@keyframes ap-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ap-fade { from { opacity: 0; } }
 
 .ap-head {
   position: relative;
@@ -80,13 +70,11 @@
   flex-wrap: wrap;
   gap: 2px 8px;
   min-width: 0;
-  padding: 4px 0;
-  font-size: var(--t-md);
-  line-height: 1.5;
+  padding: 3px 0;
+  font-size: var(--t-base);
+  line-height: 1.55;
   color: var(--ink-3);
 }
-.ap-who { line-height: 1; transition: color 700ms var(--ap-ease); }
-.ap-group:not(.has-live) .ap-who { color: color-mix(in srgb, var(--agent) 72%, var(--ink-3)); }
 
 /* ── the words: lit while live, quiet once done ──
    Two copies of the same text: the ink underneath carries the state and eases
@@ -123,8 +111,8 @@
   user-select: none;
   transition: opacity 420ms var(--ap-ease);
 }
-/* A line's own state, never its group's: the live agent's finished steps stay quiet. */
-.ap-line.is-live .ap-title-ink { color: color-mix(in srgb, var(--agent-lit) 62%, var(--ink)); }
+/* A line's own state, never an ancestor's. */
+.ap-line.is-live .ap-title-ink { color: color-mix(in srgb, var(--agent-lit, var(--agent)) 55%, var(--ink)); }
 .ap-line.is-live .ap-sheen {
   opacity: 1;
   animation: ap-sheen 2.4s linear infinite;
@@ -136,11 +124,12 @@
   100% { background-position: -25% 0; }
 }
 
+.ap-line.is-held .ap-title-ink { color: var(--ink-2); }
 .ap-line.is-waiting .ap-title-ink { color: var(--accent); }
-.ap-line.is-stopped .ap-title-ink { color: var(--ink-3); }
 .ap-icon { display: inline-flex; align-self: center; color: var(--ink-3); }
-.ap-icon svg { width: 15px; height: 15px; }
+.ap-icon svg { width: 14px; height: 14px; }
 .ap-line.is-waiting .ap-icon { color: var(--accent); }
+.ap-line.is-stopped .ap-icon { color: var(--warn); }
 
 /* The quiet half of a step: the file, the command, the count. */
 .ap-obj {
@@ -152,6 +141,7 @@
   overflow-wrap: anywhere;
 }
 .ap-obj .wf-path { font-size: inherit; }
+.ap-line.is-live .ap-obj { color: var(--ink-2); }
 .ap-chip {
   display: inline-flex;
   align-self: center;
@@ -176,8 +166,9 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.ap-flag { font-size: var(--t-xs); color: var(--warn); }
 
-/* ── the chevron: a button stretched over the whole row ── */
+/* ── the chevron: a button stretched over the whole line ── */
 .ap-toggle {
   display: inline-flex;
   align-self: center;
@@ -186,7 +177,7 @@
   background: none;
   color: var(--ink-4);
   cursor: pointer;
-  animation: ap-fade 420ms var(--ap-ease) both;
+  animation: ap-fade 420ms var(--ap-ease) backwards;
 }
 .ap-toggle::before {
   content: "";
@@ -201,14 +192,14 @@
 .ap-head.has-more:hover .ap-toggle { color: var(--ink-2); }
 .ap-head.has-more:hover .ap-toggle::before { background: color-mix(in srgb, var(--ink) 3%, transparent); }
 .ap-chev { display: inline-flex; transition: transform 260ms var(--ap-ease); }
-.ap-chev svg { width: 15px; height: 15px; }
+.ap-chev svg { width: 14px; height: 14px; }
 .ap-toggle[aria-expanded="true"] .ap-chev { transform: rotate(90deg); }
 
 /* ── the sentence under a step ── */
 .ap-msg {
-  margin: 2px 0 8px;
+  margin: 1px 0 7px;
   max-width: 68ch;
-  font-size: var(--t-md);
+  font-size: var(--t-base);
   line-height: 1.6;
   color: var(--ink-2);
   text-wrap: pretty;
@@ -216,7 +207,7 @@
 .ap-edge { opacity: 0.45; }
 .ap-ghost { color: transparent; }
 
-/* ── what the chevron opens ──
+/* ── what the chevron opens: the whole plan, file by file ──
    Its height eases open and shut (both ways, unlike a mount), and once shut it is
    hidden from focus and from assistive tech, not just squeezed to nothing. */
 .ap-more {
@@ -239,41 +230,16 @@
     visibility 0s;
 }
 .ap-more-in { min-height: 0; overflow: hidden; }
-.ap-more-text {
-  margin: 2px 0 6px;
-  max-width: 68ch;
-  font-size: var(--t-base);
-  line-height: 1.6;
-  color: var(--ink-2);
-  text-wrap: pretty;
-}
-.ap-see {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 2px 0 8px;
-  padding: 2px 0;
-  border: 0;
-  background: none;
-  font-family: var(--mono);
-  font-size: var(--t-xs);
-  color: var(--ink-3);
-  cursor: pointer;
-  transition: color var(--tr);
-}
-.ap-see svg { width: 13px; height: 13px; transition: transform var(--tr); }
-.ap-see:hover { color: var(--ink); }
-.ap-see:hover svg { transform: translateX(2px); }
-.ap-see:focus-visible { outline: 2px solid var(--run); outline-offset: 2px; border-radius: 3px; }
+.ap-more-in > .writing { padding: 6px 0 10px; }
 
 /* ── more is coming ── */
 .ap-dots {
   display: flex;
   align-items: center;
   gap: 5px;
-  height: 22px;
+  height: 20px;
   padding-left: 1px;
-  animation: ap-fade 420ms var(--ap-ease) both;
+  animation: ap-fade 420ms var(--ap-ease) backwards;
 }
 .ap-dots i {
   width: 4px;
@@ -289,22 +255,16 @@
   35%           { opacity: 1;    transform: translateY(-2px); }
 }
 
-@media (max-width: 560px) {
-  .ap-in { padding: 14px 14px 16px; }
-  .ap-group { grid-template-columns: 28px minmax(0, 1fr); column-gap: 10px; }
-}
-
 /* Reduced motion keeps every state legible and drops the movement: the live line
-   is still lit (just without the passing sheen), new lines simply appear, the
-   dots hold still, and sentences arrive whole (AgentProgress checks the same
-   preference before typing). */
+   is still lit (just without the passing sheen), new lines and a starting phase
+   appear in place, the dots hold still, and sentences arrive whole (PhaseSteps
+   checks the same preference before typing). The swapped-in fade is still an
+   animation, so each element hears its animationend and settles. */
 @media (prefers-reduced-motion: reduce) {
-  .ap,
-  .ap[data-sized] { transition: none; }
   .ap-sheen { display: none; }
-  /* New lines fade in where they land: no height opening, no rise, no blur. An
-     animation (not `none`) so the row still hears its animationend and settles. */
   .ap-line.is-new,
-  .ap-line.is-new > .ap-line-in { animation-name: ap-fade; }
+  .ap-line.is-new > .ap-line-in,
+  .ap-wrap.is-new,
+  .ap-wrap.is-new > .ap { animation-name: ap-fade; }
   .ap-dots i { animation: none; opacity: 0.6; }
 }

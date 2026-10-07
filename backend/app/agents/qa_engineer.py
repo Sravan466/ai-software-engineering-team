@@ -73,8 +73,10 @@ class QAEngineerAgent(BaseAgent):
             try:
                 for side in sides:
                     runs.append(build_runner.run_tests(files, side))
-            finally:
-                activity.end()
+            except BaseException:
+                activity.end(finished=False)
+                raise
+            activity.end()
         except (RequestCancelled, Superseded):
             raise
         except Exception as e:  # noqa: BLE001 - the runner must not become the failure

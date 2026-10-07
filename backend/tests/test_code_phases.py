@@ -366,7 +366,8 @@ def test_stop_between_two_files_stops_before_the_next_call(client, monkeypatch):
         with pytest.raises(RequestCancelled):
             _run(monkeypatch, "backend_engineer", model, SMALL)
     assert model.writes == [["backend/app/mod1.py"], ["backend/app/mod2.py"]]
-    assert activity.get(pid) is None
+    # Stopped mid-phase: nothing is kept, not even as an ended snapshot.
+    assert activity.latest(pid) is None
 
 
 def test_a_second_driver_is_noticed_between_files_and_the_first_stops(client, monkeypatch):
@@ -479,7 +480,7 @@ def test_each_command_is_a_step_and_writing_and_fixing_are_one():
         activity.stage("building", detail="npm install")
         activity.stage("building", detail="npm install")  # the same command again is not a new step
         activity.stage("building", detail="next build")
-        out = activity.get("p-trail")
+        out = activity.latest("p-trail")
         activity.end()
         ended = activity.latest("p-trail")
     assert [(t["stage"], t["detail"]) for t in out["trail"]] == [
@@ -489,9 +490,8 @@ def test_each_command_is_a_step_and_writing_and_fixing_are_one():
     assert (out["stage"], out["detail"]) == ("building", "next build")
     assert len(out["note"]) <= activity.NOTE_MAX and out["note"].endswith("…")
     assert out["ended"] is False
-    # Once the phase stops reporting, nothing is live — but its last word is kept, with
-    # the step it was on filed as done, until the next phase begins.
-    assert activity.get("p-trail") is None
+    # Once the phase stops reporting, its last word is kept, with the step it was on
+    # filed as done, until the next phase begins.
     assert ended["ended"] is True
     assert ended["trail"][-1] == {"stage": "building", "detail": "next build", "done": 2, "total": 2}
     activity.clear("p-trail")
@@ -516,10 +516,38 @@ def test_a_phase_that_never_plans_does_not_report_a_planning_step():
         activity.begin("qa_engineer")
         activity.stage("testing", detail="npm install")
         activity.stage("testing", detail="jest")
-        out = activity.get("p-qa")
+        out = activity.latest("p-qa")
         activity.end()
     assert [(t["stage"], t["detail"]) for t in out["trail"]] == [("testing", "npm install")]
     assert out["note"] == ""
+
+
+def test_a_phase_that_has_named_no_stage_is_not_planning():
+    with inflight.building("p-setup"):
+        activity.begin("qa_engineer")
+        out = activity.latest("p-setup")
+        activity.end()
+    assert out["stage"] == "" and out["trail"] == []
+    activity.clear("p-setup")
+
+
+def test_a_phase_that_raised_keeps_nothing():
+    with inflight.building("p-boom"):
+        activity.begin("frontend_engineer")
+        activity.stage("building", detail="next build")
+        activity.end(finished=False)
+    assert activity.latest("p-boom") is None
+
+
+def test_ended_snapshots_are_bounded():
+    for i in range(activity.ENDED_MAX + 3):
+        with inflight.building(f"p-many-{i}"):
+            activity.begin("backend_engineer")
+            activity.end()
+    assert activity.latest("p-many-0") is None
+    assert activity.latest(f"p-many-{activity.ENDED_MAX + 2}")["ended"] is True
+    for i in range(activity.ENDED_MAX + 3):
+        activity.clear(f"p-many-{i}")
     activity.clear("p-qa")
 
 
@@ -542,7 +570,7 @@ def test_the_trail_keeps_only_the_latest_steps():
         activity.begin("backend_engineer")
         for i in range(activity.TRAIL_MAX + 5):
             activity.stage("building", detail=f"step {i}")
-        out = activity.get("p-long")
+        out = activity.latest("p-long")
         activity.end()
     assert len(out["trail"]) == activity.TRAIL_MAX
     assert out["trail"][-1]["detail"] == f"step {activity.TRAIL_MAX + 3}"

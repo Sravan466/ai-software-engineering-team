@@ -235,9 +235,12 @@ class _Run:
         agent._pin(ctx)
         activity.begin(agent.key)
         try:
-            return self._run()
-        finally:
-            activity.end()
+            result = self._run()
+        except BaseException:
+            activity.end(finished=False)
+            raise
+        activity.end()
+        return result
 
     def _run(self) -> AgentResult:
         agent, ctx = self.agent, self.ctx
@@ -899,6 +902,7 @@ class _Run:
     def _whole(self, reason: str) -> AgentResult:
         """No plan to write from: the one-reply path, with the plan's calls counted."""
         log.warning("%s: %s", self.agent.title, reason)
+        activity.stage("writing", total=0)
         result = BaseAgent.run(self.agent, self.ctx)
         calls = self.calls + list(result.calls or [result.response])
         result.calls = calls

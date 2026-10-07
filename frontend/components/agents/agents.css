@@ -572,7 +572,6 @@
 /* The phase a character is actively working gets a hairline of their colour. */
 .phase.running,
 .phase.gate { box-shadow: inset 2px 0 0 var(--agent); }
-.phase.running .phase-progress span { background: var(--agent); }
 
 /* A completed phase keeps its character's colour on the deliverable name. */
 .phase.done .phase-deliver { color: var(--agent); }

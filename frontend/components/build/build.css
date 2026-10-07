@@ -12,19 +12,8 @@
    the phase that owns the panel.
    =========================================================================== */
 
-/* ===========================================================================
-   THE CLOCK — a running phase row's elapsed time
-   (The live banner above the phases is the progress feed now: progress.css.)
-   =========================================================================== */
-/* The clock. Tabular so the digits don't jitter as the seconds roll. */
-.elapsed {
-  flex: none;
-  font-size: var(--t-md);
-  font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  letter-spacing: 0.01em;
-}
-.phase-side .elapsed { font-size: var(--t-sm); color: var(--agent); }
+/* A phase row's token count. (The running row tells its steps instead of a
+   clock and a bar now: progress.css, #86.) */
 .phase-tokens { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-3); }
 
 /* ===========================================================================
@@ -1873,7 +1862,8 @@ textarea.db-input { min-height: 132px; white-space: pre; overflow-x: auto; }
    the set's own icons, the folder quiet and the file name read first.
    =========================================================================== */
 /* Under the running phase's row, aligned with its text. */
-.phase-writing { padding: 0 4px 16px 56px; }
+/* (#86: its bottom padding lives inside the steps, so it folds away with them.) */
+.phase-writing { padding: 0 4px 0 56px; }
 .writing { display: flex; flex-direction: column; gap: 8px; }
 .writing-head {
   display: flex;
