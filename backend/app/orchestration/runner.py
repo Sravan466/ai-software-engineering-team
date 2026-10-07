@@ -819,10 +819,22 @@ class PipelineRunner:
         `restore_row` — the attempt undo or redo brings back — plus `kind`, `label`
         and `was`, the status the build returns to if the change is refused.
         """
+        from app.preview import app_runtime
+
         phase = Phase.FRONTEND_ENGINEER.value
+        spec = {**spec, "was_phase": project.current_phase, "was_gate": project.gate_kind, "was_note": project.gate_note}
         row = self.latest_row(db, project, phase)
+        db.expire(project, ["phases"])
+        shown, _ = app_runtime.current_frontend(project)
         if row is None or not isinstance(row.output, dict) or not row.output.get("files"):
             app_state.refuse_edit(project, "There's no frontend to change yet.")
+            db.commit()
+            self._back_to(db, project, spec)
+            return project
+        if shown is None or shown.id != row.id:
+            # The change was made on one attempt; another is the newest. Applying it
+            # to code the person never saw would be a change nobody asked for.
+            app_state.refuse_edit(project, "The frontend changed under that edit, so nothing was changed. Try again.")
             db.commit()
             self._back_to(db, project, spec)
             return project
@@ -867,14 +879,18 @@ class PipelineRunner:
         )
 
     def _back_to(self, db: Session, project: Project, spec: dict) -> None:
-        """A preview change that never started: the build goes back to where it was."""
+        """A preview change that wasn't made: the build goes back to where it was —
+        finished, or waiting on the gate it was on when the change was asked for."""
         if spec.get("was") == PipelineStatus.COMPLETED.value:
             project.status = PipelineStatus.COMPLETED.value
             project.gate_kind = None
             project.gate_note = None
+            if spec.get("was_phase"):
+                project.current_phase = spec["was_phase"]
             db.commit()
         else:
-            self._park(db, project, Gate(project.gate_kind or GateKind.PHASE.value, project.gate_note))
+            self._park(db, project, Gate(spec.get("was_gate") or project.gate_kind or GateKind.PHASE.value,
+                                         spec.get("was_note", project.gate_note)))
 
     def draw_sketch_for(self, project_id: str, row_id: str, owner_id: Optional[str]) -> None:
         """Draw the sketch for a frontend whose app preview couldn't run (#78): the
@@ -1175,6 +1191,9 @@ class PipelineRunner:
         # has replaced it — see the failure path below.
         superseded = self.latest_row(db, project, phase_key)
         was = superseded.status if superseded is not None else None
+        # Where the build stood, for a preview change that isn't kept (#78): starting
+        # the phase moves both, and committing makes that a rollback can't undo.
+        was_at = (project.current_phase, project.phase_started_at)
         # Its note too. `_mark_phase` is about to overwrite `feedback` with this
         # redo's, and if the attempt being superseded was itself a rejection, that
         # note is the record of why — restoring the row without it would put the
@@ -1298,13 +1317,13 @@ class PipelineRunner:
                     )
         except RevisionRefused as e:
             # A change made on the app preview that broke the build (#78): not kept.
-            return self._unrevise(db, project, row, superseded, was, was_feedback, revise, fallback, str(e))
+            return self._unrevise(db, project, row, superseded, was, was_feedback, revise, was_at, str(e))
         except ProviderError as e:
             if revise is not None:
                 # A change made on the preview whose model call failed changed nothing,
                 # so the build is put back exactly as it was — never failed for it.
                 return self._unrevise(
-                    db, project, row, superseded, was, was_feedback, revise, fallback,
+                    db, project, row, superseded, was, was_feedback, revise, was_at,
                     "The run was stopped before the change was made."
                     if isinstance(e, RequestCancelled)
                     else f"The model didn't answer, so nothing was changed: {e}",
@@ -1356,7 +1375,7 @@ class PipelineRunner:
             # the new one running): it is put back, and the person told.
             log.exception("A preview change to %s failed", project.id)
             return self._unrevise(
-                db, project, row, superseded, was, was_feedback, revise, fallback,
+                db, project, row, superseded, was, was_feedback, revise, was_at,
                 f"The change couldn't be made, so nothing was changed: {e}",
             )
 
@@ -1426,12 +1445,12 @@ class PipelineRunner:
         was: Optional[str],
         was_feedback: Optional[str],
         revise: dict,
-        fallback: Gate,
+        was_at: tuple,
         reason: str,
     ) -> Project:
         """A change made on the app preview that wasn't kept (#78): the attempt it was
         made from is put back as it was, nothing after it was touched, and the build
-        returns to where it waited — finished, or on its gate."""
+        returns to where it waited — finished, or on its gate, at the phase it was at."""
         db.rollback()
         if superseded is not None and was is not None:
             superseded.status = was
@@ -1440,15 +1459,10 @@ class PipelineRunner:
         app_state.refuse_edit(project, reason)
         # A Stop pressed during the change stopped the change, not the build.
         project.cancel_requested = False
+        project.current_phase, project.phase_started_at = was_at
         db.commit()
         log.info("A preview change to %s wasn't kept: %s", project.id, reason)
-        if revise.get("was") == PipelineStatus.COMPLETED.value:
-            project.status = PipelineStatus.COMPLETED.value
-            project.gate_kind = None
-            project.gate_note = None
-            db.commit()
-        else:
-            self._park(db, project, fallback)
+        self._back_to(db, project, revise)
         return project
 
     @staticmethod
@@ -1678,18 +1692,6 @@ class PipelineRunner:
         self, db: Session, project: Project, row: PhaseResult, lr: dict
     ) -> PhaseResult:
         usage = lr.get("usage") or {}
-        if (
-            row.phase == Phase.FRONTEND_ENGINEER.value
-            and isinstance(lr.get("output"), dict)
-            and "app_theme" not in lr["output"]
-            and not (lr.get("handoff") or {}).get("edit")
-        ):
-            # A frontend the crew rewrote keeps the site style the person chose on the
-            # app preview (#78), whichever path rewrote it. A change made on the preview
-            # itself says its own style — an undo may be taking one away.
-            chosen = app_state.theme(project)
-            if chosen:
-                lr = {**lr, "output": {**lr["output"], "app_theme": chosen}}
         row.status = PhaseStatus.PENDING_APPROVAL.value
         row.agent = lr["agent"]
         row.output = lr["output"]

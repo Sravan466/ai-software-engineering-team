@@ -367,6 +367,29 @@ def test_an_idle_preview_stops_and_starts_again_on_the_next_open(client, monkeyp
     assert client.get("/", headers={"host": _host(again)}).status_code == 200
 
 
+@parser
+def test_a_build_stopped_while_it_builds_is_never_put_on_screen_or_called_failed(client, monkeypatch, built, app_engine):
+    import threading
+
+    pid = _finished_build(client, monkeypatch)
+    gate, started = threading.Event(), threading.Event()
+    real = app_engine.start
+
+    def slow(inst, plan, on_step):
+        started.set()
+        gate.wait(5)
+        return real(inst, plan, on_step)
+
+    app_engine.start = slow
+    client.post(f"/api/projects/{pid}/preview/app")
+    assert started.wait(5)
+    app_runtime.stop(pid)  # let go while it builds
+    gate.set()
+    time.sleep(0.3)
+    assert app_runtime.serving(pid) is None and pid not in app_runtime._transient
+    assert client.get(f"/api/projects/{pid}/preview").json()["app"]["status"] == "idle"
+
+
 def test_at_most_max_running_apps_and_the_least_recent_stops(monkeypatch):
     monkeypatch.setattr(settings, "preview_app_max_running", 1)
     a = app_runtime.Instance("pa", None, "ra", None)
@@ -521,7 +544,8 @@ def test_a_change_that_breaks_the_build_is_refused_and_nothing_moves(client, mon
     state = client.get(f"/api/projects/{pid}/preview").json()
     assert state["app"]["editing"]["status"] == "refused"
     assert "didn't build" in state["app"]["editing"]["reason"]
-    assert client.get(f"/api/projects/{pid}").json()["status"] == "completed"
+    project = client.get(f"/api/projects/{pid}").json()
+    assert project["status"] == "completed" and project["current_phase"] == "cost_estimation"
 
 
 @parser

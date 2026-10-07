@@ -365,6 +365,9 @@ class Instance:
         self.last_access = time.monotonic()
         self.handle: Optional[Handle] = None
         self.stopped = False
+        #: Set under the registry's lock when it is let go: a build finishing a moment
+        #: later must not then be published as the app on screen.
+        self.retired = False
         self._lock = threading.Lock()
         self._cancel: list[Callable[[], None]] = []
 
@@ -667,6 +670,7 @@ def building(project_id: str) -> Optional[Instance]:
 
 def _retire(inst: Instance) -> None:
     with _lock:
+        inst.retired = True
         if _serving.get(inst.project_id) is inst:
             _serving.pop(inst.project_id, None)
         if _building.get(inst.project_id) is inst:
@@ -713,6 +717,7 @@ def reap() -> list[Instance]:
             # by itself; say why.
             tail = inst.handle.tail() if isinstance(inst.handle, RelayHandle) else ""
             _remember_failure(inst, f"The app stopped right after it started. {tail}".strip(), [])
+            _sketch_instead(inst)
     return idle
 
 
@@ -909,20 +914,24 @@ def _start(inst: Instance) -> None:
     finally:
         _build_slots.release()
 
-    if inst.stopped:
+    with _lock:
+        # Checked and published under the one lock `_retire` marks it under, so a build
+        # let go while it finished is never put on screen over the app it replaced.
+        published = not (inst.stopped or inst.retired)
+        if published:
+            inst.handle = handle
+            inst.status = RUNNING
+            inst.step = ""
+            inst.ready_at = time.time()
+            inst.touch()
+            old = _serving.get(inst.project_id)
+            _serving[inst.project_id] = inst
+            if _building.get(inst.project_id) is inst:
+                _building.pop(inst.project_id, None)
+            _tokens[inst.token] = inst
+    if not published:
         handle.stop()
         return
-    inst.handle = handle
-    inst.status = RUNNING
-    inst.step = ""
-    inst.ready_at = time.time()
-    inst.touch()
-    with _lock:
-        old = _serving.get(inst.project_id)
-        _serving[inst.project_id] = inst
-        if _building.get(inst.project_id) is inst:
-            _building.pop(inst.project_id, None)
-        _tokens[inst.token] = inst
     if old is not None and old is not inst:
         _retire(old)
     log.info("App preview of %s is up (%s, %d elements traced to code).", inst.project_id, plan.stack, plan.tagged)
@@ -943,6 +952,8 @@ def _start_backend(inst: Instance, plan: BackendPlan) -> None:
 
 
 def _fail(inst: Instance, reason: str, problems: Optional[list[dict]] = None, *, persist: bool) -> None:
+    if inst.stopped or inst.retired:
+        return  # let go on purpose — a newer build, a stop — not a failure of anything
     inst.status = FAILED
     inst.reason = reason
     inst.problems = problems or []

@@ -76,7 +76,8 @@ function serveStatic(dir) {
       return res.end('Bad request');
     }
     let file = path.resolve(base, '.' + rel);
-    if (!file.startsWith(base)) {
+    // Inside the build output only: `dist-private` merely starts with `dist`.
+    if (file !== base && !file.startsWith(base + path.sep)) {
       res.writeHead(403);
       return res.end();
     }

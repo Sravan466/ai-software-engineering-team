@@ -187,11 +187,12 @@ export default function VisualPreview({ id, onOpenBuild }: { id: string; onOpenB
     const last = startedFor.current;
     if (last && last.from === app.current_from && Date.now() - last.at < 15_000) return;
     startedFor.current = { from: app.current_from, at: Date.now() };
+    // Its answer goes through the poll's ordering: a slow one must not undo a newer state.
     api
       .startPreviewApp(id)
-      .then((next) => setState(next))
+      .then(() => refresh(true))
       .catch((e) => setError(describe(e, "Start the app")));
-  }, [app, id]);
+  }, [app, id, refresh]);
 
   // While the app is on screen, say so now and then, so it isn't stopped as idle.
   useEffect(() => {
