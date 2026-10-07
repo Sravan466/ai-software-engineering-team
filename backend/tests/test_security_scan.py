@@ -519,7 +519,7 @@ def test_runner_unavailable_means_scanners_skipped_and_the_card_says_so(client, 
     monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(runner, "engine", None)
     monkeypatch.setattr(settings, "build_runner_url", "")
-    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None: (dict(SCAN_TREE), dict(SCAN_OWNERS)))
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: (dict(SCAN_TREE), dict(SCAN_OWNERS)))
     from app.build import sandbox
 
     monkeypatch.setattr(sandbox, "available", lambda refresh=False: (False, "Docker isn't installed on the computer running the backend.", None))
@@ -916,13 +916,13 @@ def test_the_same_tree_is_scanned_once_within_the_hour(monkeypatch):
         return scan.ScanResult(status="ok", tools=tools)
 
     monkeypatch.setattr(scan, "run_scan", fake_run)
-    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None: ({"backend/a.py": "x"}, {}))
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: ({"backend/a.py": "x"}, {}))
     monkeypatch.setattr(scan, "_recent", {})
     first = scan.scan_build({})
     again = scan.scan_build({})
     assert len(calls) == 1 and not first.reused and again.reused
     # A different tree is scanned for real.
-    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None: ({"backend/a.py": "y"}, {}))
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: ({"backend/a.py": "y"}, {}))
     scan.scan_build({})
     assert len(calls) == 2
 
@@ -1088,3 +1088,74 @@ def test_a_planned_side_with_no_report_is_not_a_side_that_ran():
 def test_paths_below_a_renamed_root_are_the_same_file():
     assert remediation._same_file("server/app/db.py", "backend/app/db.py")
     assert not remediation._same_file("a/x.js", "b/x.js")
+    # Two sides of the tree are two files, however alike below their roots.
+    assert not remediation._same_file("backend/src/index.js", "frontend/src/index.js")
+
+
+# ── the re-review of the final round's fixes (#77, PR #88) ───────────────────
+def test_a_note_is_only_read_where_and_as_severe_as_it_was_read(client, monkeypatch):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from tests.test_autofix import _build
+
+    sqli = {"title": "SQL Injection", "severity": "high", "category": "Injection", "path": "routes/users.js",
+            "line": 9, "description": "d", "recommendation": "r"}
+    pid, crew, _ = _build(client, monkeypatch, [[]], audits=[[sqli], [{**sqli, "path": "routes/payments.js"}]],
+                          mode="checkpoints")
+    assert client.post(f"/api/projects/{pid}/approve").status_code == 200  # the plan review
+    assert client.post(f"/api/projects/{pid}/approve").status_code == 200  # read at the Security stop
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        from app.db.models import SecurityDisposition
+
+        row = db.query(SecurityDisposition).filter_by(project_id=pid, category="Injection").one()
+        assert remediation.is_read(project, row)
+        # The same note, somewhere else: not what was read.
+        row.path = "routes/payments.js"
+        assert not remediation.is_read(project, row)
+        row.path, row.severity = "routes/users.js", "critical"
+        assert not remediation.is_read(project, row)
+
+
+def test_a_multi_place_or_more_severe_note_is_not_a_repeat():
+    note = remediation.Finding(key="k", title="SQL injection", severity="critical", category="SQL injection",
+                               location="backend/app/index.js:5", recommendation="", owner_phase=None,
+                               path="backend/app/index.js", line=5)
+    medium = remediation.Finding(key="t", title="SQL text is built", severity="medium", category="SQL injection",
+                                 location="backend/app/index.js:5", recommendation="", owner_phase=None,
+                                 source="tool", tool="semgrep", rule_id="r", path="backend/app/index.js", line=5)
+    assert not remediation.repeats(note, medium)
+    critical = remediation.Finding(**{**medium.__dict__, "severity": "critical"})
+    assert remediation.repeats(note, critical)
+    spread = remediation.Finding(**{**note.__dict__, "location": "backend/app/index.js:5, backend/app/other.js"})
+    assert not remediation.repeats(spread, critical)
+
+
+def test_rule_packs_are_staged_where_the_scan_never_reads_them():
+    assert '".staging"' in scan._RULES_FETCH and "timeout=60" in scan._RULES_FETCH
+    assert ".part-" not in scan._RULES_FETCH
+
+
+def test_a_stop_marks_the_plans_after_it_as_stopped(monkeypatch):
+    from app.build import runner
+
+    monkeypatch.setattr(settings, "security_scan_enabled", True)
+    monkeypatch.setattr(settings, "build_run_enabled", True)
+
+    class Engine:
+        kind = "docker"
+
+    monkeypatch.setattr(runner, "engine", Engine())
+
+    def stopped(*a, **k):
+        raise runner._Stopped()
+
+    monkeypatch.setattr(runner, "_execute", stopped)
+    result = scan.run_scan({**_TREE, "frontend/package.json": "{}"}, {})
+    assert result.tools[scan.NPM_AUDIT]["status"] == "skipped"
+    assert result.tools[scan.NPM_AUDIT]["reason"] == "The scan was stopped."
+
+
+def test_the_reuse_key_changes_with_the_tree():
+    files = {"backend/a.py": "x"}
+    assert scan._tree_key(files, ["backend/a.py", "backend/tests/t.py"]) != scan._tree_key(files, ["backend/a.py"])

@@ -40,6 +40,10 @@ export function samePath(a: string, b: string): boolean {
   const x = a.toLowerCase().replace(/^\.?\//, "");
   const y = b.toLowerCase().replace(/^\.?\//, "");
   if (x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`)) return true;
+  // Only between an agent's own root and a placed one: `backend/src/index.js` and
+  // `frontend/src/index.js` are two files.
+  const side = (p: string) => ["backend", "frontend"].includes(p.split("/")[0]);
+  if (side(x) === side(y)) return false;
   const below = (p: string) => (p.includes("/") ? p.slice(p.indexOf("/") + 1) : "");
   return below(x) !== "" && below(x).includes("/") && below(x) === below(y);
 }

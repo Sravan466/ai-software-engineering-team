@@ -366,5 +366,5 @@ def scripted_scan(monkeypatch, scans: list[list[dict]], tree: Optional[dict] = N
     chosen = dict(tree or SCAN_TREE)
     if npm:
         chosen.setdefault("frontend/package.json", '{\n  "dependencies": {\n    "lodash": "4.17.15"\n  }\n}\n')
-    monkeypatch.setattr(_scan, "scan_tree", lambda prior, charter=None: (dict(chosen), dict(owners or SCAN_OWNERS)))
+    monkeypatch.setattr(_scan, "scan_tree", lambda prior, charter=None, **kw: (dict(chosen), dict(owners or SCAN_OWNERS)))
     return scanner

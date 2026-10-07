@@ -104,9 +104,10 @@ rules:
     metadata:
       cwe: ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"]
       confidence: HIGH
-    # Only SQL: a string that reads as SQL joined to a request value, or a template
-    # handed to a method that only ever takes SQL. `res.send("Hello " + req.query.name)`
-    # and `cache.get("user:" + req.params.id)` are not this rule's business.
+    # Only SQL: a string or a template that reads as SQL, with a request value in it.
+    # `res.send("Hello " + req.query.name)` and `cache.get(`user:${id}`)` are not this
+    # rule's business. (Checked against Semgrep itself: `metavariable-regex` doesn't read
+    # a bound template, so templates go through `metavariable-pattern`.)
     patterns:
       - pattern-either:
           - patterns:
@@ -125,14 +126,21 @@ rules:
               - pattern-either:
                   - pattern: $DB.$QUERY(`...${$REQ.$PART.$X}...`, ...)
                   - pattern: $DB.$QUERY(`...${$REQ.$PART[$X]}...`, ...)
-                  - patterns:
-                      - pattern: $DB.$QUERY($Q, ...)
-                      - pattern-inside: |
-                          $Q = `...${$REQ.$PART.$X}...`;
-                          ...
-              - metavariable-regex:
-                  metavariable: $QUERY
-                  regex: ^(query|execute|exec|raw|unsafe|prepare|\$queryRawUnsafe|\$executeRawUnsafe)$
+              - pattern: $DB.$QUERY($TPL, ...)
+              - metavariable-pattern:
+                  metavariable: $TPL
+                  patterns:
+                    - pattern-regex: (?i)\b(select|insert|update|delete)\b
+          - patterns:
+              - pattern: $DB.$QUERY($Q, ...)
+              - pattern-inside: |
+                  $Q = $TPL;
+                  ...
+              - metavariable-pattern:
+                  metavariable: $TPL
+                  patterns:
+                    - pattern: "`...${$REQ.$PART.$X}...`"
+                    - pattern-regex: (?i)\b(select|insert|update|delete)\b
       - metavariable-regex:
           metavariable: $PART
           regex: ^(params|query|body|headers|cookies)$
@@ -433,7 +441,7 @@ _SIDE_OWNER = {layout.BACKEND: Phase.BACKEND_ENGINEER.value, layout.FRONTEND: Ph
 SCANNED_PHASES = (Phase.BACKEND_ENGINEER.value, Phase.FRONTEND_ENGINEER.value, Phase.QA_ENGINEER.value)
 
 
-def scan_tree(prior_outputs: dict, charter=None) -> tuple[dict[str, str], dict[str, str]]:
+def scan_tree(prior_outputs: dict, charter=None, with_tree: bool = False) -> tuple:
     """(the files to scan, who wrote each) — the build as Warden is about to review it.
 
     The crew's own source, not its tests (a fake password in a fixture is not a leak)
@@ -468,15 +476,9 @@ def scan_tree(prior_outputs: dict, charter=None) -> tuple[dict[str, str], dict[s
         if _is_test(rel) or platform_owned(path):
             continue
         out[path] = content
-    return out, owners
-
-
-def tree_paths(prior_outputs: dict, charter=None) -> list[str]:
-    """Every file in the build as Warden sees it, scanned or not."""
-    from app.build.check import phase_tree
-
-    files, _ = phase_tree(prior_outputs, Phase.SECURITY_ENGINEER.value, {}, charter)
-    return sorted(files)
+    # With `with_tree`, every path in the tree too: what `covers` reads to tell a file
+    # that wasn't scanned from one that is gone.
+    return (out, owners, sorted(files)) if with_tree else (out, owners)
 
 
 def owner_of(path: str, owners: dict[str, str]) -> Optional[str]:
@@ -657,9 +659,17 @@ process.stdout.write('\n' + MARK + JSON.stringify(out) + '\n');
 
 #: Fetches the registry packs into the scanner cache, keeping the last good copy.
 _RULES_FETCH = r"""
-import os, subprocess, sys, tempfile, time, urllib.request
+import os, shutil, subprocess, sys, tempfile, time, urllib.request
 d, packs, max_age, tools = sys.argv[1], sys.argv[2].split(","), float(sys.argv[3]) * 3600, sys.argv[4]
 os.makedirs(d, exist_ok=True)
+# Packs are fetched and checked in a folder the scan's `*.yml` never reads; whatever a
+# killed fetch left there is swept first.
+staging = os.path.join(d, ".staging")
+for leftover in os.listdir(staging) if os.path.isdir(staging) else []:
+    path = os.path.join(staging, leftover)
+    if time.time() - os.path.getmtime(path) > 600:
+        shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.remove(path)
+os.makedirs(staging, exist_ok=True)
 def accepted(path):
     # A pack the pinned Semgrep can't parse would fail every scan: it never replaces
     # the last good copy.
@@ -667,7 +677,7 @@ def accepted(path):
     env = dict(os.environ, PYTHONPATH=tools, PATH=tools + "/bin:" + os.environ.get("PATH", ""))
     try:
         r = subprocess.run([tools + "/bin/semgrep", "scan", "--metrics=off", "--disable-version-check", "--quiet",
-                            "--json", "--config", path, empty], env=env, capture_output=True, timeout=180)
+                            "--json", "--config", path, empty], env=env, capture_output=True, timeout=60)
     except Exception:
         return False
     return r.returncode in (0, 1)
@@ -680,7 +690,7 @@ for p in packs:
         body = urllib.request.urlopen(req, timeout=60).read()
         if not body.lstrip().startswith(b"rules:"):
             raise ValueError("not a rule pack")
-        tmp = path + ".part-%d.yml" % os.getpid()
+        tmp = os.path.join(staging, "%s-%d.yml" % (p, os.getpid()))
         with open(tmp, "wb") as f:
             f.write(body)
         if not accepted(tmp):
@@ -1213,12 +1223,17 @@ def run_scan(files: dict[str, str], owners: dict[str, str], tree: Optional[Itera
     deadline = started + _budget()
     done: list[tuple[ScanPlan, list[StepResult], Optional[str]]] = []
     user = identity.current_user_id() or "shared"
+    stopped = False
     for plan in plans:
         # The scanners' own cache, which no build mounts: code a build ran can never
         # reach the tools that judge it. The Python tools are the same for everyone;
         # npm's metadata cache is the account's own.
         cache = "scan-tools" if plan.image == PYTHON_IMAGE else f"scan-{user}"
         unrun = [StepResult(s.name, s.label, None, 0.0, skipped=True) for s in plan.steps]
+        if stopped:
+            # Stop means stop: no next sandbox — and its tools say so, not "not needed".
+            done.append((plan, unrun, "The scan was stopped."))
+            continue
         left = deadline - time.monotonic()
         if left < 20:
             done.append((plan, unrun, "The scan ran out of time before this part of it."))
@@ -1232,7 +1247,8 @@ def run_scan(files: dict[str, str], owners: dict[str, str], tree: Optional[Itera
             continue
         except runner._Stopped:
             done.append((plan, unrun, "The scan was stopped."))
-            break  # Stop means stop: no next sandbox
+            stopped = True
+            continue
         done.append((plan, results, None))
     result = judge(done, files, owners)
     result.scanned = sorted(p for p in files if p.endswith(_CODE_EXT))
@@ -1251,12 +1267,15 @@ _recent: dict[str, tuple[float, dict]] = {}
 _recent_lock = threading.Lock()
 
 
-def _tree_key(files: dict[str, str]) -> str:
+def _tree_key(files: dict[str, str], tree: Iterable[str] = ()) -> str:
+    """The scanned code, and every path in the tree (a deleted test file changes what
+    `covers` must say, even when the scanned code is the same)."""
     from app.core import identity
 
     h = hashlib.sha256((identity.current_user_id() or "").encode("utf-8") + b"\0")
     for path in sorted(files):
         h.update(path.encode("utf-8") + b"\0" + files[path].encode("utf-8") + b"\0")
+    h.update(b"\1" + "\0".join(sorted(tree)).encode("utf-8"))
     return h.hexdigest()
 
 
@@ -1278,9 +1297,10 @@ def scan_build(prior_outputs: dict, charter=None) -> ScanResult:
     from app.router.base import RequestCancelled
 
     try:
-        files, owners = scan_tree(prior_outputs, charter)
-        tree = tree_paths(prior_outputs, charter)
-        key = _tree_key(files)
+        got = scan_tree(prior_outputs, charter, with_tree=True)
+        files, owners = got[0], got[1]
+        tree = list(got[2]) if len(got) > 2 else sorted(files)
+        key = _tree_key(files, tree)
         now = time.monotonic()
         with _recent_lock:
             for k in [k for k, (at, _) in _recent.items() if now - at > REUSE_SECONDS]:

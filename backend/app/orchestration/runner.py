@@ -933,8 +933,10 @@ class PipelineRunner:
 
     @staticmethod
     def _unsettled(db: Session, project: Project, keys: list) -> set[str]:
+        """Of `keys`, the ones not fixed. Only a fix counts: a note superseded by a
+        scanner finding, or one simply no longer mentioned, wasn't fixed by the round."""
         return {r.finding_key for r in PipelineRunner._dispositions(db, project, keys)
-                if r.status not in FindingStatus.settled()}
+                if r.status != FindingStatus.FIXED.value}
 
     @staticmethod
     def _why_unjudged(scanned: object) -> str:

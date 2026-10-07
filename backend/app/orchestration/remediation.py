@@ -403,8 +403,13 @@ def _same_file(a: Optional[str], b: Optional[str]) -> bool:
     if a == b or a.endswith("/" + b) or b.endswith("/" + a):
         return True
     # The tree renames an agent's own root (`server/app/x.py` is placed at
-    # `backend/app/x.py`): the same path below the first folder is the same file —
-    # the rule the page's `samePath` uses too.
+    # `backend/app/x.py`): the same path below the first folder is the same file — but
+    # only between the agent's own root and a placed one. `backend/src/index.js` and
+    # `frontend/src/index.js` are two files. (The page's `samePath` has the same rule.)
+    sides = ("backend", "frontend")
+    root_a, root_b = a.split("/", 1)[0], b.split("/", 1)[0]
+    if (root_a in sides) == (root_b in sides):
+        return False
     below = lambda p: p.split("/", 1)[1] if "/" in p else ""  # noqa: E731
     return "/" in below(a) and below(a) == below(b)
 
@@ -461,6 +466,10 @@ def repeats(note: Finding, tool: Finding) -> bool:
     within three lines) *and* the same problem — the note's words share one with the
     scanner's category, title or rule. An IDOR note beside an XSS finding is not one."""
     if not (_same_file(tool.path, note.path) and _near(tool.line, note.line)):
+        return False
+    # One place, and a scanner finding at least as severe: a note about three files
+    # isn't one of them, and a critical note isn't a medium scanner finding.
+    if "," in (note.location or "") or _more_severe(note.severity, tool.severity):
         return False
     about = _words(f"{tool.category} {tool.title} {(tool.rule_id or '').replace('.', ' ').replace('-', ' ')}")
     return bool(_words(f"{note.category} {note.title}") & about)
@@ -1008,8 +1017,18 @@ def open_notes(db, project) -> list:
         if row_source(row) == SOURCE_MODEL
         and row.severity in STOPPING_SEVERITIES
         and row.status not in FindingStatus.settled()
-        and row.finding_key not in read
+        and _read_mark(row) not in read
     ]
+
+
+def _read_mark(row) -> str:
+    """What a person read: this note, in this file, at this severity. The same title
+    somewhere else, or rated higher, is something they haven't read."""
+    return f"{row.finding_key}|{row.path or ''}|{(row.severity or '').lower()}"
+
+
+def is_read(project, row) -> bool:
+    return _read_mark(row) in notes_read(project)
 
 
 def notes_read(project) -> set[str]:
@@ -1024,7 +1043,7 @@ def mark_notes_read(db, project) -> None:
     from app.orchestration import autofix
 
     data = autofix.load(project)
-    data["notes_read"] = sorted(set(data.get("notes_read") or []) | {r.finding_key for r in open_notes(db, project)})
+    data["notes_read"] = sorted(set(data.get("notes_read") or []) | {_read_mark(r) for r in open_notes(db, project)})
     autofix.save(project, data)
 
 
