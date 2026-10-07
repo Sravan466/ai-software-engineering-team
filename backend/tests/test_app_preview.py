@@ -568,6 +568,9 @@ def test_site_style_on_the_app_is_written_into_the_tailwind_config_that_ships(cl
     config = files["frontend/tailwind.config.js"]
     assert '"indigo": {' in config and '"600": "#0f766e"' in config and '"lg": "16px"' in config
     assert "Fraunces" in config
+    # CSS-valid families: a name with a digit or space quoted, and headings given one stack.
+    assert '"\\"Source Sans 3\\""' in config
+    assert "fontFamily: \"Fraunces, ui-serif, Georgia, serif\"" in config
     css = next(c for p, c in files.items() if p.startswith("frontend/") and p.endswith(".css") and "@tailwind base" in c)
     assert css.startswith("@import url('https://fonts.googleapis.com/css2?family=Fraunces")
     # Density has no single place in code.

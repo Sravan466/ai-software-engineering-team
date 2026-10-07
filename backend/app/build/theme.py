@@ -112,6 +112,15 @@ def merge(theme: Optional[dict], changes: dict, files: dict[str, str]) -> dict:
     return out
 
 
+def _family(name: str) -> str:
+    """A font family as CSS reads it: quoted when it is more than one word or has a
+    digit — an unquoted `Source Sans 3` makes the whole `font-family` invalid."""
+    name = name.strip()
+    if name.startswith(("ui-", "system-")) or name in ("serif", "sans-serif", "monospace", "cursive"):
+        return name
+    return f'"{name}"' if re.search(r"[^A-Za-z-]", name) else name
+
+
 def _px(value: str) -> float:
     m = re.match(r"([\d.]+)px", value or "")
     return float(m.group(1)) if m else 0.0
@@ -144,10 +153,12 @@ def extend(theme: Optional[dict]) -> tuple[dict, Optional[str]]:
     if pair:
         fallback = [f.strip() for f in pair["fallback"].split(",")]
         out["fontFamily"] = {
-            "sans": [pair["body"], *fallback],
-            "display": [pair["display"], *fallback],
+            "sans": [_family(pair["body"]), *fallback],
+            "display": [_family(pair["display"]), *fallback],
         }
-        display = json.dumps([pair["display"], *fallback])
+        # One string: `addBase` reads an array as one declaration per entry, and the
+        # last one — the generic fallback — would win.
+        display = json.dumps(", ".join([_family(pair["display"]), *fallback]))
     radius = D._RADIUS.get(theme.get("radius") or "")
     if radius:
         small, base, large, xl = radius
