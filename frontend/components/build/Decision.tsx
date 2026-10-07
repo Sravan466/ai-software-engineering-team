@@ -86,8 +86,8 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
   security: {
     title: "Security stop",
     blurb:
-      "Warden found lower-severity issues for you to decide on. " +
-      "The crew fixes serious ones itself.",
+      "Scanner findings that are yours to decide, and Warden's review notes. " +
+      "The crew fixes serious findings itself; notes never hold the build.",
     approve: "Accept and continue",
     after: "The remaining phases then run without stopping.",
   },
