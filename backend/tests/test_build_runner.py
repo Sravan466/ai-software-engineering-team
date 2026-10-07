@@ -979,3 +979,18 @@ def test_a_stop_just_before_the_engine_registers_still_reaches_it(real_build, mo
     with inflight.building(pid):
         run = build_runner.run_build(_next_files(), "frontend")
     assert told == ["stopped"] and run.status == "unchecked" and "stopped" in run.reason
+
+
+
+def test_a_one_line_problem_keeps_the_key_it_had_before_real_builds():
+    """A fix round open across the upgrade must still recognise its problems."""
+    import hashlib
+
+    from app.orchestration import autofix
+
+    message = "uses `Header`, which is never imported or declared in this file. Import it or define it."
+    before = hashlib.sha256(
+        "|".join(["build", "frontend/app/page.tsx", message.replace("`", "`")]).lower().encode()
+    ).hexdigest()[:32]
+    got = autofix._build_problem({"path": "frontend/app/page.tsx", "message": message}, "frontend_engineer")
+    assert got["key"] == before

@@ -247,8 +247,11 @@ def _build_problem(p: dict, phase: str) -> dict:
     # and two different errors still get two keys.
     head, _, tail = message.partition("\n")
     cause = next((l.strip() for l in tail.splitlines() if re.search(r"error", l, re.IGNORECASE)), "")
+    # A one-line problem keys exactly as it always did, so a fix round already open
+    # when this shipped still recognises its problems.
+    extra = [re.sub(r"[0-9a-f]{6,}|\d+", "#", cause)] if cause else []
     out = {
-        "key": _key("build", path, re.sub(r"\d+", "#", head), re.sub(r"[0-9a-f]{6,}|\d+", "#", cause)),
+        "key": _key("build", path, re.sub(r"\d+", "#", head), *extra),
         "title": message.replace("`", ""),
         "kind": "build",
         "where": f"{path}:{line}" if path and line else (path or None),
