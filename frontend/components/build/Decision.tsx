@@ -15,7 +15,8 @@ import { AGENT_BY_KEY } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
 import { SkeletonLines } from "@/components/ui/Skeleton";
-import MockupFrame from "@/components/preview/MockupFrame";
+import PreviewFrame from "@/components/preview/PreviewFrame";
+import { AppStarting, SourceLine } from "@/components/preview/AppStatus";
 import PhaseArtifact from "./PhaseArtifact";
 import SchemaBadge from "./SchemaBadge";
 import FileBrowser from "./FileBrowser";
@@ -237,15 +238,26 @@ export default function Decision({
   // the wait is bounded: past a couple of minutes, nothing is coming.
   const [waited, setWaited] = useState(0);
   const mockupBuilding = Boolean(preview?.job?.running);
-  const awaitingMockup = wantsBuild && !preview?.html && (mockupBuilding || waited < 15);
+  // The app itself (#78): started when the review opens, followed while it builds.
+  const appStatus = preview?.app?.status;
+  const appMoving = wantsBuild && (appStatus === "starting" || appStatus === "idle" || Boolean(preview?.app?.stale));
+  const awaitingMockup =
+    wantsBuild && preview?.source !== "app" && !preview?.html && (mockupBuilding || waited < 15);
   useEffect(() => {
-    if (!awaitingMockup && !mockupBuilding) return;
+    if (!awaitingMockup && !mockupBuilding && !appMoving) return;
     const timer = setInterval(() => {
       setWaited((n) => n + 1);
-      api.getPreview(id).then(setPreview).catch(() => {});
-    }, mockupBuilding ? 3000 : 8000);
+      api.getPreview(id, true).then(setPreview).catch(() => {});
+    }, mockupBuilding || appMoving ? 3000 : 8000);
     return () => clearInterval(timer);
-  }, [awaitingMockup, mockupBuilding, id]);
+  }, [awaitingMockup, mockupBuilding, appMoving, id]);
+  const appFor = preview?.app?.status === "idle" ? preview.app.current_from : null;
+  useEffect(() => {
+    if (!wantsBuild || !appFor) return;
+    api.startPreviewApp(id).then(setPreview).catch(() => {});
+  }, [wantsBuild, appFor, id]);
+  // Approving while the review shows a sketch, though code exists: allowed, and said.
+  const onSketch = wantsBuild && Boolean(preview?.has_frontend) && preview?.source === "sketch";
 
   const files = useMemo(() => (art ? artifactFiles(art.files) : []), [art]);
 
@@ -465,9 +477,10 @@ export default function Decision({
       <div className="decision-act">
         <div className="decision-approve">
           <button
-            className="btn btn-lg btn-accent"
+            className={"btn btn-lg btn-accent" + (onSketch && !blocked && testsHeld === 0 ? " is-cautioned" : "")}
             disabled={busy || blocked || testsHeld > 0}
             onClick={() => act(() => api.approve(id))}
+            aria-describedby={onSketch ? "approve-on-sketch" : undefined}
           >
             {busy && !sending && <span className="btn-spinner" aria-hidden="true" />}
             {Icon.check} {shown.approve}
@@ -489,6 +502,18 @@ export default function Decision({
                     : ". Send each one back to be fixed, or waive it with a reason.")
               : shown.after}
           </span>
+          {onSketch && !blocked && testsHeld === 0 && (
+            <p className="decision-caution" id="approve-on-sketch">
+              {Icon.alert}
+              <span>
+                The preview above is a <b>sketch</b>, not the app —{" "}
+                {preview?.app?.status === "failed"
+                  ? "the app didn't build, so you haven't seen the code run."
+                  : (preview?.app?.reason ?? "the app couldn't run here.").replace(/\.$/, "") + "."}{" "}
+                Approving ships the code in Files.
+              </span>
+            </p>
+          )}
         </div>
 
         <div className="decision-send">
@@ -724,8 +749,10 @@ function TestsReview({
 // ── ship: the whole build in one pass ────────────────────────────────────────
 type ShipView = "files" | "mockup" | "security" | "cost" | "stack";
 
-/** True when the picture was drawn before the front end it is captioned as showing. */
+/** True when the sketch was drawn from an older Frontend attempt than the current one —
+ *  exact since #78 (the sketch records the attempt), by timestamp for older sketches. */
 function mockupIsStale(project: Project, preview: PreviewState | null): boolean {
+  if (preview?.sketch_built_from) return Boolean(preview.sketch_stale);
   const drawn = preview?.revisions?.[0]?.created_at;
   const built = rowFor(project, "frontend_engineer")?.completed_at;
   if (!drawn || !built) return false;
@@ -767,8 +794,9 @@ function ShipReview({
 
   const views: { key: ShipView; label: string; icon: ReactNode; count?: number }[] = [];
   if (files.length) views.push({ key: "files", label: "Files", icon: Icon.file, count: files.length });
-  if (preview?.html || preview?.job?.running)
-    views.push({ key: "mockup", label: "Mockup", icon: Icon.sparkle });
+  const showsApp = preview?.source === "app";
+  if (showsApp) views.push({ key: "mockup", label: "App", icon: Icon.monitor });
+  else if (preview?.html || preview?.job?.running) views.push({ key: "mockup", label: "Sketch", icon: Icon.sparkle });
   if (security)
     views.push({
       key: "security",
@@ -880,32 +908,53 @@ function ShipReview({
           />
         </div>
       )}
-      {active?.key === "mockup" && !preview?.html && preview?.job && (
+      {active?.key === "mockup" && showsApp && preview?.app && (
+        <div className="artifact-view" style={{ maxHeight: 700 }}>
+          <div className="artifact-pad">
+            <div className="pv-ship-head">
+              <SourceLine state={preview} />
+            </div>
+            {preview.app.url ? (
+              <PreviewFrame src={preview.app.url} routes={preview.app.routes} height={480} />
+            ) : (
+              <div className="prev-frame">
+                <div className="prev-placeholder" style={{ height: 480 }}>
+                  <AppStarting app={preview.app} />
+                </div>
+              </div>
+            )}
+            <p className="field-hint" style={{ marginTop: 10 }}>
+              The app as built from Files — what Approve ships. Change it element by element on the Preview tab.
+            </p>
+          </div>
+        </div>
+      )}
+      {active?.key === "mockup" && !showsApp && !preview?.html && preview?.job && (
         <div className="artifact-view">
           <div className="artifact-pad">
             <BuildProgress job={preview.job} />
           </div>
         </div>
       )}
-      {active?.key === "mockup" && preview?.html && (
-        <div className="artifact-view" style={{ maxHeight: 660 }}>
+      {active?.key === "mockup" && !showsApp && preview?.html && (
+        <div className="artifact-view" style={{ maxHeight: 700 }}>
           <div className="artifact-pad">
+            <div className="pv-ship-head">
+              <SourceLine state={preview} />
+            </div>
             {stale && (
               <p className="decision-alarm" style={{ borderBottom: 0, marginBottom: 12 }}>
                 {Icon.alert}
                 <span>
-                  This mockup is older than the current front end. It was kept because it
-                  was edited by hand. Regenerate it on the Preview tab to see the latest build.
+                  This sketch is of an older front end than the one in Files. Redraw it on the
+                  Preview tab to see the latest plan.
                 </span>
               </p>
             )}
-            <MockupFrame html={preview.html} routes={preview.routes} height={460} />
+            <PreviewFrame html={preview.html} routes={preview.routes} height={460} />
             <p className="field-hint" style={{ marginTop: 10 }}>
-              {stale
-                ? "Edit it section by section on the Preview tab."
-                : preview.routes.length > 1
-                  ? "Pages, forms and filters work. Edit it section by section on the Preview tab."
-                  : "Drawn by the Frontend phase. Edit it section by section on the Preview tab."}
+              A sketch drawn from the plan, not the code in Files.{" "}
+              {preview.app?.reason ? `${preview.app.reason.replace(/\.$/, "")}.` : ""}
             </p>
           </div>
         </div>

@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from app.agents import handoff
 from app.agents.base import (
+    RevisionRefused,
     _MEMORY_FRAME,
     _RAG_FRAME,
     _SKILLS_FRAME,
@@ -88,6 +89,8 @@ _WRITE_TAIL = (
 #: test model looks for to know which files it was asked for.
 _WRITE_NOW = "# Write now"
 _FIX_ECHO = "# Your last version of {path} (fix it; keep what was right)\n{fence}{lang}\n{code}{nl}{fence}\n"
+#: A change asked for on the app preview (#78): the file as it is, to change in place.
+_EDIT_ECHO = "# The current version of {path} (change only what is asked)\n{fence}{lang}\n{code}{nl}{fence}\n"
 
 
 @dataclass
@@ -192,6 +195,11 @@ class CodePhaseAgent(BaseAgent):
     def write_system_prompt(self, charter=None, registry=None) -> str:
         return self._standing(charter, registry, _WRITE_NOTE) + _WRITE_TAIL
 
+    def _ask(self, ctx: AgentContext, output: dict, ask: dict) -> tuple[dict, list[LLMResponse]]:
+        """"Change this element" from the app preview (#78): the per-file write call,
+        for the one file that renders it, with the file as it is and the change asked."""
+        return _Run(self, ctx).edit(output, ask)
+
     def assemble(self, plan: dict, files: list[dict]) -> dict:
         """The deliverable: the plan's fields, with the written files as `files`."""
         out = {k: v for k, v in plan.items() if k != "files"}
@@ -283,6 +291,80 @@ class _Run:
 
 
         return self._finish()
+
+    def edit(self, output: dict, ask: dict) -> tuple[dict, list[LLMResponse]]:
+        """One file changed as the person asked on the app preview (#78).
+
+        Every other file stays as it is: the crew is shown the file, the lines the
+        element sits on, and the change, and writes that one file back whole. It is
+        parsed (and repaired once if it doesn't) like any file this phase writes.
+        """
+        agent, ctx = self.agent, self.ctx
+        path = str(ask.get("path") or "")
+        files = [f for f in output.get("files") or [] if isinstance(f, dict) and isinstance(f.get("path"), str)]
+        if not any(f["path"] == path for f in files):
+            raise RevisionRefused(f"{path} isn't one of the files {agent.title} wrote.")
+        from types import SimpleNamespace
+
+        for f in files:
+            code = f.get("code") if isinstance(f.get("code"), str) else str(f.get("content") or "")
+            self.planned.append(_Planned(path=f["path"], purpose=str(f.get("purpose") or "")))
+            self.written[f["path"]] = _Written(f["path"], code, str(f.get("language") or ""), str(f.get("purpose") or ""))
+        self.plan = SimpleNamespace(output={k: v for k, v in output.items() if k != "files"}, repair_rounds=0,
+                                    calls=[], response=None, handoff={}, skills_used=[])
+        agent._pin(ctx)
+        self.profile = router.profile_for(
+            ctx.routing_mode, ctx.preferred_model, complexity=agent._complexity(ctx), role=agent.key, pin=ctx.pin_model,
+        )
+        self.choice = 1
+        self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
+        self.digests = {
+            dep: handoff.digest(dep, ctx.prior_outputs[dep])
+            for dep in agent.depends_on
+            if isinstance(ctx.prior_outputs.get(dep), dict)
+        }
+        lines = ask.get("lines") or []
+        where = f"lines {lines[0]}–{lines[1]}" if len(lines) == 2 and lines[0] != lines[1] else (
+            f"line {lines[0]}" if lines else "this file"
+        )
+        what = str(ask.get("what") or "the selected element")
+        request = f"In {where} ({what}): {str(ask.get('instruction') or '').strip()}"
+        if isinstance(ask.get("content"), str) and ask["content"].strip():
+            # The file as the app preview was built from it — the lines it names are
+            # lines of this text (the platform may have added a directive at the top).
+            self.written[path].code = ask["content"]
+        planned = self._entry(path)
+        current = self.written[path]
+        asked = _Written(path, current.code, current.language, current.purpose, problems=[Problem(path, request, "edit")])
+        board = activity.begin(agent.key)
+        try:
+            activity.plan([path], 1, note=request)
+            claim.between_calls()
+            resp = self._call(self._messages([planned], editing=asked), [planned], "changing")
+            self.truncated += 1 if _cut(resp) else 0
+            landed, _partial = self._take(resp, [planned])
+            if path not in landed:
+                raise RevisionRefused(
+                    "The crew didn't send the file back in full, so nothing was changed. Try again, or say it differently."
+                )
+            self._check([path])
+            if self.written[path].faults():
+                raise RevisionRefused(
+                    "The crew's version of the file doesn't parse, so nothing was changed: "
+                    + "; ".join(self.written[path].faults()[:2])
+                )
+        except BaseException:
+            activity.end(board, finished=False)
+            raise
+        activity.end(board)
+        out_files = []
+        for f in files:
+            entry = dict(f)
+            if f["path"] == path:
+                entry["code"] = self.written[path].code
+                entry.pop("content", None)
+            out_files.append(entry)
+        return {**output, "files": out_files}, list(self.calls)
 
     def _batch_size(self, remaining: int) -> int:
         n = files_per_call(self.profile, remaining, avg_file_tokens=self._avg(), override=self.choice)
@@ -519,7 +601,12 @@ class _Run:
 
     # ── the prompt ───────────────────────────────────────────────────────────
     def _messages(
-        self, batch: list[_Planned], *, split: bool = False, fixing: Optional[list[_Written]] = None
+        self,
+        batch: list[_Planned],
+        *,
+        split: bool = False,
+        fixing: Optional[list[_Written]] = None,
+        editing: Optional[_Written] = None,
     ) -> list[ChatMessage]:
         """The ask for one batch, held to the prompt budget section by section.
 
@@ -542,11 +629,19 @@ class _Run:
             left -= cost
             return True
 
-        if not put("write", self._write_now(batch, split, fixing), force=True):
+        if not put("write", self._write_now(batch, split, fixing, editing), force=True):
             log.error("%s: the file list alone does not fit this model's window.", self.agent.title)
         for w in fixing or []:
             room = max(int(left * 0.4) // max(len(fixing), 1) - 200, 0)
             put(f"echo:{w.path}", _echo(w, room))
+        if editing is not None:
+            # The whole file or nothing: a clipped file written back would lose its end.
+            echo = _echo(editing, max(len(editing.code) + 200, 400), _EDIT_ECHO)
+            if not put(f"echo:{editing.path}", echo):
+                raise RevisionRefused(
+                    f"{editing.path} is too long for this model to rewrite in one reply, so nothing was changed. "
+                    "Pick a model with a larger window for the frontend, or ask for a smaller change."
+                )
 
         for compact in (0, 1, 2):
             if put("plan", self._plan_text(batch, compact)):
@@ -600,9 +695,21 @@ class _Run:
             ChatMessage(role="user", content="\n".join(p for p in parts if p)),
         ]
 
-    def _write_now(self, batch: list[_Planned], split: bool, fixing: Optional[list[_Written]]) -> str:
+    def _write_now(
+        self, batch: list[_Planned], split: bool, fixing: Optional[list[_Written]], editing: Optional[_Written] = None
+    ) -> str:
         total = len(self.planned)
         done = len([p for p in self.planned if p.path in self.written])
+        if editing is not None:
+            p = batch[0]
+            return (
+                f"{_WRITE_NOW} — change 1 file\n"
+                f"- `{p.path}`" + (f" — {p.purpose}" if p.purpose else "") + "\n"
+                + "".join(f"  - change: {fault}\n" for fault in editing.faults()[:3])
+                + "Make that change and only that change. Return the whole file, with everything "
+                "else exactly as it is: the other files import from it.\n"
+                "Answer with `### path` and one fenced block — nothing else.\n"
+            )
         if fixing:
             head = f"{_WRITE_NOW} — fix {len(fixing)} file{'s' if len(fixing) > 1 else ''}"
         elif len(batch) == 1:
@@ -982,14 +1089,14 @@ def _block(path: str, code: str, language: str = "") -> str:
     return f"### {path}\n{fence}{language}\n{code}{nl}{fence}\n"
 
 
-def _echo(w: _Written, room: int) -> str:
+def _echo(w: _Written, room: int, template: str = _FIX_ECHO) -> str:
     """The broken version of a file, clipped to `room`, for the repair call to correct."""
     if room <= 200:
         return ""
     code = w.code if len(w.code) <= room else w.code[:room] + "\n" + _TRUNCATED
     fence = _fence(code)
     nl = "" if code.endswith("\n") else "\n"
-    return _FIX_ECHO.format(path=w.path, fence=fence, lang=w.language, code=code, nl=nl)
+    return template.format(path=w.path, fence=fence, lang=w.language, code=code, nl=nl)
 
 
 def _salvage_json(text: str) -> list[CodeBlock]:

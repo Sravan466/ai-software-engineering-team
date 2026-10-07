@@ -324,6 +324,22 @@ class Settings(BaseSettings):
     #: (about a minute) into a cache no build can touch.
     security_scan_timeout_seconds: BlankTolerantInt(420) = 420
 
+    # ── App preview (#78): the generated app, running, on the Preview tab ──
+    #: Build the frontend in the sandbox and serve it to the Preview tab, instead of
+    #: only the sketch drawn from the plan. Needs the real build (Docker here).
+    preview_app_enabled: bool = True
+    #: A running app stops after this long without a request; opening the Preview
+    #: tab again builds it again.
+    preview_app_ttl_seconds: BlankTolerantInt(1800) = 1800
+    #: Apps running at once on this computer; the least recently looked at stops first.
+    preview_app_max_running: BlankTolerantInt(3) = 3
+    #: The preview build's budget (install + build), and the backend's install.
+    preview_app_build_seconds: BlankTolerantInt(420) = 420
+    preview_app_memory_mb: BlankTolerantInt(2048) = 2048
+    #: Previews are served at `<token>.<this domain>`. Blank: `localhost` when the
+    #: backend is reached on loopback; set a wildcard domain that reaches it otherwise.
+    preview_app_domain: str = ""
+
     # ── Cloud providers ──
     #: Keys are `SecretStr`, so a repr, a debug dump or an error report of these
     #: settings prints `**********` rather than the key.
