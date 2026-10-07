@@ -338,8 +338,9 @@ class ScriptedScanner:
                                                 "findings": found, "total": len(found)})
             elif step.label == "bandit":
                 text = _scan.MARK + json.dumps({"tool": "bandit", "ran": True, "version": "1.8.6", "findings": []})
-            elif step.label == "pip-audit":
-                text = _scan.MARK + json.dumps({"tool": "pip-audit", "side": "backend", "ran": True, "findings": []})
+            elif step.label.startswith("pip-audit"):
+                side = step.label[step.label.find("(") + 1 : -1]
+                text = _scan.MARK + json.dumps({"tool": "pip-audit", "side": side, "ran": True, "findings": []})
             else:
                 side = step.label[step.label.find("(") + 1 : -1]
                 text = _scan.MARK + json.dumps({"tool": "npm audit", "side": side, "ran": True, "version": "10.8.2",

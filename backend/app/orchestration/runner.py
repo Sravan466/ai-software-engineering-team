@@ -826,15 +826,18 @@ class PipelineRunner:
         data = autofix.load(project)
         t = autofix.track(data, autofix.SECURITY)
         outstanding = remediation.unresolved(db, project, serious=True)
-        # Which of the findings the open round was sent the rescan could judge: only a
-        # tool that ran again can say its finding is gone (#77). One that couldn't run
-        # leaves its findings as they were — sent back, not fixed.
         live = autofix.open_round(t)
-        unjudged = self._unrescanned(live, row.scan) if live is not None else []
-        fixed = autofix.close_round(t, [f.finding_key for f in outstanding])
-        if live is not None and unjudged:
-            rescan = scan.ScanResult.from_dict(row.scan)
-            autofix.mark_unjudged(live, unjudged, (rescan.reason if rescan else None) or "The scanners didn't run again.")
+        # What the round was sent and still has no verdict for (#77): a finding the
+        # rescan reported again is open, one it could speak for and didn't report is
+        # fixed — one still "sent back" is one it couldn't read where it was.
+        sent = [p.get("key") for p in (live or {}).get("problems") or []]
+        waiting = self._still_sent_back(db, project, sent) if live is not None else []
+        # Fixed means settled: a sent finding whose record is still open in any form
+        # (one from before #77 that is now a review note, say) was not fixed.
+        unsettled = {f.finding_key for f in outstanding} | self._unsettled(db, project, sent)
+        fixed = autofix.close_round(t, list(unsettled))
+        if live is not None and waiting:
+            autofix.mark_unjudged(live, waiting, self._why_unjudged(row.scan))
         if fixed:
             last = t["rounds"][-1]
             for record in self._dispositions(db, project, fixed):
@@ -923,18 +926,26 @@ class PipelineRunner:
         return True
 
     @staticmethod
-    def _unrescanned(live: dict, scanned: object) -> list[str]:
-        """The keys a round was sent whose tool didn't run on the rebuilt code (#77)."""
+    def _still_sent_back(db: Session, project: Project, keys: list) -> list[str]:
+        """Of `keys`, the findings the latest audit gave no verdict on (#77)."""
+        return [r.finding_key for r in PipelineRunner._dispositions(db, project, keys)
+                if r.status == FindingStatus.FIX_REQUESTED.value]
+
+    @staticmethod
+    def _unsettled(db: Session, project: Project, keys: list) -> set[str]:
+        return {r.finding_key for r in PipelineRunner._dispositions(db, project, keys)
+                if r.status not in FindingStatus.settled()}
+
+    @staticmethod
+    def _why_unjudged(scanned: object) -> str:
+        """Why the rescan couldn't say whether a fix took."""
         result = scan.ScanResult.from_dict(scanned)
-        return [
-            p.get("key")
-            for p in live.get("problems") or []
-            if p.get("tool")
-            and (
-                result is None
-                or not result.covers(p["tool"], p.get("path") or (p.get("where") or "").rsplit(":", 1)[0], p.get("rule_id"))
-            )
-        ]
+        if result is None or result.status != "ok":
+            return (result.reason if result else None) or "The scanners didn't run again."
+        return (
+            "The rescan couldn't read where these were: its report was cut short, it "
+            "couldn't parse the file, or a rule pack was missing."
+        )
 
     @staticmethod
     def _standing_fix_note(data: dict, phase: str) -> Optional[str]:

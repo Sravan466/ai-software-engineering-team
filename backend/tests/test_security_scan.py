@@ -157,7 +157,7 @@ def test_the_readers_turn_each_tools_json_into_findings_with_a_rule_and_a_line(t
         StepResult("install", "install scanners", 0, 1.0, "scanners already installed"),
         StepResult("scan", "semgrep", 0, 1.0, _read(tmp_path, "semgrep", _SEMGREP_JSON)),
         StepResult("scan", "bandit", 0, 1.0, _read(tmp_path, "bandit", _BANDIT_JSON)),
-        StepResult("scan", "pip-audit", 0, 1.0, _read(tmp_path, "pip-audit", _PIP_AUDIT_JSON, "backend")),
+        StepResult("scan", "pip-audit (backend)", 0, 1.0, _read(tmp_path, "pip-audit", _PIP_AUDIT_JSON, "backend")),
     ]
     owners = {"backend/app/index.js": "backend_engineer", "backend/main.py": "backend_engineer"}
     result = scan.judge([(_plan(scan.SEMGREP, scan.BANDIT, scan.PIP_AUDIT), outputs, None)], _TREE, owners)
@@ -242,15 +242,15 @@ def test_a_scan_with_no_report_says_why_per_tool():
 def test_only_the_dependency_audits_get_the_network_and_versions_are_pinned():
     plan = scan.plan_python(_TREE)
     by = {s.label: s for s in plan.steps}
-    assert set(by) == {"install scanners", "semgrep", "bandit", "pip-audit"}
+    assert set(by) == {"install scanners", "semgrep", "bandit", "pip-audit (backend)"}
     # Semgrep and Bandit read the code with no network at all.
     assert not by["semgrep"].network and not by["bandit"].network
-    assert by["install scanners"].network and by["pip-audit"].network
+    assert by["install scanners"].network and by["pip-audit (backend)"].network
     assert f"semgrep=={scan.SEMGREP_VERSION}" in by["install scanners"].command
     assert f"bandit=={scan.BANDIT_VERSION}" in by["install scanners"].command
     # Requirements are resolved from wheels only, and pip-audit installs nothing.
     assert "--only-binary :all:" in by["install scanners"].command
-    assert "--disable-pip" in by["pip-audit"].command and "--metrics=off" in by["semgrep"].command
+    assert "--disable-pip" in by["pip-audit (backend)"].command and "--metrics=off" in by["semgrep"].command
     # The box holds the code and the manifest, nothing else.
     assert set(plan.files) == set(_TREE)
     node = scan.plan_node({"frontend/package.json": "{}", "frontend/app/page.tsx": "x"})
@@ -925,3 +925,110 @@ def test_the_same_tree_is_scanned_once_within_the_hour(monkeypatch):
     monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None: ({"backend/a.py": "y"}, {}))
     scan.scan_build({})
     assert len(calls) == 2
+
+
+# ── what the fourth review found (#77, PR #88) ───────────────────────────────
+def test_a_waiver_never_passes_to_a_more_severe_note_beside_it(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+
+    verbose = {"title": "Verbose error message", "severity": "low", "category": "Information exposure",
+               "path": "routes/orders.js", "line": 40, "description": "d", "recommendation": "r"}
+    idor = {"title": "IDOR on GET /orders/:id", "severity": "critical", "category": "Authorization",
+            "path": "routes/orders.js", "line": 42, "description": "d", "recommendation": "r"}
+    with SessionLocal() as db:
+        project = _project(db, client)
+        (row,) = remediation.sync_dispositions(db, project, {"findings": [verbose]}, scan=_scan())
+        row.status = FindingStatus.WAIVED.value
+        db.commit()
+        rows = remediation.sync_dispositions(db, project, {"findings": [idor]}, scan=_scan())
+        by = {r.title: r for r in rows}
+        assert by["IDOR on GET /orders/:id"].status == "open"
+        assert remediation.open_notes(db, project) == [by["IDOR on GET /orders/:id"]]
+
+
+def test_a_repeat_note_keeps_its_record_while_the_scanner_still_reports_the_problem(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+
+    note = {"title": "SQL injection in the user lookup", "severity": "critical", "category": "SQL injection",
+            "path": "backend/app/index.js", "line": 5, "description": "d", "recommendation": "r"}
+    with SessionLocal() as db:
+        project = _project(db, client)
+        # Tracked before a scanner reported it (a build from before #77), then sent back.
+        (row,) = remediation.sync_dispositions(db, project, {"findings": [note]}, scan=_scan())
+        row.status = FindingStatus.FIX_REQUESTED.value
+        db.commit()
+        rows = remediation.sync_dispositions(db, project, {"findings": [note]}, scan=_scan(_hit(5)))
+        note_row = next(r for r in rows if r.source == "model")
+        assert note_row.status == "open"  # not "fixed": the scanner still reports it
+        assert len(rows) == 2
+
+
+def test_a_pip_audit_report_per_side_and_reuse_needs_every_side():
+    plan = scan.plan_python({**_TREE, "frontend/requirements.txt": "flask\n"})
+    assert [s.label for s in plan.steps if s.label.startswith("pip-audit")] == ["pip-audit (backend)", "pip-audit (frontend)"]
+    tools = {t: {"status": "ran"} for t in scan.TOOLS}
+    tools["npm audit"]["sides"] = {"backend": "ran", "frontend": "failed"}
+    assert not scan._complete(scan.ScanResult(status="ok", tools=tools))
+    tools["npm audit"]["sides"]["frontend"] = "ran"
+    assert scan._complete(scan.ScanResult(status="ok", tools=tools))
+
+
+def test_the_install_lock_goes_stale_when_an_install_could_no_longer_be_running(monkeypatch):
+    monkeypatch.setattr(settings, "security_scan_timeout_seconds", 120)
+    install = scan.plan_python(_TREE).steps[0]
+    assert install.timeout == 120 and "-mmin +2" in install.command
+
+
+def test_a_rescan_that_reports_a_finding_again_judges_it(client, monkeypatch):
+    """The rescan ran but its report was cut short — and still reported the finding:
+    that is a verdict (not fixed), not "couldn't check"."""
+    from app.build import runner as _runner
+
+    scanner = scripted_scan(monkeypatch, [[SQLI]])
+    real_judge = scan.judge
+
+    def cut(*a, **k):
+        result = real_judge(*a, **k)
+        result.tools["semgrep"]["truncated"] = True
+        return result
+
+    monkeypatch.setattr(scan, "judge", cut)
+    stub(monkeypatch, "complete", _fake_complete)
+    pid = client.post(
+        "/api/projects",
+        json={"idea": "A user directory", "routing_mode": "local_only", "approval_mode": "unattended"},
+    ).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    through_database_gate(client, pid)
+    track = client.get(f"/api/projects/{pid}").json()["auto_fix"]["tracks"]["security"]
+    assert track["stopped"]["reason"] == "no_progress"
+    assert not track["rounds"][0].get("unjudged_all")
+
+
+def test_a_legacy_round_of_model_findings_is_not_counted_as_fixed(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.orchestration import autofix
+    from app.orchestration.runner import runner
+
+    legacy = {"title": "Hardcoded key", "severity": "critical", "category": "Secrets", "path": "app.js", "line": 3,
+              "description": "d", "recommendation": "r"}
+    with SessionLocal() as db:
+        project = _project(db, client)
+        (row,) = remediation.sync_dispositions(db, project, {"findings": [legacy]}, scan=_scan())
+        row.source = None  # written before #77
+        row.status = FindingStatus.FIX_REQUESTED.value
+        data = autofix.load(project)
+        t = autofix.track(data, autofix.SECURITY)
+        autofix.start_round(t, "guided", ["backend_engineer"], [{"key": row.finding_key, "kind": "security"}])
+        autofix.save(project, data)
+        db.commit()
+        # The re-audit after the upgrade still reports it.
+        remediation.sync_dispositions(db, project, {"findings": [legacy]}, scan=_scan())
+        unsettled = runner._unsettled(db, project, [row.finding_key])
+        assert unsettled == {row.finding_key}
+        fixed = autofix.close_round(autofix.track(autofix.load(db.get(Project, project.id)), autofix.SECURITY), list(unsettled))
+        assert fixed == []

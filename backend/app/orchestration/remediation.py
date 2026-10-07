@@ -814,8 +814,11 @@ def sync_dispositions(
 
     # ── Warden's review notes ──
     # A repeat of what a scanner already reported there isn't tracked twice: the
-    # scanner's finding is the one tracked, with its rule and its rescan.
-    notes = [f for f in read_findings(output, project) if not any(repeats(f, t) for t in current)]
+    # scanner's finding is the one tracked, with its rule and its rescan. A repeat still
+    # claims a record it already has, so that record isn't closed as "no longer
+    # mentioned" while the scanner is reporting the very same problem.
+    notes = read_findings(output, project)
+    repeat_keys = {f.key for f in notes if any(repeats(f, t) for t in current)}
     # Its own words first, for every note; only then a reworded one by file and line,
     # among the rows nobody claimed — so a nearby note never takes another's row (and
     # its waiver) because it happened to be read first.
@@ -828,7 +831,13 @@ def sync_dispositions(
     for f in notes:
         if f.key in claimed:
             continue
-        nearby = [r for r in model_rows if r.id not in matched and same_model_finding(r, f)]
+        # A waiver is a decision about one note. It never passes to a different, more
+        # severe note that merely sits beside it: that one is new, and asked about.
+        nearby = [
+            r for r in model_rows
+            if r.id not in matched and same_model_finding(r, f)
+            and not (r.status == FindingStatus.WAIVED.value and _more_severe(f.severity, r.severity))
+        ]
         row = min(nearby, key=lambda r: abs((r.line or 0) - (f.line or 0))) if nearby else None
         if row is not None:
             matched.add(row.id)
@@ -836,7 +845,7 @@ def sync_dispositions(
     for f in notes:
         row = claimed.get(f.key)
         if row is None:
-            if f.key in keys:
+            if f.key in keys or f.key in repeat_keys:
                 continue
             keys.add(f.key)
             row = SecurityDisposition(
@@ -880,6 +889,12 @@ def sync_dispositions(
         .order_by(SecurityDisposition.created_at)
         .all()
     )
+
+
+def _more_severe(a: str, b: str) -> bool:
+    """Whether severity `a` outranks `b` (an unrated one outranks nothing)."""
+    rank = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+    return rank.get((a or "").lower(), 99) < rank.get((b or "").lower(), 99)
 
 
 def _closest(rows: list, line: Optional[int]):

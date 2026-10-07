@@ -674,15 +674,19 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
         return None
     tools: list[str] = []
     budget = _budget()
+    install_seconds = min(budget, 420)
+    # A lock older than the install step can run is a killed install's: `find -mmin +N`
+    # is "more than N whole minutes".
+    stale_minutes = max((install_seconds + 59) // 60, 1)
     env = {"PYTHONPATH": _TOOLS_DIR, "PATH": f"{_TOOLS_DIR}/bin:/usr/local/bin:/usr/bin:/bin"}
     install = (
         "set -e\n"
         f"T={_TOOLS_DIR}\n"
         'if [ ! -f "$T/.ok" ]; then\n'
         # One installer at a time in the shared cache: `mkdir` is atomic, and a lock
-        # older than ten minutes belongs to an install that died holding it.
+        # older than an install can live belongs to one that was killed holding it.
         '  until mkdir "$T.lock" 2>/dev/null; do\n'
-        '    if [ -n "$(find "$T.lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then rm -rf "$T.lock"; fi\n'
+        f'    if [ -n "$(find "$T.lock" -maxdepth 0 -mmin +{stale_minutes} 2>/dev/null)" ]; then rm -rf "$T.lock"; fi\n'
         "    sleep 2\n"
         "  done\n"
         '  trap \'rm -rf "$T.lock"\' EXIT\n'
@@ -714,7 +718,7 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
             f"--disable-pip-version-check --report {_SCRATCH}/{side}-resolved.json -r {side}/requirements.txt "
             f">/dev/null 2>{_SCRATCH}/{side}-resolve.err; echo $? > {_SCRATCH}/{side}-resolve.code\n"
         )
-    steps = [Step("install", "install scanners", install, network=True, timeout=min(budget, 420))]
+    steps = [Step("install", "install scanners", install, network=True, timeout=install_seconds)]
 
     if code:
         tools.append(SEMGREP)
@@ -746,20 +750,23 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
         steps.append(Step("scan", "bandit", bandit, timeout=min(budget, 120), env=env))
     if py_sides:
         tools.append(PIP_AUDIT)
-        audit = _heredoc("/tmp/aiteam-read.py", _PY_READER)
         for side in py_sides:
+            # One step a side: each report gets the whole of its step's kept output, so
+            # one side's long report can't push the other's marker out of it.
             # The resolved versions, pinned, audited as they are: --disable-pip installs
             # nothing. The network is for the advisory database.
-            audit += (
-                f"r=$(cat {_SCRATCH}/{side}-resolve.code 2>/dev/null || echo 1); cp {_SCRATCH}/{side}-resolve.err /tmp/resolve-{side}.err 2>/dev/null\n"
+            audit = (
+                _heredoc("/tmp/aiteam-read.py", _PY_READER)
+                + f"r=$(cat {_SCRATCH}/{side}-resolve.code 2>/dev/null || echo 1); cp {_SCRATCH}/{side}-resolve.err /tmp/resolve-{side}.err 2>/dev/null\n"
                 f"if [ \"$r\" = 0 ]; then python -c 'import json,sys; d=json.load(open(sys.argv[1])); "
                 "print(\"\\n\".join(i[\"metadata\"][\"name\"]+\"==\"+i[\"metadata\"][\"version\"] for i in d.get(\"install\") or []))' "
                 f"{_SCRATCH}/{side}-resolved.json > /tmp/{side}-pinned.txt; "
                 f"pip-audit --no-deps --disable-pip -r /tmp/{side}-pinned.txt -f json -o /tmp/pip-audit-{side}.json "
                 f"--progress-spinner off 2>/tmp/pip-audit-{side}.err; code=$?; else code=0; fi\n"
                 f"python /tmp/aiteam-read.py pip-audit {side} /tmp/pip-audit-{side}.json $code $r\n"
+                "exit 0\n"
             )
-        steps.append(Step("scan", "pip-audit", audit + "exit 0\n", network=True, timeout=min(budget, 180), env=env))
+            steps.append(Step("scan", f"pip-audit ({side})", audit, network=True, timeout=min(budget, 180), env=env))
     mine = {p: c for p, c in files.items() if p.endswith(_CODE_EXT) or layout.relative_to_side(p) == "requirements.txt"}
     return ScanPlan(PYTHON_IMAGE, steps, mine, tuple(tools))
 
@@ -1000,7 +1007,7 @@ def judge(results_by_plan: list[tuple[ScanPlan, list[StepResult], Optional[str]]
                     rules_note = _rules_note(r.output)
                 continue
             name = SEMGREP if r.label == SEMGREP else BANDIT if r.label == BANDIT else (
-                PIP_AUDIT if r.label == PIP_AUDIT else NPM_AUDIT
+                PIP_AUDIT if r.label.startswith(PIP_AUDIT) else NPM_AUDIT
             )
             entry = tools.setdefault(name, {"status": SKIPPED, "version": None, "reason": None, "count": 0,
                                              "seconds": 0.0})
@@ -1187,7 +1194,10 @@ def _tree_key(files: dict[str, str]) -> str:
 def _complete(result: ScanResult) -> bool:
     """Every tool that applied ran, whole: the only kind of scan worth reusing."""
     return result.status == "ok" and all(
-        t.get("status") in (RAN, NOT_NEEDED) and not t.get("truncated") and not t.get("missing_packs")
+        t.get("status") in (RAN, NOT_NEEDED)
+        and not t.get("truncated")
+        and not t.get("missing_packs")
+        and all(v == RAN for v in (t.get("sides") or {}).values())
         for t in result.tools.values()
     )
 

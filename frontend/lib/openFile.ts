@@ -33,9 +33,13 @@ export function onOpenFile(handler: (jump: FileJump) => void): () => void {
 /**
  * One file, however much of its path each side wrote: `users.js` and
  * `backend/routes/users.js` match; `admin/users.js` and `routes/users.js` don't.
+ * The tree also renames an agent's own root (`server/app/x.py` is placed at
+ * `backend/app/x.py`), so two paths that agree below their first folder match too.
  */
 export function samePath(a: string, b: string): boolean {
   const x = a.toLowerCase().replace(/^\.?\//, "");
   const y = b.toLowerCase().replace(/^\.?\//, "");
-  return x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`);
+  if (x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`)) return true;
+  const below = (p: string) => (p.includes("/") ? p.slice(p.indexOf("/") + 1) : "");
+  return below(x) !== "" && below(x).includes("/") && below(x) === below(y);
 }
