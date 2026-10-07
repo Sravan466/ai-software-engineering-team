@@ -68,12 +68,13 @@ def run(body: dict) -> dict:
     build_id = str(body.get("id") or "")
     limits = _limits(body.get("limits") or {})
     with _slots:
-        sandbox.ensure_image(image)
         box = sandbox.Sandbox(image, limits)
+        # Registered before the pull, so a cancel during it runs nothing after it.
         if build_id:
             with _running_lock:
                 _running[build_id] = box
         try:
+            sandbox.ensure_image(image)
             results = box.run(files, steps)
         finally:
             if build_id:

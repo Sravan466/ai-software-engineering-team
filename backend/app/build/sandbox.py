@@ -318,6 +318,8 @@ class Sandbox:
         """Put `files` in the volume, then each step in order until one fails.
 
         `on_step(step)` is told as each step starts, for a progress line."""
+        if self.cancelled:  # stopped while its image was pulled: nothing runs
+            return [StepResult(s.name, s.label, None, 0.0, skipped=True) for s in steps]
         start = time.monotonic()
         deadline = start + self.limits.seconds
         made = subprocess.run(

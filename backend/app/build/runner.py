@@ -195,9 +195,11 @@ class DockerEngine:
     kind = "docker"
 
     def run(self, image, files, steps, limits, on_cancel, on_step):
-        sandbox.ensure_image(image)
         box = sandbox.Sandbox(image, limits)
+        # Before the pull, which can take minutes the first time: Stop pressed during
+        # it runs nothing after it.
         on_cancel(box.cancel)
+        sandbox.ensure_image(image)
         return box.run(files, steps, on_step=on_step)
 
 
@@ -251,7 +253,21 @@ class BuilderEngine:
 engine: Optional[Engine] = None
 
 
-def _builder_health(url: str) -> tuple[bool, Optional[str]]:
+_health_cache: dict[str, tuple[float, tuple[bool, Optional[str]]]] = {}
+#: Seconds a builder service's answer is trusted, as `sandbox.available` trusts Docker's.
+_HEALTH_TTL = 30.0
+
+
+def _builder_health(url: str, refresh: bool = False) -> tuple[bool, Optional[str]]:
+    seen = _health_cache.get(url)
+    if not refresh and seen is not None and time.monotonic() - seen[0] < _HEALTH_TTL:
+        return seen[1]
+    answer = _ask_builder(url)
+    _health_cache[url] = (time.monotonic(), answer)
+    return answer
+
+
+def _ask_builder(url: str) -> tuple[bool, Optional[str]]:
     import httpx
 
     try:
@@ -281,7 +297,7 @@ def status() -> dict:
     if engine is not None:
         return {"kind": getattr(engine, "kind", "docker"), "available": True, "reason": None, "detail": None}
     if settings.build_runner_url:
-        ok, why = _builder_health(settings.build_runner_url)
+        ok, why = _builder_health(settings.build_runner_url, refresh=True)
         return {"kind": "builder", "available": ok, "reason": why, "detail": settings.build_runner_url,
                 "images": list(sandbox.IMAGES)}
     ok, why, version = sandbox.available(refresh=True)
@@ -393,13 +409,15 @@ def judge(plan: Plan, results: list[StepResult], side: str, files: dict[str, str
                 if buildlog.environmental(r.output):
                     found = [Problem(plan.manifest, "An install script tried to reach the network. Builds have the "
                                                     "network only while packages download; drop the package that needs it.", "package")]
+            elif buildlog.environmental(r.output):
+                # The download step has the network: failing to reach the registry is
+                # the network's fault, whatever pip or npm then says about a package.
+                unchecked = unchecked or "The package registry couldn't be reached, so the build wasn't run."
+                continue
             elif plan.stack == "python":
                 found = buildlog.pip_problems(r.output, plan.manifest)
             else:
                 found = buildlog.npm_problems(r.output, plan.manifest)
-            if not found and r.label in ("npm install", "pip install") and buildlog.environmental(r.output):
-                unchecked = unchecked or "The package registry couldn't be reached, so the build wasn't run."
-                continue
         elif r.name == "build":
             found = buildlog.js_build_problems(r.output, names) if plan.stack != "python" else buildlog.python_problems(r.output)
             if not found and buildlog.environmental(r.output):
@@ -407,7 +425,10 @@ def judge(plan: Plan, results: list[StepResult], side: str, files: dict[str, str
                 continue
         else:  # boot
             found = buildlog.python_problems(r.output) if plan.stack == "python" else buildlog.node_problems(r.output)
-            if buildlog.environmental(r.output):
+            # A crash that is itself "can't reach the database" isn't the code's fault in
+            # a box with no network; any other crash still is, whatever else it logged.
+            found = [p for p in found if not buildlog.environmental(p.message)]
+            if not found and buildlog.environmental(r.output):
                 # Started as far as its database: a box with no network can't say more.
                 entry["inconclusive"] = True
                 entry["ok"] = True

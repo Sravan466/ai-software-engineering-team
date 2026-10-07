@@ -726,7 +726,12 @@ function ShipReview({
 
       {active?.key === "files" && (
         <div className="artifact-view artifact-files" style={{ height: 560 }}>
-          <BuildLine state={buildState} problems={art.build?.problems.length ?? 0} commands={art.scaffold?.commands ?? []} />
+          <BuildLine
+            state={buildState}
+            problems={art.build?.problems.length ?? 0}
+            commands={art.scaffold?.commands ?? []}
+            runs={art.build?.runs}
+          />
           <FileBrowser
             files={files}
             renderAction={(file) =>

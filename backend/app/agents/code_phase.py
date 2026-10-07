@@ -747,7 +747,10 @@ class _Run:
             and settings.schema_repair_rounds > 0
         ):
             build, output, errors, stack, rerun = self._fix_build(build, output, errors, stack, real=True)
-            build_run = rerun or build_run
+            if rerun is not _UNCHANGED:
+                # The repaired tree is what ships: its own build, or none at all when
+                # the repair stopped it parsing — never the failed build it replaced.
+                build_run = rerun
 
         never = [
             p for p in self.unwritten
@@ -836,14 +839,15 @@ class _Run:
 
     def _fix_build(
         self, build: BuildCheck, output: dict, errors: list[str], stack: list[str], real: bool = False
-    ) -> tuple[BuildCheck, dict, list[str], list[str], Optional[dict]]:
+    ) -> tuple[BuildCheck, dict, list[str], list[str], object]:
         """The whole-tree check failed: one round on the files it names, then check again.
 
         Only for what the per-file check could not see — an import, a name, a JavaScript
         parse. A file that already failed its own repair round has had its round.
 
         `real`: the problems came from the real build (#75), so the re-check builds
-        again once the files parse, and the new build's record is returned last.
+        again once the files parse, and the new build's record is returned last — None
+        when the repaired files no longer parse, `_UNCHANGED` when the repair wasn't kept.
         """
         named: dict[str, list[Problem]] = {}
         for p in build.problems:
@@ -852,7 +856,7 @@ class _Run:
                 named.setdefault(p.path, []).append(p)
 
         if not named:
-            return build, output, errors, stack, None
+            return build, output, errors, stack, _UNCHANGED
         failing: list[_Written] = []
         for path, problems in named.items():
             w = self.written[path]
@@ -887,7 +891,7 @@ class _Run:
         self.written = before
         for path in named:
             activity.file(path, "failed")
-        return build, output, errors, stack, None
+        return build, output, errors, stack, _UNCHANGED
 
 
     def _whole(self, reason: str) -> AgentResult:
@@ -905,6 +909,10 @@ class _Run:
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+#: `_fix_build`'s answer when the tree it was given is still the one that ships.
+_UNCHANGED = object()
+
+
 def _choice(value: object) -> object:
     """The eval harness's mode wins over the person's choice; `batch` is automatic."""
     if MODE_OVERRIDE == "one":

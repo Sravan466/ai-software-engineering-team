@@ -455,6 +455,16 @@ class BaseAgent:
         if run.status == BuildStatus.FAILED.value:
             build.problems = (build.problems + run.problems)[:_BUILD_PROBLEM_CAP]
             build.status = BuildStatus.FAILED.value
+        elif (
+            run.status == BuildStatus.OK.value
+            and build.status == BuildStatus.UNCHECKED.value
+            and all(p.startswith(f"{side}/") for p in build.unchecked)
+        ):
+            # No parser could read these files here, but they installed and built:
+            # that is a stronger check than the one that couldn't run.
+            build.status = BuildStatus.OK.value
+            build.unchecked = []
+            build.reason = None
         return run.as_dict()
 
     def _complete(

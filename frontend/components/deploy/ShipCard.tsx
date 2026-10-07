@@ -571,10 +571,13 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
     if (status && !seen.current[status]) seen.current[status] = Date.now();
   }, [status]);
 
+  // One poll at a time: the next is scheduled when the last one answers, so a slow
+  // answer (Vercel's log, read once a build fails) is never overtaken by another.
   useEffect(() => {
     if (!live) return;
     let stop = false;
-    const t = setInterval(async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
       tick((n) => n + 1);
       try {
         const next = await api.deployState(id);
@@ -586,10 +589,12 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
       } catch {
         // The next poll tries again.
       }
-    }, 2500);
+      if (!stop) timer = setTimeout(poll, 2500);
+    };
+    timer = setTimeout(poll, 2500);
     return () => {
       stop = true;
-      clearInterval(t);
+      clearTimeout(timer);
     };
   }, [live, id, onChange]);
 
@@ -600,19 +605,25 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
   useEffect(() => {
     if (!crewAtWork) return;
     let stop = false;
-    const t = setInterval(async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
       try {
         const next = await api.deployState(id);
         if (stop) return;
         setState(next);
-        if (next.status !== "fixing" || next.fix?.state !== "fixing") onChange();
+        if (next.status !== "fixing" || next.fix?.state !== "fixing") {
+          onChange();
+          return;
+        }
       } catch {
         // The next poll tries again.
       }
-    }, 4000);
+      if (!stop) timer = setTimeout(poll, 4000);
+    };
+    timer = setTimeout(poll, 4000);
     return () => {
       stop = true;
-      clearInterval(t);
+      clearTimeout(timer);
     };
   }, [crewAtWork, id, onChange]);
 

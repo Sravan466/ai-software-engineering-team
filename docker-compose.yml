@@ -65,14 +65,22 @@ services:
       # backup of the data volume doesn't carry what unlocks it. (Or set
       # SECRETS_ENCRYPTION_KEY in .env / a Docker secret.)
       - backend_secrets:/root/.config/aiteam
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
     depends_on:
-      - builder
+      - backend
 
   # Builds and starts the generated code (#75): `npm install` + `npm run build`, a
   # Python import, a Node boot — each step in its own throwaway container, with no
   # network after the packages download, a memory/CPU/time cap, and nothing of the
   # platform's mounted. It holds the Docker socket so the backend never has to, and
   # it has none of the backend's volumes. Not published: only the backend reaches it.
+  # The backend starts without it: until it answers, code is only parsed.
   builder:
     build:
       context: ./backend
@@ -84,15 +92,6 @@ services:
       BUILDER_CONCURRENCY: ${BUILD_RUN_CONCURRENCY:-2}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
-    environment:
-      NEXT_PUBLIC_API_BASE: http://localhost:8000
-    depends_on:
-      - backend
 
   # Optional Postgres — switch DATABASE_URL on the backend to use it.
   postgres:

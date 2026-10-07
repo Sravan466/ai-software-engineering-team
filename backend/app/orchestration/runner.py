@@ -626,6 +626,8 @@ class PipelineRunner:
         keyed = autofix.deploy_problems(problems, phase)
         record = autofix.start_round(t, remediation.strategy_for(1), [phase], keyed)
         record["source"] = "vercel"
+        # "Round 1 of 3": the episode's budget, kept with the round that opened it.
+        record["of"] = int(t["allowed"]) - int(t.get("episode_start") or 0)
         autofix.save(project, data)
         # Positioned at the end, as at the Ship review, so the redo rewinds everything
         # after the frontend rather than leaving tests and findings for the old code.

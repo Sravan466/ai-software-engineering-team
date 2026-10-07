@@ -168,6 +168,15 @@ def test_next_import_syntax_and_prerender_failures_are_each_read():
     assert "window is not defined" in crash.message
 
 
+def test_a_page_that_fetches_while_prerendering_is_the_sandbox_not_the_code():
+    fetching = NEXT_PRERENDER.replace(
+        "ReferenceError: window is not defined",
+        "TypeError: fetch failed\n    [cause]: Error: getaddrinfo ENOTFOUND api.example.com",
+    )
+    assert buildlog.js_build_problems(fetching, ["app/page.tsx"]) == []
+    assert buildlog.environmental(fetching)
+
+
 def test_tsc_esbuild_and_rollup_lines_are_read():
     out = buildlog.js_build_problems(
         "src/api.ts(12,5): error TS2322: Type 'x' is not assignable to type 'y'.\n"
@@ -392,7 +401,7 @@ def test_the_builder_service_is_used_when_configured(monkeypatch, client):
     monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(settings, "build_runner_url", "http://builder:8100")
     monkeypatch.setattr(build_runner, "engine", None)
-    monkeypatch.setattr(build_runner, "_builder_health", lambda url: (True, None))
+    monkeypatch.setattr(build_runner, "_builder_health", lambda url, refresh=False: (True, None))
     shown = client.get("/api/settings/build-runner").json()
     assert shown["kind"] == "builder" and shown["available"] and shown["detail"] == "http://builder:8100"
     chosen, _ = build_runner._engine()
@@ -657,3 +666,137 @@ def test_docker_a_step_past_its_budget_is_killed():
 
     left = subprocess.run(["docker", "ps", "-q", "--filter", f"name={box.volume}"], capture_output=True, text=True)
     assert left.stdout.strip() == "", "the timed-out container was left running"
+
+
+# ── what the first review found (PR #84) ─────────────────────────────────────
+PIP_OFFLINE = """WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')': /simple/fastapi/
+ERROR: Could not find a version that satisfies the requirement fastapi<1,>=0.110 (from versions: none)
+ERROR: No matching distribution found for fastapi<1,>=0.110
+"""
+
+
+def _python_files() -> dict[str, str]:
+    from app.build import scaffold
+
+    files = {"backend/main.py": "from fastapi import FastAPI\napp = FastAPI()\n"}
+    for f in scaffold.build(dict(files), None, None, "Demo").files:
+        files[f.path] = f.content
+    return files
+
+
+def test_a_registry_that_cannot_be_reached_is_the_network_not_a_package(real_build):
+    real_build(lambda step, files: (1, PIP_OFFLINE) if step.name == "install" else _ok(step, files))
+    run = build_runner.run_build(_python_files(), "backend")
+    assert run.status == "unchecked" and not run.problems and "registry" in run.reason
+
+
+def test_a_real_crash_is_not_hidden_by_a_database_warning(real_build):
+    from app.build import scaffold
+
+    files = {"backend/server.js": "const express = require('express');\nconst app = express();\napp.listen(3001);\n"}
+    for f in scaffold.build(dict(files), None, None, "Demo").files:
+        files[f.path] = f.content
+    noisy = "redis: connect ECONNREFUSED 127.0.0.1:6379, retrying\n" + NODE_CRASH
+    real_build(lambda step, files: (1, noisy) if step.name == "boot" else _ok(step, files))
+    run = build_runner.run_build(files, "backend")
+    assert run.status == "failed" and run.problems[0].path == "backend/server.js"
+
+
+def test_stop_during_the_image_pull_runs_nothing(monkeypatch):
+    monkeypatch.setattr(sandbox, "docker", lambda: "/usr/bin/docker")
+    stoppers: list = []
+
+    def pull(image, timeout=600.0):
+        for stop in stoppers:  # Stop pressed while the image downloads
+            stop()
+
+    monkeypatch.setattr(sandbox, "ensure_image", pull)
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: pytest.fail("ran docker after Stop"))
+    results = build_runner.DockerEngine().run(
+        sandbox.NODE_IMAGE, {"a": "b"}, [Step("install", "npm install", "npm install")], Limits(), stoppers.append, lambda s: None
+    )
+    assert [r.skipped for r in results] == [True]
+
+
+def test_a_passing_real_build_upgrades_an_unchecked_parse(real_build):
+    from app.agents import get_agent
+    from app.agents.base import AgentContext
+    from app.build.check import BuildCheck
+
+    real_build(_ok)
+    build = BuildCheck(status="unchecked", unchecked=["frontend/app/page.tsx"], reason="No parser here.")
+    record = get_agent("frontend_engineer")._run_build(
+        AgentContext(idea="x", prior_outputs={}),
+        {"files": [{"path": "app/page.tsx", "code": "export default function P() { return null; }\n"}]},
+        build,
+    )
+    assert record["status"] == "ok" and build.status == "ok" and build.unchecked == []
+
+
+def test_next_type_checks_only_a_frontend_that_was_really_built():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app.core.artifacts import assemble
+
+    def project(run):
+        row = SimpleNamespace(
+            phase="frontend_engineer", status="approved", created_at=datetime.now(timezone.utc), id="f",
+            output={"files": [{"path": "app/page.tsx", "code": "export default function P(){return null}\n"}]},
+            content_md="", build_status="ok", build_note=None, build_run=run,
+        )
+        return SimpleNamespace(charter=None, name="x", idea="x", phases=[row])
+
+    def config(p):
+        return next(f["content"] for f in assemble(p)["files"] if f["path"] == "frontend/next.config.js")
+
+    # Never built for real (no Docker, or a build from before #75): Vercel mustn't be the
+    # first to type-check it.
+    assert "ignoreBuildErrors: true" in config(project(None))
+    assert "ignoreBuildErrors: true" in config(project({"status": "unchecked"}))
+    built = config(project({"status": "ok", "summary": "ok"}))
+    assert "ignoreBuildErrors" not in built and "ignoreDuringBuilds: true" in built
+
+
+def test_a_poll_that_lost_the_race_leaves_the_crews_fix_alone(client, monkeypatch, real_build, vercel_fake):
+    real_build(_ok)
+    pid = _unattended(client, "A counter page Vercel fails twice over")
+    _building(pid)
+    with SessionLocal() as db:
+        # Another poll already won the move off `building` and handed it to the crew.
+        p = db.get(Project, pid)
+        p.deploy_status = "fixing"
+        db.commit()
+    seen = len(vercel_fake.event_params)
+    state = client.get(f"/api/projects/{pid}/deploy").json()
+    assert state["status"] == "fixing" and len(vercel_fake.event_params) == seen
+    with SessionLocal() as db:
+        assert not (db.get(Project, pid).auto_fix or {}).get("vercel"), "an attempt was counted twice"
+
+
+def test_a_package_vercel_cannot_install_goes_back_to_the_crew(client, monkeypatch, real_build, vercel_fake):
+    from app.router.router import router as model_router
+
+    real_build(_ok)
+    model = Frontend(lambda prompt: "failed the build on Vercel" in prompt)
+    monkeypatch.setattr(model_router, "complete", model)
+    pid = _unattended(client, "A counter page with a package npm lacks")
+    _building(pid)
+    vercel_fake.log = NPM_ETARGET.splitlines()
+    assert client.get(f"/api/projects/{pid}/deploy").json()["status"] == "fixing"
+    note = next(p for p in model.prompts if "failed the build on Vercel" in p)
+    assert "frontend/package.json" in note and "left-pad" in note
+    state = client.get(f"/api/projects/{pid}/deploy").json()
+    assert state["status"] == "fixed" and state["fix"]["of"] == settings.auto_fix_max_rounds
+
+
+def test_compose_runs_generated_code_in_the_builder_not_the_backend():
+    import pathlib
+
+    compose = (pathlib.Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
+    backend = compose[compose.index("  backend:"): compose.index("  frontend:")]
+    builder = compose[compose.index("  builder:"): compose.index("  postgres:")]
+    assert "BUILD_RUNNER_URL: http://builder:8100" in backend and "docker.sock" not in backend
+    assert "/var/run/docker.sock:/var/run/docker.sock" in builder and "Dockerfile.builder" in builder
+    # It has none of the platform's data, keys or database, and isn't published.
+    assert "backend_data" not in builder and "backend_secrets" not in builder and "ports:" not in builder

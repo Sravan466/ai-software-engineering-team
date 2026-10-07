@@ -1372,6 +1372,7 @@ function SummaryTab({
               state={art.build?.status ?? null}
               problems={art.build?.problems.length ?? 0}
               commands={art.scaffold?.commands ?? []}
+              runs={art.build?.runs}
             />
             <FileBrowser files={artifactFiles(art.files)} />
           </div>

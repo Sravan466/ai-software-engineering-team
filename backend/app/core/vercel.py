@@ -213,18 +213,12 @@ def events(token: str, deployment_id: str) -> list[str]:
     return [scrub.scrub(line)[:400] for line in out[-LOG_LINES:]]
 
 
-def log_tail(token: str, deployment_id: str, lines: int = 40) -> list[str]:
-    """The last `lines` lines of the build log, scrubbed. Empty when it can't be read."""
-    return events(token, deployment_id)[-lines:]
-
-
 def failure(deployment: dict) -> str:
     """Why Vercel says a deployment failed — its message, code and step — in one line."""
-    parts = [str(deployment.get(k) or "").strip() for k in ("errorMessage",)]
+    text = str(deployment.get("errorMessage") or "").strip()
     code = str(deployment.get("errorCode") or "").strip()
     step = str(deployment.get("errorStep") or "").strip()
     extra = ", ".join(x for x in (code, f"during {step}" if step else "") if x)
-    text = " ".join(p for p in parts if p)
     return f"{text} ({extra})" if text and extra else (text or extra)
 
 

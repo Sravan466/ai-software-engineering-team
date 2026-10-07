@@ -1721,6 +1721,8 @@ export type Artifacts = {
     status: "ok" | "failed" | "unchecked" | null;
     phases: Record<string, string | null>;
     problems: BuildProblem[];
+    /** Each built phase's real build (#75): its outcome and one-line summary. */
+    runs?: Record<string, { status: BuildRun["status"]; summary: string }>;
   };
 };
 

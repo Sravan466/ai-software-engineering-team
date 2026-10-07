@@ -276,6 +276,10 @@ def js_build_problems(output: str, files: Iterable[str] = ()) -> list[Problem]:
             continue
         m = _PRERENDER.search(line) or _COLLECT.search(line)
         if m:
+            if environmental("\n".join(lines[i + 1 : i + 30])):
+                # A page that fetches while it is prerendered, in a sandbox with no
+                # network: not the code's fault — on Vercel the request goes out.
+                continue
             route = m.group("route")
             page = _page_for(route, known) or ("app/page.tsx" if route == "/" and "app/page.tsx" in known else None)
             cause = next((l.strip() for l in lines[i + 1 : i + 12] if _JS_ERROR.match(l.strip())), "")
