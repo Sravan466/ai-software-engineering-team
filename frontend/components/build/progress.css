@@ -47,7 +47,7 @@
   height: 28px;
   animation: ap-fade 360ms var(--ap-ease) both;
 }
-.ap-group:not(.is-live) .ap-av { opacity: 0.9; }
+.ap-group:not(.has-live) .ap-av { opacity: 0.9; }
 
 .ap-lines { display: flex; flex-direction: column; min-width: 0; }
 
@@ -57,12 +57,14 @@
    jumps. The class comes off when it lands, so the row is plain afterwards. */
 .ap-line { display: grid; grid-template-rows: 1fr; min-width: 0; }
 .ap-line-in { min-width: 0; min-height: 0; }
+/* One duration for both halves: the class comes off when the row's own animation
+   ends, and the rise must not be cut off before it lands. */
 .ap-line.is-new {
-  animation: ap-grow 420ms var(--ap-ease) var(--ap-delay, 0ms) both;
+  animation: ap-grow 520ms var(--ap-ease) var(--ap-delay, 0ms) both;
 }
 .ap-line.is-new > .ap-line-in {
   overflow: hidden;
-  animation: ap-rise 560ms var(--ap-ease) var(--ap-delay, 0ms) both;
+  animation: ap-rise 520ms var(--ap-ease) var(--ap-delay, 0ms) both;
 }
 @keyframes ap-grow { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
 @keyframes ap-rise {
@@ -84,7 +86,7 @@
   color: var(--ink-3);
 }
 .ap-who { line-height: 1; transition: color 700ms var(--ap-ease); }
-.ap-group:not(.is-live) .ap-who { color: color-mix(in srgb, var(--agent) 72%, var(--ink-3)); }
+.ap-group:not(.has-live) .ap-who { color: color-mix(in srgb, var(--agent) 72%, var(--ink-3)); }
 
 /* ── the words: lit while live, quiet once done ──
    Two copies of the same text: the ink underneath carries the state and eases
@@ -121,8 +123,9 @@
   user-select: none;
   transition: opacity 420ms var(--ap-ease);
 }
-.is-live .ap-title-ink { color: color-mix(in srgb, var(--agent-lit) 62%, var(--ink)); }
-.is-live .ap-sheen {
+/* A line's own state, never its group's: the live agent's finished steps stay quiet. */
+.ap-line.is-live .ap-title-ink { color: color-mix(in srgb, var(--agent-lit) 62%, var(--ink)); }
+.ap-line.is-live .ap-sheen {
   opacity: 1;
   animation: ap-sheen 2.4s linear infinite;
 }
@@ -133,11 +136,11 @@
   100% { background-position: -25% 0; }
 }
 
-.is-waiting .ap-title-ink { color: var(--accent); }
-.is-stopped .ap-title-ink { color: var(--ink-3); }
+.ap-line.is-waiting .ap-title-ink { color: var(--accent); }
+.ap-line.is-stopped .ap-title-ink { color: var(--ink-3); }
 .ap-icon { display: inline-flex; align-self: center; color: var(--ink-3); }
 .ap-icon svg { width: 15px; height: 15px; }
-.is-waiting .ap-icon { color: var(--accent); }
+.ap-line.is-waiting .ap-icon { color: var(--accent); }
 
 /* The quiet half of a step: the file, the command, the count. */
 .ap-obj {
@@ -165,7 +168,7 @@
   overflow-wrap: anywhere;
   transition: color 520ms var(--ap-ease), border-color 520ms var(--ap-ease);
 }
-.is-live .ap-chip { color: var(--ink-2); border-color: var(--line-3); }
+.ap-line.is-live .ap-chip { color: var(--ink-2); border-color: var(--line-3); }
 .ap-count {
   font-family: var(--mono);
   font-size: var(--t-xs);
@@ -299,6 +302,9 @@
   .ap,
   .ap[data-sized] { transition: none; }
   .ap-sheen { display: none; }
-  .ap-line.is-new > .ap-line-in { transform: none; filter: none; }
+  /* New lines fade in where they land: no height opening, no rise, no blur. An
+     animation (not `none`) so the row still hears its animationend and settles. */
+  .ap-line.is-new,
+  .ap-line.is-new > .ap-line-in { animation-name: ap-fade; }
   .ap-dots i { animation: none; opacity: 0.6; }
 }

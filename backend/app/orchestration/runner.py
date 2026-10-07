@@ -57,7 +57,7 @@ from app.db.base import SessionLocal
 from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
 from app.preview import history as preview_history
 from app.memory.store import memory_store
-from app.orchestration import autofix, claim, connectors, remediation
+from app.orchestration import activity, autofix, claim, connectors, remediation
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import Charter, binding_on
 from app.orchestration.graph import connectors_note, graph, gather_skills
@@ -1449,6 +1449,9 @@ class PipelineRunner:
         project.phase_started_at = now
         project.heartbeat_at = now
         project.status = PipelineStatus.RUNNING.value
+        # The last phase's ended snapshot is history now; a redo of the same phase
+        # mustn't show its previous attempt's steps until it reports its own (#86).
+        activity.clear(project.id)
         # Moving means the pipeline is no longer parked; nothing is waiting on anyone,
         # and whatever stopped the last attempt has been superseded by this one.
         project.gate_kind = None

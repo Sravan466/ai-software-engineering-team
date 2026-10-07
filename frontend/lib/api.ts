@@ -155,8 +155,12 @@ export type Activity = {
    * command while building or testing. Writing and fixing are one step. Capped.
    */
   trail?: ActivityStep[];
+  /** Steps that fell off the front of `trail`, so lines can be numbered stably. */
+  dropped?: number;
   /** The code plan's own summary — what the phase is about to write. */
   note?: string;
+  /** The phase stopped reporting and its row is being saved: every step is done. */
+  ended?: boolean;
 };
 
 /** One finished step of the running phase (#86). `detail` is the command, if any. */

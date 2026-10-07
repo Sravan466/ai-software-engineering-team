@@ -289,12 +289,14 @@ class Project(Base):
     @property
     def activity(self) -> Optional[dict]:
         """What the phase running now is doing — planning, or which file it is writing —
-        from the run in this process (#81). None when nothing is reporting."""
+        from the run in this process (#81). None when nothing is reporting. Once the
+        phase stops reporting, its last snapshot (`ended`) stands in until the next
+        phase begins, so the steps it took don't vanish while its row is saved (#86)."""
         if self.status != "running":
             return None
         from app.orchestration import activity
 
-        found = activity.get(self.id)
+        found = activity.latest(self.id)
         if found is None or found.get("phase") != self.current_phase:
             return None
         return found

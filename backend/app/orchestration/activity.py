@@ -8,6 +8,9 @@ and the file list filling in as files land.
 The steps it has finished are kept too (#86), so the build page can show them as a
 feed — "Planned 9 files", "Ran npm install" — rather than only the one in hand. A
 command that ran between two polls, or before a reload, is still there to read.
+When the phase stops reporting, its last snapshot is kept, marked `ended`, until
+the next phase begins: the runner is still saving the row for a moment after the
+agent returns, and a feed that lost every step in that gap would jump backwards.
 
 Process-local, like the mockup's progress (`preview/jobs.py`): the run is a thread in
 this process, so is every request that reads it, and a restart that loses the run
@@ -73,7 +76,19 @@ class _Activity:
     #: the default `planning` of a phase that never plans is not mistaken for a step.
     opened: str = ""
     trail: list[dict] = field(default_factory=list)
+    #: Steps that fell off the front of the trail, so the page can number lines stably.
+    dropped: int = 0
     note: str = ""
+    #: The phase stopped reporting; this is its last word, kept until the row settles.
+    ended: bool = False
+
+    def file_step(self) -> None:
+        """Put the step in hand into the trail, keeping only the latest `TRAIL_MAX`."""
+        self.trail.append(self.finished())
+        over = len(self.trail) - TRAIL_MAX
+        if over > 0:
+            del self.trail[:over]
+            self.dropped += over
 
     def finished(self) -> dict:
         """The step in hand, as the trail keeps it once the next one starts."""
@@ -96,12 +111,16 @@ class _Activity:
             "files": [{"path": p, "state": s} for p, s in self.files.items()],
             "elapsed_s": int(time.time() - self.started_at),
             "trail": list(self.trail),
+            "dropped": self.dropped,
             "note": self.note,
+            "ended": self.ended,
         }
 
 
 _lock = threading.Lock()
 _board: dict[str, _Activity] = {}
+#: What each project's last phase said as it stopped reporting (see the module doc).
+_ended: dict[str, _Activity] = {}
 
 
 def _project() -> Optional[str]:
@@ -116,6 +135,7 @@ def begin(phase: str) -> None:
         return
     with _lock:
         _board[pid] = _Activity(phase=phase)
+        _ended.pop(pid, None)
 
 
 def stage(name: str, *, total: Optional[int] = None, detail: str = "", done: Optional[int] = None) -> None:
@@ -129,8 +149,7 @@ def stage(name: str, *, total: Optional[int] = None, detail: str = "", done: Opt
             return
         moved = _step(name, detail) != _step(found.stage, found.detail)
         if found.opened and moved:
-            found.trail.append(found.finished())
-            del found.trail[:-TRAIL_MAX]
+            found.file_step()
         if moved or not found.opened:
             found.opened = name
         found.stage, found.detail = name, detail
@@ -174,19 +193,39 @@ def per_call(n: int) -> None:
 
 
 def end() -> None:
+    """The phase stopped reporting: its step in hand is done, and the snapshot is kept."""
     pid = _project()
-    if pid is not None:
-        clear(pid)
+    if pid is None:
+        return
+    with _lock:
+        found = _board.pop(pid, None)
+        if found is None:
+            return
+        if found.opened:
+            found.file_step()
+            found.opened = ""
+        found.ended = True
+        _ended[pid] = found
 
 
 def clear(project_id: str) -> None:
+    """Forget the project's progress, live and ended. A new phase starts clean."""
     with _lock:
         _board.pop(project_id, None)
+        _ended.pop(project_id, None)
 
 
 def get(project_id: str) -> Optional[dict]:
+    """The phase reporting now, or None."""
     with _lock:
         found = _board.get(project_id)
+        return found.as_dict() if found is not None else None
+
+
+def latest(project_id: str) -> Optional[dict]:
+    """The phase reporting now, or else the last word of the one that just stopped."""
+    with _lock:
+        found = _board.get(project_id) or _ended.get(project_id)
         return found.as_dict() if found is not None else None
 
 

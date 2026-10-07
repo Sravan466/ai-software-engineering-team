@@ -7,7 +7,7 @@ import AgentSprite from "@/components/agents/AgentSprite";
 import { PHASES } from "@/components/shell/phases";
 import { Icon } from "@/components/shell/icons";
 import { latestRow } from "@/components/build/payload";
-import { FilePath, activityFor } from "@/components/build/CodeWriting";
+import { FilePath, activityFor, plural } from "@/components/build/CodeWriting";
 
 /**
  * The run as an account of what the crew did and is doing, not a clock (#86).
@@ -63,10 +63,6 @@ const SUMMARY_FIELD: Record<string, string> = {
 };
 
 const FINISHED = new Set(["approved", "pending_approval"]);
-
-function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
 
 function squash(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -141,26 +137,34 @@ function currentStep(a: Activity): Pick<Line, "title" | "object" | "chip" | "cou
 
 /** The running phase's lines: what it has done, then what it's doing. */
 function liveLines(project: Project, key: string, agent: Persona, state: string): Line[] {
-  const id = (i: number) => `${key}:${i}`;
+  const id = (i: number | string) => `${key}:${i}`;
   if (STOPPED_VERB[state]) return [{ id: id(0), state: "stopped", title: STOPPED_VERB[state] }];
 
   const a = activityFor(project, key);
   const lines: Line[] = [];
   if (a) {
     const trail = a.trail ?? [];
-    // A phase that reports only its last part (QA's test run) did its writing first.
-    if ((trail[0]?.stage ?? a.stage) !== "planning") {
-      lines.push({ id: id(0), state: "done", title: agent.steps.done });
-    }
+    const dropped = a.dropped ?? 0;
+    // A code phase plans first, and keeps its file list even after the planning step
+    // has fallen off the front of the trail. A phase that reports only its last part
+    // (QA's test run) did its writing first, and says so.
+    const planned = a.files.length > 0 || a.stage === "planning" || trail.some((t) => t.stage === "planning");
+    let n = 0;
+    if (!planned) lines.push({ id: id(n++), state: "done", title: agent.steps.done });
+    // Lines are numbered from the phase's first step, not the trail's, so a step that
+    // falls off the front doesn't shift every id after it.
+    if (dropped > 0) lines.push({ id: id("earlier"), state: "done", title: plural(dropped, "earlier step") });
+    n += dropped;
     for (const t of trail) {
       lines.push({
-        id: id(lines.length),
+        id: id(n++),
         state: "done",
         ...finishedStep(t),
         message: t.stage === "planning" && a.note ? a.note : undefined,
       });
     }
-    lines.push({ id: id(lines.length), state: "live", ...currentStep(a) });
+    // Stopped reporting, row not saved yet: every step is done, the phase is closing.
+    lines.push(a.ended ? { id: id(n), state: "live", title: "Wrapping up" } : { id: id(n), state: "live", ...currentStep(a) });
   } else {
     lines.push({ id: id(0), state: "live", title: agent.steps.doing });
   }
@@ -176,13 +180,22 @@ export function feedFor(project: Project, state: string): Group[] {
   const groups: Group[] = [];
   let live: Group | null = null;
 
-  for (const ph of PHASES) {
+  // Whoever holds the run is `current_phase`, as long as its row says so. Any other
+  // row left `running` is an orphan of a process that died, not someone at work.
+  const current = project.current_phase;
+  const liveKey = current && latestRow(project.phases, current)?.status === "running" ? current : null;
+  // A redo runs an earlier phase again while the later ones' rows still stand. Those
+  // are about to be superseded, so the account stops at the phase being redone.
+  const liveAt = liveKey ? PHASES.findIndex((ph) => ph.key === liveKey) : PHASES.length;
+
+  for (let i = 0; i < PHASES.length; i++) {
+    const ph = PHASES[i];
     const agent = AGENT_BY_KEY[ph.key];
     const row = latestRow(project.phases, ph.key);
     if (!agent || !row) continue;
-    if (row.status === "running") {
+    if (ph.key === liveKey) {
       live = { key: ph.key, agent, live: true, lines: liveLines(project, ph.key, agent, state) };
-    } else if (FINISHED.has(row.status)) {
+    } else if (i < liveAt && FINISHED.has(row.status)) {
       const summary = summaryOf(row);
       groups.push({
         key: ph.key,
@@ -314,7 +327,7 @@ function Enter({
       className={className + (growing ? " is-new" : "")}
       style={growing && delay ? ({ ["--ap-delay" as string]: `${delay}ms` } as CSSProperties) : undefined}
       onAnimationEnd={(e) => {
-        if (e.target === e.currentTarget && e.animationName === "ap-grow") setGrowing(false);
+        if (e.target === e.currentTarget) setGrowing(false);
       }}
     >
       {children}
@@ -335,7 +348,9 @@ function Title({ text }: { text: string }) {
 }
 
 function Typed({ text, fresh }: { text: string; fresh: boolean }) {
-  const n = useTyped(text, fresh);
+  // Decided once, as it mounts: `fresh` is only true on the render it first appears.
+  const [animate] = useState(fresh);
+  const n = useTyped(text, animate);
   // The last few letters arrive soft, so the text reads as written rather than stamped.
   const edge = Math.max(0, n - 6);
   return (
@@ -459,13 +474,18 @@ export default function AgentProgress({
   const groups = visible ? feedFor(project, state) : [];
   const [measure, height] = useFollowHeight();
 
-  // Everything on screen the first time the feed appears is history, not news: it
-  // renders still. Only what arrives after that grows, rises and types in.
+  // Everything on screen when the feed appears is history, not news: it renders
+  // still. Only what arrives after that grows, rises and types in — on the render it
+  // arrives, after which it is known. Hidden, the feed forgets, so coming back (a
+  // finished run sent back for a redo) starts from still again rather than replaying.
+  const ids = groups.flatMap((g) => g.lines.flatMap((l) => (l.message ? [l.id, messageId(l)] : [l.id])));
   const seen = useRef<Set<string> | null>(null);
-  if (visible && groups.length && seen.current === null) {
-    seen.current = new Set(groups.flatMap((g) => g.lines.flatMap((l) => (l.message ? [l.id, messageId(l)] : [l.id]))));
-  }
+  if (!visible || groups.length === 0) seen.current = null;
+  else if (seen.current === null) seen.current = new Set(ids);
   const isNew = (id: string) => seen.current !== null && !seen.current.has(id);
+  useEffect(() => {
+    ids.forEach((id) => seen.current?.add(id));
+  });
 
   if (!visible || groups.length === 0) return null;
 
@@ -487,7 +507,7 @@ export default function AgentProgress({
           {groups.map((g) => (
             <li
               key={g.key}
-              className={"ap-group" + (g.live ? " is-live" : "")}
+              className={"ap-group" + (g.live ? " has-live" : "")}
               style={{ ["--agent" as string]: g.agent.accent, ["--agent-lit" as string]: g.agent.accentLit }}
             >
               {/* Keyed on liveness, so the working sprite and the still swap with a fade

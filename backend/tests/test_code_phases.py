@@ -481,13 +481,34 @@ def test_each_command_is_a_step_and_writing_and_fixing_are_one():
         activity.stage("building", detail="next build")
         out = activity.get("p-trail")
         activity.end()
+        ended = activity.latest("p-trail")
     assert [(t["stage"], t["detail"]) for t in out["trail"]] == [
         ("planning", ""), ("writing", ""), ("checking", ""), ("building", "npm install"),
     ]
     assert out["trail"][1]["done"] == 2 and out["trail"][1]["total"] == 2
     assert (out["stage"], out["detail"]) == ("building", "next build")
     assert len(out["note"]) <= activity.NOTE_MAX and out["note"].endswith("…")
+    assert out["ended"] is False
+    # Once the phase stops reporting, nothing is live — but its last word is kept, with
+    # the step it was on filed as done, until the next phase begins.
     assert activity.get("p-trail") is None
+    assert ended["ended"] is True
+    assert ended["trail"][-1] == {"stage": "building", "detail": "next build", "done": 2, "total": 2}
+    activity.clear("p-trail")
+    assert activity.latest("p-trail") is None
+
+
+def test_a_new_phase_starts_without_the_last_ones_ended_steps():
+    with inflight.building("p-next"):
+        activity.begin("backend_engineer")
+        activity.stage("planning")
+        activity.end()
+        assert activity.latest("p-next")["phase"] == "backend_engineer"
+        activity.begin("frontend_engineer")
+        out = activity.latest("p-next")
+        activity.end()
+    assert out["phase"] == "frontend_engineer" and out["trail"] == [] and out["ended"] is False
+    activity.clear("p-next")
 
 
 def test_a_phase_that_never_plans_does_not_report_a_planning_step():
@@ -499,6 +520,21 @@ def test_a_phase_that_never_plans_does_not_report_a_planning_step():
         activity.end()
     assert [(t["stage"], t["detail"]) for t in out["trail"]] == [("testing", "npm install")]
     assert out["note"] == ""
+    activity.clear("p-qa")
+
+
+def test_the_api_shows_a_phases_last_word_while_its_row_is_saved():
+    with inflight.building("p-api"):
+        activity.begin("backend_engineer")
+        activity.stage("planning")
+        activity.end()
+    project = Project(id="p-api", status="running", current_phase="backend_engineer")
+    assert project.activity["ended"] is True
+    assert project.activity["trail"] == [{"stage": "planning", "detail": "", "done": 0, "total": 0}]
+    # Never someone else's: the next phase's row shows nothing until it reports.
+    project.current_phase = "frontend_engineer"
+    assert project.activity is None
+    activity.clear("p-api")
 
 
 def test_the_trail_keeps_only_the_latest_steps():
@@ -510,6 +546,9 @@ def test_the_trail_keeps_only_the_latest_steps():
         activity.end()
     assert len(out["trail"]) == activity.TRAIL_MAX
     assert out["trail"][-1]["detail"] == f"step {activity.TRAIL_MAX + 3}"
+    # What fell off the front is counted, so the page can keep numbering lines stably.
+    assert out["dropped"] == 4
+    activity.clear("p-long")
 
 
 # ── the old path, when there is no plan to write from ────────────────────────

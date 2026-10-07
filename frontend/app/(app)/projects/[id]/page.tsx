@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
-import { APPROVAL_BY_ID, PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
+import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
 import { AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
