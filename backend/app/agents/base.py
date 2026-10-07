@@ -1246,10 +1246,14 @@ def _pack_skills(skills: tuple[Selected, ...], limit: int) -> tuple[str, list[st
 
 
 def _file_lists(output: dict) -> list[str]:
-    """The keys of `output` that hold lists of files (`files`, `test_files`, …)."""
+    """The keys of `output` that hold lists of files (`files`, `test_files`, …): items
+    with a path *and* code. System Design's endpoints have a path too — a URL, shared by
+    GET and POST — and merging those by it would lose one of each pair."""
     keys = []
     for key, value in (output or {}).items():
-        if isinstance(value, list) and value and all(isinstance(v, dict) and "path" in v for v in value):
+        if isinstance(value, list) and value and all(
+            isinstance(v, dict) and "path" in v and ("code" in v or "content" in v) for v in value
+        ):
             keys.append(key)
     return keys
 

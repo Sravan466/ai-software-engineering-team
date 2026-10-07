@@ -260,6 +260,8 @@ def restore_version(
     current = versions.ensure_first(db, project)
     if current is not None and current.id == version.id:
         raise HTTPException(409, f"v{number} is already the current version.")
+    if versions.matches_current(db, project, version):
+        raise HTTPException(409, f"The build already holds exactly v{number}.")
     token = _claim(db, project, {PipelineStatus.COMPLETED.value})
     if not token:
         raise _conflict(project, "restore")

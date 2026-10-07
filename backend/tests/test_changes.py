@@ -445,3 +445,38 @@ def test_the_project_list_carries_versions_and_open_changes(client, script):
     listed = {p["id"]: p for p in client.get("/api/projects").json()}
     assert listed[done]["current_version"]["number"] == 1 and listed[done]["change"] is None
     assert listed[changing]["change"]["status"] == "awaiting_approval"
+
+
+def test_an_architecture_edit_keeps_every_endpoint():
+    from app.agents.base import merge_edit
+
+    base = {"api_endpoints": [{"method": "GET", "path": "/api/todos"}, {"method": "POST", "path": "/api/todos"}]}
+    reply = {"api_endpoints": [{"method": "GET", "path": "/api/todos"}, {"method": "POST", "path": "/api/todos"},
+                               {"method": "DELETE", "path": "/api/todos"}]}
+    merged = merge_edit(base, reply)
+    assert [e["method"] for e in merged["api_endpoints"]] == ["GET", "POST", "DELETE"]
+
+
+def test_restoring_what_the_build_already_holds_is_refused(client, script):
+    pid = _finished(client)
+    client.post(f"/api/projects/{pid}/changes", json={"text": "add a /health endpoint"})
+    assert client.post(f"/api/projects/{pid}/versions/1/restore").status_code == 202
+    again = client.post(f"/api/projects/{pid}/versions/1/restore")
+    assert again.status_code == 409 and "already holds" in again.json()["detail"]
+    assert [v["number"] for v in client.get(f"/api/projects/{pid}/versions").json()["versions"]] == [3, 2, 1]
+
+
+def test_a_change_that_cant_be_planned_changes_nothing(client, script, monkeypatch):
+    from app.agents.change_planner import ChangePlannerAgent
+
+    pid = _finished(client)
+
+    def broken(self, ctx):
+        raise ValueError("the plan came back as nonsense")
+
+    monkeypatch.setattr(ChangePlannerAgent, "run", broken)
+    client.post(f"/api/projects/{pid}/changes", json={"text": "add a /health endpoint"})
+    project = client.get(f"/api/projects/{pid}").json()
+    assert project["status"] == "completed" and project["change"] is None
+    change = client.get(f"/api/projects/{pid}/changes").json()["changes"][0]
+    assert change["status"] == "failed" and "nonsense" in change["note"]

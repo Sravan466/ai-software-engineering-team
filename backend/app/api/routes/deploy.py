@@ -538,9 +538,9 @@ def deploy_status(
         project.deploy_status = "ready"
         project.deploy_url = vercel.live_url(found) or project.deploy_url
         project.deployed_at = _now()
-        # The version that just went live (#79).
-        if project.deploying_version is not None:
-            project.deployed_version = project.deploying_version
+        # The version that just went live (#79) — none, for a build without versions.
+        project.deployed_version = project.deploying_version
+        project.deploying_version = None
         data = autofix.load(project)
         if data.get("vercel"):
             # It built: the next failure, if there is one, starts the count again.

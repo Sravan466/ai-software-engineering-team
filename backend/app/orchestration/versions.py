@@ -383,6 +383,12 @@ def restore_rows(db: Session, project: Project, version: Version, note: str) -> 
         row = db.get(PhaseResult, item.get("id")) if item.get("id") else None
         if row is not None and row.project_id == project.id and newest is not None and newest.id == row.id:
             row.status = PhaseStatus.APPROVED.value
+            # Exactly what the version saved, whatever was written on the row since.
+            for name in SNAP_FIELDS:
+                if name not in ("phase", "agent"):
+                    setattr(row, name, item.get(name))
+            row.total_tokens = int(item.get("total_tokens") or 0)
+            row.latency_ms = int(item.get("latency_ms") or 0)
         else:
             fields = {name: item.get(name) for name in SNAP_FIELDS if name not in ("phase", "agent")}
             # Which row this copy restores: the version names that one, and the copy

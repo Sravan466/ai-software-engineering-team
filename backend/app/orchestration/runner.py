@@ -915,6 +915,12 @@ class PipelineRunner:
             return self._change_failed(db, project, found, "Stopped before the crew started on it.")
         except ProviderError as e:
             return self._change_failed(db, project, found, f"The planner's model didn't answer: {e}")
+        except claim.Superseded:
+            raise
+        except Exception as e:  # noqa: BLE001 - nothing was changed yet, so nothing is lost
+            log.exception("Scoping change #%d on %s failed", found.number, project.id)
+            db.rollback()
+            return self._change_failed(db, project, found, f"The change couldn't be planned: {e}")
 
         rows = {r.phase: r for r in versions.current_rows(db, project)}
         has = {phase for phase, r in rows.items() if isinstance(r.output, dict) and r.output}
@@ -1069,15 +1075,19 @@ class PipelineRunner:
 
     def _change_failed(self, db: Session, project: Project, found: ChangeRequest, reason: str) -> Project:
         """A change that changed nothing: closed, and the build finished again as it was."""
+        self._close_failed(project, found, reason)
+        self._finished_again(db, project)
+        log.info("Change #%d on %s failed before any edit: %s", found.number, project.id, reason)
+        return project
+
+    def _close_failed(self, project: Project, found: ChangeRequest, reason: str) -> None:
+        """Close a change that changed nothing, with its reason; the caller commits."""
         from app.core.scrub import scrub
 
         found.status = changes.FAILED
         found.note = scrub(reason)[:1000]
         found.finished_at = _now()
         self._put_back(project, found)
-        self._finished_again(db, project)
-        log.info("Change #%d on %s failed before any edit: %s", found.number, project.id, reason)
-        return project
 
     @staticmethod
     def _put_back(project: Project, found: ChangeRequest) -> None:
@@ -1182,12 +1192,11 @@ class PipelineRunner:
         found = changes.open_change(db, project)
         if found is not None:
             if not self._change_started(project, found):
-                # Resumed to the end without the change's first edit ever landing.
-                found.status = changes.FAILED
-                found.note = "The change stopped before anything was changed."
-                found.finished_at = _now()
-                self._put_back(project, found)
-                return False
+                # Resumed to the end without the change's first edit ever landing. Closed —
+                # and the build still gets a version below if anything else changed it.
+                self._close_failed(project, found, "The change stopped before anything was changed.")
+                found = None
+        if found is not None:
             version = versions.record(db, project, found.text, versions.CHANGE, change_id=found.id)
             found.status = changes.DONE
             found.version_id = version.id
