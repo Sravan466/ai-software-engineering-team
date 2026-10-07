@@ -220,6 +220,15 @@ repair round carrying the validation errors; if it still misses, the phase is fl
 rather than quietly stored — and the cost and security gates, which read specific keys off
 these outputs, stop the run instead of reading nothing and calling it fine.
 
+The code phases are the exception to "one reply". The Backend and Frontend Engineers
+first return a small JSON plan (the file list, what each file exports and imports),
+then write the files in batches as fenced code blocks — never as escaped strings inside
+JSON. How many files go in one call comes from the model's measured prompt budget and
+reply ceiling: one at a time on a small window, several on a large one, and you can set
+it per agent in Settings. Python and JSON files are parsed as they land and repaired
+before the next batch; the whole tree is compile-checked once, after the last file.
+
+
 That RAM budget covers everything a computer generates at once, not each call. Builds
 on different projects run side by side, so by default one local generation runs per
 computer at a time (`LOCAL_CONCURRENT_GENERATIONS=1`). Another build's call waits its

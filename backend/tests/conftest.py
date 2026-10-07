@@ -7,6 +7,7 @@ any local runtime or any cloud key.
 from __future__ import annotations
 
 import json
+import re
 import os
 import tempfile
 
@@ -128,10 +129,29 @@ def _conforming(schema: dict) -> object:
     return "mock deliverable"
 
 
+def asked_files(messages) -> list[str]:
+    """The paths a code phase's write call asks for, from its `# Write now` list (#81)."""
+    text = messages[-1].content if messages else ""
+    head, found, rest = text.partition("# Write now")
+    if not found:
+        return []
+    return re.findall(r"^- `([^`]+)`", rest, flags=re.MULTILINE)
+
+
+def fenced(files: dict[str, str]) -> str:
+    """A write call's answer: each file as `### path` and one fenced block."""
+    return "".join(f"### {path}\n```\n{code}{'' if code.endswith(chr(10)) else chr(10)}```\n\n" for path, code in files.items())
+
+
 def _fake_complete(messages, **kwargs) -> LLMResponse:
     options = kwargs.get("options")
     schema = getattr(options, "json_schema", None)
-    text = json.dumps(_conforming(schema)) if schema else MOCK_JSON
+    wanted = [] if schema else asked_files(messages)
+    if wanted:
+        text = fenced({path: "mock deliverable" for path in wanted})
+    else:
+        text = json.dumps(_conforming(schema)) if schema else MOCK_JSON
+
     return LLMResponse(
         text=text,
         provider="mock",

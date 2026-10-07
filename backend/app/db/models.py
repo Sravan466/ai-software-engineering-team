@@ -268,6 +268,19 @@ class Project(Base):
             return None
         return max(0.0, (_now() - started).total_seconds())
 
+    @property
+    def activity(self) -> Optional[dict]:
+        """What the phase running now is doing — planning, or which file it is writing —
+        from the run in this process (#81). None when nothing is reporting."""
+        if self.status != "running":
+            return None
+        from app.orchestration import activity
+
+        found = activity.get(self.id)
+        if found is None or found.get("phase") != self.current_phase:
+            return None
+        return found
+
 
 class PhaseResult(Base):
     """Output of a single agent/phase, plus its approval state."""

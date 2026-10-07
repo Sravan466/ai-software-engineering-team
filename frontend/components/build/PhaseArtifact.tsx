@@ -6,6 +6,8 @@ import { AGENT_BY_KEY } from "@/components/agents/personas";
 import Markdown from "@/components/ui/Markdown";
 import { Icon } from "@/components/shell/icons";
 import DetailFields from "./DetailFields";
+import { HowWritten } from "./CodeWriting";
+
 import FileBrowser from "./FileBrowser";
 import Mermaid from "./Mermaid";
 import { useSkillTitles } from "@/components/skills/skills";
@@ -57,7 +59,10 @@ export default function PhaseArtifact({
     views.push({ key: "files", label: "Files", icon: Icon.file, count: files.length });
   }
   if (mermaid) views.push({ key: "diagram", label: "Diagram", icon: Icon.diagram });
-  if (fields.length) views.push({ key: "details", label: "Details", icon: Icon.info });
+  // A code phase's plan and how it wrote from it (#81) live with its other details.
+  const generation = row.handoff?.generation ?? null;
+  if (fields.length || generation) views.push({ key: "details", label: "Details", icon: Icon.info });
+
 
   const [view, setView] = useState<ViewKey>(views[0]?.key ?? "summary");
   const active = views.find((v) => v.key === view) ?? views[0];
@@ -119,10 +124,12 @@ export default function PhaseArtifact({
           </div>
         )}
         {active?.key === "details" && (
-          <div className="artifact-pad">
-            <DetailFields fields={fields} />
+          <div className="artifact-pad artifact-details">
+            {generation && <HowWritten generation={generation} />}
+            {fields.length > 0 && <DetailFields fields={fields} />}
           </div>
         )}
+
       </div>
 
       <SkillsUsed row={row} />

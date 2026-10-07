@@ -294,6 +294,11 @@ class ProjectOut(BaseModel):
     stalled: bool = False
     #: Seconds the current phase has been generating (None when idle).
     elapsed_seconds: Optional[float] = None
+    #: What the running phase is doing inside itself (#81): `{phase, stage: planning |
+    #: writing | fixing | checking, label, done, total, detail, per_call, files: [{path,
+    #: state}]}` — "writing frontend/app/page.tsx (3 of 9)". None when nothing reports.
+    activity: Optional[dict] = None
+
 
     model_config = {"from_attributes": True, "populate_by_name": True}
 

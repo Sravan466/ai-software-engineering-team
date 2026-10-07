@@ -139,6 +139,17 @@ class ModelProfile:
         return int(self.prompt_token_budget * max(settings.approx_chars_per_token, 1.0))
 
     @property
+    def files_per_call(self) -> int:
+        """How many files one code-writing call asks this model for, plan aside (#81).
+
+        One when the measured prompt budget or reply ceiling is below the batching
+        floor, else as many average files as the reply ceiling holds. A property of the
+        budgets alone: two models with the same window get the same answer, whatever
+        they are called.
+        """
+        return files_per_call(self, 0)
+
+    @property
     def is_small(self) -> bool:
         """Small enough that thin, shapeless output is the model, not the prompt."""
         if self.parameter_count is None:
@@ -175,6 +186,7 @@ class ModelProfile:
             "thinking": self.thinking,
             "thinking_level": self.thinking_level,
             "reasoning_tokens": self.reasoning_tokens,
+            "files_per_call": self.files_per_call,
             "is_local": self.is_local,
             "source": self.source,
             "clamp_reason": self.clamp_reason,
@@ -202,6 +214,44 @@ MIN_WORKABLE_TOKENS = _MIN_WORKABLE_TOKENS
 #: The most of a window reasoning may be kept for, whatever the configured budget:
 #: a reply and a prompt still have to fit beside it.
 _REASONING_SHARE = 0.25
+
+
+#: A per-role choice that writes the whole plan in one call, however long it is.
+FILES_ALL = "all"
+
+
+def files_per_call(
+    profile: "ModelProfile",
+    planned: int,
+    *,
+    avg_file_tokens: Optional[float] = None,
+    override: object = None,
+) -> int:
+    """Files one write call asks for. `planned` 0 means "no plan yet, no cap".
+
+    `override` is the person's per-role choice — a count, or `FILES_ALL` — and wins
+    over the budgets: they may know their model writes more than its window suggests.
+    Otherwise one file when the prompt budget or the reply ceiling is under the batching
+    floor, else `max_output_tokens // avg_file_tokens`, capped at the plan. When that
+    holds the whole plan, the whole plan goes in one call.
+    """
+    cap = planned if planned > 0 else None
+    if override == FILES_ALL:
+        return cap or max(profile.max_output_tokens // _avg(avg_file_tokens), 1)
+    if isinstance(override, int) and not isinstance(override, bool) and override > 0:
+        return min(override, cap) if cap else override
+    if (
+        profile.prompt_char_budget < settings.code_batch_min_prompt_chars
+        or profile.max_output_tokens < settings.code_batch_min_output_tokens
+    ):
+        return 1
+    n = max(profile.max_output_tokens // _avg(avg_file_tokens), 1)
+    return min(n, cap) if cap else n
+
+
+def _avg(avg_file_tokens: Optional[float]) -> int:
+    value = avg_file_tokens if avg_file_tokens and avg_file_tokens > 0 else settings.code_avg_file_tokens
+    return max(int(value), 1)
 
 
 def fallback_profile(

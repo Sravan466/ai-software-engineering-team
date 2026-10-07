@@ -1599,3 +1599,183 @@ textarea.db-input { min-height: 132px; white-space: pre; overflow-x: auto; }
   .db-disclosure, .db-choice, .db-choice-chev, .db-steps li { transition: none; }
 }
 .db-notices { margin: -6px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+
+/* ===========================================================================
+   WRITING — a code phase writing its files, one batch at a time (#81)
+   The phase used to be a single spinner for minutes. It now says which file it
+   is on, and the list under the row fills in as files land: a mark per file in
+   the set's own icons, the folder quiet and the file name read first.
+   =========================================================================== */
+/* The "now working" line, when a code phase reports which file it is on. */
+.working-act { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.working-file {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 18px;
+}
+.working-count {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* With a plan there is real progress to show: the bar fills rather than sweeps. */
+.working-bar-fill span {
+  width: 100%;
+  transform-origin: left center;
+  animation: none;
+  transition: transform var(--tr-slow);
+}
+
+/* Under the running phase's row, aligned with its text. */
+.phase-writing { padding: 0 4px 16px 56px; }
+.writing { display: flex; flex-direction: column; gap: 8px; }
+.writing-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.writing-count { color: var(--ink-2); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.writing-meter {
+  flex: 1;
+  max-width: 220px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+.writing-meter span {
+  display: block;
+  height: 100%;
+  background: var(--agent);
+  transform-origin: left center;
+  transition: transform var(--tr-slow);
+}
+.writing-meta { white-space: nowrap; }
+
+.writing-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 2px 16px;
+  max-height: 236px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.wf {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-xs);
+  transition: background var(--tr);
+}
+.wf-mark { display: inline-flex; color: var(--ink-4); }
+.wf-mark svg { width: 14px; height: 14px; display: block; }
+.wf-path { display: flex; min-width: 0; font-family: var(--mono); font-size: var(--t-xs); line-height: 18px; }
+/* The folder gives way first, so a narrow column keeps the file name. */
+.wf-dir { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); }
+.wf-base { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.wf-state { color: var(--ink-3); white-space: nowrap; }
+
+.wf-planned .wf-base { color: var(--ink-2); }
+.wf-writing,
+.wf-fixing { background: color-mix(in srgb, var(--agent) 10%, transparent); }
+.wf-writing .wf-mark,
+.wf-writing .wf-state { color: var(--agent); }
+.wf-writing .wf-mark svg { animation: wf-pulse 1.2s ease-in-out infinite; }
+.wf-ok .wf-mark { color: var(--ok); }
+.wf-fixing .wf-mark,
+.wf-fixing .wf-state { color: var(--warn); }
+.wf-fixing .wf-mark svg { animation: wf-turn 1.4s linear infinite; }
+.wf-failed .wf-mark,
+.wf-failed .wf-state { color: var(--bad); }
+.wf-missing .wf-base { color: var(--ink-3); text-decoration: line-through; text-decoration-color: var(--ink-4); }
+@keyframes wf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@keyframes wf-turn { to { transform: rotate(-360deg); } }
+
+/* ── the plan, in a finished phase's Details ─────────────────────────────── */
+.artifact-details { display: flex; flex-direction: column; gap: 22px; }
+.written-mode {
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 500;
+}
+.written-whole { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: var(--warn-soft); }
+.written-facts { margin: 0; font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.written-note { margin: 0; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.5; overflow-wrap: anywhere; }
+
+.plan-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.plan-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+}
+.plan-row:first-child { border-top: 0; }
+.plan-row .wf-mark { padding-top: 2px; }
+.plan-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.plan-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.plan-top .wf-path { font-size: var(--t-sm); line-height: 20px; }
+.plan-purpose { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.5; }
+.plan-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 16px;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.plan-k { font-family: var(--sans); color: var(--ink-3); margin-right: 2px; }
+.plan-tag {
+  flex: none;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--ink-2);
+}
+.plan-tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: var(--warn-soft); }
+
+@media (max-width: 640px) {
+  .phase-writing { padding-left: 8px; }
+  .writing-files { grid-template-columns: minmax(0, 1fr); }
+  .writing-meter { max-width: none; }
+  .writing-meta { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wf-writing .wf-mark svg,
+  .wf-fixing .wf-mark svg { animation: none; }
+  .writing-meter span,
+  .working-bar-fill span { transition: none; }
+}

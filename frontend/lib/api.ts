@@ -86,7 +86,59 @@ export type Handoff = {
   registry: boolean;
   contract: boolean;
   truncated_replies: number;
+  /** How a code phase wrote its code (#81). Absent on other phases and older rows. */
+  generation?: Generation | null;
 };
+
+/** One file a code phase planned before writing it (#81). */
+export type PlannedFile = {
+  path: string;
+  purpose: string;
+  exports: string[];
+  imports: string[];
+  /** plan | split (a module a cut-off file was split into) | unplanned */
+  origin: "plan" | "split" | "unplanned";
+};
+
+/**
+ * How a code phase wrote its code (#81): `one` file per call, a `batch` per call
+ * sized to the model's window, or the old `whole` single JSON reply.
+ */
+export type Generation = {
+  mode: "one" | "batch" | "whole";
+  /** Why it wrote in one reply, for `whole`. */
+  reason?: string;
+  files_per_call: number;
+  calls: number;
+  plan_calls?: number;
+  files_planned: number;
+  files_written: number;
+  truncated_replies: number;
+  repairs?: number;
+  plan?: PlannedFile[];
+  unwritten?: string[];
+  left_to_platform?: string[];
+  /** Whether each written file parsed as it landed. */
+  files?: Record<string, "ok" | "failed">;
+};
+
+/** A file's state while a code phase writes it (#81). */
+export type ActivityFileState = "planned" | "writing" | "ok" | "fixing" | "failed" | "missing";
+
+/** What the running phase is doing inside itself (#81). */
+export type Activity = {
+  phase: string;
+  stage: "planning" | "writing" | "fixing" | "checking";
+  label: string;
+  done: number;
+  total: number;
+  /** The file being written or fixed now. */
+  detail: string;
+  per_call: number;
+  files: { path: string; state: ActivityFileState }[];
+  elapsed_s: number;
+};
+
 
 /** One reason a generated file does not compile. */
 export type BuildProblem = {
@@ -276,7 +328,10 @@ export type Project = {
   /** `running`, but nothing is driving it. The server owns the threshold. */
   stalled: boolean;
   elapsed_seconds: number | null;
+  /** What the running phase is doing inside itself — planning, or which file (#81). */
+  activity?: Activity | null;
 };
+
 
 // Fast CRUD calls should fail fast so a hung/restarting backend surfaces an error
 // instead of an infinite "Loading…". LLM-driven endpoints (generate / edit a preview)
@@ -795,6 +850,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  /** How many files a code phase writes per call: a count, "all", or `null` for automatic. */
+  setFilesPerCall: (role: string, value: number | "all" | null) =>
+    req<RoleSettings>(`/api/settings/roles/${role}/files-per-call`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
+
 
   // ── Skills: the procedural library the agents are given ──
   listSkills: () => req<SkillLibrary>("/api/skills"),
@@ -1390,7 +1452,14 @@ export type RoleRow = {
   assigned: string | null;
   provider: string | null;
   model: string | null;
+  /**
+   * Code phases only (#81): how many files one call writes — a count, "all", or
+   * null for automatic — and what automatic means for this role's model now.
+   */
+  files_per_call?: number | "all" | null;
+  files_per_call_auto?: number | null;
 };
+
 
 export type RoleSettings = {
   roles: RoleRow[];

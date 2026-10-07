@@ -261,6 +261,37 @@ class FrontendEngineerOutput(_Shape):
     files: _list_of(SourceFile)
 
 
+# ── the plan a code phase writes before its files (#81) ──────────────────────
+class PlannedFile(_Shape):
+    """One file the phase will write, before a line of it is written."""
+
+    path: str
+    purpose: str
+    #: The names other files import from it — what the next file's call is told exists.
+    exports: StrList = Field(default_factory=list)
+    #: Paths in this plan it imports, so it is written after them where it can be.
+    imports: StrList = Field(default_factory=list)
+
+
+class BackendPlan(_Shape):
+    """Everything in `BackendEngineerOutput` but the code: the code comes file by file."""
+
+    framework: str = Field(description="e.g. FastAPI")
+    summary: str
+    auth_flow: str
+    setup_instructions: StrList
+    files: _list_of(PlannedFile)
+
+
+class FrontendPlan(_Shape):
+    framework: str = Field(description="e.g. Next.js + React")
+    summary: str
+    pages: _list_of(Page)
+    components: _list_of(UiComponent)
+    state_management: str
+    files: _list_of(PlannedFile)
+
+
 # ── QA ───────────────────────────────────────────────────────────────────────
 class TestFile(_Shape):
     path: str
