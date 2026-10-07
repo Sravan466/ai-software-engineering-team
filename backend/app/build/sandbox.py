@@ -233,8 +233,9 @@ def sweep_previews() -> None:
     if cli is None:
         return
     try:
+        # `.Label` for both: on `volume ls`, `.Labels` is a string and can't be indexed.
         for kind, fmt in (("container", '{{.Names}} {{.Label "aiteam.pid"}}'),
-                          ("volume", '{{.Name}} {{index .Labels "aiteam.pid"}}')):
+                          ("volume", '{{.Name}} {{.Label "aiteam.pid"}}')):
             listed = subprocess.run(
                 [cli, kind, "ls", *(["-a"] if kind == "container" else []), "--filter", f"label={PREVIEW_LABEL}",
                  "--format", fmt],
@@ -265,7 +266,9 @@ def sweep() -> None:
     try:
         listed = subprocess.run(
             [cli, "volume", "ls", "--filter", f"label={LABEL}",
-             "--format", '{{.Name}} {{index .Labels "aiteam.created"}}'],
+             # `.Label`, not `index .Labels`: on `volume ls` the labels are one string,
+             # and indexing it fails the whole listing — so nothing was ever swept.
+             "--format", '{{.Name}} {{.Label "aiteam.created"}}'],
             capture_output=True, text=True, timeout=30,
         )
         now = time.time()

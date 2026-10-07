@@ -177,13 +177,16 @@ export default function VisualPreview({ id, onOpenBuild }: { id: string; onOpenB
   const appUrl = onApp ? app?.url ?? null : null;
   const to: PreviewTarget | undefined = onApp ? { target: "app", built_from: app?.built_from } : undefined;
 
-  // Start the app whenever the current frontend has none running or starting. Once
-  // per attempt: a start that fails says so, and "Try again" is a person's choice.
-  const startedFor = useRef<string | null>(null);
+  // Start the app whenever the current frontend has none running or starting — for a
+  // new attempt at once, and again when it went idle (stopped after the idle limit, or
+  // a start the sandbox couldn't finish). Not more than every 15 s: a start that keeps
+  // failing for the sandbox's sake says so rather than spinning.
+  const startedFor = useRef<{ from: string; at: number } | null>(null);
   useEffect(() => {
     if (!app || app.status !== "idle" || !app.current_from) return;
-    if (startedFor.current === app.current_from) return;
-    startedFor.current = app.current_from;
+    const last = startedFor.current;
+    if (last && last.from === app.current_from && Date.now() - last.at < 15_000) return;
+    startedFor.current = { from: app.current_from, at: Date.now() };
     api
       .startPreviewApp(id)
       .then((next) => setState(next))

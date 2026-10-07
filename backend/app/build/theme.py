@@ -61,7 +61,7 @@ def families(files: dict[str, str]) -> dict[str, Optional[str]]:
 def current(theme: Optional[dict], files: dict[str, str]) -> dict:
     """The style the app has now: what was chosen, else what its classes already say."""
     theme = theme if isinstance(theme, dict) else {}
-    fam = theme.get("families") if isinstance(theme.get("families"), dict) else families(files)
+    fam = theme["families"] if isinstance(theme.get("families"), dict) else families(files)
     return {
         "primary": theme.get("primary") or TAILWIND_600.get(fam.get("primary") or "indigo", "#4f46e5"),
         "accent": theme.get("accent") or TAILWIND_600.get(fam.get("accent") or "amber", "#d97706"),

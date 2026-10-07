@@ -32,14 +32,16 @@ _OWNERS = {
 }
 
 
-def edit_block(project: Project) -> Optional[str]:
-    """Why the app can't be changed from the preview right now, or None."""
+def edit_block(project: Project, current: Optional[tuple] = None) -> Optional[str]:
+    """Why the app can't be changed from the preview right now, or None.
+
+    `current`: `app_runtime.current_frontend(project)`, when the caller has it."""
     from app.orchestration.runner import runner
 
     ok, why = app_runtime.available()
     if not ok:
         return why
-    row, busy = app_runtime.current_frontend(project)
+    row, busy = current or app_runtime.current_frontend(project)
     if row is None:
         return "The crew hasn't written the frontend yet."
     if busy or project.status == PipelineStatus.RUNNING.value:
@@ -66,9 +68,28 @@ def guard(project: Project, built_from: Optional[str]):
     return row
 
 
+#: project -> (the attempts it was assembled from, its files). A selection on the app
+#: asks where an element is drawn on every click; the build only changes when an
+#: attempt does.
+_assembled: dict[str, tuple[tuple, dict[str, dict]]] = {}
+_ASSEMBLED_MAX = 16
+
+
 def records(project: Project) -> dict[str, dict]:
     """Every placed file of the build, as the preview was built from it."""
-    return {f["path"]: f for f in artifacts.assemble(project).get("files") or []}
+    key = (
+        tuple(sorted((ph.id, ph.status, str(ph.completed_at)) for ph in project.phases)),
+        str(project.charter),
+        project.name,
+    )
+    seen = _assembled.get(project.id)
+    if seen is not None and seen[0] == key:
+        return seen[1]
+    files = {f["path"]: f for f in artifacts.assemble(project).get("files") or []}
+    if len(_assembled) >= _ASSEMBLED_MAX:
+        _assembled.pop(next(iter(_assembled)))
+    _assembled[project.id] = (key, files)
+    return files
 
 
 def address(oid: Optional[str]) -> source.Address:
@@ -176,15 +197,33 @@ def ask_spec(project: Project, oid: str, instruction: str) -> tuple[dict, str]:
     }, addr.path
 
 
-def theme_spec(row, changes: dict) -> dict:
+def _front(row) -> dict[str, str]:
+    """The Frontend attempt's own files, by the path it wrote them at."""
     output = row.output if isinstance(row.output, dict) else {}
-    front = {
+    return {
         f["path"]: (f.get("code") or f.get("content") or "")
         for f in output.get("files") or []
         if isinstance(f, dict) and isinstance(f.get("path"), str)
     }
+
+
+#: Frontend attempt -> the palette families its classes use. Attempts don't change.
+_families: dict[str, dict] = {}
+
+
+def _families_of(row) -> dict:
+    found = _families.get(row.id)
+    if found is None:
+        if len(_families) >= 64:
+            _families.pop(next(iter(_families)))
+        found = _families[row.id] = site.families(_front(row))
+    return found
+
+
+def theme_spec(row, changes: dict) -> dict:
+    output = row.output if isinstance(row.output, dict) else {}
     try:
-        merged = site.merge(output.get("app_theme"), changes, front)
+        merged = site.merge(output.get("app_theme"), changes, _front(row))
     except site.Refused as e:
         raise HTTPException(422, str(e))
     return {"theme": merged}
@@ -205,14 +244,9 @@ def app_theme(row) -> Optional[dict]:
 
     if row is None or not isinstance(row.output, dict):
         return None
-    front = {
-        f["path"]: (f.get("code") or f.get("content") or "")
-        for f in row.output.get("files") or []
-        if isinstance(f, dict) and isinstance(f.get("path"), str)
-    }
     chosen = row.output.get("app_theme") if isinstance(row.output.get("app_theme"), dict) else None
-    families = (chosen or {}).get("families") if isinstance((chosen or {}).get("families"), dict) else site.families(front)
-    now = site.current(chosen, front)
+    families = (chosen or {}).get("families") if isinstance((chosen or {}).get("families"), dict) else _families_of(row)
+    now = site.current({**(chosen or {}), "families": families}, {})
     primary = D._hex(now["primary"]) or "#4f46e5"
     accent = D._hex(now["accent"]) or "#d97706"
     return {
@@ -235,10 +269,11 @@ def app_theme(row) -> Optional[dict]:
     }
 
 
-def out(project: Project, *, touch: bool = False) -> dict:
-    """`PreviewOut.app`."""
-    data = app_runtime.state(project, touch=touch)
-    row, _busy = app_runtime.current_frontend(project)
+def out(project: Project, *, touch: bool = False, current: Optional[tuple] = None) -> dict:
+    """`PreviewOut.app`. `current`: `app_runtime.current_frontend(project)`, when known."""
+    current = current or app_runtime.current_frontend(project)
+    row, _busy = current
+    data = app_runtime.state(project, touch=touch, current=current)
     record = app_state.edit(project)
     if record is not None:
         record = {
@@ -246,7 +281,7 @@ def out(project: Project, *, touch: bool = False) -> dict:
             "active": record.get("status") in ("running", "landed") and project.status == PipelineStatus.RUNNING.value,
         }
     undo, redo = app_state.targets(project, row.id if row is not None else None)
-    block = edit_block(project)
+    block = edit_block(project, current)
     data.update(
         editing=record,
         can_edit=block is None and data["status"] in ("running", "starting"),

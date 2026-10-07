@@ -210,10 +210,11 @@ def _preview_out(db: Session, project: Project, touch: bool = False) -> PreviewO
 
 
 def _app_fields(project: Project, html: Optional[str], live, revs, touch: bool) -> dict:
-    app = app_edits.out(project, touch=touch)
+    current = app_runtime.current_frontend(project)
+    app = app_edits.out(project, touch=touch, current=current)
     source, note = _source(html, app)
     drawn = _sketch_from(live, revs)
-    row, _ = app_runtime.current_frontend(project)
+    row = current[0]
     kept_from = (row.handoff or {}).get("kept_from") if row is not None and isinstance(row.handoff, dict) else None
     stale = bool(drawn and row is not None and drawn not in (row.id, kept_from))
     return {

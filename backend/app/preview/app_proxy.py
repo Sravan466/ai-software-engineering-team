@@ -31,6 +31,18 @@ log = get_logger(__name__)
 
 #: The largest request body the preview passes on.
 MAX_BODY = 10 * 1024 * 1024
+#: Threads the previews may hold at once, apart from the API's own: a generated app
+#: that hangs holds these for up to a minute each, and must never hold the ones every
+#: sync route of the API runs on.
+THREADS = 24
+_limiter: Optional[anyio.CapacityLimiter] = None
+
+
+def _threads() -> anyio.CapacityLimiter:
+    global _limiter
+    if _limiter is None:
+        _limiter = anyio.CapacityLimiter(THREADS)
+    return _limiter
 #: What a served app may not set or override about how it is served.
 _DROP = frozenset({
     "set-cookie", "set-cookie2", "content-security-policy", "content-security-policy-report-only",
@@ -177,7 +189,7 @@ class AppPreviewMiddleware:
         method = scope.get("method", "GET").upper()
         try:
             status, upstream, body = await anyio.to_thread.run_sync(
-                inst.request, method, path, forwarded, b"".join(chunks)
+                inst.request, method, path, forwarded, b"".join(chunks), limiter=_threads()
             )
         except Exception as e:  # noqa: BLE001 - the page says so, the API is unaffected
             log.info("Preview request failed for %s: %s", inst.project_id, e)

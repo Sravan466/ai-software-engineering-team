@@ -542,6 +542,76 @@ def test_a_crew_rewrite_of_the_frontend_keeps_the_chosen_site_style(client, monk
     assert _frontend_row(pid).output.get("app_theme", {}).get("primary")
 
 
+@parser
+def test_a_model_that_fails_during_ask_the_crew_leaves_the_build_as_it_was(client, monkeypatch, built, app_engine):
+    from app.router.base import ProviderError
+
+    crew = Crew()
+    pid = _finished_build(client, monkeypatch, crew)
+    app = _running(client, pid)["app"]
+    before = _frontend_row(pid)
+
+    def down(messages, **kwargs):
+        if "change 1 file" in messages[-1].content:
+            raise ProviderError("the local runtime refused the connection")
+        return crew(messages, **kwargs)
+
+    stub(monkeypatch, "complete", down)
+    r = client.post(
+        f"/api/projects/{pid}/preview/edit",
+        json={"oid": H1, "instruction": "Make it warmer", "target": "app", "built_from": app["built_from"]},
+    )
+    assert r.status_code == 200, r.text
+    project = client.get(f"/api/projects/{pid}").json()
+    assert project["status"] == "completed" and not project.get("last_error")
+    assert _frontend_row(pid).id == before.id and _frontend_row(pid).status == before.status
+    state = client.get(f"/api/projects/{pid}/preview").json()
+    assert state["app"]["editing"]["status"] == "refused" and "didn't answer" in state["app"]["editing"]["reason"]
+
+
+@parser
+def test_a_crash_inside_a_preview_change_puts_the_frontend_back(client, monkeypatch, built, app_engine):
+    from app.agents.base import BaseAgent
+
+    pid = _finished_build(client, monkeypatch)
+    app = _running(client, pid)["app"]
+    before = _frontend_row(pid)
+
+    def boom(self, *a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(BaseAgent, "_run_build", boom)
+    r = client.post(
+        f"/api/projects/{pid}/preview/patch",
+        json={"ops": [{"oid": H1, "kind": "text", "text": "Anything"}], "target": "app", "built_from": app["built_from"]},
+    )
+    assert r.status_code == 200
+    assert client.get(f"/api/projects/{pid}").json()["status"] == "completed"
+    with SessionLocal() as db:
+        rows = db.query(PhaseResult).filter(PhaseResult.project_id == pid, PhaseResult.phase == "frontend_engineer").all()
+        assert not [r for r in rows if r.status == "running"]
+    assert _frontend_row(pid).id == before.id and "Welcome MARKER-78" in _hero(pid)
+    assert "disk full" in client.get(f"/api/projects/{pid}/preview").json()["app"]["editing"]["reason"]
+
+
+def test_the_sweeps_read_volume_labels_the_way_docker_can(monkeypatch):
+    calls: list = []
+
+    class Done:
+        stdout, returncode = "", 0
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return Done()
+
+    monkeypatch.setattr(sandbox, "docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(sandbox.subprocess, "run", run)
+    sandbox.sweep()
+    sandbox.sweep_previews()
+    formats = [a[a.index("--format") + 1] for a in calls if "--format" in a]
+    assert formats and all("index .Labels" not in f and ".Label " in f for f in formats)
+
+
 def test_edits_wait_for_a_build_that_is_running(client, app_engine):
     pid = client.post("/api/projects", json={"idea": "A recipe site", "routing_mode": "local_only"}).json()["id"]
     r = client.post(f"/api/projects/{pid}/preview/patch", json={"ops": [{"oid": H1, "kind": "text", "text": "x"}], "target": "app"})
@@ -562,6 +632,11 @@ def test_tags_and_edits_keep_to_what_the_code_states_plainly():
     assert '<h1 className="text-4xl font-bold">{"Hi {you} & me"}</h1>' in new["frontend/components/Hero.tsx"]
     assert 'href="/all"' in new["frontend/components/Hero.tsx"]
     assert len(refused) == 1 and "shadow-lg" in refused[0]["reason"]
+    # A JSX attribute string has no escapes: a quote in it is written as an expression.
+    img = {"frontend/x.tsx": 'export default function X() {\n  return <img src="/a.png" alt="hero" />;\n}\n'}
+    new, refused = source.edit(img, [{"path": "frontend/x.tsx", "line": 2, "col": 10, "kind": "attr", "name": "alt", "value": '27" screen & stand'}])
+    assert not refused and 'alt={"27\\" screen & stand"}' in new["frontend/x.tsx"]
+    assert source.tag(new)[1] == 1  # and it still parses
 
 
 def test_app_routes_skip_the_pages_that_need_a_parameter():

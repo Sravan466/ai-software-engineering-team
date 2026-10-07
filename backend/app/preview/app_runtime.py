@@ -932,11 +932,12 @@ _transient: dict[str, tuple[str, str, float]] = {}
 
 
 # ── what the page is told ────────────────────────────────────────────────────
-def state(project, *, touch: bool = False) -> dict:
-    """The app preview's state for `PreviewOut.app`. No side effects but `touch`."""
+def state(project, *, touch: bool = False, current: Optional[tuple] = None) -> dict:
+    """The app preview's state for `PreviewOut.app`. No side effects but `touch`.
+    `current`: `current_frontend(project)`, when the caller has it."""
     from app.preview import app_state
 
-    row, busy = current_frontend(project)
+    row, busy = current or current_frontend(project)
     ok, why = available()
     serving_now = serving(project.id)
     building_now = building(project.id)

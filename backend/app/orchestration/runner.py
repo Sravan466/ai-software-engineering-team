@@ -1217,17 +1217,6 @@ class PipelineRunner:
                     # it is per project, so it holds up nothing else. It does not stop a
                     # second driver existing — see `_checkpoint_lock`.
                     result = agent.revise(ctx, revise) if revise is not None else agent.run(ctx)
-                    if (
-                        revise is None
-                        and phase_key == Phase.FRONTEND_ENGINEER.value
-                        and superseded is not None
-                        and isinstance(superseded.output, dict)
-                        and superseded.output.get("app_theme")
-                        and "app_theme" not in (result.output or {})
-                    ):
-                        # The site style chosen on the app preview (#78) is the
-                        # person's, not the crew's: a rewrite of the code keeps it.
-                        result.output = {**result.output, "app_theme": superseded.output["app_theme"]}
 
                     from app.orchestration.graph import _last_debate, _serialize_result, build_integrations
                     from app.orchestration.charter import freeze
@@ -1296,26 +1285,17 @@ class PipelineRunner:
                     )
         except RevisionRefused as e:
             # A change made on the app preview that broke the build (#78): not kept.
-            # The attempt it was made from is put back as it was, nothing after it was
-            # touched, and the build returns to where it waited.
-            if superseded is not None and was is not None:
-                superseded.status = was
-                superseded.feedback = was_feedback
-            self._delete_rows(db, project, [row])
-            app_state.refuse_edit(project, str(e))
-            db.commit()
-            log.info("A preview change to %s wasn't kept: %s", project.id, e)
-            if (revise or {}).get("was") == PipelineStatus.COMPLETED.value:
-                project.status = PipelineStatus.COMPLETED.value
-                project.gate_kind = None
-                project.gate_note = None
-                db.commit()
-            else:
-                self._park(db, project, fallback)
-            return project
+            return self._unrevise(db, project, row, superseded, was, was_feedback, revise, fallback, str(e))
         except ProviderError as e:
             if revise is not None:
-                app_state.refuse_edit(project, f"The model didn't answer: {e}")
+                # A change made on the preview whose model call failed changed nothing,
+                # so the build is put back exactly as it was — never failed for it.
+                return self._unrevise(
+                    db, project, row, superseded, was, was_feedback, revise, fallback,
+                    "The run was stopped before the change was made."
+                    if isinstance(e, RequestCancelled)
+                    else f"The model didn't answer, so nothing was changed: {e}",
+                )
             if fix_track:
                 self._abandon_round(db, project, fix_track)
             # Put the previous attempt back. Both `rejected` and `failed` count as
@@ -1355,6 +1335,17 @@ class PipelineRunner:
             else:
                 self._fail(db, project, str(e), kind=e.kind, provider=e.provider)
             return project
+        except Exception as e:  # noqa: BLE001 - see below
+            if revise is None or isinstance(e, claim.Superseded):
+                raise
+            # Anything else going wrong inside a preview change — the sandbox, the
+            # checks — must not leave the frontend half-replaced (its attempt rejected,
+            # the new one running): it is put back, and the person told.
+            log.exception("A preview change to %s failed", project.id)
+            return self._unrevise(
+                db, project, row, superseded, was, was_feedback, revise, fallback,
+                f"The change couldn't be made, so nothing was changed: {e}",
+            )
 
         self._complete_row(db, project, row, last_result)
         if charter_update is not None:
@@ -1412,6 +1403,40 @@ class PipelineRunner:
         db.commit()
         log.info("Rebuilding %s from %s after a redo", project.id, phase_key)
         return self.continue_run(db, project)
+
+    def _unrevise(
+        self,
+        db: Session,
+        project: Project,
+        row: PhaseResult,
+        superseded: Optional[PhaseResult],
+        was: Optional[str],
+        was_feedback: Optional[str],
+        revise: dict,
+        fallback: Gate,
+        reason: str,
+    ) -> Project:
+        """A change made on the app preview that wasn't kept (#78): the attempt it was
+        made from is put back as it was, nothing after it was touched, and the build
+        returns to where it waited — finished, or on its gate."""
+        db.rollback()
+        if superseded is not None and was is not None:
+            superseded.status = was
+            superseded.feedback = was_feedback
+        self._delete_rows(db, project, [row])
+        app_state.refuse_edit(project, reason)
+        # A Stop pressed during the change stopped the change, not the build.
+        project.cancel_requested = False
+        db.commit()
+        log.info("A preview change to %s wasn't kept: %s", project.id, reason)
+        if revise.get("was") == PipelineStatus.COMPLETED.value:
+            project.status = PipelineStatus.COMPLETED.value
+            project.gate_kind = None
+            project.gate_note = None
+            db.commit()
+        else:
+            self._park(db, project, fallback)
+        return project
 
     @staticmethod
     def _delete_rows(db: Session, project: Project, rows: list[PhaseResult]) -> None:

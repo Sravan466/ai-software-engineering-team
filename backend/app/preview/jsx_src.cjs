@@ -169,7 +169,9 @@ function attrTarget(sf, opening, name) {
   if (!attr) return { missing: true, value: '' };
   const init = attr.initializer;
   if (!init) return { why: `\`${name}\` is set without a value here.` };
-  if (ts.isStringLiteral(init)) return { start: init.getStart(sf), end: init.end, value: init.text, quote: init.getText(sf)[0] };
+  // A JSX attribute string (`alt="…"`) is not a JS string: it has no escapes, and it
+  // reads HTML entities. Written back with `jsxAttr`, never `quoted`.
+  if (ts.isStringLiteral(init)) return { start: init.getStart(sf), end: init.end, value: init.text, jsx: true };
   if (ts.isJsxExpression(init) && stringLiteral(init.expression)) {
     const lit = init.expression;
     return { start: lit.getStart(sf), end: lit.end, value: lit.text, quote: lit.getText(sf)[0] };
@@ -183,6 +185,16 @@ function quoted(value, quote) {
   if (quote === '`') return '`' + value.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${') + '`';
   if (quote === "'") return "'" + value.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
   return JSON.stringify(value);
+}
+
+function jsxAttr(value) {
+  // Plain when JSX would read it back as written; a string expression otherwise.
+  if (/["&\n\r]/.test(value)) return `{${JSON.stringify(value)}}`;
+  return `"${value}"`;
+}
+
+function written(target, value) {
+  return target.jsx ? jsxAttr(value) : quoted(value, target.quote);
 }
 
 function jsxText(value) {
@@ -284,9 +296,9 @@ function plan(sf, found, op) {
     for (const c of op.add || []) if (c && !next.includes(c)) next.push(c);
     const value = next.join(' ');
     if (target.missing) {
-      return { index: op.index, start: opening.tagName.end, end: opening.tagName.end, text: ` className=${JSON.stringify(value)}` };
+      return { index: op.index, start: opening.tagName.end, end: opening.tagName.end, text: ` className=${jsxAttr(value)}` };
     }
-    return { index: op.index, start: target.start, end: target.end, text: quoted(value, target.quote) };
+    return { index: op.index, start: target.start, end: target.end, text: written(target, value) };
   }
   if (op.kind === 'attr') {
     const name = String(op.name || '');
@@ -295,9 +307,9 @@ function plan(sf, found, op) {
     if (target.why) return { why: target.why };
     const value = op.value == null ? '' : String(op.value);
     if (target.missing) {
-      return { index: op.index, start: opening.tagName.end, end: opening.tagName.end, text: ` ${name}=${JSON.stringify(value)}` };
+      return { index: op.index, start: opening.tagName.end, end: opening.tagName.end, text: ` ${name}=${jsxAttr(value)}` };
     }
-    return { index: op.index, start: target.start, end: target.end, text: quoted(value, target.quote) };
+    return { index: op.index, start: target.start, end: target.end, text: written(target, value) };
   }
   return { why: `"${op.kind}" isn't a change the code can take.` };
 }

@@ -52,6 +52,7 @@ function shutdown(code) {
   setTimeout(() => process.exit(code), 200);
 }
 process.on('SIGTERM', () => shutdown(0));
+process.on('uncaughtException', (e) => log(`[relay] ${e && e.stack ? e.stack : e}`));
 process.stdin.on('end', () => shutdown(0));
 
 // ── the frontend ─────────────────────────────────────────────────────────────
@@ -66,7 +67,14 @@ const TYPES = {
 function serveStatic(dir) {
   const base = path.resolve(ROOT, dir);
   return http.createServer((req, res) => {
-    let rel = decodeURIComponent((req.url || '/').split('?')[0]);
+    let rel;
+    try {
+      rel = decodeURIComponent((req.url || '/').split('?')[0]);
+    } catch (_) {
+      // A malformed address is the request's fault: answer it, don't fall over.
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('Bad request');
+    }
     let file = path.resolve(base, '.' + rel);
     if (!file.startsWith(base)) {
       res.writeHead(403);
