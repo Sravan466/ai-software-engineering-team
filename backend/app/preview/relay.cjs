@@ -190,7 +190,11 @@ function forward(msg) {
   for (const [k, v] of Object.entries(msg.headers || {})) if (!HOP.has(k.toLowerCase())) headers[k] = v;
   const body = msg.body ? Buffer.from(msg.body, 'base64') : null;
   if (body && body.length) headers['content-length'] = String(body.length);
-  headers.host = 'localhost';
+  // The app sees the host it is reached on, so the absolute URLs it builds (a redirect
+  // to /login) stay on the preview's origin.
+  const host = (msg.headers || {}).host;
+  headers.host = typeof host === 'string' && host ? host : 'localhost';
+  headers['x-forwarded-proto'] = 'http';
   const target = back ? backendTarget : { port: FRONT_PORT };
   const req = http.request(
     Object.assign({ host: '127.0.0.1', method: msg.method || 'GET', path: back ? back.path : msg.path || '/', headers, timeout: 60000 }, target),

@@ -594,7 +594,9 @@ export default function VisualPreview({ id, onOpenBuild }: { id: string; onOpenB
       <div className={"notice " + (appFailed ? "notice-bad" : "notice-warn")} role="note">
         {appFailed ? Icon.alert : Icon.info}
         <div className="notice-body">
-          <span className="notice-title">{appFailed ? "The app didn't build, so this is the sketch" : "The app can't run here, so this is the sketch"}</span>
+          <span className="notice-title">
+            {appFailed && app.fault !== "sandbox" ? "The app didn't build, so this is the sketch" : "The app couldn't run here, so this is the sketch"}
+          </span>
           <span className="notice-text">{app.reason}</span>
           {appFailed && app.problems.length > 0 && (
             <ul className="pv-problems">
@@ -607,7 +609,7 @@ export default function VisualPreview({ id, onOpenBuild }: { id: string; onOpenB
           )}
           {appFailed && (
             <div className="notice-actions">
-              {onOpenBuild && (
+              {onOpenBuild && app.fault !== "sandbox" && (
                 <button className="btn btn-sm" onClick={onOpenBuild}>
                   {Icon.list} See Build
                 </button>
@@ -631,7 +633,9 @@ export default function VisualPreview({ id, onOpenBuild }: { id: string; onOpenB
             {noFrontend
               ? "Prism hasn't built the front end yet"
               : appFailed
-                ? "The app didn't build"
+                ? app?.fault === "sandbox"
+                  ? "The app couldn't start here"
+                  : "The app didn't build"
                 : app?.status === "unavailable"
                   ? "The app can't run here"
                   : "No preview yet"}
@@ -833,9 +837,11 @@ export default function VisualPreview({ id, onOpenBuild }: { id: string; onOpenB
                     ? appBlock
                       ? `${appBlock} You can still select elements to see where they come from.`
                       : "Changes here are made to the code. Hover to preview a selection; ↑ or Esc selects the parent."
-                    : app?.backend?.status === "down" || app?.backend?.why
-                      ? `The app runs here as built. ${app?.backend?.why ?? ""}`.trim()
-                      : "This is the app as built — the code you download and deploy. Switch to Edit (S) to change it."
+                    : app?.backend?.status === "installing" || app?.backend?.status === "starting"
+                      ? "This is the app as built. Its backend is still starting, so data the app fetches may not load yet."
+                      : app?.backend?.status === "down" || app?.backend?.why
+                        ? `This is the app as built, running without its backend: ${app?.backend?.why ?? ""}`.trim()
+                        : "This is the app as built — the code you download and deploy. Switch to Edit (S) to change it."
                 : comparing
                   ? "Showing the version before the crew's change."
                   : editing

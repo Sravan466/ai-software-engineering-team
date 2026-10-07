@@ -56,7 +56,7 @@ export function describeSource(state: PreviewState, now: number): [Tone, string,
     return ["live", "Running the built app", `from the Frontend phase${when ? ` ${when}` : ""}${backend}`];
   }
   if (!app || app.status === "none") return ["sketch", "Sketch", "the crew hasn't written the frontend yet"];
-  if (app.status === "failed") return ["bad", "Sketch", "the app failed to build"];
+  if (app.status === "failed") return ["bad", "Sketch", app.fault === "sandbox" ? "the app couldn't start here" : "the app failed to build"];
   return ["sketch", "Sketch", app.reason ? "the app can't run here" : null];
 }
 
@@ -64,7 +64,7 @@ export function describeSource(state: PreviewState, now: number): [Tone, string,
 export function SourceLine({ state, onOpenBuild }: { state: PreviewState; onOpenBuild?: () => void }) {
   const now = useNow();
   const [tone, what, why] = describeSource(state, now);
-  const failed = state.app?.status === "failed";
+  const failed = state.app?.status === "failed" && state.app?.fault !== "sandbox";
   const title = state.source === "sketch" ? state.app?.reason ?? state.source_note ?? undefined : state.app?.backend?.why || undefined;
   return (
     <span className="pv-source" data-tone={tone} role="status" aria-live="polite" title={title}>
@@ -216,11 +216,12 @@ export function ChangeStrip({
       </>
     );
   } else if (e) {
+    const back = e.kind === "undo" ? "The earlier code is back." : e.kind === "redo" ? "Your change is back in the code." : "Your change is in the code.";
     body = (
       <>
         <span className="btn-spinner" aria-hidden="true" />
         <span className="pv-change-text">
-          <b>Your change is in the code.</b> Restarting the app with it…
+          <b>{back}</b> Restarting the app with it…
         </span>
       </>
     );

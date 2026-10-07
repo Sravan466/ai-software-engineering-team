@@ -101,6 +101,8 @@ class AppOut(BaseModel):
     traced: int = 0
     trace_note: Optional[str] = None
     ttl_seconds: int = 0
+    #: A failed start: the code's fault (it didn't build) or the sandbox's (it couldn't run).
+    fault: Optional[str] = None
     editing: Optional[AppEditOut] = None
     can_edit: bool = False
     edit_block: Optional[str] = None

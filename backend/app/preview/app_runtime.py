@@ -50,7 +50,7 @@ from app.build import runner as build_runner
 from app.build import sandbox
 from app.build.sandbox import NODE_IMAGE, PYTHON_IMAGE, Limits, SandboxError, Step
 from app.core.config import settings
-from app.core.constants import BuildStatus, PhaseStatus
+from app.core.constants import BuildStatus, Phase, PhaseStatus
 from app.core.logging import get_logger
 from app.preview import source
 
@@ -67,7 +67,7 @@ RELAY_PATH = ".aiteam/relay.cjs"
 #: A Python backend's socket, in the volume both containers mount.
 API_SOCKET = "/work/.aiteam/api.sock"
 _TOKEN = re.compile(r"^[0-9a-f]{32}$")
-FRONTEND = "frontend_engineer"
+FRONTEND = Phase.FRONTEND_ENGINEER.value
 
 
 class AppBuildFailed(Exception):
@@ -549,7 +549,8 @@ class RelayHandle:
         )
         env = {**plan.env, "PYTHONPATH": "/work/backend:/work/backend/.deps"}
         try:
-            self._backend_proc = self.box.serve("api", command, env, image=PYTHON_IMAGE)
+            # Its stdout is the access log: nothing reads it, so it goes nowhere.
+            self._backend_proc = self.box.serve("api", command, env, image=PYTHON_IMAGE, stdout=False)
         except SandboxError as e:
             inst.set_backend("down", str(e))
             self._tell_backend("down", str(e))
@@ -736,16 +737,25 @@ def _cap() -> None:
 
 # ── the project's side ───────────────────────────────────────────────────────
 def current_frontend(project) -> tuple[Optional[object], bool]:
-    """(the Frontend attempt that counts, whether a newer one is being written now)."""
+    """(the Frontend attempt that counts, whether a newer one is being written now).
+
+    While a newer one is being written, the attempt it replaces still counts: a redo
+    marks it superseded the moment it starts, and the app on screen is still that
+    code until the new attempt lands — or is refused and the old one put back.
+    """
     rows = [r for r in project.phases if r.phase == FRONTEND]
-    busy = any(r.status == PhaseStatus.RUNNING.value for r in rows)
+    running = [r for r in rows if r.status == PhaseStatus.RUNNING.value]
+    has_code = lambda r: isinstance(r.output, dict) and r.output.get("files")  # noqa: E731
     done = [
         r for r in rows
         if r.status not in (PhaseStatus.REJECTED.value, PhaseStatus.FAILED.value, PhaseStatus.RUNNING.value)
-        and isinstance(r.output, dict) and r.output.get("files")
+        and has_code(r)
     ]
+    if running and not done:
+        started = min((r.created_at, r.id) for r in running)
+        done = [r for r in rows if r.status == PhaseStatus.REJECTED.value and has_code(r) and (r.created_at, r.id) < started]
     done.sort(key=lambda r: (r.created_at, r.id))
-    return (done[-1] if done else None), busy
+    return (done[-1] if done else None), bool(running)
 
 
 def _built_at(row) -> Optional[str]:
@@ -772,6 +782,24 @@ def _remember_failure(inst: Instance, reason: str, problems: list[dict]) -> None
         log.exception("Couldn't record a failed app preview for %s", inst.project_id)
     finally:
         db.close()
+
+
+def _sketch_instead(inst: Instance) -> None:
+    """The app can't run: draw the sketch, the fallback, if there is none (#78)."""
+    from app.db.base import SessionLocal
+    from app.db.models import PreviewRevision
+    from app.orchestration.runner import runner
+
+    db = SessionLocal()
+    try:
+        if db.query(PreviewRevision).filter(PreviewRevision.project_id == inst.project_id).count():
+            return
+    finally:
+        db.close()
+    try:
+        runner.draw_sketch_for(inst.project_id, inst.built_from, inst.owner_id)
+    except Exception:  # noqa: BLE001 - the reason is on the page either way
+        log.exception("Couldn't start the fallback sketch for %s", inst.project_id)
 
 
 def _forget_failure(project_id: str) -> None:
@@ -809,6 +837,10 @@ def ensure(project, *, retry: bool = False) -> Optional[Instance]:
     known = app_state.failed(project)
     if known and known.get("row") == row.id and not retry:
         return None
+    transient = _transient.get(project.id)
+    if transient and transient[0] == row.id and not retry:
+        return None
+    _transient.pop(project.id, None)
     with _lock:
         current = _serving.get(project.id)
         if current is not None and current.built_from == row.id and current.alive():
@@ -921,6 +953,7 @@ def _fail(inst: Instance, reason: str, problems: Optional[list[dict]] = None, *,
             _building.pop(inst.project_id, None)
     if persist:
         _remember_failure(inst, reason, inst.problems)
+        _sketch_instead(inst)
     else:
         # Not the code's fault: kept only in memory, so the page can say why and a
         # second look tries again.
@@ -928,6 +961,7 @@ def _fail(inst: Instance, reason: str, problems: Optional[list[dict]] = None, *,
 
 
 #: project -> (attempt, why, when) for a start that failed for the sandbox's sake.
+#: Kept until a retry: starting again by itself would spend a build every minute.
 _transient: dict[str, tuple[str, str, float]] = {}
 
 
@@ -960,6 +994,8 @@ def state(project, *, touch: bool = False, current: Optional[tuple] = None) -> d
         "traced": (serving_now.tagged if alive else 0),
         "trace_note": serving_now.tag_note if alive else None,
         "ttl_seconds": int(settings.preview_app_ttl_seconds),
+        #: Whose failure a failed start is: the code's (it didn't build) or the sandbox's.
+        "fault": None,
     }
     if row is None:
         out["status"] = "none"
@@ -979,16 +1015,21 @@ def state(project, *, touch: bool = False, current: Optional[tuple] = None) -> d
         out["step"] = building_now.step
     elif run is not None and run.get("status") == BuildStatus.FAILED.value:
         out["status"] = FAILED
+        out["fault"] = "code"
         out["reason"] = f"The app didn't build: {run.get('summary') or 'see the Build tab'}"
         out["problems"] = [p for p in run.get("problems") or [] if isinstance(p, dict)][:8]
     elif known and known.get("row") == row.id:
         out["status"] = FAILED
+        out["fault"] = "code"
         out["reason"] = known.get("reason")
         out["problems"] = list(known.get("problems") or [])
     elif alive and serving_now.built_from == row.id:
         out["status"] = RUNNING
-    elif transient and transient[0] == row.id and time.monotonic() - transient[2] < 60:
+    elif transient and transient[0] == row.id:
+        # Not the code's fault, but not something a reload fixes either: it stays until
+        # someone asks for another try ("Try the app again").
         out["status"] = FAILED
+        out["fault"] = "sandbox"
         out["reason"] = transient[1]
     elif busy:
         out["status"] = "waiting"

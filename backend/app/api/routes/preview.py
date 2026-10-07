@@ -338,7 +338,9 @@ def _drive_revise(project_id: str, spec: dict, token: str) -> None:
         try:
             db.rollback()
             project = db.get(Project, project_id)
-            if project is not None:
+            # Only a change still on its way in is "not made": one that landed is in the
+            # code, and the crash happened in what ran after it.
+            if project is not None and (app_state.edit(project) or {}).get("status") == "running":
                 app_state.refuse_edit(project, "The platform hit an internal error making that change.")
                 db.commit()
         except Exception:  # noqa: BLE001

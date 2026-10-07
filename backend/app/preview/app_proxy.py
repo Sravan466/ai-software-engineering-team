@@ -20,10 +20,12 @@ What the app sends back is passed on as it is, with four exceptions:
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 import anyio
 
+from app.api.auth_middleware import _header
 from app.core.logging import get_logger
 from app.preview import app_runtime
 
@@ -51,7 +53,9 @@ _DROP = frozenset({
     "clear-site-data", "permissions-policy", "cross-origin-opener-policy", "cross-origin-embedder-policy",
     "cross-origin-resource-policy",
 })
-_FORWARD_SKIP = frozenset({"host", "cookie", "connection", "accept-encoding", "content-length", "origin", "referer"})
+_FORWARD_SKIP = frozenset({"cookie", "connection", "accept-encoding", "content-length", "origin", "referer"})
+#: A redirect the app built against the host it is served from inside the box.
+_LOOPBACK = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?(?=/|$)", re.IGNORECASE)
 
 
 def _frame_ancestors() -> list[str]:
@@ -213,6 +217,9 @@ class AppPreviewMiddleware:
                 continue
             values = value if isinstance(value, list) else [value]
             for v in values:
+                if name == "location":
+                    # Back onto the preview's own origin, whatever host the app thought it had.
+                    v = _LOOPBACK.sub("", str(v)) or "/"
                 out.append((name.encode("latin-1"), str(v).encode("latin-1", errors="replace")))
         out += [
             (b"content-length", str(length).encode("ascii")),
@@ -225,10 +232,4 @@ class AppPreviewMiddleware:
             out.append((b"cache-control", b"no-store"))
         return out
 
-
-def _header(scope, name: bytes) -> Optional[str]:
-    for key, value in scope.get("headers") or []:
-        if key.lower() == name:
-            return value.decode("latin-1")
-    return None
 

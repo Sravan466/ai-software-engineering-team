@@ -824,7 +824,7 @@ class PipelineRunner:
         if row is None or not isinstance(row.output, dict) or not row.output.get("files"):
             app_state.refuse_edit(project, "There's no frontend to change yet.")
             db.commit()
-            self._park(db, project, Gate(project.gate_kind or GateKind.PHASE.value, project.gate_note))
+            self._back_to(db, project, spec)
             return project
         spec = {
             **spec,
@@ -840,11 +840,7 @@ class PipelineRunner:
             if older is None or older.project_id != project.id or older.phase != phase:
                 app_state.refuse_edit(project, "That version of the frontend isn't kept any more.")
                 db.commit()
-                if spec.get("was") == PipelineStatus.COMPLETED.value:
-                    project.status = PipelineStatus.COMPLETED.value
-                    db.commit()
-                else:
-                    self._park(db, project, Gate(project.gate_kind or GateKind.PHASE.value, project.gate_note))
+                self._back_to(db, project, spec)
                 return project
             spec["restore"] = {"output": older.output, "build_run": older.build_run}
         if spec.get("was") == PipelineStatus.COMPLETED.value:
@@ -869,6 +865,22 @@ class PipelineRunner:
             keep=keep or None,
             revise=spec,
         )
+
+    def _back_to(self, db: Session, project: Project, spec: dict) -> None:
+        """A preview change that never started: the build goes back to where it was."""
+        if spec.get("was") == PipelineStatus.COMPLETED.value:
+            project.status = PipelineStatus.COMPLETED.value
+            project.gate_kind = None
+            project.gate_note = None
+            db.commit()
+        else:
+            self._park(db, project, Gate(project.gate_kind or GateKind.PHASE.value, project.gate_note))
+
+    def draw_sketch_for(self, project_id: str, row_id: str, owner_id: Optional[str]) -> None:
+        """Draw the sketch for a frontend whose app preview couldn't run (#78): the
+        fallback, on the owner's models, alongside whatever else is happening."""
+        with identity.acting_as(owner_id):
+            self._draw_mockup_later(project_id, row_id)
 
     def _remediate(self, db: Session, project: Project) -> bool:
         """Send serious findings back to the agents that own them. True if it fired.
@@ -1209,6 +1221,7 @@ class PipelineRunner:
                         extra_context=(
                             connectors_note() if phase_key == Phase.SYSTEM_DESIGN.value else ""
                         ),
+                        revising=revise is not None,
                     )
                     # Inside the lock, model call and all. This is a read-modify-write:
                     # the patch below is built from the snapshot above, so a write to this
@@ -1885,6 +1898,10 @@ class PipelineRunner:
         run = row.build_run if row is not None and isinstance(row.build_run, dict) else None
         if run is None or run.get("status") != BuildStatus.OK.value or run.get("stack") not in ("nextjs", "vite"):
             return False
+        project = db.get(Project, row.project_id)
+        known = app_state.failed(project) if project is not None else None
+        if known and known.get("row") == row_id:
+            return False  # its app preview was tried, and didn't build
         ok, _ = app_runtime.available()
         return ok
 

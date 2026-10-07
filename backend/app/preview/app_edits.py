@@ -21,7 +21,7 @@ from app.core.constants import PipelineStatus
 from app.db.models import Project
 from app.preview import app_runtime, app_state, source
 
-FRONTEND = "frontend_engineer"
+FRONTEND = app_runtime.FRONTEND
 #: What a person may change the app from: a build waiting on them, or a finished one.
 EDITABLE = (PipelineStatus.AWAITING_APPROVAL.value, PipelineStatus.COMPLETED.value)
 _OWNERS = {

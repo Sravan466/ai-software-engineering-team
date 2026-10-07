@@ -507,7 +507,7 @@ export default function Decision({
               {Icon.alert}
               <span>
                 The preview above is a <b>sketch</b>, not the app —{" "}
-                {preview?.app?.status === "failed"
+                {preview?.app?.status === "failed" && preview.app.fault !== "sandbox"
                   ? "the app didn't build, so you haven't seen the code run."
                   : (preview?.app?.reason ?? "the app couldn't run here.").replace(/\.$/, "") + "."}{" "}
                 Approving ships the code in Files.

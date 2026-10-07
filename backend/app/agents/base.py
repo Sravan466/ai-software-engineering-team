@@ -122,6 +122,8 @@ class AgentContext:
     escalate: bool = False
     #: The model an escalated call is pinned to, resolved once per run by the router.
     pin_model: Optional[str] = None
+    #: A change made on the app preview (#78): the attempt says its own site style.
+    revising: bool = False
 
 
 class RevisionRefused(Exception):
@@ -582,6 +584,7 @@ class BaseAgent:
         may well be correct, so a failure here is logged and the phase is simply not
         checked — which the status then says, rather than claiming it passed.
         """
+        self._carry_theme(ctx, output)
         if not settings.enforce_build_check or self.key not in CODE_PHASES:
             return None
         try:
@@ -589,6 +592,32 @@ class BaseAgent:
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure
             log.warning("%s: the compile check could not run: %s", self.title, e)
             return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")
+
+    def _carry_theme(self, ctx: AgentContext, output: dict) -> None:
+        """A frontend the crew (re)writes keeps the site style the person chose on the
+        app preview (#78) — before it is checked and built, so the build that passes
+        is of the Tailwind config that ships. A change made on the preview itself says
+        its own style (an undo may be taking one away), so it is left alone."""
+        if self.key != Phase.FRONTEND_ENGINEER.value or ctx.revising or not isinstance(output, dict):
+            return
+        if "app_theme" in output:
+            return
+        build = inflight.current() or {}
+        if not build.get("id"):
+            return
+        from app.db.base import SessionLocal
+        from app.db.models import Project
+        from app.preview import app_state
+
+        try:
+            with SessionLocal() as db:
+                project = db.get(Project, build["id"])
+                theme = app_state.theme(project) if project is not None else None
+        except Exception:  # noqa: BLE001 - a style is never worth failing a phase over
+            log.exception("Couldn't read the chosen site style")
+            return
+        if theme:
+            output["app_theme"] = theme
 
     def _run_build(
         self, ctx: AgentContext, output: dict, build: Optional[BuildCheck], reuse: Optional[dict] = None

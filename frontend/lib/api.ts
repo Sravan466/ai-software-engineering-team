@@ -1894,6 +1894,8 @@ export type PreviewApp = {
   traced: number;
   trace_note: string | null;
   ttl_seconds: number;
+  /** A failed start: the code's fault (it didn't build) or the sandbox's (it couldn't run). */
+  fault: "code" | "sandbox" | null;
   editing: PreviewAppEdit | null;
   can_edit: boolean;
   edit_block: string | null;

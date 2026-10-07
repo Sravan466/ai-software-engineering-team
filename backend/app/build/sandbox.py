@@ -210,6 +210,11 @@ SWEEP_AFTER_SECONDS = 3600
 PREVIEW_LABEL = "aiteam.preview=1"
 
 
+#: This process, as its previews are labelled: a PID can come round again — a backend
+#: in a container is PID 1 on every restart — so a PID alone can't say whose they are.
+INSTANCE = uuid.uuid4().hex[:12]
+
+
 def _alive(pid: str) -> bool:
     import os
 
@@ -232,10 +237,12 @@ def sweep_previews() -> None:
     cli = docker()
     if cli is None:
         return
+    import os
+
     try:
         # `.Label` for both: on `volume ls`, `.Labels` is a string and can't be indexed.
-        for kind, fmt in (("container", '{{.Names}} {{.Label "aiteam.pid"}}'),
-                          ("volume", '{{.Name}} {{.Label "aiteam.pid"}}')):
+        for kind, fmt in (("container", '{{.Names}} {{.Label "aiteam.pid"}} {{.Label "aiteam.instance"}}'),
+                          ("volume", '{{.Name}} {{.Label "aiteam.pid"}} {{.Label "aiteam.instance"}}')):
             listed = subprocess.run(
                 [cli, kind, "ls", *(["-a"] if kind == "container" else []), "--filter", f"label={PREVIEW_LABEL}",
                  "--format", fmt],
@@ -243,8 +250,10 @@ def sweep_previews() -> None:
             )
             gone = []
             for line in listed.stdout.splitlines():
-                name, _, pid = line.partition(" ")
-                if name and not _alive(pid.strip() or "0"):
+                name, pid, instance = (line.split(" ") + ["", ""])[:3]
+                # Its process is gone — or the PID is ours now, but we didn't start it.
+                ours_by_pid = pid.strip() == str(os.getpid())
+                if name and (not _alive(pid.strip() or "0") or (ours_by_pid and instance.strip() != INSTANCE)):
                     gone.append(name)
             if gone:
                 subprocess.run([cli, kind, "rm", "-f", *gone],
@@ -336,7 +345,7 @@ class Sandbox:
 
         out = ["--label", LABEL]
         if self.preview:
-            out += ["--label", PREVIEW_LABEL, "--label", f"aiteam.pid={os.getpid()}"]
+            out += ["--label", PREVIEW_LABEL, "--label", f"aiteam.pid={os.getpid()}", "--label", f"aiteam.instance={INSTANCE}"]
         return out
 
     # ── stopping ─────────────────────────────────────────────────────────────
@@ -483,10 +492,14 @@ class Sandbox:
             pass
 
     # ── a kept build, served (#78) ───────────────────────────────────────────
-    def serve(self, suffix: str, command: str, env: dict, image: Optional[str] = None) -> subprocess.Popen:
+    def serve(self, suffix: str, command: str, env: dict, image: Optional[str] = None,
+              stdout: bool = True) -> subprocess.Popen:
         """Start a long-lived container on the kept volume, attached by its stdin and
         stdout. No network, no port: whatever it serves is reached through those pipes
-        alone. Its memory and CPU caps are the sandbox's."""
+        alone. Its memory and CPU caps are the sandbox's.
+
+        `stdout=False` sends its stdout nowhere: a pipe nobody reads fills after 64 KB,
+        and the next write — an access-log line — blocks the server for good."""
         name = f"{self.volume}-{_safe(suffix)}"
         with self._lock:
             if self.cancelled:
@@ -494,7 +507,10 @@ class Sandbox:
             self._served.append(name)
         args = self._args(name, command, network=False, env=env, image=image, interactive=True, cache=False)
         try:
-            return subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return subprocess.Popen(
+                args, stdin=subprocess.PIPE, stdout=subprocess.PIPE if stdout else subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
         except OSError as e:
             raise SandboxError(f"Docker couldn't start the preview: {e}") from e
 

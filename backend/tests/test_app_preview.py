@@ -99,6 +99,8 @@ class FakeHandle:
             return 200, {"content-type": "application/javascript", "set-cookie": "x=1"}, b"console.log(1)"
         if path.startswith("/__api"):
             return 503, {"content-type": "application/json"}, b'{"detail":"frontend only"}'
+        if path == "/account":
+            return 307, {"location": "http://localhost/login?next=%2Faccount"}, b""
         return 200, {
             "content-type": "text/html; charset=utf-8",
             "set-cookie": "session=stolen; Domain=localhost",
@@ -272,6 +274,55 @@ def test_the_preview_is_the_built_app_served_byte_for_byte_from_its_own_origin(c
     assert asset.status_code == 200 and "set-cookie" not in asset.headers
     # No sketch was drawn: the app runs.
     assert state["revisions"] == []
+
+
+@parser
+def test_the_app_sees_its_own_host_and_its_redirects_stay_on_its_origin(client, monkeypatch, built, app_engine):
+    pid = _finished_build(client, monkeypatch)
+    host = _host(_running(client, pid)["app"]["url"])
+    r = client.get("/account", headers={"host": host}, follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/login?next=%2Faccount"
+    method, path, headers = app_engine.handles[-1].requests[-1]
+    assert headers["host"] == host and "cookie" not in headers
+
+
+@parser
+def test_a_start_the_sandbox_couldnt_finish_waits_for_a_retry(client, monkeypatch, built, app_engine):
+    pid = _finished_build(client, monkeypatch)
+
+    def broken(inst, plan, on_step):
+        raise sandbox.SandboxError("Docker couldn't pull node:20-alpine")
+
+    app_engine.start = broken
+    client.post(f"/api/projects/{pid}/preview/app")
+    state = _wait(lambda: (lambda s: s if s["app"]["status"] == "failed" else None)(
+        client.get(f"/api/projects/{pid}/preview").json()
+    ))
+    assert "couldn't pull" in state["app"]["reason"]
+    # Not tried again by itself, however long the tab stays open...
+    row, why, at = app_runtime._transient[pid]
+    app_runtime._transient[pid] = (row, why, at - 3600)
+    client.post(f"/api/projects/{pid}/preview/app")
+    assert client.get(f"/api/projects/{pid}/preview").json()["app"]["status"] == "failed"
+    # ...only when asked.
+    del app_engine.start  # the engine's own start again
+    client.post(f"/api/projects/{pid}/preview/app", json={"retry": True})
+    _wait(lambda: client.get(f"/api/projects/{pid}/preview").json()["app"]["status"] == "running")
+
+
+@parser
+def test_an_app_preview_that_fails_to_build_asks_for_the_sketch(client, monkeypatch, built, app_engine):
+    from app.orchestration.runner import runner
+
+    asked: list = []
+    monkeypatch.setattr(runner, "draw_sketch_for", lambda pid, row, owner: asked.append((pid, row)))
+    pid = _finished_build(client, monkeypatch)
+    app_engine.fail = "The app didn't build: `next build` failed · 1 error"
+    client.post(f"/api/projects/{pid}/preview/app")
+    _wait(lambda: asked)
+    assert asked == [(pid, _frontend_row(pid).id)]
+    with SessionLocal() as db:
+        assert runner._app_preview_runs(db, _frontend_row(pid).id) is False
 
 
 def test_the_proxy_refuses_a_host_without_a_live_token(client, app_engine):
@@ -540,6 +591,8 @@ def test_a_crew_rewrite_of_the_frontend_keeps_the_chosen_site_style(client, monk
         db.commit()
         runner.redo(db, project, "frontend_engineer", "tighten the layout")
     assert _frontend_row(pid).output.get("app_theme", {}).get("primary")
+    # And the rewrite was built with it: the passing build is of the config that ships.
+    assert '"600": "#0f766e"' in built.runs[-1]["tailwind.config.js"]
 
 
 @parser
@@ -612,6 +665,27 @@ def test_the_sweeps_read_volume_labels_the_way_docker_can(monkeypatch):
     assert formats and all("index .Labels" not in f and ".Label " in f for f in formats)
 
 
+def test_previews_left_under_our_own_pid_by_an_earlier_process_are_swept(monkeypatch):
+    calls: list = []
+    me = str(os.getpid())
+
+    class Done:
+        def __init__(self, stdout=""):
+            self.stdout, self.returncode = stdout, 0
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["container", "ls"]:
+            return Done(f"left {me} oldinstance\nmine {me} {sandbox.INSTANCE}\n")
+        return Done()
+
+    monkeypatch.setattr(sandbox, "docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(sandbox.subprocess, "run", run)
+    sandbox.sweep_previews()
+    removed = [a for a in calls if a[1:3] == ["container", "rm"]]
+    assert removed == [["/usr/bin/docker", "container", "rm", "-f", "left"]]
+
+
 def test_edits_wait_for_a_build_that_is_running(client, app_engine):
     pid = client.post("/api/projects", json={"idea": "A recipe site", "routing_mode": "local_only"}).json()["id"]
     r = client.post(f"/api/projects/{pid}/preview/patch", json={"ops": [{"oid": H1, "kind": "text", "text": "x"}], "target": "app"})
@@ -637,6 +711,22 @@ def test_tags_and_edits_keep_to_what_the_code_states_plainly():
     new, refused = source.edit(img, [{"path": "frontend/x.tsx", "line": 2, "col": 10, "kind": "attr", "name": "alt", "value": '27" screen & stand'}])
     assert not refused and 'alt={"27\\" screen & stand"}' in new["frontend/x.tsx"]
     assert source.tag(new)[1] == 1  # and it still parses
+
+
+def test_while_the_crew_changes_the_frontend_the_attempt_it_replaces_still_counts():
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    t = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    code = {"files": [{"path": "a.tsx", "code": "x"}]}
+    older = SimpleNamespace(id="o", phase="frontend_engineer", status="rejected", output=code, created_at=t)
+    replaced = SimpleNamespace(id="r", phase="frontend_engineer", status="rejected", output=code, created_at=t + timedelta(minutes=1))
+    writing = SimpleNamespace(id="w", phase="frontend_engineer", status="running", output={}, created_at=t + timedelta(minutes=2))
+    row, busy = app_runtime.current_frontend(SimpleNamespace(phases=[older, replaced, writing]))
+    assert busy and row is replaced
+    landed = SimpleNamespace(id="w", phase="frontend_engineer", status="pending_approval", output=code, created_at=writing.created_at)
+    row, busy = app_runtime.current_frontend(SimpleNamespace(phases=[older, replaced, landed]))
+    assert not busy and row is landed
 
 
 def test_app_routes_skip_the_pages_that_need_a_parameter():
