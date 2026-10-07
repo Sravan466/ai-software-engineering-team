@@ -35,8 +35,9 @@ MARK = "@@AITEAM-TESTS@@"
 _RESULTS = "/tmp/aiteam-results.json"
 _COVERAGE_DIR = "/tmp/aiteam-coverage"
 _PY_COVERAGE = "/tmp/aiteam-coverage.json"
-#: Failures kept per run. The rest are counted, not described.
-MAX_FAILURES = 30
+#: Failures kept per run, each cut to its assertion and first frames, so the report
+#: stays well inside the output the sandbox keeps. The rest are counted, not described.
+MAX_FAILURES = 100
 _TAIL_LINES = 40
 
 
@@ -249,7 +250,7 @@ if (r && kind === 'mocha') {
   const st = r.stats || {};
   out.passed = st.passes || 0; out.failed = st.failures || 0; out.skipped = st.pending || 0;
   for (const f of (r.failures || []).slice(0, MAX)) {
-    out.failures.push({ path: f.file || '', name: f.fullTitle || f.title || '', message: clip(f.err && (f.err.stack || f.err.message), 1200) });
+    out.failures.push({ path: f.file || '', name: f.fullTitle || f.title || '', message: clip(f.err && (f.err.stack || f.err.message), 600) });
   }
 } else if (r) {
   out.ran = true;
@@ -259,11 +260,11 @@ if (r && kind === 'mocha') {
     const asserts = s.assertionResults || [];
     if (s.status === 'failed' && !asserts.some((a) => a.status === 'failed')) {
       out.errored += 1;
-      if (out.suites.length < 10) out.suites.push({ path: s.name || '', message: clip(s.message || s.failureMessage, 2400) });
+      if (out.suites.length < 10) out.suites.push({ path: s.name || '', message: clip(s.message || s.failureMessage, 1500) });
     }
     for (const a of asserts) {
       if (a.status !== 'failed' || out.failures.length >= MAX) continue;
-      out.failures.push({ path: s.name || '', name: a.fullName || a.title || '', message: clip((a.failureMessages || []).join('\n'), 1200), line: a.location ? a.location.line : null });
+      out.failures.push({ path: s.name || '', name: a.fullName || a.title || '', message: clip((a.failureMessages || []).join('\n'), 600), line: a.location ? a.location.line : null });
     }
   }
 }
@@ -303,7 +304,7 @@ if r:
         if len(out["failures"]) < MAX:
             out["failures"].append({
                 "path": node.split("::")[0], "name": node.split("::", 1)[-1],
-                "message": str(stage.get("longrepr") or crash.get("message") or "")[-1200:],
+                "message": str(stage.get("longrepr") or crash.get("message") or "")[-600:],
                 "line": crash.get("lineno") if str(crash.get("path") or "").endswith(node.split("::")[0]) else
                         ((t.get("lineno") or 0) + 1 or None),
                 "error": t.get("outcome") == "error",
@@ -313,7 +314,7 @@ if r:
         if c.get("outcome") == "failed":
             errors += 1
             if len(out["suites"]) < 10:
-                out["suites"].append({"path": str(c.get("nodeid") or ""), "message": str(c.get("longrepr") or "")[-2400:]})
+                out["suites"].append({"path": str(c.get("nodeid") or ""), "message": str(c.get("longrepr") or "")[-1500:]})
     out["errored"] = max(errors, int(s.get("error") or 0))
 c = read(coverage)
 if c and c.get("totals"):
@@ -346,8 +347,9 @@ _COMMANDS = {
         # Vitest reports coverage only for a green run unless told otherwise.
         "--coverage.reportsDirectory={cov} --coverage.reportOnFailure=true"
     ),
-    # Mocha's JSON reporter writes to stdout; the run's human output goes to stderr.
-    "mocha": "npm test --silent -- --reporter json > {results}",
+    # The JSON reporter's own file: stdout is the app's, and a `console.log` in it
+    # mustn't corrupt the report.
+    "mocha": "npm test --silent -- --reporter json --reporter-option output={results}",
 }
 
 
@@ -358,28 +360,33 @@ def _test_files(files: dict[str, str]) -> list[str]:
     )
 
 
-def plan_tests(files: dict[str, str], side: str) -> tuple[Optional[TestPlan], Optional[str], bool]:
-    """The steps that install one side and run its suite. (plan, why none, counts as failed).
+#: Why there is no plan, when there is none: nothing to run, the tests' own fault (a
+#: suite in the wrong language — QA can fix it), or no runner set up for this side,
+#: which QA can't change.
+NOTHING, TESTS_FAULT, NO_RUNNER = "nothing", "tests", "no_runner"
 
-    `files` are relative to the side. The third value says whether "no plan" is the
-    tests' fault — a suite for a runner this side doesn't have — or simply nothing to
-    run, like a side with no tests at all.
+
+def plan_tests(files: dict[str, str], side: str) -> tuple[Optional[TestPlan], Optional[str], str]:
+    """The steps that install one side and run its suite: (plan, why none, whose fault).
+
+    `files` are relative to the side. Both faults count as failed — a suite that can't
+    run is never a pass — but only `TESTS_FAULT` is sent back to QA.
     """
     from app.build.runner import _NPM_INSTALL, _NPM_SCRIPTS, _env_example, _json
 
     tests = _test_files(files)
     if not tests:
-        return None, "There are no tests for this side.", False
+        return None, "There are no tests for this side.", NOTHING
     env = _env_example(files)
     budget = max(int(settings.build_run_timeout_seconds), 30)
     if "package.json" in files:
         js = [t for t in tests if not t.endswith(".py")]
         if not js:
-            return None, f"The tests here are Python, but the {side} is JavaScript.", True
+            return None, f"The tests here are Python, but the {side} is JavaScript.", TESTS_FAULT
         script = str((_json(files["package.json"]).get("scripts") or {}).get("test") or "")
         framework = next((f for f in ("vitest", "mocha", "jest") if re.search(rf"\b{f}\b", script)), None)
         if framework is None:
-            return None, f"The {side} has no test runner set up, so its tests can't run.", True
+            return None, f"The {side} has no test runner set up, so its tests can't run.", NO_RUNNER
         command = (
             _WRITE_NODE_READER
             + _COMMANDS[framework].format(results=_RESULTS, cov=_COVERAGE_DIR)
@@ -388,13 +395,13 @@ def plan_tests(files: dict[str, str], side: str) -> tuple[Optional[TestPlan], Op
         )
         steps = [_NPM_INSTALL, _NPM_SCRIPTS,
                  Step("test", f"{framework} (tests)", command, timeout=budget, env={**env, "NODE_ENV": "test"})]
-        return TestPlan(framework, NODE_IMAGE, steps, "package.json"), None, False
+        return TestPlan(framework, NODE_IMAGE, steps, "package.json"), None, NOTHING
     if "requirements.txt" in files:
         py = [t for t in tests if t.endswith(".py")]
         if not py:
-            return None, f"The tests here are JavaScript, but the {side} is Python.", True
+            return None, f"The tests here are JavaScript, but the {side} is Python.", TESTS_FAULT
         if not re.search(r"(?im)^pytest\b", files["requirements.txt"]):
-            return None, f"The {side} doesn't install pytest, so its tests can't run.", True
+            return None, f"The {side} doesn't install pytest, so its tests can't run.", NO_RUNNER
         command = (
             _WRITE_PY_READER
             + _COVERAGE_RC
@@ -411,8 +418,8 @@ def plan_tests(files: dict[str, str], side: str) -> tuple[Optional[TestPlan], Op
             Step("test", "pytest (tests)", command, timeout=budget,
                  env={**env, "PYTHONPATH": "/work:/work/.deps"}),
         ]
-        return TestPlan("pytest", PYTHON_IMAGE, steps, "requirements.txt"), None, False
-    return None, f"Nothing here can run the {side}'s tests yet.", True
+        return TestPlan("pytest", PYTHON_IMAGE, steps, "requirements.txt"), None, NOTHING
+    return None, f"Nothing here can run the {side}'s tests yet.", NO_RUNNER
 
 
 # ── reading what it did ──────────────────────────────────────────────────────
@@ -544,12 +551,15 @@ def judge(plan: TestPlan, results: list[StepResult], side: str, files: list[str]
         raw = str(f.get("message") or "")
         path = _side_path(str(f.get("path") or first), side)
         env = buildlog.environmental(raw)
-        if f.get("error") and not env:
-            # A pytest *error* is a fixture or setup that broke before the test body:
-            # the test's own scaffolding, so the test's to fix.
+        if env:
+            kind = "environment"
+        elif f.get("error") or _broke_itself(raw, path, side):
+            # A pytest *error* is a fixture or setup that broke before the test body;
+            # an undefined name thrown from the test file is the test's own mistake.
+            # Either way it is the test's to fix, not the code's.
             kind = "error"
         else:
-            kind = "environment" if env else "assertion"
+            kind = "assertion"
         # The failing line in the test file, from its stack; else where the test starts.
         line = _line(raw, path) or (f.get("line") if isinstance(f.get("line"), int) and f.get("line") else None)
         run.failures.append(TestFailure(path, str(f.get("name") or "a test"), _message(raw) or "failed", line, kind))
@@ -568,6 +578,34 @@ def judge(plan: TestPlan, results: list[StepResult], side: str, files: list[str]
     else:
         run.status = TestStatus.OK.value
     return run
+
+
+#: Mistakes a test makes in its own body: a name it never defined or imported, code
+#: that doesn't parse, a module it can't import. Not a TypeError — "undefined is not
+#: an object" in a test is as often the code returning the wrong thing.
+_OWN_JS = re.compile(r"^\s*(?:Error:\s*)?(?:Uncaught\s+)?(ReferenceError|SyntaxError)\b")
+_OWN_PY = frozenset({"NameError", "SyntaxError", "ImportError", "ModuleNotFoundError", "IndentationError"})
+_PY_CRASH = re.compile(r"^(?P<path>[\w./\-]+\.py):(?P<line>\d+): (?P<exc>\w+)\s*$", re.MULTILINE)
+
+
+def _broke_itself(raw: str, path: str, side: str) -> bool:
+    """Whether a failure was thrown by the test file's own code, before any assertion."""
+    text = buildlog.clean(raw or "")
+    if path.endswith(".py"):
+        crashes = list(_PY_CRASH.finditer(text))
+        if not crashes:
+            return False
+        last = crashes[-1]
+        return last.group("exc") in _OWN_PY and _side_path(last.group("path"), side) == path
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    if not _OWN_JS.match(first):
+        return False
+    for m in buildlog._JS_FRAME.finditer(text):
+        frame = buildlog.rel(m.group("path"))
+        if frame.startswith("node_modules/") or "/node_modules/" in frame:
+            continue
+        return _side_path(frame, side) == path
+    return False
 
 
 def _num(value: object) -> Optional[float]:

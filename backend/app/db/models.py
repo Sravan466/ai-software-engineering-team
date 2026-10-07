@@ -162,11 +162,10 @@ class Project(Base):
         from app.orchestration import autofix
 
         qa = next((ph for ph in artifacts._current(list(self.phases)) if ph.phase == "qa_engineer"), None)
-        failures = autofix.test_failures(getattr(qa, "test_run", None)) if qa is not None else []
-        if not failures:
+        run = getattr(qa, "test_run", None) if qa is not None else None
+        if not isinstance(run, dict) or run.get("status") != "failed":
             return 0
-        t = autofix.load(self)["tracks"].get(autofix.TESTS)
-        return 0 if t is not None and autofix.covers(t, [f["key"] for f in failures]) else len(failures)
+        return len(autofix.unwaived_tests(autofix.load(self), run))
 
     # ── where the finished build went (#55) ──────────────────────────────────
     #: The repository in the user's own GitHub (`owner/name`) this build was pushed

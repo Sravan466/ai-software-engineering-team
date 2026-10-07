@@ -48,7 +48,9 @@ from app.core.constants import (
     RoutingMode,
     BuildStatus,
     SchemaStatus,
+    SHIP_GATE_PHASE,
     StackStatus,
+    TestStatus,
 )
 from app.core.logging import get_logger
 from app.db.base import SessionLocal
@@ -348,7 +350,8 @@ class PipelineRunner:
             row.schema_status,
             stack,
             self.build_problems(project),
-            self.failing_tests(project),
+            # Only the Ship review reads it, so only the Ship review pays for it.
+            self.failing_tests(project) if row.phase == SHIP_GATE_PHASE.value else None,
         )
 
     @staticmethod
@@ -527,11 +530,7 @@ class PipelineRunner:
     def failing_tests(project: Project) -> list[dict]:
         """QA's tests that ran and failed in the current build, less a waiver that
         covers them (#76). What a red suite blocks the Ship review with."""
-        failures = autofix.test_failures(artifacts.test_run(project))
-        t = autofix.load(project)["tracks"].get(autofix.TESTS)
-        if t is not None and autofix.covers(t, [f["key"] for f in failures]):
-            return []
-        return failures
+        return autofix.unwaived_tests(autofix.load(project), artifacts.test_run(project))
 
     def _auto_fix(self, db: Session, project: Project, row: PhaseResult) -> bool:
         """Send a finished phase's serious problems back to be fixed. True if it
@@ -567,6 +566,15 @@ class PipelineRunner:
         if not problems and name not in data["tracks"]:
             return False
         t = autofix.track(data, name)
+        run = row.test_run if isinstance(row.test_run, dict) else {}
+        if autofix.open_round(t) is not None and run.get("status") not in (TestStatus.FAILED.value, TestStatus.OK.value):
+            # The re-check couldn't run, so it can't say the fix worked. Recorded as
+            # such — never as "fixed" — and the card says why the tests didn't run.
+            autofix.unjudge_round(t, str(run.get("reason") or "The tests didn't run again."))
+            autofix.settle(t)
+            autofix.save(project, data)
+            db.commit()
+            return False
         keys = [p["key"] for p in problems]
         if autofix.accepted(data, name):
             if autofix.covers(t, keys):
@@ -609,20 +617,20 @@ class PipelineRunner:
         }
         record = autofix.start_round(t, strategy, dests, routed)
         qa = Phase.QA_ENGINEER.value
-        keep = None
+        # What the rewind re-checks instead of regenerating: every phase between the
+        # first one asked and QA that nobody asked this round — the frontend, while the
+        # backend fixes a backend test — so the tests are judged against the code that
+        # failed them, changed only where someone was asked to change it. And QA's suite
+        # itself, unless QA is one of the ones asked.
+        keep = {}
+        for phase in order[order.index(dests[0]) + 1 : order.index(qa)]:
+            between = self.latest_row(db, project, phase) if phase not in dests else None
+            if between is not None and isinstance(between.output, dict) and between.output:
+                keep[phase] = self._kept(between)
         if qa not in dests:
             # Only the code's owners were asked: what they don't fix is QA's next.
             record["handover"] = True
-            keep = {
-                qa: {
-                    "output": row.output,
-                    "model": row.model_used,
-                    "provider": row.provider_used,
-                    "is_local": row.is_local,
-                    "skills_used": row.skills_used,
-                    "handoff": row.handoff,
-                }
-            }
+            keep[qa] = self._kept(row)
         autofix.save(project, data)
         db.commit()
         log.info(
@@ -639,9 +647,21 @@ class PipelineRunner:
             escalate=tuple(dests) if strategy == remediation.STRATEGY_STRONGER else (),
             continue_after=True,
             fix_track=name,
-            keep=keep,
+            keep=keep or None,
         )
         return True
+
+    @staticmethod
+    def _kept(row: PhaseResult) -> dict:
+        """A finished attempt, as the record a rewind keeps to re-check (#76)."""
+        return {
+            "output": row.output,
+            "model": row.model_used,
+            "provider": row.provider_used,
+            "is_local": row.is_local,
+            "skills_used": row.skills_used,
+            "handoff": row.handoff,
+        }
 
     def _fix_code(self, db: Session, project: Project, row: PhaseResult) -> bool:
         """Re-run a phase whose code does not compile or contradicts the stack.
@@ -1179,7 +1199,7 @@ class PipelineRunner:
             # would otherwise leave a build whose backend is new and whose tests,
             # findings and costs describe the code it replaced — and `artifacts.assemble`
             # would hand out both halves in one .zip without a word.
-            self._discard_after(db, project, phase_key)
+            self._discard_after(db, project, phase_key, kept=tuple(keep or ()))
 
         if self._cancel_requested(db, project):
             self._settle_cancelled(db, project, rewinding=bool(stale))
@@ -1266,8 +1286,11 @@ class PipelineRunner:
         except ValueError:
             return []
 
-    def _discard_after(self, db: Session, project: Project, phase_key: str) -> None:
-        """Forget every phase that ran after `phase_key` — they are about to re-run."""
+    def _discard_after(self, db: Session, project: Project, phase_key: str, kept: tuple = ()) -> None:
+        """Forget every phase that ran after `phase_key` — they are about to re-run.
+
+        `kept` are phases about to be re-checked rather than regenerated (#76): their
+        rows go too, but a kept frontend is the same code, so its mockup stays."""
         downstream = self._phases_after(phase_key)
         if not downstream:
             return
@@ -1285,7 +1308,7 @@ class PipelineRunner:
         # The mockup is a picture of the front end. If the front end is being rebuilt,
         # the picture is of code that will not exist. Re-running that phase draws a
         # fresh one through `_run_phase`'s hook.
-        if Phase.FRONTEND_ENGINEER.value in downstream:
+        if Phase.FRONTEND_ENGINEER.value in downstream and Phase.FRONTEND_ENGINEER.value not in kept:
             self._clear_generated_mockup(db, project.id)
         db.commit()
 
@@ -1367,7 +1390,12 @@ class PipelineRunner:
             db.commit()
         self._raise_if_cancelled(db, project)
 
-        if phase_key == Phase.FRONTEND_ENGINEER.value and last_result:
+        if (
+            phase_key == Phase.FRONTEND_ENGINEER.value
+            and last_result
+            # A kept frontend (#76) is the code the mockup already pictures.
+            and not (last_result.get("handoff") or {}).get("kept")
+        ):
             self._draw_mockup_later(project.id, row.id)
 
     def _begin_phase(self, db: Session, project: Project, phase_key: str) -> PhaseResult:

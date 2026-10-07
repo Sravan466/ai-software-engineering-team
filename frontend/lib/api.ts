@@ -327,6 +327,8 @@ export type AutoFixRound = {
   source?: "vercel";
   /** A tests round that only asked the code's owners (#76): what it doesn't fix goes to QA next. */
   handover?: boolean;
+  /** Why the re-check couldn't run (#76): the round fixed nothing anyone could confirm. */
+  unjudged?: string;
   /** Keys the re-check no longer reports. `null` while the round is still running. */
   fixed: string[] | null;
   remaining?: string[];

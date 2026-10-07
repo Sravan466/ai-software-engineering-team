@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
@@ -76,6 +77,14 @@ def test_next_jest_measures_coverage_over_the_apps_own_files():
     assert _pkg(files, "frontend")["scripts"]["test"] == "jest"
 
 
+def test_a_typescript_next_suite_has_jests_types_so_next_build_passes():
+    files = _tree({
+        "frontend/app/page.tsx": "export default function Home() { return <main />; }\n",
+        "frontend/__tests__/page.test.tsx": "import Home from '../app/page';\ntest('x', () => { expect(Home).toBeTruthy(); });\n",
+    })
+    assert "@types/jest" in _pkg(files, "frontend")["devDependencies"]
+
+
 @pytest.mark.parametrize(
     "test, runner",
     [
@@ -94,9 +103,25 @@ def test_a_node_backend_gets_the_runner_its_tests_import(test, runner):
     assert runner in pkg["scripts"]["test"]
     assert runner in pkg["devDependencies"]
     if runner == "mocha":
-        assert pkg["scripts"]["test"] == "mocha --recursive tests"
+        # The test files themselves — a folder would load the app's own modules too —
+        # and --exit, so an open server can't hang the run.
+        assert pkg["scripts"]["test"] == "mocha --exit 'tests/app.test.js'"
     if runner == "jest":
-        assert pkg["jest"]["collectCoverageFrom"]
+        assert "jest" not in pkg  # one config: a file QA's own copy can't sit beside
+        assert "collectCoverageFrom" in files["backend/jest.config.cjs"]
+
+
+def test_qas_own_jest_config_is_replaced_not_kept_beside_the_platforms():
+    from app.build.scaffold import platform_owned, superseded
+
+    assert platform_owned("backend/jest.config.js")
+    assert superseded("backend/jest.config.js", {"backend/jest.config.cjs"})
+
+
+def test_a_vite_suite_written_for_jest_finds_jest_fn():
+    files = _tree({**VITE_APP, "frontend/src/__tests__/App.test.jsx": "test('x', () => { jest.fn(); });\n"})
+    setup = files["frontend/vitest.setup.js"]
+    assert "globalThis.jest = vi" in setup and "jest-dom/vitest" in setup
 
 
 def test_an_es_module_backend_runs_jest_behind_nodes_flag():
@@ -333,6 +358,31 @@ def test_no_runner_is_not_run_with_the_reason(monkeypatch):
     assert run.summary().startswith("Not run:") and "%" not in run.summary()
 
 
+def test_a_side_with_no_runner_set_up_fails_without_blaming_qa(monkeypatch):
+    monkeypatch.setattr(settings, "build_run_enabled", True)
+    monkeypatch.setattr(build_runner, "engine", SimpleNamespace(kind="docker", run=lambda *a, **k: []))
+    files = {"frontend/package.json": json.dumps({"name": "x", "scripts": {"build": "nuxt build"}}),
+             "frontend/__tests__/a.test.js": "test('x', () => {});\n"}
+    run = build_runner.run_tests(files, "frontend")
+    # Never a pass (constraint 4) — and nothing QA could change, so nothing sent to QA.
+    assert run.status == "failed" and "no test runner" in run.reason and run.problems == []
+
+
+def test_a_test_that_throws_from_its_own_body_is_qas_to_fix():
+    out = _report(failed=2, failures=[
+        {"path": "/work/__tests__/a.test.js", "name": "renders",
+         "message": "ReferenceError: render is not defined\n    at Object.<anonymous> (/work/__tests__/a.test.js:5:3)"},
+        {"path": "/work/__tests__/a.test.js", "name": "adds",
+         "message": "ReferenceError: total is not defined\n    at sum (/work/lib/sum.js:2:10)\n"
+                    "    at Object.<anonymous> (/work/__tests__/a.test.js:9:3)"},
+    ])
+    run = testrun.judge(_plan(), _results(out), "frontend", ["frontend/__tests__/a.test.js"])
+    # The first never imported `render`; the second hit a bug in the code it tests.
+    assert [f.kind for f in run.failures] == ["error", "assertion"]
+    routed = autofix.route_tests({"rounds": []}, autofix.test_failures(testrun.combine([run])))
+    assert sorted(p["phase"] for p in routed) == ["frontend_engineer", "qa_engineer"]
+
+
 def test_a_suite_in_the_wrong_language_fails_when_a_runner_is_here(monkeypatch):
     monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(build_runner, "engine", SimpleNamespace(kind="docker", run=lambda *a, **k: []))
@@ -490,6 +540,96 @@ def test_a_failure_the_owner_cannot_fix_goes_to_qa_then_asks_for_help(client, mo
     assert done["status"] == "completed", done.get("gate_note")
     accepted = done["auto_fix"]["tracks"]["tests"]["accepted"]
     assert accepted["reason"] == "sum is replaced by a library next sprint"
+
+
+def test_a_re_check_that_could_not_run_is_never_counted_as_fixed(client, monkeypatch, sandboxed):
+    """The fix round's re-check hit an unreachable registry: the round says so, nothing
+    is "fixed", and the card says the tests weren't run."""
+    crew = Crew(fixes=True)
+    runs = {"n": 0}
+    real_run = sandboxed.run
+
+    def flaky(image, files, steps, limits, on_cancel, on_step):
+        if any(s.name == "test" for s in steps):
+            runs["n"] += 1
+            if runs["n"] == 2:
+                return [StepResult("install", "npm install", 1, 1.0, "npm error code EAI_AGAIN getaddrinfo EAI_AGAIN registry.npmjs.org")] + [
+                    StepResult(s.name, s.label, None, 0.0, skipped=True) for s in steps[1:]]
+        return real_run(image, files, steps, limits, on_cancel, on_step)
+
+    monkeypatch.setattr(sandboxed, "run", flaky)
+    project = _run(client, monkeypatch, crew, "A calculator whose re-check can't reach npm")
+    assert project["status"] == "completed", project.get("gate_note")
+    [round_] = project["auto_fix"]["tracks"]["tests"]["rounds"]
+    assert round_["fixed"] == [] and "registry" in round_["unjudged"]
+    qa = _current(project, "qa_engineer")
+    assert qa["test_run"]["status"] == "not_run" and qa["test_run"]["summary"].startswith("Not run:")
+
+
+class FullStack(Crew):
+    """A failing *backend* test: FORGE fixes it once told, PRISM is never asked."""
+
+    BROKEN = "from fastapi import FastAPI\n\napp = FastAPI()\n\n\n@app.get('/total')\ndef total():\n    return {'total': 1 - 2}\n"
+    FIXED = BROKEN.replace("1 - 2", "1 + 2")
+
+    def __init__(self) -> None:
+        super().__init__(fixes=True)
+        self.frontend_calls = 0
+        self.frontend_at_fix: Optional[int] = None
+
+    def __call__(self, messages, **kwargs):
+        system = messages[0].content
+        resp = _fake_complete(messages, **kwargs)
+        if system.startswith("You are the Frontend Engineer"):
+            self.frontend_calls += 1
+        if system.startswith("You are the QA Engineer"):
+            self.qa_calls += 1
+            payload = json.loads(resp.text)
+            payload["test_files"] = [{"path": "backend/tests/test_total.py", "framework": "pytest", "targets": "backend/main.py",
+                                      "code": "from main import app\n\n\ndef test_total_is_three():\n    assert app\n"}]
+            return resp.model_copy(update={"text": json.dumps(payload)})
+        if not system.startswith("You are the Backend Engineer"):
+            return super().__call__(messages, **kwargs) if system.startswith("You are the Frontend Engineer") else resp
+        if getattr(kwargs.get("options"), "json_schema", None):
+            payload = json.loads(resp.text)
+            payload["files"] = [{"path": "main.py", "purpose": "app"}]
+            return resp.model_copy(update={"text": json.dumps(payload)})
+        told = autofix.TEST_NOTE_PREFIX in messages[-1].content
+        if told and self.frontend_at_fix is None:
+            self.frontend_at_fix = self.frontend_calls
+        code = self.FIXED if told else self.BROKEN
+        return resp.model_copy(update={"text": fenced({p: code for p in asked_files(messages)})})
+
+
+class PyEngine(Engine):
+    def run(self, image, files, steps, limits, on_cancel, on_step):
+        if not any(s.name == "test" for s in steps) or "main.py" not in files:
+            return super().run(image, files, steps, limits, on_cancel, on_step)
+        self.test_runs += 1
+        broken = "1 - 2" in files["main.py"]
+        report = {"framework": "pytest", "ran": True, "passed": 0 if broken else 1, "failed": 1 if broken else 0,
+                  "errored": 0, "skipped": 0, "suites": [], "coverage": {"lines_pct": 80.0, "branches_pct": None},
+                  "failures": [{"path": "tests/test_total.py", "name": "test_total_is_three",
+                                "message": "E       assert -1 == 3", "line": 5}] if broken else []}
+        return [StepResult("install", "pip install", 0, 1.0, "Successfully installed fastapi\n"),
+                StepResult("test", "pytest (tests)", 1 if broken else 0, 1.0, f"{testrun.MARK}{json.dumps(report)}\n")]
+
+
+def test_a_backend_fix_keeps_the_frontend_it_did_not_touch(client, monkeypatch):
+    monkeypatch.setattr(settings, "build_run_enabled", True)
+    engine = PyEngine()
+    monkeypatch.setattr(build_runner, "engine", engine)
+    crew = FullStack()
+    project = _run(client, monkeypatch, crew, "A totals API")
+    assert project["status"] == "completed", project.get("gate_note")
+    [round_] = project["auto_fix"]["tracks"]["tests"]["rounds"]
+    assert round_["phases"] == ["backend_engineer"] and round_["fixed"]
+    # FORGE was re-run; PRISM's frontend and SIEVE's suite were kept and re-checked.
+    front = _current(project, "frontend_engineer")
+    assert front["handoff"]["kept"] is True
+    assert crew.qa_calls == 1 and engine.test_runs == 2
+    # Not one Frontend Engineer call after FORGE was told about the failing test.
+    assert crew.frontend_at_fix and crew.frontend_calls == crew.frontend_at_fix
 
 
 # ── the Ship gate ────────────────────────────────────────────────────────────

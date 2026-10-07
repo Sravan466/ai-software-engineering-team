@@ -259,8 +259,11 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               </span>
               <span className="ledger-how">{approach(name, r.strategy, r)}</span>
             </div>
-            <span className={`badge ${fixed > 0 ? "badge-ok" : "badge"}`}>
-              {r.fixed === null ? "Not re-checked" : `Fixed ${fixed} of ${sent}`}
+            <span
+              className={`badge ${r.unjudged ? "badge-warn" : fixed > 0 ? "badge-ok" : "badge"}`}
+              title={r.unjudged}
+            >
+              {r.fixed === null ? "Not re-checked" : r.unjudged ? "Couldn't re-check" : `Fixed ${fixed} of ${sent}`}
             </span>
           </li>
         );

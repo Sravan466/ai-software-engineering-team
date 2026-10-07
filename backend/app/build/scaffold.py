@@ -33,7 +33,7 @@ _OWNED_FRONTEND = re.compile(
 )
 _OWNED_BACKEND = re.compile(
     r"^(package(-lock)?\.json|yarn\.lock|pnpm-lock\.yaml|requirements(-dev)?\.txt|"
-    r"\.env\.example|migrate\.py|pytest\.ini|scripts/(migrate|check)\.c?js)$"
+    r"\.env\.example|migrate\.py|pytest\.ini|jest\.config\.[cm]?[jt]s|scripts/(migrate|check)\.c?js)$"
 )
 _OWNED_ROOT = re.compile(r"^(package(-lock)?\.json|\.gitignore)$")
 
@@ -450,6 +450,10 @@ def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str,
     scripts = {"dev": "next dev", "build": "next build", "start": "next start"}
     if tests:
         dev.update({k: pkg.NPM_DEV[k] for k in ("jest", "jest-environment-jsdom", "@testing-library/react", "@testing-library/jest-dom", "@testing-library/dom")})
+        if ts:
+            # `next build` type-checks every .ts file, tests included: without Jest's
+            # globals typed, a TypeScript suite fails the deploy, not just the run.
+            dev["@types/jest"] = pkg.NPM_DEV["@types/jest"]
         scripts["test"] = "jest"
         sc.add(
             fe("jest.config.js"),
@@ -727,8 +731,12 @@ def _scaffold_vite(sc: Scaffold, files: dict[str, str], slug: str, product: str,
         )
         sc.add(
             fe("vitest.setup.js"),
-            "import '@testing-library/jest-dom/vitest';\n",
-            "Gives the frontend tests the DOM matchers (toBeInTheDocument, …).",
+            "import { vi } from 'vitest';\n"
+            "import '@testing-library/jest-dom/vitest';\n\n"
+            # The charter names Jest for a JavaScript stack, so a suite may say
+            # `jest.fn()`: Vitest's `vi` answers to that name too.
+            "globalThis.jest = vi;\n",
+            "Gives the frontend tests the DOM matchers, and Jest's `jest.fn()` as Vitest's `vi`.",
         )
     alias_target = "./src/*" if alias_root == "src" else "./*"
     options = {"baseUrl": ".", "paths": {"@/*": [alias_target]}}
@@ -985,16 +993,24 @@ def _scaffold_node_backend(sc: Scaffold, files: dict[str, str], slug: str, datab
             # Jest reads ES modules only behind Node's flag.
             scripts["test"] = "NODE_OPTIONS=--experimental-vm-modules jest"
         elif runner == "mocha":
-            # Mocha looks in ./test by default; point it at where the tests really are.
-            specs = sorted({t.split("/", 1)[0] if "/" in t else t for t in tests})
-            scripts["test"] = "mocha --recursive " + " ".join(specs)
+            # Mocha looks in ./test by default. Name the test files themselves — a folder
+            # would load the app's own modules too, server entry and all — and `--exit`,
+            # so an open handle (a listening app, a pool) can't hang the run.
+            scripts["test"] = "mocha --exit " + " ".join(f"'{t}'" for t in sorted(tests))
         else:
             scripts["test"] = "vitest run" if runner == "vitest" else runner
         dev.setdefault(runner, pkg.NPM_DEV[runner])
         if runner == "vitest":
             dev.setdefault("@vitest/coverage-v8", pkg.NPM_DEV["@vitest/coverage-v8"])
         if runner == "jest":
-            jest_config = {"testEnvironment": "node", "collectCoverageFrom": json.loads(_JS_COVERAGE)}
+            # A file, not a `"jest"` key: one QA wrote beside a key would be a second
+            # config, which Jest refuses. The platform's file replaces QA's copy.
+            jest_config = (
+                "module.exports = {\n"
+                "  testEnvironment: 'node',\n"
+                f"  collectCoverageFrom: {_JS_COVERAGE},\n"
+                "};\n"
+            )
     manifest = {
         "name": f"{slug}-backend",
         "version": "0.1.0",
@@ -1005,9 +1021,9 @@ def _scaffold_node_backend(sc: Scaffold, files: dict[str, str], slug: str, datab
     }
     if dev:
         manifest["devDependencies"] = dict(sorted(dev.items()))
-    if jest_config:
-        manifest["jest"] = jest_config
     sc.add(be("package.json"), _json(manifest), "Dependencies derived from what the backend imports.")
+    if jest_config:
+        sc.add(be("jest.config.cjs"), jest_config, "Runs the QA suite's backend tests, measuring coverage of the backend's own code.")
     sc.add(be("scripts/check.cjs"), _NODE_CHECK, "`npm run build` for a server: every file must parse.")
     if with_migrations and driver:
         sc.add(be("scripts/migrate.cjs"), _NODE_MIGRATE, "Applies migrations/*.sql once each, in order.")

@@ -342,6 +342,30 @@ def test_failures(run: object) -> list[dict]:
     return list(out.values())
 
 
+def unwaived_tests(data: dict, run: object) -> list[dict]:
+    """The failing tests in `run` a person hasn't waived — the one rule that holds the
+    Ship review, read by the gate, the approve route and the page alike."""
+    failures = test_failures(run)
+    t = data["tracks"].get(TESTS)
+    if failures and t is not None and covers(t, [f["key"] for f in failures]):
+        return []
+    return failures
+
+
+def unjudge_round(t: dict, reason: str) -> bool:
+    """Close the open round as one whose re-check couldn't run — the registry was down,
+    Docker failed, the suite no longer compiles. Never "fixed": nobody knows. True if
+    a round was waiting."""
+    last = open_round(t)
+    if last is None:
+        return False
+    last["fixed"] = []
+    last["remaining"] = [p["key"] for p in last.get("problems", [])]
+    last["unjudged"] = reason
+    last["checked_at"] = _now()
+    return True
+
+
 def route_tests(t: dict, problems: list[dict]) -> list[dict]:
     """Who each failing test goes to this round.
 
@@ -470,6 +494,8 @@ __all__ = [
     "route_tests",
     "test_failures",
     "test_note",
+    "unjudge_round",
+    "unwaived_tests",
     "STOP_LIMIT",
     "STOP_NO_PROGRESS",
     "WAIVE_KINDS",

@@ -633,16 +633,17 @@ def run_tests(files: dict[str, str], side: str) -> "testrun.TestRun":
     chosen, why = _engine()
     if chosen is None:
         return testrun.TestRun.not_run(side, why or "No test runner is available.", files=tests)
-    plan, why, broken = testrun.plan_tests(mine, side)
+    plan, why, fault = testrun.plan_tests(mine, side)
     if plan is None:
-        if broken:
-            # A suite for a runner this side doesn't have can't run, and that is the
-            # suite's defect: failed, with a problem QA is sent back with.
-            run = testrun.TestRun(status=TestStatus.FAILED.value, side=side, reason=why, files=tests,
-                                  runner=chosen.kind)
+        if fault == testrun.NOTHING:
+            return testrun.TestRun.not_run(side, why or "There are no tests to run.", files=tests)
+        # A suite that can't run here is never a pass: failed, with the reason. Only
+        # one QA can fix (the wrong language) goes back to QA as a problem.
+        run = testrun.TestRun(status=TestStatus.FAILED.value, side=side, reason=why, files=tests,
+                              runner=chosen.kind)
+        if fault == testrun.TESTS_FAULT:
             run.problems = [Problem(tests[0], why or "These tests can't run.", "test", None, "test")]
-            return run
-        return testrun.TestRun.not_run(side, why or "There are no tests to run.", files=tests)
+        return run
     started = time.monotonic()
     try:
         results = _execute(plan.image, mine, plan.steps, side, "testing", chosen)
