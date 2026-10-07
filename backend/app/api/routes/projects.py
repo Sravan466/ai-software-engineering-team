@@ -608,6 +608,25 @@ def _require_findings_settled(db: Session, project: Project) -> None:
     )
 
 
+def _require_tests_settled(project: Project) -> None:
+    """Refuse to approve over tests that ran and failed, unless they were waived (#76).
+
+    The same rule as a severe finding: a red suite ships fixed, or waived on the record
+    with a reason — never because the button was there.
+    """
+    failing = runner.failing_tests(project)
+    if not failing:
+        return
+    count = len(failing)
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{count} of QA's test{'s' if count != 1 else ''} still fail{'' if count != 1 else 's'}. "
+            "Send the code or the tests back, or waive the failures with a reason."
+        ),
+    )
+
+
 def _refuse_at_database_gate(project: Project) -> None:
     """Refuse anything but an answer while the build waits on a question gate."""
     if runner.at_database_gate(project):
@@ -662,6 +681,7 @@ def approve_phase(
     # Before anything else is checked, so the answer names what is actually waiting.
     _refuse_at_database_gate(project)
     _require_findings_settled(db, project)
+    _require_tests_settled(project)
     # Every route that starts model calls asks first, as `run` and `resume` do —
     # a default changed since the last phase would otherwise fail inside it.
     _require_models(project)
@@ -950,7 +970,7 @@ def accept_code_problems(
     if payload.kind not in autofix.WAIVE_KINDS:
         raise HTTPException(422, f"'{payload.kind}' is not a reason this build records.")
     data = autofix.load(project)
-    if not any(n.startswith(autofix.BUILD_PREFIX) for n in autofix.stuck(data)):
+    if not any(autofix.accepts_wholesale(n) for n in autofix.stuck(data)):
         raise HTTPException(
             400,
             "There are no code problems to move past — waive the security findings "
@@ -971,6 +991,38 @@ def accept_code_problems(
         current_phase=project.current_phase,
         message="Continuing — the problems you accepted are on the record.",
     )
+
+
+@router.post("/{project_id}/tests/waive")
+def waive_failing_tests(
+    payload: AcceptRequest,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Ship past QA's failing tests at a review, with the reason on the record (#76).
+
+    For a red suite met at a review rather than one the crew gave up on (that is
+    `auto-fix/accept`). Covers exactly the failures on screen: a different test
+    failing after a later rebuild is a new problem. The build stays parked; approving
+    is still the reviewer's next click.
+    """
+    if project.status != PipelineStatus.AWAITING_APPROVAL.value:
+        raise (
+            _conflict(project, "waive")
+            if project.status == PipelineStatus.RUNNING.value
+            else HTTPException(400, "There is nothing waiting for a decision.")
+        )
+    if payload.kind not in autofix.WAIVE_KINDS:
+        raise HTTPException(422, f"'{payload.kind}' is not a reason this build records.")
+    failing = runner.failing_tests(project)
+    if not failing:
+        raise HTTPException(400, "No tests are failing, so there is nothing to waive.")
+    data = autofix.load(project)
+    autofix.accept_tests(data, payload.kind, payload.reason.strip(), [f["key"] for f in failing])
+    autofix.save(project, data)
+    db.commit()
+    log.info("Failing tests waived on %s (%d): %s — %s", project.id, len(failing), payload.kind, payload.reason)
+    return {"waived": len(failing), "kind": payload.kind, "reason": payload.reason.strip()}
 
 
 @router.post("/{project_id}/redo", response_model=RunResponse)

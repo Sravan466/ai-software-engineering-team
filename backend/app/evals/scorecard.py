@@ -27,6 +27,12 @@ and, since #81, how the code phases wrote their code:
   files_planned         files the code phases' plans listed
   files_written         of those, files that were written
   compile_by_path       ok | failed for every file the code phases wrote
+
+and, since #76, what running QA's tests measured — never the model's own estimate:
+
+  tests_passed_pct      passed / tests that ran, across every suite; None if none ran
+  coverage_lines_pct    line coverage the runner measured (the lowest suite's, when
+                        there are two); None when nothing measured it
 """
 
 from __future__ import annotations
@@ -171,6 +177,25 @@ def score(db: Session, project: Project) -> dict:
             int((getattr(ph, "handoff", None) or {}).get("truncated_replies") or 0) for ph in phases
         ),
         **generation(db, project, phases, code_paths, check),
+        **tests(phases),
+    }
+
+
+def tests(phases: list) -> dict:
+    """What running QA's suite measured (#76). None where nothing was measured."""
+    qa = next((ph for ph in phases if ph.phase == "qa_engineer"), None)
+    run = getattr(qa, "test_run", None) if qa is not None else None
+    runs = [r for r in (run or {}).get("runs") or [] if r.get("status") != "not_run"] if isinstance(run, dict) else []
+    total = sum(int(r.get("passed") or 0) + int(r.get("failed") or 0) + int(r.get("errored") or 0) for r in runs)
+    passed = sum(int(r.get("passed") or 0) for r in runs)
+    measured = [
+        float(r["coverage"]["lines_pct"])
+        for r in runs
+        if isinstance(r.get("coverage"), dict) and r["coverage"].get("lines_pct") is not None
+    ]
+    return {
+        "tests_passed_pct": _pct(passed, total),
+        "coverage_lines_pct": min(measured) if measured else None,
     }
 
 

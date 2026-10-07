@@ -11,8 +11,8 @@ things read them, and because they read the *same* declaration they cannot disag
 
 Two deliberate leniencies. `extra="allow"` keeps whatever else an agent thought worth
 saying — the shape is a floor, not a cage. And several fields accept the names models
-actually drifted to in real runs (`estimated_coverage` for `coverage_estimate`,
-`docker_compose` for `compose_or_manifests`), normalising them back to the canonical
+actually drifted to in real runs (`docker_compose` for `compose_or_manifests`,
+`security_findings` for `findings`), normalising them back to the canonical
 key on the way in. Renaming a field is the cheapest kind of drift to absorb and the
 most expensive kind to discover downstream.
 """
@@ -300,22 +300,32 @@ class TestFile(_Shape):
     code: str
 
 
+#: What models call a coverage figure they made up. Still accepted — a model asked
+#: for it for months will keep sending it — and never stored (#76): coverage is
+#: measured by running the suite, or the page says it wasn't.
+_GUESSED_COVERAGE = ("coverage_estimate", "estimated_coverage", "estimatedCoverage", "coverage")
+#: Written by the platform after running the suite, never by the model: a reply that
+#: carries one has it dropped, so a model can't report its own tests green.
+_MEASURED = ("test_run",)
+
+
 class QAEngineerOutput(_Shape):
     summary: str
     test_strategy: str
     edge_cases: StrList
-    #: Observed drift: models return `estimated_coverage`. Same number, other name.
-    coverage_estimate: str = Field(
-        validation_alias=AliasChoices(
-            "coverage_estimate", "estimated_coverage", "estimatedCoverage"
-        )
-    )
     risks: StrList
     #: The commands that run these tests, which DevOps's CI workflow uses rather
     #: than guessing. Empty when the side has no tests.
     command_backend: str = Field("", description="e.g. pytest backend/tests")
     command_frontend: str = Field("", description="e.g. npm test --prefix frontend")
     test_files: _list_of(TestFile)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_guessed_coverage(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = {k: v for k, v in data.items() if k not in _GUESSED_COVERAGE and k not in _MEASURED}
+        return data
 
 
 # ── Security ─────────────────────────────────────────────────────────────────

@@ -194,6 +194,10 @@ class PhaseResultOut(BaseModel):
     #: The real build (#75): `{status, summary, runner, seconds, steps: [{name, label,
     #: exit_code, seconds, ok, tail}], problems, reason}`. `None` when nothing was built.
     build_run: Optional[dict] = None
+    #: QA's tests, run for real (#76): `{status: ok|failed|not_run, summary, reason,
+    #: runs: [{side, framework, passed, failed, errored, skipped, failures, coverage}]}`.
+    #: `None` for every other phase, and for QA rows from before tests were run.
+    test_run: Optional[dict] = None
 
     #: The procedural skills this phase was actually given, by name and in the order
     #: they were injected. `None` on rows written before the library existed — which
@@ -255,6 +259,9 @@ class ProjectOut(BaseModel):
     #: Connectors answered "later" (or whose key failed), read live — what every
     #: "N connectors not connected" mark counts.
     connectors_unconnected: list[str] = []
+    #: QA's tests that ran, failed and weren't waived (#76): while above zero the
+    #: Ship review can't be approved — waive them with a reason, or send work back.
+    tests_unwaived: int = 0
     #: Where the finished build went: its GitHub repo and its live deploy (#55).
     #: Names and URLs only — never a token.
     github_repo: Optional[str] = None

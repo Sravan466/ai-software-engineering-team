@@ -76,8 +76,16 @@ const ACRONYMS = new Set([
   "p2", "qa", "io", "aws", "gcp", "k8s", "orm", "rest", "crud", "ssl", "tls", "mfa",
 ]);
 
+/**
+ * What models called a coverage figure they made up. QA is no longer asked for one
+ * (#76); an older build that still has it shows it for what it is, never as a fact.
+ */
+const GUESSED_COVERAGE = new Set(["coverage_estimate", "estimated_coverage", "estimatedCoverage"]);
+export const UNMEASURED_LABEL = "Model's estimate (not measured)";
+
 /** `api_endpoints` → `API endpoints`; `total_monthly_low_usd` → `Total monthly low USD`. */
 export function labelize(key: string): string {
+  if (GUESSED_COVERAGE.has(key)) return UNMEASURED_LABEL;
   const words = String(key).replace(/[_-]+/g, " ").trim().split(/\s+/);
   return words
     .map((word, i) => {

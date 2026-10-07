@@ -234,6 +234,7 @@ def decide_gate(
     schema_status: Optional[str] = None,
     stack_violations: Optional[list] = None,
     build_problems: Optional[list] = None,
+    failing_tests: Optional[list] = None,
 ) -> Optional[Gate]:
     """Should the pipeline stop after `phase_key`? Returns the gate, or None.
 
@@ -266,9 +267,18 @@ def decide_gate(
     # once with its errors, and the phases after it are not built on a compile error
     # the way they are built on a stack. `build_problems` is every code phase's
     # outstanding problems, gathered by the caller at the last phase.
-    if phase_key == SHIP_GATE_PHASE.value and build_problems:
+    if phase_key == SHIP_GATE_PHASE.value and (build_problems or failing_tests):
+        # A red suite stops the finished build the same way (#76): "ship it" over
+        # tests that ran and failed is a waiver with a reason, never a silent click.
         overrun = cost_overrun_note(project, output)
-        return Gate(GateKind.BUILD.value, _both(build_note(build_problems), overrun))
+        return Gate(
+            GateKind.BUILD.value,
+            _both(
+                build_note(build_problems) if build_problems else None,
+                tests_note(failing_tests) if failing_tests else None,
+                overrun,
+            ),
+        )
 
     if mode == ApprovalMode.UNATTENDED.value:
         return None
@@ -374,6 +384,18 @@ def build_note(problems: list) -> str:
         f"{len(files)} {subject} compile, after the crew's fix rounds. "
         f"The first: {where} — {first.get('message')}"
     )
+
+
+def tests_note(failures: list) -> str:
+    """"2 of QA's tests fail. The first: `Todo API › creates a todo` — expected 201, got 404." """
+    rows = [f for f in failures if isinstance(f, dict)]
+    if not rows:
+        return "QA's tests fail."
+    first = rows[0]
+    head, _, message = str(first.get("title") or first.get("test") or "").partition("\n")
+    what = f"{len(rows)} of QA's tests fail" if len(rows) != 1 else "1 of QA's tests fails"
+    detail = " ".join(message.split())[:160]
+    return f"{what}, after the crew's fix rounds. The first: {head}" + (f" — {detail}" if detail else "")
 
 
 def unchecked_note(phase_key: str, schema_status: Optional[str]) -> Optional[str]:

@@ -19,7 +19,10 @@ without a model. One *track* per kind of problem:
 
   * `security` — severe findings, fixed by rewinding to the phases that own them;
   * `build:<phase>` — a phase whose code does not compile or contradicts the stack,
-    fixed by re-running that phase in place.
+    fixed by re-running that phase in place;
+  * `tests` — QA's tests that ran and failed (#76). Each failure goes first to the
+    engineer who owns the code it tests, with QA's suite kept as it is; one the fix
+    didn't turn green goes to QA next, to decide whether the test or the code is wrong.
 
 Each track holds its rounds (what was sent, to whom, how, and what the re-check found
 fixed), how many rounds it is allowed, and — once it stops — why.
@@ -34,10 +37,11 @@ from typing import Iterable, Optional
 
 from app.core.artifacts import NOTE_KIND
 from app.core.config import settings
-from app.core.constants import BuildStatus
+from app.core.constants import BuildStatus, Phase, TestStatus
 
 SECURITY = "security"
 BUILD_PREFIX = "build:"
+TESTS = "tests"
 
 #: Why a loop stopped.
 STOP_LIMIT = "limit"  # every round it was allowed has run
@@ -114,7 +118,13 @@ def next_step(t: dict) -> str:
     """"fix" to run another round, or the reason to stop and ask for help."""
     rounds = t.get("rounds") or []
     judged = rounds[int(t.get("resumed_after") or 0) :]
-    if judged and judged[-1].get("fixed") == []:
+    # A round that only asked the code's owners to fix failing tests hands what it
+    # didn't fix to QA, rather than stopping: "the code is right, the test is wrong"
+    # is the other half of the question, and nobody has been asked it yet (#76).
+    # Nor does a round whose re-check couldn't run at all (#76): it tried nothing that
+    # anyone could judge, so it says nothing about progress — the limit still holds.
+    last = judged[-1] if judged else None
+    if last and last.get("fixed") == [] and not last.get("handover") and not last.get("unjudged_all"):
         return STOP_NO_PROGRESS
     if len(rounds) >= int(t.get("allowed") or 0):
         return STOP_LIMIT
@@ -189,12 +199,28 @@ def accept(data: dict, kind: str, reason: str) -> list[str]:
     own, with its own reason, because "I accept this leaked credential" is a
     statement about one finding.
     """
-    names = [n for n in stuck(data) if n.startswith(BUILD_PREFIX)]
+    names = [n for n in stuck(data) if accepts_wholesale(n)]
     for name in names:
         t = data["tracks"][name]
         keys = list((t.get("stopped") or {}).get("keys") or [])
         t["accepted"] = {"kind": kind, "reason": reason, "keys": keys, "at": _now()}
     return names
+
+
+def accepts_wholesale(name: str) -> bool:
+    """Tracks a person can move past in one decision: code problems and failing tests."""
+    return name.startswith(BUILD_PREFIX) or name == TESTS
+
+
+def accept_tests(data: dict, kind: str, reason: str, keys: list[str]) -> None:
+    """Ship past the failing tests now on screen, with the reason on the record (#76).
+
+    Recorded on the `tests` track whether or not the loop ever ran on it — a red suite
+    met at the Ship review is waived the same way as one the crew gave up on — and for
+    exactly these failures: a different test failing later is a new problem."""
+    t = track(data, TESTS)
+    before = list((t.get("accepted") or {}).get("keys") or [])
+    t["accepted"] = {"kind": kind, "reason": reason, "keys": list(dict.fromkeys(before + list(keys))), "at": _now()}
 
 
 def accepted(data: dict, name: str) -> bool:
@@ -276,7 +302,216 @@ _BROKE = {
     "build": "fails the build",
     "boot": "crashes when it starts",
     "vercel": "failed the build on Vercel",
+    "test": "can't run as a test",
 }
+
+
+# ── failing tests (#76) ──────────────────────────────────────────────────────
+_SIDE_OWNER = {
+    "backend": Phase.BACKEND_ENGINEER.value,
+    "frontend": Phase.FRONTEND_ENGINEER.value,
+}
+QA = Phase.QA_ENGINEER.value
+
+
+def test_failures(run: object, unrunnable: bool = False) -> list[dict]:
+    """Every test in QA's latest run (`PhaseResult.test_run`) that ran and failed,
+    keyed by file and name.
+
+    The key leaves out the message and the line, which change as the code does: a
+    test still failing for a different reason after a fix is still that test failing.
+
+    `unrunnable` adds one entry per side whose suite failed without running anything
+    and without a problem anyone was sent (no runner set up for it). Nobody in the
+    crew can fix that, so the loop never sees it — but it is never a pass either, so
+    the Ship review does, and it ships only with a waiver.
+    """
+    if not isinstance(run, dict) or run.get("status") != TestStatus.FAILED.value:
+        return []
+    out: dict[str, dict] = {}
+    for side_run in run.get("runs") or []:
+        side = str(side_run.get("side") or "")
+        if (
+            unrunnable
+            and side_run.get("status") == TestStatus.FAILED.value
+            and not side_run.get("total")
+            and not side_run.get("problems")
+        ):
+            reason = str(side_run.get("reason") or "The suite couldn't run.")
+            key = _key("suite", side, reason)
+            out[key] = {"key": key, "title": f"The {side} tests couldn't run\n{reason}", "kind": "test",
+                        "where": None, "phase": QA, "test": f"{side} suite", "failure": "unrunnable",
+                        "owner": QA, "side": side, "path": ""}
+        for f in side_run.get("failures") or []:
+            if not isinstance(f, dict):
+                continue
+            path, name = str(f.get("path") or ""), str(f.get("name") or "a test")
+            message = str(f.get("message") or "failed").strip()
+            key = _key("test", path, name)
+            out[key] = {
+                "key": key,
+                "title": f"{name}\n{message}",
+                "kind": "test",
+                "where": f"{path}:{f['line']}" if path and f.get("line") else (path or None),
+                "phase": QA,
+                "test": name,
+                "failure": str(f.get("kind") or "assertion"),
+                "owner": _SIDE_OWNER.get(side, QA),
+                "framework": side_run.get("framework"),
+                "side": side,
+                "path": path,
+            }
+    return list(out.values())
+
+
+def judged(problem: dict, run: object) -> bool:
+    """Whether `run` can say anything about this failing test: its side's suite ran,
+    its file loaded, and the report wasn't cut short. A test the run never reached is
+    not fixed — nobody knows. A test that no longer exists (QA deleted the file, or
+    every test on its side) is judged: the suite says nothing failed because nothing
+    is there, and that was QA's call to make."""
+    if not isinstance(run, dict):
+        return False
+    path = str(problem.get("path") or "")
+    if not path and problem.get("where"):
+        path = str(problem["where"]).rsplit(":", 1)[0]
+    # A round from before tests had sides recorded: the side is the path's first folder.
+    side_name = problem.get("side") or (path.split("/", 1)[0] if "/" in path else None)
+    runs = run.get("runs") or []
+    if not runs:
+        return bool(run.get("no_tests"))
+    side = next((r for r in runs if r.get("side") == side_name), None)
+    if side is None:
+        return True  # no tests on this side any more
+    files = side.get("files") or []
+    if files and path and path not in files:
+        return True  # its file is gone
+    if side.get("status") not in (TestStatus.OK.value, TestStatus.FAILED.value) or not side.get("total"):
+        return False
+    if side.get("truncated"):
+        return False
+    broken = {str(p.get("path") or "") for p in side.get("problems") or [] if isinstance(p, dict)}
+    return path not in broken
+
+
+def test_problems(t: dict, run: object) -> tuple[list[dict], list[dict]]:
+    """(the failing tests to deal with, those carried from the last round unjudged).
+
+    What `run` reports failing, plus every test the current episode's last round was
+    sent that `run` couldn't judge — a side that didn't run (the registry was down), a
+    file that wouldn't load against the fix. Those stay failing until a run says
+    otherwise: a re-check that couldn't run is never a fix.
+    """
+    current = test_failures(run)
+    keys = {p["key"] for p in current}
+    rounds = t.get("rounds") or []
+    last = rounds[-1] if len(rounds) > int(t.get("episode_start") or 0) else None
+    if last is None:
+        return current, []
+    pending = (last.get("problems") or []) if last.get("fixed") is None else (last.get("carried") or [])
+    carried = [p for p in pending if p.get("key") not in keys and not judged(p, run)]
+    return current + carried, carried
+
+
+def unwaived_tests(data: dict, run: object) -> list[dict]:
+    """The failing tests in `run` a person hasn't waived — the one rule that holds the
+    Ship review, read by the gate, the approve route and the page alike. A side whose
+    suite couldn't run at all counts too: never a pass, so never shipped silently."""
+    failures = test_failures(run, unrunnable=True)
+    t = data["tracks"].get(TESTS)
+    # Per failure: what a person waived stays waived, and only what they never saw
+    # (a new failure, a suite that stopped running) holds the review again.
+    waived = set(((t or {}).get("accepted") or {}).get("keys") or [])
+    return [f for f in failures if f["key"] not in waived]
+
+
+def judge_tests_round(t: dict, run: object, reason: Optional[str] = None) -> Optional[list[str]]:
+    """Close the open tests round against `run` — the suite it kept, before anything
+    rewrites it. Tests `run` couldn't reach are carried as still failing, with why.
+    Returns the keys fixed, or None if no round was waiting."""
+    last = open_round(t)
+    if last is None:
+        return None
+    problems, carried = test_problems(t, run)
+    fixed = close_round(t, [p["key"] for p in problems])
+    if carried:
+        last["carried"] = carried
+        last["unjudged"] = reason or "Some tests couldn't run again to check the fix."
+        sent = {p.get("key") for p in last.get("problems") or []}
+        last["unjudged_all"] = sent <= {p.get("key") for p in carried}
+    return fixed
+
+
+def route_tests(t: dict, problems: list[dict]) -> list[dict]:
+    """Who each failing test goes to this round.
+
+    The owner of the code first — the test is QA's reading of the spec, and the code
+    is what it is checking. A failure the owner already had a turn at goes to QA, to
+    decide which of the two is wrong. A test that broke on its own scaffolding (a
+    fixture, the network the sandbox doesn't have) is QA's from the start.
+    """
+    last_to: dict[str, str] = {}
+    for r in (t.get("rounds") or [])[int(t.get("episode_start") or 0):]:
+        unseen = {p.get("key") for p in r.get("carried") or []}
+        for p in r.get("problems") or []:
+            # A turn whose result nobody could see isn't a turn: the same phase goes again.
+            if p.get("key") not in unseen:
+                last_to[p.get("key")] = p.get("phase")
+    routed = []
+    for p in problems:
+        owner = p.get("owner") or QA
+        if p.get("failure") in ("environment", "error") or last_to.get(p["key"]) == owner:
+            dest = QA
+        else:
+            dest = owner
+        routed.append({**p, "phase": dest})
+    return routed
+
+
+TEST_NOTE_PREFIX = "Some of QA's tests fail"
+
+
+def test_note(problems: list[dict], phase: str, round_number: int, bodies: Optional[dict] = None,
+              standing: Optional[str] = None) -> str:
+    """The note one phase is re-run with to deal with failing tests.
+
+    An engineer is told to fix the code, with the assertion and the test's body — the
+    suite is kept as it is and run again against the fix. QA is told the owner already
+    had a turn, and asked to decide: fix a test that expects the wrong thing, or keep
+    one that's right and say why.
+    """
+    lines = []
+    for p in problems:
+        where = f" (`{p['where']}`)" if p.get("where") else ""
+        head, _, message = p["title"].partition("\n")
+        lines.append(f"- {head}{where}: {' '.join(message.split())[:400]}")
+        body = (bodies or {}).get(p["key"])
+        if body:
+            lines.append("\n".join(f"    {line}" for line in body.splitlines()))
+    if phase == QA:
+        env = [p for p in problems if p.get("failure") == "environment"]
+        lead = (
+            f"{TEST_NOTE_PREFIX}, and they are yours to look at. "
+            + ("Where the engineer already tried to fix the code and the test still fails, decide which "
+               "is wrong: if the test expects something the spec doesn't ask for, fix the test; if the "
+               "code is wrong, keep the test and say so in `risks`. " if len(env) < len(problems) else "")
+            + ("Tests run with no network and no database server: mock what they reach for. " if env else "")
+            + "Return the complete deliverable, every test file included:"
+        )
+    else:
+        lead = (
+            f"{TEST_NOTE_PREFIX} against your code. Fix the code so they pass — the tests stay as they "
+            "are and are run again against your fix. Return the complete deliverable:"
+        )
+    retry = (
+        f"\n\nThis is fix round {round_number}. Don't repeat what the last round tried."
+        if round_number > 1 else ""
+    )
+    carried = (
+        "\n\nThis phase is also in the middle of a security fix. Keep every one of those fixes:\n\n" + standing
+        if standing else ""
+    )
+    return lead + "\n" + "\n".join(lines) + retry + carried
 
 
 CODE_NOTE_PREFIX = "Your last deliverable still has problems"
@@ -332,6 +567,16 @@ def code_note(
 
 __all__ = [
     "SECURITY",
+    "TESTS",
+    "accept_tests",
+    "accepts_wholesale",
+    "route_tests",
+    "test_failures",
+    "test_note",
+    "judge_tests_round",
+    "judged",
+    "test_problems",
+    "unwaived_tests",
     "STOP_LIMIT",
     "STOP_NO_PROGRESS",
     "WAIVE_KINDS",

@@ -72,6 +72,9 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # What installing, building and starting the code did (#75): the steps, their
         # output's tail, and how long it took. None when nothing was built.
         "build_run": getattr(result, "build_run", None),
+        # QA's tests, run for real (#76): counts, failures, measured coverage — or
+        # why they weren't run. Written by the platform, never by the model.
+        "test_run": getattr(result, "test_run", None),
         # Which procedures this deliverable was actually written with. Recorded
         # because a skill you cannot confirm reached the model is indistinguishable
         # from one that did nothing — and because selection is a keyword score, so
@@ -82,7 +85,8 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         "handoff": dict(getattr(result, "handoff", {}) or {}),
         # One entry per model call. A repaired phase made two, and analytics counts
         # calls and averages latency across them — folding both into a single event
-        # would report one call that took as long as two.
+        # would report one call that took as long as two. A kept attempt re-checked
+        # without a model (#76) made none, and records none.
         "calls": [
             {
                 "provider": c.provider,
@@ -92,7 +96,7 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
                 "fallback_used": c.fallback_used,
                 "is_local": c.is_local,
             }
-            for c in (result.calls or [result.response])
+            for c in (result.calls or ([] if getattr(result, "kept", False) else [result.response]))
         ],
     }
 
@@ -252,6 +256,9 @@ def _make_node(phase: Phase):
     agent = get_agent(phase.value)
 
     def node(state: PipelineState) -> dict:
+        kept = (state.get("kept") or {}).get(phase.value)
+        if kept is not None:
+            return _recheck(state, phase, agent, kept)
         rag_ctx, mem_ctx = _gather_context(state, phase.value)
         skill_ctx = gather_skills(state, phase.value)
         extra = ""
@@ -313,6 +320,28 @@ def _make_node(phase: Phase):
         return updates
 
     return node
+
+
+def _recheck(state: PipelineState, phase: Phase, agent, kept: dict) -> dict:
+    """A phase the fix loop kept from the last attempt (#76): checked and run again
+    against the rebuilt phases before it, not regenerated. QA's suite, while the
+    engineer who owns the code it tests fixes it — so the tests that judge the fix are
+    the tests that failed."""
+    ctx = AgentContext(
+        idea=state["idea"],
+        routing_mode=RoutingMode(state.get("routing_mode", "local_only")),
+        preferred_model=state.get("preferred_model"),
+        prior_outputs=state.get("prior_outputs", {}),
+        charter=binding_on(phase.value, state.get("charter")),
+    )
+    result = agent.recheck(ctx, kept)
+    claim.check()
+    return {
+        "prior_outputs": {**state.get("prior_outputs", {}), phase.value: result.output},
+        "last_phase": phase.value,
+        "last_result": _serialize_result(phase.value, agent.title, result),
+        "kept": {k: v for k, v in (state.get("kept") or {}).items() if k != phase.value},
+    }
 
 
 def build_graph() -> StateGraph:

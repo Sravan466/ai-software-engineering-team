@@ -385,8 +385,6 @@ def test_every_agent_declares_a_shape_that_prompt_and_schema_agree_on(phase):
             "overallRiskAssessment",
             "risk_assessment",
         ),
-        (QAEngineerOutput, "estimated_coverage", "coverage_estimate"),
-        (QAEngineerOutput, "estimatedCoverage", "coverage_estimate"),
         (SecurityEngineerOutput, "security_findings", "findings"),
         (SecurityEngineerOutput, "vulnerabilities", "findings"),
         (CostEstimationOutput, "totalMonthlyHighUsd", "total_monthly_high_usd"),

@@ -25,6 +25,7 @@ STAGES = {
     "fixing": "Fixing",
     "checking": "Checking the build",
     "building": "Building and starting it",
+    "testing": "Running the tests",
 }
 
 #: A file's state in the list: planned, being written, written and parses, being

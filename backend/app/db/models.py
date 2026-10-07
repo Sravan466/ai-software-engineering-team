@@ -154,6 +154,19 @@ class Project(Base):
 
         return connectors.unconnected_answered(self)
 
+    @property
+    def tests_unwaived(self) -> int:
+        """QA's tests that ran and failed and nobody waived (#76) — what holds the Ship
+        button. Read from the loaded phases, so a page poll costs no extra query."""
+        from app.core import artifacts
+        from app.orchestration import autofix
+
+        qa = next((ph for ph in artifacts._current(list(self.phases)) if ph.phase == "qa_engineer"), None)
+        run = getattr(qa, "test_run", None) if qa is not None else None
+        if not isinstance(run, dict) or run.get("status") != "failed":
+            return 0
+        return len(autofix.unwaived_tests(autofix.load(self), run))
+
     # ── where the finished build went (#55) ──────────────────────────────────
     #: The repository in the user's own GitHub (`owner/name`) this build was pushed
     #: to, so a second push adds a commit there instead of failing on the name.
@@ -356,6 +369,11 @@ class PhaseResult(Base):
     #: Null for rows from before real builds, phases that aren't built, and code that
     #: didn't parse — there was nothing to build.
     build_run: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: What running QA's tests in the same sandbox did (#76): `{status, summary, runs:
+    #: [{side, framework, passed, failed, errored, skipped, failures, coverage, …}]}`.
+    #: Written by the runner, never by the model. Null for every phase but QA, and for
+    #: QA rows from before tests were run.
+    test_run: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     #: The skills this phase was actually given, by name, in the order they were
     #: injected. What was *selected* is a different fact: a skill that did not fit

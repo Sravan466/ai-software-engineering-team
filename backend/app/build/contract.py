@@ -75,6 +75,8 @@ def prompt_block(phase_key: str, charter=None) -> Optional[str]:
         extra = "- Import every testing helper you use (render, screen, fireEvent, …).\n"
     else:
         return None
+    # QA's code is compiled and then run (#76); everyone else's is compiled and built.
+    after = "compiled and your tests are run" if phase_key == Phase.QA_ENGINEER.value else "compiled"
 
     return (
         "PLATFORM SCAFFOLD — the platform writes the project's boilerplate from the stack "
@@ -85,7 +87,7 @@ def prompt_block(phase_key: str, charter=None) -> Optional[str]:
         f"{extra}"
         f"- {available}. Anything else must be a file in this build.\n"
         "- Every relative import must point at a file you or an earlier phase wrote.\n"
-        "- Write each file's code with real newlines. The build is compiled after you "
+        f"- Write each file's code with real newlines. The build is {after} after you "
         "answer: a file that does not parse, uses a name it never imports, or imports "
         "something that does not exist is sent back to you with the error."
     )

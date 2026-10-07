@@ -45,7 +45,23 @@ const CODE_STRATEGY: Record<AutoFixRound["strategy"], string> = {
   stronger_model: "A full rewrite on the strongest model available",
 };
 
-export function approach(track: string, strategy: AutoFixRound["strategy"]): string {
+/**
+ * A tests round (#76) is about who is asked: the engineer whose code a test checks,
+ * with QA's suite kept and run again on the fix; or QA, once the engineer had a turn,
+ * to decide whether the test or the code is wrong.
+ */
+function testApproach(strategy: AutoFixRound["strategy"], round?: AutoFixRound): string {
+  const toQa = round?.phases.includes("qa_engineer");
+  const who = toQa
+    ? (round?.phases.length ?? 0) > 1
+      ? "The owners fix the code; QA decides on the rest"
+      : "QA decides whether the test or the code is wrong"
+    : "The owner fixes the code; the same tests run again";
+  return strategy === "stronger_model" ? `${who}, on the strongest model available` : who;
+}
+
+export function approach(track: string, strategy: AutoFixRound["strategy"], round?: AutoFixRound): string {
+  if (track === "tests") return testApproach(strategy, round);
   return (track === "security" ? STRATEGY : CODE_STRATEGY)[strategy];
 }
 
@@ -73,6 +89,7 @@ const BROKE: Record<string, string> = {
   build: "fails the build",
   boot: "crashes on start",
   vercel: "failed on Vercel",
+  test: "can't run as a test",
 };
 
 /** Where a real build found a problem, as a tag beside it. */
@@ -81,6 +98,7 @@ const FOUND_BY: Record<string, string> = {
   build: "Build",
   boot: "Start-up",
   vercel: "Vercel",
+  test: "Test run",
 };
 
 /** A problem's first line as its title; a pasted log under it, as a terminal. */
@@ -96,6 +114,7 @@ function ProblemTitle({ title }: { title: string }) {
 
 function trackLabel(name: string): string {
   if (name === "security") return "security findings";
+  if (name === "tests") return "the failing tests";
   const phase = name.replace(/^build:/, "");
   return `${AGENT_BY_KEY[phase]?.codename ?? phase}'s code`;
 }
@@ -107,8 +126,9 @@ function stepFor(problem: AutoFixProblem, track: string, current: string | null)
   if (at < 0 || owner < 0) return "queued";
   if (at < owner) return "queued";
   if (at === owner) return "fixing";
-  // A code fix is re-checked inside its own phase; a finding by the next audit.
-  return track === "security" ? "rechecking" : "fixed";
+  // A code fix is re-checked inside its own phase; a finding by the next audit; a
+  // failing test by running the suite again, at QA.
+  return track === "security" || track === "tests" ? "rechecking" : "fixed";
 }
 
 /** The rail every problem runs along. The label says the state; colour only agrees. */
@@ -164,7 +184,9 @@ export function FixingPanel({ project }: { project: Project }) {
                 <h2 id="fixing-title">
                   {fromVercel
                     ? `Fixing what Vercel rejected: ${count} problem${count === 1 ? "" : "s"}`
-                    : `Fixing ${count} serious ${name === "security" ? "issue" : "problem"}${count === 1 ? "" : "s"}`}
+                    : name === "tests"
+                      ? `Fixing ${count} failing test${count === 1 ? "" : "s"}`
+                      : `Fixing ${count} serious ${name === "security" ? "issue" : "problem"}${count === 1 ? "" : "s"}`}
                 </h2>
                 <p>
                   {/* Counted within this episode: a fresh problem gets a fresh budget. */}
@@ -172,11 +194,19 @@ export function FixingPanel({ project }: { project: Project }) {
                   {onIt && (
                     <>
                       {" · "}
-                      <b>{AGENT_BY_KEY[onIt]?.codename ?? onIt}</b> is on{" "}
-                      {onFile ? <code className="mono">{onFile}</code> : "it"}
+                      <b>{AGENT_BY_KEY[onIt]?.codename ?? onIt}</b>{" "}
+                      {name === "tests" && onIt !== "qa_engineer" ? (
+                        // The engineer fixes the code a test checks, never the test.
+                        <>
+                          is fixing what {onFile ? <code className="mono">{onFile}</code> : "the failing test"} checks
+                        </>
+                      ) : (
+                        <>is on {onFile ? <code className="mono">{onFile}</code> : "it"}</>
+                      )}
                     </>
                   )}
                   {!onIt && name === "security" && " · Warden is re-checking the rebuilt code"}
+                  {!onIt && name === "tests" && " · SIEVE's suite runs again on the rebuilt code"}
                 </p>
               </div>
               <span className="badge badge-run">
@@ -186,7 +216,7 @@ export function FixingPanel({ project }: { project: Project }) {
             </header>
             <p className="fixing-approach">
               <span className="fixing-approach-label">This round</span>
-              {approach(name, round.strategy)}
+              {approach(name, round.strategy, round)}
             </p>
             <ul className="fix-list">
               {round.problems.map((p) => (
@@ -196,6 +226,7 @@ export function FixingPanel({ project }: { project: Project }) {
                     <ProblemTitle title={p.title} />
                   </div>
                   <div className="fix-item-meta">
+                    {p.kind === "test" && <span className="fix-item-step">Test</span>}
                     {p.step && <span className="fix-item-step">{FOUND_BY[p.step] ?? p.step}</span>}
                     {p.where && <code className="mono">{p.where}</code>}
                     <Owner phase={p.phase} />
@@ -233,10 +264,17 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               <span className="ledger-what">
                 Sent {sent} to {who}
               </span>
-              <span className="ledger-how">{approach(name, r.strategy)}</span>
+              <span className="ledger-how">{approach(name, r.strategy, r)}</span>
             </div>
-            <span className={`badge ${fixed > 0 ? "badge-ok" : "badge"}`}>
-              {r.fixed === null ? "Not re-checked" : `Fixed ${fixed} of ${sent}`}
+            <span
+              className={`badge ${r.unjudged && fixed === 0 ? "badge-warn" : fixed > 0 ? "badge-ok" : "badge"}`}
+              title={r.unjudged}
+            >
+              {r.fixed === null
+                ? "Not re-checked"
+                : r.unjudged && fixed === 0
+                  ? "Couldn't re-check"
+                  : `Fixed ${fixed} of ${sent}`}
             </span>
           </li>
         );
@@ -380,7 +418,11 @@ function CodeLeft({ track }: { track: AutoFixTrack }) {
         <li key={p.key} className="fix-item" data-left>
           <div className="fix-item-main">
             <span className="badge badge-bad">
-              {p.kind === "stack" ? "contradicts the stack" : BROKE[p.step ?? ""] ?? "doesn't compile"}
+              {p.kind === "stack"
+                ? "contradicts the stack"
+                : p.kind === "test"
+                  ? "still fails"
+                  : BROKE[p.step ?? ""] ?? "doesn't compile"}
             </span>
             <ProblemTitle title={p.title} />
           </div>

@@ -263,8 +263,9 @@ def test_files_the_platform_claims_but_does_not_write_are_kept():
     )
     art = assemble(project)
     by_path = {f["path"]: f for f in art["files"]}
-    # Kept: the scaffold writes no Jest config for Vite and no runner for a backend
-    # that brings its own migrations.
+    # Kept: a Vite build with no tests gets no test config from the scaffold (one with
+    # tests gets Vitest — see test_test_runs.py), and a backend that brings its own
+    # migrations gets no runner.
     assert by_path["frontend/jest.config.js"]["phase"] == "frontend_engineer"
     assert by_path["backend/migrate.py"]["phase"] == "backend_engineer"
     # Replaced: files the scaffold does write, and the lockfile beside its manifest.
