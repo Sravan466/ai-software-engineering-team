@@ -1,0 +1,304 @@
+/* ===========================================================================
+   AGENT PROGRESS — the run as an account, not a clock (#86)
+
+   One motion idea, carried through: words settle. A step in hand is lit in its
+   agent's colour with a sheen passing over it; when it finishes, the same words
+   cool to the quiet ink of everything already done, and the next step grows in
+   beneath. Nothing jumps — new lines open their own height, the card's height
+   follows its content, and a new sentence is laid out at full size before it
+   types itself in. Every duration is short and decelerating: this is feedback on
+   work in progress, not choreography to sit through.
+
+   Colour stays where it means something: the live line in the agent's own lit
+   tone, a gate in the pipeline's amber, everything finished in --ink-3.
+   =========================================================================== */
+.ap {
+  --ap-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  box-sizing: content-box; /* the height it follows is the content's; the border sits outside it */
+  position: relative;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--agent) 30%, var(--line));
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  transition: border-color 700ms var(--ap-ease);
+}
+.ap[data-sized] {
+  transition:
+    height 440ms var(--ap-ease),
+    border-color 700ms var(--ap-ease);
+}
+.ap-in { padding: 16px 20px 18px; }
+
+.ap-groups,
+.ap-lines { list-style: none; margin: 0; padding: 0; }
+.ap-groups { display: flex; flex-direction: column; gap: 10px; }
+
+.ap-group {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: start;
+}
+/* The avatar sits on the first line's centre. A live sprite is taller than the
+   line and may hang into the gap below; it's a figure, not a box. */
+.ap-av {
+  display: grid;
+  place-items: center;
+  height: 28px;
+  animation: ap-fade 360ms var(--ap-ease) both;
+}
+.ap-group:not(.is-live) .ap-av { opacity: 0.9; }
+
+.ap-lines { display: flex; flex-direction: column; min-width: 0; }
+
+/* ── a line, and how it arrives ──
+   The row opens its own height (grid 0fr → 1fr) while its words rise and come into
+   focus, so whatever sits below — the dots, the next card — slides rather than
+   jumps. The class comes off when it lands, so the row is plain afterwards. */
+.ap-line { display: grid; grid-template-rows: 1fr; min-width: 0; }
+.ap-line-in { min-width: 0; min-height: 0; }
+.ap-line.is-new {
+  animation: ap-grow 420ms var(--ap-ease) var(--ap-delay, 0ms) both;
+}
+.ap-line.is-new > .ap-line-in {
+  overflow: hidden;
+  animation: ap-rise 560ms var(--ap-ease) var(--ap-delay, 0ms) both;
+}
+@keyframes ap-grow { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
+@keyframes ap-rise {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+@keyframes ap-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.ap-head {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+  padding: 4px 0;
+  font-size: var(--t-md);
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+.ap-who { line-height: 1; transition: color 700ms var(--ap-ease); }
+.ap-group:not(.is-live) .ap-who { color: color-mix(in srgb, var(--agent) 72%, var(--ink-3)); }
+
+/* ── the words: lit while live, quiet once done ──
+   Two copies of the same text: the ink underneath carries the state and eases
+   between colours; the sheen on top is the moving highlight, clipped to the
+   letters, and fades out when the step is done. */
+.ap-title {
+  position: relative;
+  display: inline-block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ap-title-ink {
+  color: var(--ink-3);
+  transition: color 520ms var(--ap-ease);
+}
+.ap-sheen {
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    transparent 0%,
+    transparent 38%,
+    rgba(255, 255, 255, 0.92) 50%,
+    transparent 62%,
+    transparent 100%
+  );
+  background-size: 250% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 420ms var(--ap-ease);
+}
+.is-live .ap-title-ink { color: color-mix(in srgb, var(--agent-lit) 62%, var(--ink)); }
+.is-live .ap-sheen {
+  opacity: 1;
+  animation: ap-sheen 2.4s linear infinite;
+}
+/* Left to right, then a beat of rest before it passes again. */
+@keyframes ap-sheen {
+  0%   { background-position: 125% 0; }
+  70%  { background-position: -25% 0; }
+  100% { background-position: -25% 0; }
+}
+
+.is-waiting .ap-title-ink { color: var(--accent); }
+.is-stopped .ap-title-ink { color: var(--ink-3); }
+.ap-icon { display: inline-flex; align-self: center; color: var(--ink-3); }
+.ap-icon svg { width: 15px; height: 15px; }
+.is-waiting .ap-icon { color: var(--accent); }
+
+/* The quiet half of a step: the file, the command, the count. */
+.ap-obj {
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--mono);
+  font-size: var(--t-sm);
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+.ap-obj .wf-path { font-size: inherit; }
+.ap-chip {
+  display: inline-flex;
+  align-self: center;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 7px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 20px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+  transition: color 520ms var(--ap-ease), border-color 520ms var(--ap-ease);
+}
+.is-live .ap-chip { color: var(--ink-2); border-color: var(--line-3); }
+.ap-count {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── the chevron: a button stretched over the whole row ── */
+.ap-toggle {
+  display: inline-flex;
+  align-self: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-4);
+  cursor: pointer;
+  animation: ap-fade 420ms var(--ap-ease) both;
+}
+.ap-toggle::before {
+  content: "";
+  position: absolute;
+  inset: 0 -8px;
+  border-radius: var(--r-sm);
+  transition: background-color var(--tr);
+}
+.ap-toggle:focus-visible { outline: none; }
+.ap-toggle:focus-visible::before { outline: 2px solid var(--run); outline-offset: -1px; }
+.ap-head.has-more:hover .ap-title-ink { color: var(--ink-2); }
+.ap-head.has-more:hover .ap-toggle { color: var(--ink-2); }
+.ap-head.has-more:hover .ap-toggle::before { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.ap-chev { display: inline-flex; transition: transform 260ms var(--ap-ease); }
+.ap-chev svg { width: 15px; height: 15px; }
+.ap-toggle[aria-expanded="true"] .ap-chev { transform: rotate(90deg); }
+
+/* ── the sentence under a step ── */
+.ap-msg {
+  margin: 2px 0 8px;
+  max-width: 68ch;
+  font-size: var(--t-md);
+  line-height: 1.6;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+.ap-edge { opacity: 0.45; }
+.ap-ghost { color: transparent; }
+
+/* ── what the chevron opens ──
+   Its height eases open and shut (both ways, unlike a mount), and once shut it is
+   hidden from focus and from assistive tech, not just squeezed to nothing. */
+.ap-more {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows 300ms var(--ap-ease),
+    opacity 160ms ease-out,
+    visibility 0s linear 300ms;
+}
+.ap-more[data-open] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    grid-template-rows 380ms var(--ap-ease),
+    opacity 280ms var(--ap-ease) 60ms,
+    visibility 0s;
+}
+.ap-more-in { min-height: 0; overflow: hidden; }
+.ap-more-text {
+  margin: 2px 0 6px;
+  max-width: 68ch;
+  font-size: var(--t-base);
+  line-height: 1.6;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+.ap-see {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 8px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color var(--tr);
+}
+.ap-see svg { width: 13px; height: 13px; transition: transform var(--tr); }
+.ap-see:hover { color: var(--ink); }
+.ap-see:hover svg { transform: translateX(2px); }
+.ap-see:focus-visible { outline: 2px solid var(--run); outline-offset: 2px; border-radius: 3px; }
+
+/* ── more is coming ── */
+.ap-dots {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding-left: 1px;
+  animation: ap-fade 420ms var(--ap-ease) both;
+}
+.ap-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  animation: ap-dot 1.3s ease-in-out infinite;
+}
+.ap-dots i:nth-child(2) { animation-delay: 0.16s; }
+.ap-dots i:nth-child(3) { animation-delay: 0.32s; }
+@keyframes ap-dot {
+  0%, 70%, 100% { opacity: 0.28; transform: translateY(0); }
+  35%           { opacity: 1;    transform: translateY(-2px); }
+}
+
+@media (max-width: 560px) {
+  .ap-in { padding: 14px 14px 16px; }
+  .ap-group { grid-template-columns: 28px minmax(0, 1fr); column-gap: 10px; }
+}
+
+/* Reduced motion keeps every state legible and drops the movement: the live line
+   is still lit (just without the passing sheen), new lines simply appear, the
+   dots hold still, and sentences arrive whole (AgentProgress checks the same
+   preference before typing). */
+@media (prefers-reduced-motion: reduce) {
+  .ap,
+  .ap[data-sized] { transition: none; }
+  .ap-sheen { display: none; }
+  .ap-line.is-new > .ap-line-in { transform: none; filter: none; }
+  .ap-dots i { animation: none; opacity: 0.6; }
+}

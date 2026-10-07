@@ -56,9 +56,11 @@ class Scripted:
         code: Optional[dict[str, str]] = None,
         reply: Optional[Callable[["Scripted", list[str], int], Optional[str]]] = None,
         finish: Optional[Callable[["Scripted", int], Optional[str]]] = None,
+        summary: Optional[str] = None,
     ) -> None:
         self.role = role
         self.plan_files = plan_files
+        self.summary = summary
         self.code = code or {}
         self.reply = reply
         self.finish = finish
@@ -77,6 +79,8 @@ class Scripted:
             self.plans += 1
             payload = json.loads(resp.text)
             payload["files"] = self.plan_files
+            if self.summary is not None:
+                payload["summary"] = self.summary
             return resp.model_copy(update={"text": json.dumps(payload)})
         wanted = asked_files(messages)
         self.writes.append(wanted)
@@ -445,15 +449,67 @@ def test_the_build_says_which_file_is_being_written_while_it_is(client, monkeypa
         seen.append((out, inflight.current_agent()))
         return None
 
-    model = Scripted("Backend Engineer", _files(3), reply=reply)
+    model = Scripted("Backend Engineer", _files(3), reply=reply, summary="Three   modules:\n the loans,\tthe tools, the people.")
     pid = _build_until_backend(client, monkeypatch, model)
     out, label = seen[1]
     assert out["phase"] == "backend_engineer" and out["stage"] == "writing"
     assert out["detail"] == "backend/app/mod2.py" and out["total"] == 3 and out["done"] == 1
     assert [f["state"] for f in out["files"]] == ["ok", "writing", "planned"]
     assert label == "Backend Engineer — writing backend/app/mod2.py (2 of 3)"
+    # The feed (#86): planning is a finished step, file after file is still one step,
+    # and the plan's summary is there to show under it.
+    assert out["trail"] == [{"stage": "planning", "detail": "", "done": 0, "total": 3}]
+    assert seen[2][0]["trail"] == out["trail"]
+    assert out["note"] == "Three modules: the loans, the tools, the people."
     # And nothing once the phase is over.
     assert client.get(f"/api/projects/{pid}").json()["activity"] is None
+
+
+def test_each_command_is_a_step_and_writing_and_fixing_are_one():
+    with inflight.building("p-trail"):
+        activity.begin("frontend_engineer")
+        activity.stage("planning")
+        activity.plan(["a.tsx", "b.tsx"], 1, note="x " * 400)
+        activity.stage("writing", detail="a.tsx", total=2)
+        activity.stage("fixing", detail="a.tsx", total=2)
+        activity.stage("writing", detail="b.tsx", total=2)
+        activity.file("a.tsx", "ok")
+        activity.file("b.tsx", "ok")
+        activity.stage("checking", total=2)
+        activity.stage("building", detail="npm install")
+        activity.stage("building", detail="npm install")  # the same command again is not a new step
+        activity.stage("building", detail="next build")
+        out = activity.get("p-trail")
+        activity.end()
+    assert [(t["stage"], t["detail"]) for t in out["trail"]] == [
+        ("planning", ""), ("writing", ""), ("checking", ""), ("building", "npm install"),
+    ]
+    assert out["trail"][1]["done"] == 2 and out["trail"][1]["total"] == 2
+    assert (out["stage"], out["detail"]) == ("building", "next build")
+    assert len(out["note"]) <= activity.NOTE_MAX and out["note"].endswith("…")
+    assert activity.get("p-trail") is None
+
+
+def test_a_phase_that_never_plans_does_not_report_a_planning_step():
+    with inflight.building("p-qa"):
+        activity.begin("qa_engineer")
+        activity.stage("testing", detail="npm install")
+        activity.stage("testing", detail="jest")
+        out = activity.get("p-qa")
+        activity.end()
+    assert [(t["stage"], t["detail"]) for t in out["trail"]] == [("testing", "npm install")]
+    assert out["note"] == ""
+
+
+def test_the_trail_keeps_only_the_latest_steps():
+    with inflight.building("p-long"):
+        activity.begin("backend_engineer")
+        for i in range(activity.TRAIL_MAX + 5):
+            activity.stage("building", detail=f"step {i}")
+        out = activity.get("p-long")
+        activity.end()
+    assert len(out["trail"]) == activity.TRAIL_MAX
+    assert out["trail"][-1]["detail"] == f"step {activity.TRAIL_MAX + 3}"
 
 
 # ── the old path, when there is no plan to write from ────────────────────────

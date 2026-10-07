@@ -48,52 +48,8 @@ const FILE_STATE: Record<ActivityFileState, { label: string; icon: ReactNode; hi
   missing: { label: "Not written", icon: Icon.close, hint: "Asked for twice and never returned." },
 };
 
-/**
- * The activity line for the "now working" panel: what the agent is doing inside
- * its phase. `fallback` is the agent's own voice line, for a phase that reports
- * nothing finer — every phase that is not writing code.
- */
-export function ActivityLine({ activity, fallback }: { activity: Activity | null; fallback: string }) {
-  if (!activity) return <span className="working-verb">{fallback}</span>;
-  const count =
-    activity.total > 0 ? (
-      <span className="working-count">
-        {Math.min(activity.done + 1, activity.total)} of {activity.total}
-      </span>
-    ) : null;
-  switch (activity.stage) {
-    case "planning":
-      return <span className="working-verb">is planning the files</span>;
-    case "checking":
-      return <span className="working-verb">is checking the build</span>;
-    case "building":
-      // The real build (#75): which command is running in the sandbox right now.
-      return (
-        <span className="working-verb working-act">
-          is building it
-          {activity.detail && <code className="working-file">{activity.detail}</code>}
-        </span>
-      );
-    case "fixing":
-    case "writing":
-      return (
-        <span className="working-verb working-act">
-          {activity.stage === "fixing" ? "is fixing" : "is writing"}
-          {activity.detail && (
-            <code className="working-file">
-              <FilePath path={activity.detail} />
-            </code>
-          )}
-          {count}
-        </span>
-      );
-    default:
-      return <span className="working-verb">{fallback}</span>;
-  }
-}
-
 /** How far through its plan the phase is, 0–1, or null when there is no plan yet. */
-export function activityShare(activity: Activity | null): number | null {
+function activityShare(activity: Activity | null): number | null {
   if (!activity || activity.stage === "planning" || activity.total <= 0) return null;
   return Math.min(activity.done / activity.total, 1);
 }

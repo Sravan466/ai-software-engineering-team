@@ -59,6 +59,12 @@ export type Persona = {
   accentDim: string;
   /** Voice: short status lines, in character, per state. */
   lines: { queued: string; working: string; done: string; rejected: string };
+  /**
+   * The phase as a step in the build's progress feed (#86): what it is while it
+   * runs, and what it did once it's done. Plain, not in character — the feed reads
+   * as one account of the run, and the codename beside it already says who.
+   */
+  steps: { doing: string; done: string };
   debate?: boolean;
   /**
    * The thing on their desk. 14x12, drawn from DESK_PALETTE plus the agent's
@@ -132,6 +138,7 @@ export const AGENTS: Persona[] = [
       done: "Scope locked",
       rejected: "Rethinking scope",
     },
+    steps: { doing: "Scoping the product", done: "Scoped the product" },
     deskProp: [
       "...oooooooo...",
       "..oXXoooXXo...",
@@ -167,6 +174,7 @@ export const AGENTS: Persona[] = [
       done: "Architecture set",
       rejected: "Redrawing",
     },
+    steps: { doing: "Designing the architecture", done: "Designed the architecture" },
     deskProp: [
       "..oooooooooo..",
       "..oSSSSSSSSo..",
@@ -203,6 +211,7 @@ export const AGENTS: Persona[] = [
       done: "Endpoints up",
       rejected: "Tearing it out",
     },
+    steps: { doing: "Writing the backend", done: "Wrote the backend" },
     deskProp: [
       "....oooo......",
       "...oAHHAo.....",
@@ -238,6 +247,7 @@ export const AGENTS: Persona[] = [
       done: "Interface built",
       rejected: "Starting the layout over",
     },
+    steps: { doing: "Building the frontend", done: "Built the frontend" },
     deskProp: [
       "..............",
       "...oooooooo...",
@@ -274,6 +284,7 @@ export const AGENTS: Persona[] = [
       done: "Tests written",
       rejected: "Re-testing",
     },
+    steps: { doing: "Writing the tests", done: "Wrote the tests" },
     deskProp: [
       "....oooo......",
       "...oXXXXo.....",
@@ -309,6 +320,7 @@ export const AGENTS: Persona[] = [
       done: "Surface hardened",
       rejected: "Re-auditing",
     },
+    steps: { doing: "Reviewing security", done: "Reviewed security" },
     deskProp: [
       "..............",
       ".....oooo.....",
@@ -344,6 +356,7 @@ export const AGENTS: Persona[] = [
       done: "Ready to ship",
       rejected: "Rebuilding the pipeline",
     },
+    steps: { doing: "Planning the deployment", done: "Planned the deployment" },
     deskProp: [
       "......oo......",
       ".....oHHo.....",
@@ -379,6 +392,7 @@ export const AGENTS: Persona[] = [
       done: "Budget filed",
       rejected: "Recounting",
     },
+    steps: { doing: "Estimating costs", done: "Estimated costs" },
     deskProp: [
       "..oooooooooo..",
       "..oWWWWWWWWo..",

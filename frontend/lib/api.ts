@@ -150,7 +150,17 @@ export type Activity = {
   per_call: number;
   files: { path: string; state: ActivityFileState }[];
   elapsed_s: number;
+  /**
+   * The steps this phase has finished, oldest first (#86): a stage change, or a new
+   * command while building or testing. Writing and fixing are one step. Capped.
+   */
+  trail?: ActivityStep[];
+  /** The code plan's own summary — what the phase is about to write. */
+  note?: string;
 };
+
+/** One finished step of the running phase (#86). `detail` is the command, if any. */
+export type ActivityStep = { stage: string; detail: string; done: number; total: number };
 
 
 /** One reason a generated file does not compile. */

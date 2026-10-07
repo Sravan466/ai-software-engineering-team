@@ -266,7 +266,9 @@ class _Run:
             if isinstance(ctx.prior_outputs.get(dep), dict)
         }
         queue = list(self.planned)
-        activity.plan([p.path for p in queue], self._batch_size(len(queue)))
+        # The plan's own summary is the build page's "here's what I'll write" (#86).
+        summary = plan.output.get("summary") if isinstance(plan.output, dict) else None
+        activity.plan([p.path for p in queue], self._batch_size(len(queue)), note=summary if isinstance(summary, str) else "")
 
         while queue:
             claim.between_calls()
