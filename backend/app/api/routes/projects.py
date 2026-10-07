@@ -760,7 +760,7 @@ def list_findings(
     )
     track = autofix.track(autofix.load(project), autofix.SECURITY)
     warden = runner.latest_row(db, project, Phase.SECURITY_ENGINEER.value)
-
+    read = remediation.notes_read(project)
     return {
         "findings": [
             {
@@ -789,7 +789,7 @@ def list_findings(
                 "path": row.path,
                 "line": row.line,
                 # A review note a person approved past at a Security stop (#77).
-                "read": remediation.is_read(project, row),
+                "read": remediation.is_read(read, row),
                 # A review note the scanner now reports itself: `tool:rule` (#77).
                 "superseded_by": row.rule_id
                 if remediation.row_source(row) == remediation.SOURCE_MODEL and row.rule_id

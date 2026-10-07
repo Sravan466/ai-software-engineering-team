@@ -266,9 +266,11 @@ def test_the_scan_tree_leaves_out_tests_and_the_platforms_scaffold():
         ]},
         "qa_engineer": {"test_files": [{"path": "backend/tests/api.test.js", "framework": "jest", "targets": "", "code": "x"}]},
     }
-    files, owners = scan.scan_tree(prior)
+    files, owners, tree = scan.scan_tree(prior)
     assert "backend/routes/users.js" in files
     assert not any("test" in p for p in files)
+    # Left out of the scan, still in the tree: a finding there is unread, not gone.
+    assert "backend/tests/users.test.js" in tree
     assert owners["backend/routes/users.js"] == "backend_engineer"
     # The platform's manifest is audited, and owned by the side's engineer.
     assert "backend/package.json" in files
@@ -519,7 +521,7 @@ def test_runner_unavailable_means_scanners_skipped_and_the_card_says_so(client, 
     monkeypatch.setattr(settings, "build_run_enabled", True)
     monkeypatch.setattr(runner, "engine", None)
     monkeypatch.setattr(settings, "build_runner_url", "")
-    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: (dict(SCAN_TREE), dict(SCAN_OWNERS)))
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: (dict(SCAN_TREE), dict(SCAN_OWNERS), sorted(SCAN_TREE)))
     from app.build import sandbox
 
     monkeypatch.setattr(sandbox, "available", lambda refresh=False: (False, "Docker isn't installed on the computer running the backend.", None))
@@ -916,13 +918,13 @@ def test_the_same_tree_is_scanned_once_within_the_hour(monkeypatch):
         return scan.ScanResult(status="ok", tools=tools)
 
     monkeypatch.setattr(scan, "run_scan", fake_run)
-    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: ({"backend/a.py": "x"}, {}))
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: ({"backend/a.py": "x"}, {}, ["backend/a.py"]))
     monkeypatch.setattr(scan, "_recent", {})
     first = scan.scan_build({})
     again = scan.scan_build({})
     assert len(calls) == 1 and not first.reused and again.reused
     # A different tree is scanned for real.
-    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: ({"backend/a.py": "y"}, {}))
+    monkeypatch.setattr(scan, "scan_tree", lambda prior, charter=None, **kw: ({"backend/a.py": "y"}, {}, ["backend/a.py"]))
     scan.scan_build({})
     assert len(calls) == 2
 
@@ -1072,6 +1074,7 @@ def test_the_sql_rule_only_matches_sql_and_a_fatal_run_falls_back_to_own_rules()
     assert rule["id"] == "aiteam.javascript.sql-built-from-request"
     text = json.dumps(rule)
     assert '\\"$SQL\\" +' in text and "select|insert|update|delete" in text and "^(params|query|body|headers|cookies)$" in text
+    assert "oneOrNone" in text  # template SQL only through methods that run SQL
     semgrep = next(s for s in scan.plan_python(_TREE).steps if s.label == "semgrep").command
     assert "P=''; fi" in semgrep and semgrep.count("semgrep scan") == 2
 
@@ -1109,12 +1112,13 @@ def test_a_note_is_only_read_where_and_as_severe_as_it_was_read(client, monkeypa
         from app.db.models import SecurityDisposition
 
         row = db.query(SecurityDisposition).filter_by(project_id=pid, category="Injection").one()
-        assert remediation.is_read(project, row)
+        read = remediation.notes_read(project)
+        assert remediation.is_read(read, row)
         # The same note, somewhere else: not what was read.
         row.path = "routes/payments.js"
-        assert not remediation.is_read(project, row)
+        assert not remediation.is_read(read, row)
         row.path, row.severity = "routes/users.js", "critical"
-        assert not remediation.is_read(project, row)
+        assert not remediation.is_read(read, row)
 
 
 def test_a_multi_place_or_more_severe_note_is_not_a_repeat():
@@ -1159,3 +1163,8 @@ def test_a_stop_marks_the_plans_after_it_as_stopped(monkeypatch):
 def test_the_reuse_key_changes_with_the_tree():
     files = {"backend/a.py": "x"}
     assert scan._tree_key(files, ["backend/a.py", "backend/tests/t.py"]) != scan._tree_key(files, ["backend/a.py"])
+
+
+def test_a_note_about_two_lines_of_one_file_can_still_be_a_repeat():
+    assert remediation._files_in("backend/app/index.js:5, 7") == {"backend/app/index.js"}
+    assert len(remediation._files_in("a.js:5, b.js")) == 2

@@ -124,23 +124,30 @@ rules:
                   regex: (?i)\b(select|insert|update|delete)\b
           - patterns:
               - pattern-either:
-                  - pattern: $DB.$QUERY(`...${$REQ.$PART.$X}...`, ...)
-                  - pattern: $DB.$QUERY(`...${$REQ.$PART[$X]}...`, ...)
-              - pattern: $DB.$QUERY($TPL, ...)
+                  - patterns:
+                      - pattern-either:
+                          - pattern: $DB.$QUERY(`...${$REQ.$PART.$X}...`, ...)
+                          - pattern: $DB.$QUERY(`...${$REQ.$PART[$X]}...`, ...)
+                      - pattern: $DB.$QUERY($TPL, ...)
+                  - patterns:
+                      - pattern: $DB.$QUERY($Q, ...)
+                      - pattern-inside: |
+                          $Q = $TPL;
+                          ...
+                      - metavariable-pattern:
+                          metavariable: $TPL
+                          pattern-either:
+                            - pattern: "`...${$REQ.$PART.$X}...`"
+                            - pattern: "`...${$REQ.$PART[$X]}...`"
+              # A template that reads as SQL, handed to a method that runs SQL:
+              # `logger.info(`delete ${id}`)` is neither.
               - metavariable-pattern:
                   metavariable: $TPL
                   patterns:
                     - pattern-regex: (?i)\b(select|insert|update|delete)\b
-          - patterns:
-              - pattern: $DB.$QUERY($Q, ...)
-              - pattern-inside: |
-                  $Q = $TPL;
-                  ...
-              - metavariable-pattern:
-                  metavariable: $TPL
-                  patterns:
-                    - pattern: "`...${$REQ.$PART.$X}...`"
-                    - pattern-regex: (?i)\b(select|insert|update|delete)\b
+              - metavariable-regex:
+                  metavariable: $QUERY
+                  regex: ^(query|execute|exec|raw|unsafe|prepare|all|get|run|each|one|many|any|none|oneOrNone|manyOrNone|\$queryRawUnsafe|\$executeRawUnsafe)$
       - metavariable-regex:
           metavariable: $PART
           regex: ^(params|query|body|headers|cookies)$
@@ -441,8 +448,10 @@ _SIDE_OWNER = {layout.BACKEND: Phase.BACKEND_ENGINEER.value, layout.FRONTEND: Ph
 SCANNED_PHASES = (Phase.BACKEND_ENGINEER.value, Phase.FRONTEND_ENGINEER.value, Phase.QA_ENGINEER.value)
 
 
-def scan_tree(prior_outputs: dict, charter=None, with_tree: bool = False) -> tuple:
-    """(the files to scan, who wrote each) — the build as Warden is about to review it.
+def scan_tree(prior_outputs: dict, charter=None) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """(the files to scan, who wrote each, every path in the tree) — the build as Warden
+    is about to review it. The tree is what `covers` reads to tell a file that wasn't
+    scanned from one that is gone.
 
     The crew's own source, not its tests (a fake password in a fixture is not a leak)
     and not the platform's scaffold (nobody in the crew can change it) — apart from
@@ -476,9 +485,7 @@ def scan_tree(prior_outputs: dict, charter=None, with_tree: bool = False) -> tup
         if _is_test(rel) or platform_owned(path):
             continue
         out[path] = content
-    # With `with_tree`, every path in the tree too: what `covers` reads to tell a file
-    # that wasn't scanned from one that is gone.
-    return (out, owners, sorted(files)) if with_tree else (out, owners)
+    return out, owners, sorted(files)
 
 
 def owner_of(path: str, owners: dict[str, str]) -> Optional[str]:
@@ -659,7 +666,7 @@ process.stdout.write('\n' + MARK + JSON.stringify(out) + '\n');
 
 #: Fetches the registry packs into the scanner cache, keeping the last good copy.
 _RULES_FETCH = r"""
-import os, shutil, subprocess, sys, tempfile, time, urllib.request
+import os, shutil, subprocess, sys, tempfile, time, urllib.request, uuid
 d, packs, max_age, tools = sys.argv[1], sys.argv[2].split(","), float(sys.argv[3]) * 3600, sys.argv[4]
 os.makedirs(d, exist_ok=True)
 # Packs are fetched and checked in a folder the scan's `*.yml` never reads; whatever a
@@ -667,8 +674,11 @@ os.makedirs(d, exist_ok=True)
 staging = os.path.join(d, ".staging")
 for leftover in os.listdir(staging) if os.path.isdir(staging) else []:
     path = os.path.join(staging, leftover)
-    if time.time() - os.path.getmtime(path) > 600:
-        shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.remove(path)
+    try:  # another scan sharing the cache may sweep the same leftover first
+        if time.time() - os.path.getmtime(path) > 600:
+            shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.remove(path)
+    except OSError:
+        pass
 os.makedirs(staging, exist_ok=True)
 def accepted(path):
     # A pack the pinned Semgrep can't parse would fail every scan: it never replaces
@@ -677,7 +687,7 @@ def accepted(path):
     env = dict(os.environ, PYTHONPATH=tools, PATH=tools + "/bin:" + os.environ.get("PATH", ""))
     try:
         r = subprocess.run([tools + "/bin/semgrep", "scan", "--metrics=off", "--disable-version-check", "--quiet",
-                            "--json", "--config", path, empty], env=env, capture_output=True, timeout=60)
+                            "--json", "--config", path, empty], env=env, capture_output=True, timeout=120)
     except Exception:
         return False
     return r.returncode in (0, 1)
@@ -690,7 +700,8 @@ for p in packs:
         body = urllib.request.urlopen(req, timeout=60).read()
         if not body.lstrip().startswith(b"rules:"):
             raise ValueError("not a rule pack")
-        tmp = os.path.join(staging, "%s-%d.yml" % (p, os.getpid()))
+        # Unique across containers sharing the cache, where PIDs repeat.
+        tmp = os.path.join(staging, "%s-%s.yml" % (p, uuid.uuid4().hex))
         with open(tmp, "wb") as f:
             f.write(body)
         if not accepted(tmp):
@@ -1297,9 +1308,7 @@ def scan_build(prior_outputs: dict, charter=None) -> ScanResult:
     from app.router.base import RequestCancelled
 
     try:
-        got = scan_tree(prior_outputs, charter, with_tree=True)
-        files, owners = got[0], got[1]
-        tree = list(got[2]) if len(got) > 2 else sorted(files)
+        files, owners, tree = scan_tree(prior_outputs, charter)
         key = _tree_key(files, tree)
         now = time.monotonic()
         with _recent_lock:

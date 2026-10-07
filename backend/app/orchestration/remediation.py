@@ -461,6 +461,12 @@ def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) >= 4 and w not in _COMMON}
 
 
+def _files_in(location: str) -> set[str]:
+    """The files a joined location names: `a.js:5, 7` is one, `a.js:5, b.js` two."""
+    parts = [p.strip() for p in (location or "").split(",") if p.strip()]
+    return {p.split(":", 1)[0] for p in parts if not p.isdigit()}
+
+
 def repeats(note: Finding, tool: Finding) -> bool:
     """Whether a review note is a scanner's finding said again: the same place (file,
     within three lines) *and* the same problem — the note's words share one with the
@@ -469,7 +475,7 @@ def repeats(note: Finding, tool: Finding) -> bool:
         return False
     # One place, and a scanner finding at least as severe: a note about three files
     # isn't one of them, and a critical note isn't a medium scanner finding.
-    if "," in (note.location or "") or _more_severe(note.severity, tool.severity):
+    if len(_files_in(note.location)) > 1 or _more_severe(note.severity, tool.severity):
         return False
     about = _words(f"{tool.category} {tool.title} {(tool.rule_id or '').replace('.', ' ').replace('-', ' ')}")
     return bool(_words(f"{note.category} {note.title}") & about)
@@ -1027,8 +1033,9 @@ def _read_mark(row) -> str:
     return f"{row.finding_key}|{row.path or ''}|{(row.severity or '').lower()}"
 
 
-def is_read(project, row) -> bool:
-    return _read_mark(row) in notes_read(project)
+def is_read(read: set[str], row) -> bool:
+    """Whether `row` is among `read` (`notes_read(project)`, read once per request)."""
+    return _read_mark(row) in read
 
 
 def notes_read(project) -> set[str]:
