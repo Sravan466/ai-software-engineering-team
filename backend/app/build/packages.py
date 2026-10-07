@@ -192,6 +192,8 @@ NPM_DEV: dict[str, str] = {
     "@testing-library/dom": "^10.4.0",
     "supertest": "^7.0.0",
     "vitest": "^2.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "jsdom": "^25.0.0",
     "mocha": "^10.7.0",
     "chai": "^5.1.0",
     "sinon": "^18.0.0",
@@ -320,13 +322,15 @@ PIP: dict[str, tuple[str, str]] = {
     "slowapi": ("slowapi", ">=0.1.9,<1"),
     "pytest": ("pytest", ">=8.0,<9"),
     "pytest_asyncio": ("pytest-asyncio", ">=0.23,<1"),
+    "pytest_cov": ("pytest-cov", ">=5.0,<7"),
+    "pytest_jsonreport": ("pytest-json-report", ">=1.5,<2"),
     "faker": ("Faker", ">=25,<30"),
     "mongomock": ("mongomock", ">=4.1,<5"),
     "fakeredis": ("fakeredis", ">=2.23,<3"),
 }
 
 #: Distribution names that only tests need. Listed separately in the manifest.
-PIP_DEV = frozenset({"pytest", "pytest-asyncio", "Faker", "mongomock", "fakeredis"})
+PIP_DEV = frozenset({"pytest", "pytest-asyncio", "pytest-cov", "pytest-json-report", "Faker", "mongomock", "fakeredis"})
 
 #: The standard library, for the interpreter this checks *generated* code for — not
 #: the one this runs on, which may be older than the code it is reading.
@@ -364,13 +368,18 @@ def pip_requirement(import_name: str) -> Optional[tuple[str, str]]:
 
 
 # ── what agents are told ─────────────────────────────────────────────────────
+#: What the platform runs a suite with (#76) — never imported by a test, so never in
+#: the list of packages an agent is told it may import.
+RUNNER_ONLY = frozenset({"@vitest/coverage-v8", "jsdom", "pytest-cov", "pytest-json-report"})
+
+
 def npm_vocabulary(include_server: bool, include_tests: bool) -> str:
     names = sorted(
         n for n in {**NPM_FRAMEWORK, **NPM}
         if include_server or n not in _SERVER_ONLY
     )
     if include_tests:
-        names += sorted(NPM_DEV)
+        names += sorted(n for n in NPM_DEV if n not in RUNNER_ONLY)
     return ", ".join(names)
 
 
@@ -378,7 +387,7 @@ def pip_vocabulary(include_tests: bool) -> str:
     names = sorted(
         {dist.split("[")[0] + f" (import {imp})" if dist.split("[")[0].lower() != imp else imp
          for imp, (dist, _spec) in PIP.items()
-         if include_tests or dist not in PIP_DEV}
+         if (include_tests or dist not in PIP_DEV) and dist not in RUNNER_ONLY}
     )
     return ", ".join(names)
 

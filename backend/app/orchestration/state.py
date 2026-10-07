@@ -48,3 +48,9 @@ class PipelineState(TypedDict, total=False):
 
     #: Phases the fix loop's current round asks to run on the most capable model.
     escalate: list[str]
+
+    #: Phases a fix round keeps from the attempt before rather than regenerating (#76):
+    #: phase key -> `{output, model, provider, is_local, skills_used, handoff}`. QA's
+    #: suite, while an engineer fixes the code it tests: the node re-checks and re-runs
+    #: it with no model call, then drops it from here.
+    kept: dict

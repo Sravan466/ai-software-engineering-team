@@ -29,14 +29,17 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Callable, Optional, Protocol
 
 from app.build import buildlog, sandbox
 from app.build.check import Problem
 from app.build.sandbox import NODE_IMAGE, PYTHON_IMAGE, Limits, Step, StepResult
 from app.core.config import settings
-from app.core.constants import BuildStatus
+from app.core.constants import BuildStatus, TestStatus
 from app.core.logging import get_logger
+
+if TYPE_CHECKING:
+    from app.build import testrun
 
 log = get_logger(__name__)
 
@@ -511,19 +514,25 @@ def side_files(files: dict[str, str], side: str) -> dict[str, str]:
     return {p[len(prefix):]: c for p, c in files.items() if p.startswith(prefix)}
 
 
-def run_build(files: dict[str, str], side: str) -> BuildRun:
-    """Install, build and start one side of the tree. Never raises for the build's sake."""
+class _Stopped(Exception):
+    """The run was stopped while it waited or ran."""
+
+
+class _CouldntRun(Exception):
+    """The runner itself failed — Docker, the builder service — not the code."""
+
+
+def _execute(image: str, mine: dict[str, str], steps: list[Step], side: str, stage: str,
+             chosen: Engine) -> list[StepResult]:
+    """Run `steps` over `mine` in the sandbox, queued behind the project's other runs.
+
+    Raises `_Stopped` when Stop was pressed (while queued or running) and `_CouldntRun`
+    when the runner failed rather than the code. Shared by the build (#75) and the
+    test run (#76), so both queue, stop and cap exactly alike.
+    """
     from app.core import identity
     from app.orchestration import activity, claim
     from app.router import inflight
-
-    mine = side_files(files, side)
-    plan, why = plan_for(mine, side)
-    if plan is None:
-        return BuildRun.unchecked(side, why or "Nothing to build.")
-    chosen, why = _engine()
-    if chosen is None:
-        return BuildRun.unchecked(side, why or "No build runner is available.", stack=plan.stack)
 
     limits = Limits(
         seconds=float(max(int(settings.build_run_timeout_seconds), 30)),
@@ -536,12 +545,10 @@ def run_build(files: dict[str, str], side: str) -> BuildRun:
     call_id = f"build-{uuid.uuid4().hex[:12]}"
 
     def on_step(step: Step) -> None:
-        activity.stage("building", detail=step.label)
+        activity.stage(stage, detail=step.label)
 
     claim.between_calls()
-    activity.stage("building", detail=plan.steps[0].label)
-    started = time.monotonic()
-    cancelled = False
+    activity.stage(stage, detail=steps[0].label)
     results: list[StepResult] = []
     stopped = threading.Event()
 
@@ -566,14 +573,14 @@ def run_build(files: dict[str, str], side: str) -> BuildRun:
                 if _wait(slot, stopped):
                     try:
                         if not stopped.is_set():
-                            results = chosen.run(plan.image, mine, plan.steps, limits, on_cancel, on_step)
+                            results = chosen.run(image, mine, steps, limits, on_cancel, on_step)
                     except Exception as e:  # noqa: BLE001 - the runner must never become the failure
                         if not stopped.is_set():
                             if isinstance(e, sandbox.SandboxError):
-                                log.warning("The %s build couldn't run: %s", side, e)
-                                return BuildRun.unchecked(side, str(e), stack=plan.stack, runner=chosen.kind)
-                            log.exception("The %s build crashed", side)
-                            return BuildRun.unchecked(side, f"The build runner failed: {e}", stack=plan.stack, runner=chosen.kind)
+                                log.warning("The %s %s couldn't run: %s", side, stage, e)
+                                raise _CouldntRun(str(e)) from e
+                            log.exception("The %s %s crashed", side, stage)
+                            raise _CouldntRun(f"The build runner failed: {e}") from e
                         # Stopped, and the stop is what broke it: settled as a stop below.
                     finally:
                         slot.release()
@@ -583,11 +590,71 @@ def run_build(files: dict[str, str], side: str) -> BuildRun:
     if cancelled:
         # Stopped: the run settles it the way it settles a cancelled model call.
         claim.between_calls()
+        raise _Stopped()
+    return results
+
+
+def run_build(files: dict[str, str], side: str) -> BuildRun:
+    """Install, build and start one side of the tree. Never raises for the build's sake."""
+    mine = side_files(files, side)
+    plan, why = plan_for(mine, side)
+    if plan is None:
+        return BuildRun.unchecked(side, why or "Nothing to build.")
+    chosen, why = _engine()
+    if chosen is None:
+        return BuildRun.unchecked(side, why or "No build runner is available.", stack=plan.stack)
+    started = time.monotonic()
+    try:
+        results = _execute(plan.image, mine, plan.steps, side, "building", chosen)
+    except _CouldntRun as e:
+        return BuildRun.unchecked(side, str(e), stack=plan.stack, runner=chosen.kind)
+    except _Stopped:
         return BuildRun.unchecked(side, "The build was stopped.", stack=plan.stack, runner=chosen.kind)
     run = judge(plan, results, side, mine)
     run.runner = chosen.kind
     run.seconds = run.seconds or (time.monotonic() - started)
     log.info("%s build (%s on %s): %s", side, plan.stack, chosen.kind, run.summary())
+    return run
+
+
+def run_tests(files: dict[str, str], side: str) -> "testrun.TestRun":
+    """Install one side and run the tests QA wrote for it (#76). Never raises for the
+    suite's sake: what it can't run comes back `not_run`, with the reason."""
+    from app.build import testrun
+
+    mine = side_files(files, side)
+    tests = [f"{side}/{p}" for p in testrun._test_files(mine)]
+    if not tests:
+        return testrun.TestRun.not_run(side, "There are no tests to run.")
+    # Nothing to run with is "not run", whatever the suite looks like: only a runner
+    # that is here can say a suite doesn't run.
+    if not settings.build_run_enabled:
+        return testrun.TestRun.not_run(side, "Real builds are switched off (BUILD_RUN_ENABLED=false).", files=tests)
+    chosen, why = _engine()
+    if chosen is None:
+        return testrun.TestRun.not_run(side, why or "No test runner is available.", files=tests)
+    plan, why, broken = testrun.plan_tests(mine, side)
+    if plan is None:
+        if broken:
+            # A suite for a runner this side doesn't have can't run, and that is the
+            # suite's defect: failed, with a problem QA is sent back with.
+            run = testrun.TestRun(status=TestStatus.FAILED.value, side=side, reason=why, files=tests,
+                                  runner=chosen.kind)
+            run.problems = [Problem(tests[0], why or "These tests can't run.", "test", None, "test")]
+            return run
+        return testrun.TestRun.not_run(side, why or "There are no tests to run.", files=tests)
+    started = time.monotonic()
+    try:
+        results = _execute(plan.image, mine, plan.steps, side, "testing", chosen)
+    except _CouldntRun as e:
+        return testrun.TestRun.not_run(side, str(e), framework=plan.framework, runner=chosen.kind, files=tests)
+    except _Stopped:
+        return testrun.TestRun.not_run(side, "The test run was stopped.", framework=plan.framework,
+                                       runner=chosen.kind, files=tests)
+    run = testrun.judge(plan, results, side, tests)
+    run.runner = chosen.kind
+    run.seconds = run.seconds or (time.monotonic() - started)
+    log.info("%s tests (%s on %s): %s", side, plan.framework, chosen.kind, run.summary())
     return run
 
 

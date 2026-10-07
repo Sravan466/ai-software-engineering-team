@@ -270,7 +270,8 @@ export const AGENTS: Persona[] = [
     lines: {
       queued: "Waiting for something to break",
       working: "Hunting edge cases",
-      done: "Suite green",
+      // What it did, not what it hopes: the build page says how the suite ran (#76).
+      done: "Tests written",
       rejected: "Re-testing",
     },
     deskProp: [
@@ -398,3 +399,17 @@ export const AGENTS: Persona[] = [
 export const AGENT_BY_KEY: Record<string, Persona> = Object.fromEntries(
   AGENTS.map((a) => [a.key, a]),
 );
+
+/**
+ * SIEVE's "done" line, from what running the suite actually did (#76): "24 of 26
+ * green", "Suite not run". Never "green" for a suite nobody ran.
+ */
+export function suiteLine(run: { status: string; runs?: { passed: number; total: number; status: string }[] } | null | undefined): string | null {
+  if (!run) return null;
+  if (run.status === "not_run") return "Suite not run";
+  const ran = (run.runs ?? []).filter((r) => r.status !== "not_run");
+  const total = ran.reduce((n, r) => n + r.total, 0);
+  const passed = ran.reduce((n, r) => n + r.passed, 0);
+  if (total === 0) return "Suite couldn't run";
+  return `${passed} of ${total} green`;
+}

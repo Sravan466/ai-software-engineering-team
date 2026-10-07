@@ -46,7 +46,7 @@ from app.skills.selection import Selected
 log = get_logger(__name__)
 
 #: The phases whose code is built for real (#75), and the side each one builds. QA's
-#: tests run in the same sandbox in #76.
+#: tests run in the same sandbox (#76) — see `QAEngineerAgent._run_tests`.
 _BUILT_SIDES = {
     Phase.FRONTEND_ENGINEER.value: build_layout.FRONTEND,
     Phase.BACKEND_ENGINEER.value: build_layout.BACKEND,
@@ -156,6 +156,12 @@ class AgentResult:
     #: did — `BuildRun.as_dict()`. None for a phase that isn't built, or whose files
     #: didn't parse, so there was nothing to build.
     build_run: Optional[dict] = None
+    #: QA's tests, run for real (#76): `testrun.combine(...)`. Written by the platform,
+    #: never by the model. None for every phase but QA.
+    test_run: Optional[dict] = None
+    #: Re-checked from an earlier attempt rather than generated (#76): the fix loop
+    #: kept QA's tests while an engineer fixed the code they test. No model call.
+    kept: bool = False
 
 
 @dataclass
@@ -297,6 +303,9 @@ class BaseAgent:
         # Then, once it parses, for real: installed, built and started in a sandbox.
         # What fails there goes to the fix loop with the parser's problems.
         build_run = self._run_build(ctx, output, build)
+        # And QA's tests are run (#76). A suite that can't be collected joins `build`
+        # as the tests' own problems; tests that run and fail are the fix loop's.
+        test_run = self._run_tests(ctx, output, build)
 
         if errors:
             # Repair stops paying after a round or two, and a local model pays
@@ -339,7 +348,57 @@ class BaseAgent:
             handoff=record,
             truncated_replies=truncated,
             build_run=build_run,
+            test_run=test_run,
         )
+
+    def recheck(self, ctx: AgentContext, kept: dict) -> AgentResult:
+        """Check an earlier attempt again, against the phases rebuilt before it (#76).
+
+        The fix loop's way of asking "did the engineer's fix turn these tests green?"
+        of *the same tests*: QA's suite is kept while the code it tests is rewritten,
+        then compiled and run again here — no model call, so nothing about the suite
+        changes between the run that failed and the one that judges the fix.
+        """
+        output, errors = self._validate(dict(kept.get("output") or {}))
+        if not errors:
+            output, own = self.own_checks(output, ctx)
+            errors = errors + own
+        stack_errors = (
+            charter_violations(ctx.charter, self.key, output) if settings.enforce_stack_charter else []
+        )
+        build = self._build_check(ctx, output)
+        build_run = self._run_build(ctx, output, build)
+        test_run = self._run_tests(ctx, output, build)
+        if isinstance(test_run, dict):
+            test_run["kept"] = True
+        response = LLMResponse(
+            text="",
+            provider=str(kept.get("provider") or "platform"),
+            model=str(kept.get("model") or "kept"),
+            usage=Usage(),
+            latency_ms=0,
+            is_local=kept.get("is_local"),
+        )
+        return AgentResult(
+            output=output,
+            content_md=self.to_markdown(output),
+            response=response,
+            schema_status=SchemaStatus.INVALID.value if errors else SchemaStatus.VALID.value,
+            schema_note="; ".join(e.replace("`", "") for e in errors[:3]) or None,
+            calls=[],
+            stack_violations=stack_errors,
+            build_status=build.status if build else None,
+            build_problems=build.as_list() if build else [],
+            skills_used=list(kept.get("skills_used") or []),
+            handoff={**(kept.get("handoff") or {}), "kept": True},
+            build_run=build_run,
+            test_run=test_run,
+            kept=True,
+        )
+
+    def _run_tests(self, ctx: AgentContext, output: dict, build: Optional[BuildCheck]) -> Optional[dict]:
+        """Run the tests this phase wrote (#76). Only QA writes any."""
+        return None
 
     def _pin(self, ctx: AgentContext) -> None:
         """The fix loop's last round: pin this call to the strongest model, once."""

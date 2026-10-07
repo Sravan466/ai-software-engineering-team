@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
 import { APPROVAL_BY_ID, PHASES, PHASE_BY_KEY } from "@/components/shell/phases";
-import { AGENT_BY_KEY, type Persona } from "@/components/agents/personas";
+import { AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
 import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
@@ -1094,7 +1094,10 @@ function PhaseList({
                 {/* The agent's own status line, in their voice — and, for a phase
                     that hasn't started, the plain reason it hasn't. */}
                 <span className={"agent-say" + (ns === "running" ? " live" : "")}>
-                  {ns === "pending" ? waitingFor(project, i) : agent.lines[VOICE_FOR[ns]]}
+                  {ns === "pending"
+                    ? waitingFor(project, i)
+                    : (VOICE_FOR[ns] === "done" && ph.key === "qa_engineer" && suiteLine(row?.test_run)) ||
+                      agent.lines[VOICE_FOR[ns]]}
                   {hasDoc && (
                     <span className="phase-deliver" style={{ marginLeft: 8 }}>
                       {ph.deliver}

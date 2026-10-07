@@ -5,6 +5,7 @@ import {
   api,
   type Artifacts,
   type GateKind,
+  type WaiveKind,
   type PhaseResult,
   type PreviewState,
   type Project,
@@ -27,6 +28,8 @@ import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { databaseEnv, databaseUnconnected } from "@/lib/database";
 import BuildProblems from "./BuildProblems";
 import BuildLine from "./BuildLine";
+import { TestFailures } from "./TestRunLine";
+import { ReasonKinds } from "./ReasonKinds";
 import BuildProgress from "@/components/preview/BuildProgress";
 import { artifactFiles, latestRow, type PayloadFile } from "./payload";
 
@@ -46,8 +49,9 @@ import { artifactFiles, latestRow, type PayloadFile } from "./payload";
  *   stack    — a phase wrote itself against a different database, framework or test
  *              runner than the architecture froze. The one stop that is not a
  *              judgement call: the build holds two incompatible halves.
- *   build    — the finished build's code does not compile, after each broken file
- *              was sent back once. Reviewed like a ship, with what is broken first.
+ *   build    — the finished build's code does not compile, or QA's tests fail (#76),
+ *              after the crew's fix rounds. Reviewed like a ship, with what is broken
+ *              first; failing tests ship only with a waiver and its reason.
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
  *   needs_help — the crew could not fix a serious problem by itself. Not a judgement
  *              call: Keep trying or Stop, with waiving as the exception.
@@ -200,6 +204,8 @@ export default function Decision({
   // The build under review, fetched only for the pass that needs all of it.
   const wantsBuild = kind === "ship" || kind === "cost" || kind === "build";
   const [art, setArt] = useState<Artifacts | null>(null);
+  // QA's tests that ran, failed and weren't waived (#76): Ship waits on a waiver.
+  const testsHeld = project.tests_unwaived ?? 0;
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [artError, setArtError] = useState("");
   const [reloads, setReloads] = useState(0);
@@ -207,6 +213,7 @@ export default function Decision({
   useEffect(() => {
     if (!wantsBuild) return;
     setArtError("");
+    // `tests_unwaived` in the deps: a waiver recorded here reloads the review.
     // A failed fetch is not "still loading". Collapsing the two left the Ship review
     // showing placeholder bars forever above a live Ship it button — approving a
     // build whose files, findings and costs were never actually on screen.
@@ -218,7 +225,7 @@ export default function Decision({
       })
       .catch((e: any) => setArtError(e.message));
     api.getPreview(id).then(setPreview).catch(() => setPreview(null));
-  }, [wantsBuild, id, reloads]);
+  }, [wantsBuild, id, reloads, testsHeld]);
 
   // The mockup is built alongside the pipeline, so it can still be building when this
   // review opens. Without this the Mockup tab would simply be missing, and the
@@ -284,6 +291,18 @@ export default function Decision({
     }
   }
 
+  // A Ship stop over failing tests alone is about the tests, not about compiling.
+  const failingTests = kind === "build" && art?.tests?.status === "failed" ? art.tests : null;
+  const onlyTests = Boolean(failingTests) && !(art?.build?.problems?.length);
+  const shown = onlyTests
+    ? {
+        ...copy,
+        title: "Tests fail",
+        blurb: "QA's tests ran in a sandbox and some still fail after the crew's fix rounds.",
+        after: "Approving ships a build whose tests fail, with your waiver on the record.",
+      }
+    : copy;
+
   if (kind === "database") {
     return <DatabaseGate project={project} id={id} busy={busy} act={act} />;
   }
@@ -326,8 +345,8 @@ export default function Decision({
             : Icon.check}
         </span>
         <div className="decision-headings">
-          <h2 id="decision-title">{copy.title}</h2>
-          <p>{copy.blurb}</p>
+          <h2 id="decision-title">{shown.title}</h2>
+          <p>{shown.blurb}</p>
         </div>
         <span className="badge badge-warn">
           <span className="dot dot-warn dot-pulse" aria-hidden="true" />
@@ -374,6 +393,17 @@ export default function Decision({
             <BuildProblems problems={art.build.problems} onRedoFile={(phase, path) => aim(phase, path)} />
           </div>
         ) : null}
+        {failingTests && (
+          <TestsReview
+            project={project}
+            id={id}
+            busy={busy}
+            act={act}
+            tests={failingTests}
+            held={testsHeld}
+            onRedo={aim}
+          />
+        )}
         {kind === "stack" && (
           <div className="stack-review">
             <StackViolations notes={rowFor(project, gatePhase)?.stack_note} />
@@ -436,14 +466,17 @@ export default function Decision({
         <div className="decision-approve">
           <button
             className="btn btn-lg btn-accent"
-            disabled={busy || blocked}
+            disabled={busy || blocked || testsHeld > 0}
             onClick={() => act(() => api.approve(id))}
           >
             {busy && !sending && <span className="btn-spinner" aria-hidden="true" />}
-            {Icon.check} {copy.approve}
+            {Icon.check} {shown.approve}
           </button>
           <span className="field-hint">
-            {blocked
+            {testsHeld > 0 && !blocked
+              ? `${testsHeld} failing test${testsHeld === 1 ? "" : "s"} need${testsHeld === 1 ? "s" : ""} a waiver ` +
+                "with a reason first, or send the code or the tests back."
+              : blocked
               ? `${unresolved} finding${unresolved === 1 ? "" : "s"} at high severity or above ` +
                 (unresolved === 1 ? "still needs" : "still need") +
                 " a decision" +
@@ -454,7 +487,7 @@ export default function Decision({
                   : unresolved === 1
                     ? ". Send it back to be fixed, or waive it with a reason."
                     : ". Send each one back to be fixed, or waive it with a reason.")
-              : copy.after}
+              : shown.after}
           </span>
         </div>
 
@@ -603,6 +636,80 @@ function SinglePhase({
   return <PhasePanel phase={phase} row={row} maxHeight={480} onRedo={onRedo} />;
 }
 
+// ── failing tests at the Ship review (#76) ───────────────────────────────────
+/**
+ * What failed, and the one way past it that isn't fixing it: a waiver, with a reason
+ * kind and a sentence for whoever reads this build later. Approving stays shut until
+ * one is recorded — the same rule as a serious security finding.
+ */
+function TestsReview({
+  project,
+  id,
+  busy,
+  act,
+  tests,
+  held,
+  onRedo,
+}: {
+  project: Project;
+  id: string;
+  busy: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<boolean>;
+  tests: NonNullable<Artifacts["tests"]>;
+  held: number;
+  onRedo: (phase: string) => void;
+}) {
+  const [kind, setKind] = useState<WaiveKind | null>(null);
+  const [reason, setReason] = useState("");
+  const waived = project.auto_fix?.tracks?.tests?.accepted;
+  const ready = Boolean(kind) && reason.trim().length >= 3;
+  const count = tests.failures.length;
+  return (
+    <div className="artifact-pad tests-review">
+      <h3 className="tests-review-head">
+        {count} failing test{count === 1 ? "" : "s"}
+        <span>{tests.summary}</span>
+      </h3>
+      <TestFailures failures={tests.failures} />
+      {held === 0 && waived ? (
+        <p className="tests-waived" role="status">
+          {Icon.check}
+          <span>
+            Waived as <b>{waived.kind.replace(/_/g, " ")}</b>: {waived.reason}
+          </span>
+        </p>
+      ) : (
+        <div className="accept-form">
+          <b className="accept-title">Ship with these tests failing</b>
+          <ReasonKinds name="tests-waive-kind" kind={kind} setKind={setKind} />
+          <div className="field">
+            <label htmlFor="tests-waive-reason">What should someone reading this build later know?</label>
+            <input
+              id="tests-waive-reason"
+              className="input"
+              placeholder="e.g. the rounding test expects the old API; the code is right"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </div>
+          <div className="tests-waive-actions">
+            <button
+              className="btn btn-sm btn-danger"
+              disabled={busy || !ready}
+              onClick={() => kind && act(() => api.waiveTests(id, kind, reason.trim()))}
+            >
+              Waive and record the reason
+            </button>
+            <button className="btn btn-sm" disabled={busy} onClick={() => onRedo("qa_engineer")}>
+              {Icon.undo} Send the tests back instead
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ship: the whole build in one pass ────────────────────────────────────────
 type ShipView = "files" | "mockup" | "security" | "cost" | "stack";
 
@@ -732,6 +839,16 @@ function ShipReview({
             commands={art.scaffold?.commands ?? []}
             runs={art.build?.runs}
           />
+          {art.tests && (
+            // What running QA's suite measured (#76) — or why it wasn't run.
+            <p
+              className="build-line-strip"
+              data-state={art.tests.status === "ok" ? "ok" : art.tests.status === "failed" ? "failed" : "unchecked"}
+            >
+              {art.tests.status === "ok" ? Icon.check : art.tests.status === "failed" ? Icon.alert : Icon.info}
+              <span>Tests: {art.tests.summary}</span>
+            </p>
+          )}
           <FileBrowser
             files={files}
             renderAction={(file) =>

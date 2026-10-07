@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
-from app.build import dbconnect, integrations
+from app.build import dbconnect, integrations, testrun
 from app.core import artifacts, identity, project_secrets
 from app.core.config import settings
 from app.core.constants import (
@@ -154,8 +154,8 @@ def _initial_state(project: Project) -> PipelineState:
 def _is_fix_note(note: object) -> bool:
     """Whether a phase's standing note was written by the fix loop, not a person."""
     text = str(note or "")
-    return text.startswith(remediation.FIX_NOTE_PREFIX) or text.startswith(
-        autofix.CODE_NOTE_PREFIX
+    return text.startswith(
+        (remediation.FIX_NOTE_PREFIX, autofix.CODE_NOTE_PREFIX, autofix.TEST_NOTE_PREFIX)
     )
 
 
@@ -348,6 +348,7 @@ class PipelineRunner:
             row.schema_status,
             stack,
             self.build_problems(project),
+            self.failing_tests(project),
         )
 
     @staticmethod
@@ -522,6 +523,16 @@ class PipelineRunner:
             if not autofix.accepted(data, autofix.build_track(str(p.get("phase") or "")))
         ]
 
+    @staticmethod
+    def failing_tests(project: Project) -> list[dict]:
+        """QA's tests that ran and failed in the current build, less a waiver that
+        covers them (#76). What a red suite blocks the Ship review with."""
+        failures = autofix.test_failures(artifacts.test_run(project))
+        t = autofix.load(project)["tracks"].get(autofix.TESTS)
+        if t is not None and autofix.covers(t, [f["key"] for f in failures]):
+            return []
+        return failures
+
     def _auto_fix(self, db: Session, project: Project, row: PhaseResult) -> bool:
         """Send a finished phase's serious problems back to be fixed. True if it
         took the run over — by sending work back, or by parking as needs-help."""
@@ -534,9 +545,103 @@ class PipelineRunner:
             row.stack_note
             or row.build_status == BuildStatus.FAILED.value
             or (track is not None and autofix.open_round(track) is not None)
-        ):
-            return self._fix_code(db, project, row)
+        ) and self._fix_code(db, project, row):
+            return True
+        if row.phase == Phase.QA_ENGINEER.value:
+            # Once the suite itself runs: the tests that ran and failed (#76).
+            return self._fix_tests(db, project, row)
         return False
+
+    def _fix_tests(self, db: Session, project: Project, row: PhaseResult) -> bool:
+        """Send QA's failing tests to whoever can turn them green (#76).
+
+        Same loop, same stopping rule as code problems, with one difference in who is
+        asked: each failure goes first to the engineer who owns the code it tests, and
+        QA's suite is *kept* — re-run against the fix, not rewritten — so the tests
+        that judge the fix are the ones that failed. One the owner didn't fix goes to
+        QA next, to decide whether the test or the code is wrong.
+        """
+        name = autofix.TESTS
+        data = autofix.load(project)
+        problems = autofix.test_failures(row.test_run)
+        if not problems and name not in data["tracks"]:
+            return False
+        t = autofix.track(data, name)
+        keys = [p["key"] for p in problems]
+        if autofix.accepted(data, name):
+            if autofix.covers(t, keys):
+                return False
+            # Failing differently from what a person waived: a new problem.
+            t["accepted"] = None
+            autofix.settle(t)
+        autofix.close_round(t, keys)
+        if not problems:
+            autofix.settle(t)
+            autofix.save(project, data)
+            db.commit()
+            return False
+
+        step = autofix.next_step(t)
+        if step != "fix":
+            autofix.stop(t, step, keys)
+            autofix.save(project, data)
+            db.commit()
+            self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))
+            return True
+
+        n = len(t["rounds"]) + 1
+        k = n - int(t.get("episode_start") or 0)
+        strategy = remediation.strategy_for(k)
+        routed = autofix.route_tests(t, problems)
+        order = [p.value for p in PHASE_ORDER]
+        dests = sorted({p["phase"] for p in routed}, key=order.index)
+        own = {path: code for path, code, _lang in artifacts.iter_files(row.output or {})}
+        bodies = {}
+        for p in routed:
+            body = testrun.test_source(own, (p.get("where") or "").rsplit(":", 1)[0], p.get("test") or "")
+            if body:
+                bodies[p["key"]] = body
+        notes = {
+            phase: autofix.test_note(
+                [p for p in routed if p["phase"] == phase], phase, k, bodies, self._standing_fix_note(data, phase)
+            )
+            for phase in dests
+        }
+        record = autofix.start_round(t, strategy, dests, routed)
+        qa = Phase.QA_ENGINEER.value
+        keep = None
+        if qa not in dests:
+            # Only the code's owners were asked: what they don't fix is QA's next.
+            record["handover"] = True
+            keep = {
+                qa: {
+                    "output": row.output,
+                    "model": row.model_used,
+                    "provider": row.provider_used,
+                    "is_local": row.is_local,
+                    "skills_used": row.skills_used,
+                    "handoff": row.handoff,
+                }
+            }
+        autofix.save(project, data)
+        db.commit()
+        log.info(
+            "Sending %d failing test(s) on %s to %s (round %d, %s).",
+            len(routed), project.id, ", ".join(dests), n, strategy,
+        )
+        first, rest = dests[0], dests[1:]
+        self.redo(
+            db,
+            project,
+            first,
+            notes[first],
+            extra_feedback={phase: notes[phase] for phase in rest},
+            escalate=tuple(dests) if strategy == remediation.STRATEGY_STRONGER else (),
+            continue_after=True,
+            fix_track=name,
+            keep=keep,
+        )
+        return True
 
     def _fix_code(self, db: Session, project: Project, row: PhaseResult) -> bool:
         """Re-run a phase whose code does not compile or contradicts the stack.
@@ -800,6 +905,8 @@ class PipelineRunner:
             left = int(t["stopped"].get("left") or 0)
             if name == autofix.SECURITY:
                 what = f"{left} serious security finding{'' if left == 1 else 's'}"
+            elif name == autofix.TESTS:
+                what = f"{left} failing test{'' if left == 1 else 's'}"
             else:
                 phase = name[len(autofix.BUILD_PREFIX):]
                 try:
@@ -839,6 +946,7 @@ class PipelineRunner:
         escalate: tuple = (),
         continue_after: bool = False,
         fix_track: Optional[str] = None,
+        keep: Optional[dict] = None,
     ) -> Project:
         """Re-run one phase with reviewer feedback, patching the checkpoint in place.
 
@@ -856,6 +964,8 @@ class PipelineRunner:
         `escalate` names the phases that should run on the most capable model the
         router has. `continue_after` carries on with the run instead of parking on
         the same decision — the crew fixing its own work is not a person's redo.
+        `keep` names later phases the rewind re-checks rather than regenerates, with
+        the attempt to re-check: QA's suite, while an engineer fixes what it tests.
         """
         if not phase_key:
             return project
@@ -964,11 +1074,18 @@ class PipelineRunner:
                     }
                     notes[phase_key] = feedback
                     notes.update(extra_feedback or {})
+                    # What the rewind keeps rather than regenerates (#76). A kept phase
+                    # this rewind drops without keeping again is regenerated, and the
+                    # phase being re-run now is never one.
+                    held = {k: v for k, v in (values.get("kept") or {}).items() if k not in stale}
+                    held.update(keep or {})
+                    held.pop(phase_key, None)
                     patch = {
                         "prior_outputs": {**kept, phase_key: result.output},
                         "last_phase": phase_key,
                         "last_result": last_result,
                         "feedback": notes,
+                        "kept": held,
                         # This round's escalations — plus, for a fix in place, the
                         # ones an open round still owes the phases after this.
                         "escalate": sorted(
@@ -1330,6 +1447,7 @@ class PipelineRunner:
         row.build_status = lr.get("build_status")
         row.build_note = lr.get("build_problems") or None
         row.build_run = lr.get("build_run") or None
+        row.test_run = lr.get("test_run") or None
         # Provenance, not a verdict: which procedures this deliverable was written
         # with. Empty stays empty rather than becoming null — "this phase was
         # offered skills and none fitted" is a different fact from "this row was
@@ -1703,7 +1821,9 @@ class PipelineRunner:
         total right and the call count and average latency wrong, which is the kind
         of quiet inaccuracy this dashboard exists to not have.
         """
-        calls = lr.get("calls") or [
+        # A result says how many calls it took, including none: a kept attempt re-checked
+        # without a model (#76). Only a result from before calls were listed is one call.
+        calls = lr["calls"] if isinstance(lr.get("calls"), list) else [
             {
                 "provider": lr.get("provider_used"),
                 "model": lr.get("model_used"),

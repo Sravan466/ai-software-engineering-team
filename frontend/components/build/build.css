@@ -368,6 +368,9 @@
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
+/* A figure nobody measured (#76): kept for the record, never read as a fact. */
+.fact[data-unmeasured] dt { color: var(--warn); }
+.fact[data-unmeasured] dd { color: var(--ink-2); font-style: italic; }
 
 .detail-block { display: flex; flex-direction: column; gap: 9px; }
 .detail-h {
@@ -788,6 +791,217 @@
 @media (prefers-reduced-motion: reduce) {
   .buildrun-chev { transition: none; }
 }
+
+/* ── QA's tests, run for real (#76) ──
+   The build line's sibling: same band, same rhythm, outcome first. Its one
+   element of its own is the tally — what passed, failed and couldn't run, as a bar
+   whose every segment is also written out, so colour is never the only signal. */
+.testrun { border-bottom: 1px solid var(--line); background: var(--bg-panel); }
+.testrun[data-state="failed"] { background: var(--bad-soft); border-bottom-color: rgba(240, 82, 82, 0.4); }
+.testrun[data-state="not_run"] { background: var(--warn-soft); border-bottom-color: var(--accent-line); }
+.testrun > summary,
+.testrun-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 9px 14px;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.testrun > summary { list-style: none; cursor: pointer; }
+.testrun > summary::-webkit-details-marker { display: none; }
+.testrun > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.testrun-chev { display: inline-flex; color: var(--ink-3); transition: transform var(--tr); }
+.testrun-chev svg { width: 12px; height: 12px; }
+.testrun[open] > summary .testrun-chev,
+.testrun-output[open] > summary .testrun-chev { transform: rotate(90deg); }
+.testrun-mark { display: inline-flex; }
+.testrun-mark svg { width: 15px; height: 15px; }
+.testrun[data-state="ok"] .testrun-mark { color: var(--ok); }
+.testrun[data-state="failed"] .testrun-mark { color: var(--bad); }
+.testrun[data-state="not_run"] .testrun-mark { color: var(--warn); }
+.testrun-title { color: var(--ink); font-weight: 600; }
+.testrun-summary { min-width: 0; color: var(--ink-2); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.testrun[data-state="failed"] .testrun-summary,
+.testrun[data-state="not_run"] .testrun-summary { color: var(--ink); }
+.testrun > summary:hover .testrun-summary { color: var(--ink); }
+.testrun-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+}
+.testrun-where { margin-left: auto; font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+.testrun-body { padding: 0 14px 12px 34px; display: flex; flex-direction: column; gap: 14px; }
+.testrun-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.testrun-side + .testrun-side { padding-top: 12px; border-top: 1px solid var(--line); }
+.testrun-side-head {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--ink);
+  text-transform: capitalize;
+}
+.testrun-side-fw { font-family: var(--mono); font-size: var(--t-xs); font-weight: 400; color: var(--ink-3); text-transform: none; }
+.testrun-side-sum { font-size: var(--t-xs); font-weight: 400; color: var(--ink-2); text-transform: none; font-variant-numeric: tabular-nums; }
+.testrun-note { margin: 0; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.5; }
+
+.testrun-tally { display: flex; flex-direction: column; gap: 6px; }
+.testrun-bar {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+  max-width: 420px;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.testrun-bar > span { flex-basis: 0; min-width: 4px; background: var(--line-3); }
+.testrun-bar > [data-part="ok"] { background: var(--ok); }
+.testrun-bar > [data-part="bad"] { background: var(--bad); }
+.testrun-bar > [data-part="err"] { background: var(--warn); }
+.testrun-legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  font-size: var(--t-xs);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.testrun-legend li { display: inline-flex; align-items: center; gap: 5px; }
+.testrun-legend li::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--line-3); }
+.testrun-legend [data-part="ok"]::before { background: var(--ok); }
+.testrun-legend [data-part="bad"]::before { background: var(--bad); }
+.testrun-legend [data-part="err"]::before { background: var(--warn); }
+.testrun-legend b { color: var(--ink); font-weight: 600; }
+
+.testrun-cov {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: var(--t-xs);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.testrun-cov b { color: var(--ink); font-weight: 600; }
+.testrun-cov-label { color: var(--ink-3); min-width: 62px; }
+.testrun-cov-meter {
+  position: relative;
+  width: 96px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line-2);
+  overflow: hidden;
+}
+.testrun-cov-meter > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--ink-2); }
+.testrun-cov-tool { color: var(--ink-3); }
+.testrun-cov[data-measured="false"] { color: var(--ink-3); }
+
+.testrun-failures { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.testrun-failure {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(240, 82, 82, 0.3);
+  border-radius: var(--r);
+  background: var(--bg-panel);
+}
+.testrun-failure[data-kind="load"] { border-color: var(--accent-line); }
+.testrun-failure-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.testrun-failure-mark { display: inline-flex; color: var(--bad); }
+.testrun-failure[data-kind="load"] .testrun-failure-mark { color: var(--warn); }
+.testrun-failure-mark svg { width: 13px; height: 13px; }
+.testrun-failure-name { font-size: var(--t-sm); font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.testrun-failure-head code { font-size: var(--t-xs); color: var(--ink-2); overflow-wrap: anywhere; }
+.testrun-failure-kind {
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.testrun-failure-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding-left: 21px;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.testrun-failure-meta code { color: var(--ink-2); overflow-wrap: anywhere; }
+.testrun-owner { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); }
+.testrun-assert {
+  margin: 0 0 0 21px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  font-size: var(--t-xs);
+  line-height: 1.55;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 160px;
+  overflow: auto;
+  scrollbar-color: var(--line-3) transparent;
+  scrollbar-width: thin;
+}
+.testrun-assert::selection { background: var(--accent-soft); color: var(--ink); }
+
+.testrun-output > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  cursor: pointer;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.testrun-output > summary::-webkit-details-marker { display: none; }
+.testrun-output > summary:hover { color: var(--ink); }
+.testrun-output > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.testrun-output .buildrun-term { margin-top: 8px; }
+@media (max-width: 560px) {
+  .testrun > summary, .testrun-head { min-height: 44px; }
+  .testrun-output > summary { min-height: 44px; }
+  .testrun-body { padding-left: 14px; }
+  .testrun-where { margin-left: 0; flex-basis: 100%; padding-left: 41px; white-space: normal; }
+  .testrun-failure-meta { padding-left: 0; }
+  .testrun-assert { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .testrun-chev { transition: none; }
+}
+
+/* ── shipping past a red suite: a waiver, on the record (#76) ── */
+.tests-review { display: flex; flex-direction: column; gap: 12px; }
+.tests-review-head { margin: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: var(--t-base); font-weight: 600; color: var(--ink); }
+.tests-review-head span { font-size: var(--t-xs); font-weight: 400; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.tests-waived {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.tests-waived svg { width: 14px; height: 14px; color: var(--ok); flex: none; }
 
 /* ── what the agent was handed: provenance, folded away ──
    Same band as "Worked from" above it, so the two read as one footer. */
@@ -1886,4 +2100,11 @@ textarea.db-input { min-height: 132px; white-space: pre; overflow-x: auto; }
   .wf-fixing .wf-mark svg { animation: none; }
   .writing-meter span,
   .working-bar-fill span { transition: none; }
+}
+
+/* The waiver's two ways out, side by side; stacked on a phone. */
+.tests-waive-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.accept-form .tests-waive-actions .btn { align-self: auto; }
+@media (max-width: 560px) {
+  .tests-waive-actions .btn { min-height: 44px; flex: 1 1 100%; justify-content: center; }
 }

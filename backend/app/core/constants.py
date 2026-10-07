@@ -99,6 +99,23 @@ class BuildStatus(str, Enum):
     UNCHECKED = "unchecked"
 
 
+class TestStatus(str, Enum):
+    """What running the tests QA wrote did (#76). Never a number nobody measured."""
+
+    #: Not a test class, whatever its name says to pytest. (Dunder names are never
+    #: enum members.)
+    __test__ = False
+
+    #: Ran, and every test passed.
+    OK = "ok"
+    #: Ran, and a test failed — or the suite couldn't be collected, which counts the
+    #: same: a test that cannot run is a defect of the test, not a pass.
+    FAILED = "failed"
+    #: Nothing ran it: no runner on this computer, real builds switched off, no tests
+    #: written. Shown with the reason, never with a figure.
+    NOT_RUN = "not_run"
+
+
 #: The phases that write code the build must compile. DevOps writes configuration,
 #: and the rest write documents.
 CODE_PHASES = frozenset({"backend_engineer", "frontend_engineer", "qa_engineer"})

@@ -81,6 +81,33 @@ def _current(rows) -> list:
 NOTE_KIND = "plan"
 
 
+def _rows(project: Project) -> list:
+    """Every phase row, read from the database rather than `project.phases` (see below)."""
+    from sqlalchemy.orm import object_session
+
+    from app.db.models import PhaseResult
+
+    try:
+        session = object_session(project)
+    except Exception:  # noqa: BLE001 - not an ORM instance (a scoring stand-in)
+        session = None
+    return (
+        session.query(PhaseResult)
+        .filter(PhaseResult.project_id == project.id)
+        .order_by(PhaseResult.created_at, PhaseResult.id)
+        .all()
+        if session is not None
+        else list(project.phases)
+    )
+
+
+def test_run(project: Project) -> Optional[dict]:
+    """The current QA attempt's test run (#76), or None — no QA yet, or from before."""
+    qa = next((ph for ph in _current(_rows(project)) if ph.phase == "qa_engineer"), None)
+    run = getattr(qa, "test_run", None) if qa is not None else None
+    return run if isinstance(run, dict) else None
+
+
 def build_problems(project: Project) -> list[dict]:
 
     """Every compile problem still outstanding in the current build, phase by phase.
@@ -289,6 +316,31 @@ def assemble(project: Project) -> dict:
                 if isinstance(getattr(ph, "build_run", None), dict)
             },
         },
+        # QA's suite, run for real (#76): what the README and the Ship review report.
+        "tests": _tests_summary(phases),
+    }
+
+
+def _tests_summary(phases: list) -> Optional[dict]:
+    qa = next((ph for ph in phases if ph.phase == "qa_engineer"), None)
+    run = getattr(qa, "test_run", None) if qa is not None else None
+    if not isinstance(run, dict):
+        return None
+    return {
+        "status": run.get("status"),
+        "summary": run.get("summary"),
+        "reason": run.get("reason"),
+        "failures": [
+            {**f, "side": r.get("side")}
+            for r in run.get("runs") or []
+            for f in (r.get("failures") or [])
+            if isinstance(f, dict)
+        ],
+        "runs": [
+            {k: r.get(k) for k in ("side", "framework", "status", "summary", "passed", "failed", "errored",
+                                   "skipped", "coverage", "reason", "seconds")}
+            for r in run.get("runs") or []
+        ],
     }
 
 
@@ -322,6 +374,24 @@ def readme_md(project: Project, assembled: dict) -> str:
             for p in build.get("problems", [])
         ]
         lines.append("")
+    tests = assembled.get("tests") or {}
+    if tests.get("status"):
+        lines += ["## Tests", ""]
+        if tests["status"] == "not_run":
+            lines += [f"QA's tests weren't run: {tests.get('reason') or 'no test runner was available'}", ""]
+        else:
+            lines += ["QA's suite was run in a sandbox before this was delivered:", ""]
+            for r in tests.get("runs") or []:
+                lines.append(f"- **{r.get('side')}** — {r.get('summary')}")
+            failures = tests.get("failures") or []
+            if failures:
+                lines += ["", "Still failing:", ""]
+                lines += [
+                    f"- `{f.get('path')}`" + (f" line {f.get('line')}" if f.get("line") else "")
+                    + f" — {f.get('name')}: {' '.join(str(f.get('message') or '').split())[:200]}"
+                    for f in failures[:20]
+                ]
+            lines.append("")
     if assembled["setup_instructions"]:
         lines += ["## Setup notes from the team", ""]
         lines += [f"{i}. {s}" for i, s in enumerate(assembled["setup_instructions"], 1)]

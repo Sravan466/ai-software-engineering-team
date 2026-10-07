@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { BADGE_COLUMNS, badgeTone, labelize, type Cell, type Field } from "./payload";
+import { BADGE_COLUMNS, badgeTone, labelize, UNMEASURED_LABEL, type Cell, type Field } from "./payload";
 
 /**
  * The rest of the payload, rendered as data rather than prose.
@@ -38,7 +38,7 @@ function FieldBlock({ field, depth }: { field: Field; depth: number }): ReactNod
   switch (field.kind) {
     case "value":
       return (
-        <div className="fact">
+        <div className="fact" data-unmeasured={field.label === UNMEASURED_LABEL || undefined}>
           <dt>{field.label}</dt>
           <dd>{field.value}</dd>
         </div>

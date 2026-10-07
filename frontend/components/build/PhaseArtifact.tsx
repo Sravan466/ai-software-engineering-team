@@ -8,6 +8,7 @@ import { Icon } from "@/components/shell/icons";
 import DetailFields from "./DetailFields";
 import { HowWritten } from "./CodeWriting";
 import BuildRunLine from "./BuildRunLine";
+import TestRunLine from "./TestRunLine";
 
 import FileBrowser from "./FileBrowser";
 import Mermaid from "./Mermaid";
@@ -92,6 +93,8 @@ export default function PhaseArtifact({
       {/* Whether the code installs, builds and starts (#75): outcome first, the
           terminal folded under it — open when it failed. */}
       <BuildRunLine run={row.build_run} />
+      {/* QA's tests, run for real (#76): what they measured, or why nothing did. */}
+      <TestRunLine run={row.test_run} />
 
       {views.length > 1 && (
         <div className="artifact-bar">

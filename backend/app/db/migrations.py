@@ -103,6 +103,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # Nullable (#75): a row from before real builds was only parsed, and an empty
         # record would claim a build that never ran.
         "build_run",
+        # Nullable (#76): a QA row from before tests were run never ran them, and an
+        # empty record would claim a suite nobody executed.
+        "test_run",
         # Nullable for the same reason as `build_status`: a phase that ran before the
         # skill library existed cannot say which skills it had, and an empty list
         # would read as "it was offered skills and took none".

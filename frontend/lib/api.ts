@@ -63,6 +63,12 @@ export type PhaseResult = {
    * that didn't parse, or a row from before real builds.
    */
   build_run?: BuildRun | null;
+  /**
+   * QA's tests, run for real in the same sandbox (#76): counts, failures and a
+   * measured coverage figure — or why they weren't run. Written by the platform,
+   * never by the model. `null` for every other phase and for older QA rows.
+   */
+  test_run?: TestRun | null;
 
   /**
    * The procedural skills this phase was actually given, by name and in the order
@@ -135,7 +141,7 @@ export type ActivityFileState = "planned" | "writing" | "ok" | "fixing" | "faile
 export type Activity = {
   phase: string;
   /** `building`: installing, building and starting the code in a sandbox (#75). */
-  stage: "planning" | "writing" | "fixing" | "checking" | "building";
+  stage: "planning" | "writing" | "fixing" | "checking" | "building" | "testing";
   label: string;
   done: number;
   total: number;
@@ -157,10 +163,10 @@ export type BuildProblem = {
   /** Set when gathered across phases: the agent that wrote the file. */
   phase?: string;
   /** Which step of a real build found it (#75). Absent for what the parser found. */
-  step?: BuildStepName | "vercel";
+  step?: BuildStepName | "vercel" | "test";
 };
 
-export type BuildStepName = "install" | "build" | "boot";
+export type BuildStepName = "install" | "build" | "boot" | "test";
 
 /** One step of a real build: `npm install`, `next build`, `node server.js`. */
 export type BuildRunStep = {
@@ -196,6 +202,58 @@ export type BuildRun = {
   packages: number | null;
   steps: BuildRunStep[];
   problems: BuildProblem[];
+  at: string;
+};
+
+/** One test that ran and failed (#76). */
+export type TestFailure = {
+  path: string;
+  name: string;
+  /** The assertion, not the stack. */
+  message: string;
+  line: number | null;
+  /** environment: it reached for the network or a database the sandbox doesn't have. */
+  kind: "assertion" | "error" | "environment";
+};
+
+/** One side's suite, run in the sandbox (#76). */
+export type TestRunSide = {
+  status: "ok" | "failed" | "not_run";
+  side: string;
+  /** jest | vitest | mocha | pytest */
+  framework: string | null;
+  passed: number;
+  failed: number;
+  /** Tests or files that couldn't run: a collection error, a broken fixture. */
+  errored: number;
+  skipped: number;
+  total: number;
+  failures: TestFailure[];
+  /** Measured by the tool named, or null — never the model's estimate. */
+  coverage: { lines_pct: number | null; branches_pct: number | null; tool: string } | null;
+  /** "24 passed · 2 failed · 61% lines (jest, 38 s)" */
+  summary: string;
+  /** Why it didn't run, or why coverage wasn't measured. */
+  reason: string | null;
+  runner: string | null;
+  seconds: number;
+  steps: BuildRunStep[];
+  /** What stopped the suite running at all — QA's to fix. */
+  problems: BuildProblem[];
+  files: string[];
+};
+
+/** What running QA's tests did, every side together (#76). */
+export type TestRun = {
+  status: "ok" | "failed" | "not_run";
+  summary: string;
+  reason: string | null;
+  passed?: number;
+  failed?: number;
+  errored?: number;
+  runs: TestRunSide[];
+  /** The same suite, kept and run again against the engineer's fix. */
+  kept?: boolean;
   at: string;
 };
 
@@ -250,9 +308,14 @@ export type AutoFixProblem = {
   where: string | null;
   /** The phase that was sent back to fix it. */
   phase: string;
-  kind: "security" | "build" | "stack";
+  kind: "security" | "build" | "stack" | "test";
   /** Which step of a real build found it (#75); absent for the parser's own. */
-  step?: BuildStepName | "vercel";
+  step?: BuildStepName | "vercel" | "test";
+  /** A failing test (#76): its name, and what kind of failure it was. */
+  test?: string;
+  failure?: TestFailure["kind"];
+  /** The phase that owns the code the test checks. */
+  owner?: string;
 };
 
 export type AutoFixRound = {
@@ -262,6 +325,8 @@ export type AutoFixRound = {
   problems: AutoFixProblem[];
   /** `vercel`: the round was opened by a failed Vercel deploy (#75). */
   source?: "vercel";
+  /** A tests round that only asked the code's owners (#76): what it doesn't fix goes to QA next. */
+  handover?: boolean;
   /** Keys the re-check no longer reports. `null` while the round is still running. */
   fixed: string[] | null;
   remaining?: string[];
@@ -279,7 +344,7 @@ export type AutoFixTrack = {
   episode_start?: number;
 };
 
-/** The crew's own fix loop: `security`, and `build:<phase>` per phase. */
+/** The crew's own fix loop: `security`, `build:<phase>` per phase, and `tests` (#76). */
 export type AutoFix = { tracks: Record<string, AutoFixTrack> };
 
 export type ApprovalMode = "checkpoints" | "every_phase" | "unattended";
@@ -353,6 +418,8 @@ export type Project = {
   integrations_status?: Record<string, "later"> | null;
   /** Connectors answered "later" (or whose key failed), read live by the server. */
   connectors_unconnected?: string[];
+  /** QA's tests that failed and weren't waived (#76): while above zero, Ship is held. */
+  tests_unwaived?: number;
   /** Where the finished build went: its repo (`owner/name`) and its live deploy. */
   github_repo?: string | null;
   github_pushed_at?: string | null;
@@ -964,6 +1031,11 @@ export const api = {
     req<RunResponse>(`/api/projects/${id}/auto-fix/retry`, {
       method: "POST",
       body: JSON.stringify(rounds ? { rounds } : {}),
+    }),
+  waiveTests: (id: string, kind: WaiveKind, reason: string) =>
+    req<{ waived: number; kind: WaiveKind; reason: string }>(`/api/projects/${id}/tests/waive`, {
+      method: "POST",
+      body: JSON.stringify({ kind, reason }),
     }),
   acceptProblems: (id: string, kind: WaiveKind, reason: string) =>
     req<RunResponse>(`/api/projects/${id}/auto-fix/accept`, {
@@ -1726,6 +1798,14 @@ export type Artifacts = {
     /** Each built phase's real build (#75): its outcome and one-line summary. */
     runs?: Record<string, { status: BuildRun["status"]; summary: string }>;
   };
+  /** QA's suite, run for real (#76). Null before QA, and for older builds. */
+  tests?: {
+    status: TestRun["status"];
+    summary: string;
+    reason: string | null;
+    failures: (TestFailure & { side: string })[];
+    runs: Pick<TestRunSide, "side" | "framework" | "status" | "summary" | "passed" | "failed" | "errored" | "skipped" | "coverage" | "reason" | "seconds">[];
+  } | null;
 };
 
 // ── Your computers ────────────────────────────────────────────────────────────
