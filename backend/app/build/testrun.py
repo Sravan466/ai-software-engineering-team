@@ -38,6 +38,10 @@ _PY_COVERAGE = "/tmp/aiteam-coverage.json"
 #: Failures kept per run, each cut to its assertion and first frames, so the report
 #: stays well inside the output the sandbox keeps. The rest are counted, not described.
 MAX_FAILURES = 100
+#: The longest the report line may be. The sandbox keeps the last 96,000 bytes of a
+#: step's output, and a line cut at its head has lost its marker: the readers drop
+#: failures from the end until the line fits.
+REPORT_LIMIT = 80_000
 _TAIL_LINES = 40
 
 
@@ -273,8 +277,13 @@ if (c && c.total) {
   const pct = (m) => (m && typeof m.pct === 'number' && m.total > 0 ? m.pct : null);
   out.coverage = { lines_pct: pct(c.total.lines), branches_pct: pct(c.total.branches) };
 }
+// One line, and it has to arrive whole: the sandbox keeps only the output's tail.
+while (JSON.stringify(out).length > LIMIT && (out.failures.length || out.suites.length)) {
+  (out.failures.length ? out.failures : out.suites).pop();
+  out.truncated = true;
+}
 process.stdout.write('\nMARK' + JSON.stringify(out) + '\n');
-""".replace("MAX", str(MAX_FAILURES)).replace("MARK", MARK)
+""".replace("MAX", str(MAX_FAILURES)).replace("LIMIT", str(REPORT_LIMIT)).replace("MARK", MARK)
 
 #: The same for pytest-json-report and pytest-cov.
 _PY_READER = r"""
@@ -325,16 +334,23 @@ if c and c.get("totals"):
         "lines_pct": round(100.0 * (t.get("covered_lines") or 0) / lines, 1) if lines else None,
         "branches_pct": round(100.0 * (t.get("covered_branches") or 0) / branches, 1) if branches else None,
     }
+while len(json.dumps(out)) > LIMIT and (out["failures"] or out["suites"]):
+    (out["failures"] or out["suites"]).pop()
+    out["truncated"] = True
 sys.stdout.write("\nMARK" + json.dumps(out) + "\n")
-""".replace("MAX", str(MAX_FAILURES)).replace("MARK", MARK)
+""".replace("MAX", str(MAX_FAILURES)).replace("LIMIT", str(REPORT_LIMIT)).replace("MARK", MARK)
 
 #: What a JavaScript suite's report is read with, written into the box's /tmp first.
 _WRITE_NODE_READER = f"cat > /tmp/aiteam-read.cjs <<'AITEAM_EOF'\n{_NODE_READER}\nAITEAM_EOF\n"
 _WRITE_PY_READER = f"cat > /tmp/aiteam-read.py <<'AITEAM_EOF'\n{_PY_READER}\nAITEAM_EOF\n"
 
 #: Coverage of the backend's own modules: not the packages installed beside them, not
-#: the tests.
-_COVERAGE_RC = "printf '[run]\\nomit =\\n    .deps/*\\n    tests/*\\n    */tests/*\\n    conftest.py\\n' > /tmp/aiteam-cov.rc\n"
+#: the tests, not the platform's migration runner.
+_COVERAGE_RC = (
+    "printf '[run]\\nomit =\\n    .deps/*\\n    tests/*\\n    */tests/*\\n    conftest.py\\n"
+    # The platform's own migration runner is the scaffold's code, not the crew's.
+    "    migrate.py\\n' > /tmp/aiteam-cov.rc\n"
+)
 
 _COMMANDS = {
     "jest": (
@@ -457,6 +473,9 @@ def _message(raw: str, limit: int = 600) -> str:
         text = "\n".join(e_lines[:4])
     else:
         kept = [l for l in lines if not re.match(r"^\s*at\s|^\s*\d+\s*\|", l)]
+        # Jest prefixes a failed `expect` with "Error: ", which says nothing.
+        if kept:
+            kept[0] = re.sub(r"^Error:\s+(?=expect\()", "", kept[0])
         text = "\n".join(kept[:10])
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -580,11 +599,12 @@ def judge(plan: TestPlan, results: list[StepResult], side: str, files: list[str]
     return run
 
 
-#: Mistakes a test makes in its own body: a name it never defined or imported, code
-#: that doesn't parse, a module it can't import. Not a TypeError — "undefined is not
-#: an object" in a test is as often the code returning the wrong thing.
-_OWN_JS = re.compile(r"^\s*(?:Error:\s*)?(?:Uncaught\s+)?(ReferenceError|SyntaxError)\b")
-_OWN_PY = frozenset({"NameError", "SyntaxError", "ImportError", "ModuleNotFoundError", "IndentationError"})
+#: The one mistake a test can only have made itself: a name it never defined or
+#: imported. Not a TypeError, a SyntaxError (`JSON.parse` of the server's error page)
+#: or an ImportError (`from main import compute` the backend never wrote) — those are
+#: as often the code's fault, so the code's owner hears about them first.
+_OWN_JS = re.compile(r"^\s*(?:Error:\s*)?(?:Uncaught\s+)?ReferenceError\b")
+_OWN_PY = frozenset({"NameError", "UnboundLocalError"})
 _PY_CRASH = re.compile(r"^(?P<path>[\w./\-]+\.py):(?P<line>\d+): (?P<exc>\w+)\s*$", re.MULTILINE)
 
 

@@ -310,18 +310,34 @@ _SIDE_OWNER = {
 QA = Phase.QA_ENGINEER.value
 
 
-def test_failures(run: object) -> list[dict]:
+def test_failures(run: object, unrunnable: bool = False) -> list[dict]:
     """Every test in QA's latest run (`PhaseResult.test_run`) that ran and failed,
     keyed by file and name.
 
     The key leaves out the message and the line, which change as the code does: a
     test still failing for a different reason after a fix is still that test failing.
+
+    `unrunnable` adds one entry per side whose suite failed without running anything
+    and without a problem anyone was sent (no runner set up for it). Nobody in the
+    crew can fix that, so the loop never sees it — but it is never a pass either, so
+    the Ship review does, and it ships only with a waiver.
     """
     if not isinstance(run, dict) or run.get("status") != TestStatus.FAILED.value:
         return []
     out: dict[str, dict] = {}
     for side_run in run.get("runs") or []:
         side = str(side_run.get("side") or "")
+        if (
+            unrunnable
+            and side_run.get("status") == TestStatus.FAILED.value
+            and not side_run.get("total")
+            and not side_run.get("problems")
+        ):
+            reason = str(side_run.get("reason") or "The suite couldn't run.")
+            key = _key("suite", side, reason)
+            out[key] = {"key": key, "title": f"The {side} tests couldn't run\n{reason}", "kind": "test",
+                        "where": None, "phase": QA, "test": f"{side} suite", "failure": "unrunnable",
+                        "owner": QA, "side": side, "path": ""}
         for f in side_run.get("failures") or []:
             if not isinstance(f, dict):
                 continue
@@ -338,32 +354,68 @@ def test_failures(run: object) -> list[dict]:
                 "failure": str(f.get("kind") or "assertion"),
                 "owner": _SIDE_OWNER.get(side, QA),
                 "framework": side_run.get("framework"),
+                "side": side,
+                "path": path,
             }
     return list(out.values())
 
 
+def judged(problem: dict, run: object) -> bool:
+    """Whether `run` can say anything about this failing test: its side's suite ran,
+    and its file wasn't one that couldn't even load. A test the run never reached is
+    not fixed — nobody knows."""
+    if not isinstance(run, dict):
+        return False
+    side = next((r for r in run.get("runs") or [] if r.get("side") == problem.get("side")), None)
+    if side is None or side.get("status") not in (TestStatus.OK.value, TestStatus.FAILED.value) or not side.get("total"):
+        return False
+    broken = {str(p.get("path") or "") for p in side.get("problems") or [] if isinstance(p, dict)}
+    return str(problem.get("path") or "") not in broken
+
+
+def test_problems(t: dict, run: object) -> tuple[list[dict], list[dict]]:
+    """(the failing tests to deal with, those carried from the last round unjudged).
+
+    What `run` reports failing, plus every test the current episode's last round was
+    sent that `run` couldn't judge — a side that didn't run (the registry was down), a
+    file that wouldn't load against the fix. Those stay failing until a run says
+    otherwise: a re-check that couldn't run is never a fix.
+    """
+    current = test_failures(run)
+    keys = {p["key"] for p in current}
+    rounds = t.get("rounds") or []
+    last = rounds[-1] if len(rounds) > int(t.get("episode_start") or 0) else None
+    if last is None:
+        return current, []
+    pending = last.get("problems") or [] if last.get("fixed") is None else last.get("carried") or []
+    carried = [p for p in pending if p.get("key") not in keys and not judged(p, run)]
+    return current + carried, carried
+
+
 def unwaived_tests(data: dict, run: object) -> list[dict]:
     """The failing tests in `run` a person hasn't waived — the one rule that holds the
-    Ship review, read by the gate, the approve route and the page alike."""
-    failures = test_failures(run)
+    Ship review, read by the gate, the approve route and the page alike. A side whose
+    suite couldn't run at all counts too: never a pass, so never shipped silently."""
+    failures = test_failures(run, unrunnable=True)
     t = data["tracks"].get(TESTS)
     if failures and t is not None and covers(t, [f["key"] for f in failures]):
         return []
     return failures
 
 
-def unjudge_round(t: dict, reason: str) -> bool:
-    """Close the open round as one whose re-check couldn't run — the registry was down,
-    Docker failed, the suite no longer compiles. Never "fixed": nobody knows. True if
-    a round was waiting."""
+def judge_tests_round(t: dict, run: object, reason: Optional[str] = None) -> Optional[list[str]]:
+    """Close the open tests round against `run` — the suite it kept, before anything
+    rewrites it. Tests `run` couldn't reach are carried as still failing, with why.
+    Returns the keys fixed, or None if no round was waiting."""
     last = open_round(t)
     if last is None:
-        return False
-    last["fixed"] = []
-    last["remaining"] = [p["key"] for p in last.get("problems", [])]
-    last["unjudged"] = reason
-    last["checked_at"] = _now()
-    return True
+        return None
+    problems, carried = test_problems(t, run)
+    fixed = close_round(t, [p["key"] for p in problems])
+    if carried:
+        last["carried"] = carried
+        last["unjudged"] = reason or "Some tests couldn't run again to check the fix."
+    return fixed
 
 
 def route_tests(t: dict, problems: list[dict]) -> list[dict]:
@@ -494,7 +546,9 @@ __all__ = [
     "route_tests",
     "test_failures",
     "test_note",
-    "unjudge_round",
+    "judge_tests_round",
+    "judged",
+    "test_problems",
     "unwaived_tests",
     "STOP_LIMIT",
     "STOP_NO_PROGRESS",

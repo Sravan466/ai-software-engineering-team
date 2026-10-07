@@ -2102,6 +2102,20 @@ textarea.db-input { min-height: 132px; white-space: pre; overflow-x: auto; }
   .working-bar-fill span { transition: none; }
 }
 
+.tests-unrunnable {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r);
+  background: var(--warn-soft);
+  font-size: var(--t-sm);
+  color: var(--ink);
+}
+.tests-unrunnable svg { width: 14px; height: 14px; flex: none; margin-top: 2px; color: var(--warn); }
+
 /* The waiver's two ways out, side by side; stacked on a phone. */
 .tests-waive-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .accept-form .tests-waive-actions .btn { align-self: auto; }

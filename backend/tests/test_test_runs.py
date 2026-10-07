@@ -559,11 +559,38 @@ def test_a_re_check_that_could_not_run_is_never_counted_as_fixed(client, monkeyp
 
     monkeypatch.setattr(sandboxed, "run", flaky)
     project = _run(client, monkeypatch, crew, "A calculator whose re-check can't reach npm")
+    first, second = project["auto_fix"]["tracks"]["tests"]["rounds"]
+    # The owner's round couldn't be judged: nothing fixed, the test carried, and why.
+    assert first["fixed"] == [] and "registry" in first["unjudged"]
+    assert [p["key"] for p in first["carried"]] == [p["key"] for p in first["problems"]]
+    # So it went on, to QA — and a run that did happen judged it.
+    assert second["phases"] == ["qa_engineer"] and second["fixed"] == [first["problems"][0]["key"]]
     assert project["status"] == "completed", project.get("gate_note")
-    [round_] = project["auto_fix"]["tracks"]["tests"]["rounds"]
-    assert round_["fixed"] == [] and "registry" in round_["unjudged"]
-    qa = _current(project, "qa_engineer")
-    assert qa["test_run"]["status"] == "not_run" and qa["test_run"]["summary"].startswith("Not run:")
+    assert _current(project, "qa_engineer")["test_run"]["status"] == "ok"
+
+
+def test_a_side_that_never_ran_keeps_its_failures_while_the_other_side_passes():
+    t = {"rounds": [{"n": 1, "problems": [
+        {"key": "b", "side": "backend", "path": "backend/tests/test_a.py"},
+        {"key": "f", "side": "frontend", "path": "frontend/__tests__/a.test.js"},
+    ], "fixed": None}], "episode_start": 0}
+    run = testrun.combine([
+        testrun.TestRun.not_run("backend", "The package registry couldn't be reached, so the tests weren't run."),
+        testrun.TestRun(status="ok", side="frontend", framework="jest", passed=2),
+    ])
+    assert run["status"] == "ok"  # what ran, passed — but the backend test was never reached
+    assert autofix.judge_tests_round(t, run, "registry down") == ["f"]
+    assert t["rounds"][0]["remaining"] == ["b"] and t["rounds"][0]["unjudged"] == "registry down"
+
+
+def test_a_suite_that_could_not_run_at_all_holds_ship_until_waived():
+    run = testrun.combine([testrun.TestRun(status="failed", side="frontend", reason="The frontend has no test runner set up.")])
+    assert autofix.test_failures(run) == []  # nobody in the crew to send it to
+    [held] = autofix.unwaived_tests({"tracks": {}}, run)
+    assert held["test"] == "frontend suite" and "no test runner" in held["title"]
+    data = {"tracks": {}}
+    autofix.accept_tests(data, "accepted_risk", "we test this by hand", [held["key"]])
+    assert autofix.unwaived_tests(data, run) == []
 
 
 class FullStack(Crew):
@@ -602,7 +629,13 @@ class FullStack(Crew):
 
 
 class PyEngine(Engine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.frontend_builds = 0
+
     def run(self, image, files, steps, limits, on_cancel, on_step):
+        if any(s.name == "build" for s in steps) and "lib/sum.js" in files:
+            self.frontend_builds += 1
         if not any(s.name == "test" for s in steps) or "main.py" not in files:
             return super().run(image, files, steps, limits, on_cancel, on_step)
         self.test_runs += 1
@@ -628,8 +661,22 @@ def test_a_backend_fix_keeps_the_frontend_it_did_not_touch(client, monkeypatch):
     front = _current(project, "frontend_engineer")
     assert front["handoff"]["kept"] is True
     assert crew.qa_calls == 1 and engine.test_runs == 2
-    # Not one Frontend Engineer call after FORGE was told about the failing test.
+    # Not one Frontend Engineer call after FORGE was told about the failing test, and
+    # its unchanged files weren't built a second time.
     assert crew.frontend_at_fix and crew.frontend_calls == crew.frontend_at_fix
+    assert engine.frontend_builds == 1
+
+
+def test_a_kept_suite_that_no_longer_loads_carries_its_failures_unfixed():
+    """The fix renamed a module, so the kept test file no longer loads: its failures
+    weren't judged, so they aren't fixed — whatever QA writes next."""
+    t = {"rounds": [{"n": 1, "problems": [{"key": "k", "side": "backend", "path": "backend/tests/test_a.py"}],
+                     "fixed": None}], "episode_start": 0}
+    run = testrun.combine([testrun.TestRun(
+        status="failed", side="backend", framework="pytest", passed=1, errored=1,
+        problems=[testrun.Problem("backend/tests/test_a.py", "The test file couldn't run: No module named 'app.old'", "test", 1, "test")])])
+    assert autofix.judge_tests_round(t, run) == []
+    assert t["rounds"][0]["remaining"] == ["k"] and t["rounds"][0]["carried"]
 
 
 # ── the Ship gate ────────────────────────────────────────────────────────────

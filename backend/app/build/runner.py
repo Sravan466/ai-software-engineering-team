@@ -329,10 +329,34 @@ class BuildRun:
     note: Optional[str] = None
     seconds: float = 0.0
     packages: Optional[int] = None
+    #: A hash of the side's files as built (#76): a phase kept through a fix round whose
+    #: files hash the same is the same build, and isn't built again.
+    fingerprint: Optional[str] = None
 
     @classmethod
     def unchecked(cls, side: str, reason: str, **kw) -> "BuildRun":
         return cls(status=BuildStatus.UNCHECKED.value, side=side, reason=reason, **kw)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BuildRun":
+        return cls(
+            status=str(data.get("status") or BuildStatus.UNCHECKED.value),
+            side=str(data.get("side") or ""),
+            stack=data.get("stack"),
+            runner=data.get("runner"),
+            image=data.get("image"),
+            steps=list(data.get("steps") or []),
+            problems=[
+                Problem(str(p.get("path") or ""), str(p.get("message") or ""), str(p.get("kind") or "build"),
+                        p.get("line"), p.get("step"))
+                for p in data.get("problems") or [] if isinstance(p, dict)
+            ],
+            reason=data.get("reason"),
+            note=data.get("note"),
+            seconds=float(data.get("seconds") or 0),
+            packages=data.get("packages"),
+            fingerprint=data.get("fingerprint"),
+        )
 
     def summary(self) -> str:
         """"Installed 212 packages · next build passed in 41 s" — the phase card's line."""
@@ -368,8 +392,19 @@ class BuildRun:
             "packages": self.packages,
             "steps": self.steps,
             "problems": [p.as_dict() for p in self.problems],
+            "fingerprint": self.fingerprint,
             "at": datetime.now(timezone.utc).isoformat(),
         }
+
+
+def fingerprint(files: dict[str, str]) -> str:
+    """One side's files, as a hash: what a build of them depends on."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for path in sorted(files):
+        h.update(path.encode("utf-8") + b"\0" + files[path].encode("utf-8") + b"\0")
+    return h.hexdigest()
 
 
 #: A build worker the memory cap killed: Next prints the signal, V8 its heap.
@@ -613,6 +648,7 @@ def run_build(files: dict[str, str], side: str) -> BuildRun:
     run = judge(plan, results, side, mine)
     run.runner = chosen.kind
     run.seconds = run.seconds or (time.monotonic() - started)
+    run.fingerprint = fingerprint(mine)
     log.info("%s build (%s on %s): %s", side, plan.stack, chosen.kind, run.summary())
     return run
 

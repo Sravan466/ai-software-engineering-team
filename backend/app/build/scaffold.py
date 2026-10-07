@@ -451,8 +451,8 @@ def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str,
     if tests:
         dev.update({k: pkg.NPM_DEV[k] for k in ("jest", "jest-environment-jsdom", "@testing-library/react", "@testing-library/jest-dom", "@testing-library/dom")})
         if ts:
-            # `next build` type-checks every .ts file, tests included: without Jest's
-            # globals typed, a TypeScript suite fails the deploy, not just the run.
+            # Jest's globals typed, for an editor reading the suite. (`next build` leaves
+            # the tests out of its type-check: see the tsconfig below.)
             dev["@types/jest"] = pkg.NPM_DEV["@types/jest"]
         scripts["test"] = "jest"
         sc.add(
@@ -551,7 +551,11 @@ def _scaffold_next(sc: Scaffold, files: dict[str, str], slug: str, product: str,
                     "paths": paths_cfg,
                 },
                 "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-                "exclude": ["node_modules"],
+                # The suite is run by Jest (#76), not compiled by `next build`: a test's
+                # matcher types are no reason for a deploy to fail.
+                "exclude": ["node_modules"] + (
+                    ["__tests__", "**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"] if tests else []
+                ),
             }),
             "TypeScript configuration, with the @/ import alias.",
         )

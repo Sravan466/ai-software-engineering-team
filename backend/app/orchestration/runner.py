@@ -537,6 +537,10 @@ class PipelineRunner:
         took the run over — by sending work back, or by parking as needs-help."""
         if row.phase == Phase.SECURITY_ENGINEER.value:
             return self._remediate(db, project)
+        if row.phase == Phase.QA_ENGINEER.value:
+            # First, before a compile fix can rewrite QA's suite: judge the open tests
+            # round against the very suite it kept.
+            self._judge_tests_round(db, project, row)
         track = autofix.load(project)["tracks"].get(autofix.build_track(row.phase))
         # Also when the phase came back clean but a fix round is waiting on it: that
         # round has to be closed as a success, and the track settled for next time.
@@ -551,6 +555,20 @@ class PipelineRunner:
             return self._fix_tests(db, project, row)
         return False
 
+    @staticmethod
+    def _judge_tests_round(db: Session, project: Project, row: PhaseResult) -> None:
+        data = autofix.load(project)
+        t = data["tracks"].get(autofix.TESTS)
+        if t is None or autofix.open_round(t) is None:
+            return
+        run = row.test_run if isinstance(row.test_run, dict) else {}
+        reason = run.get("reason") or (
+            "Some tests didn't run against the fix." if run.get("status") != TestStatus.NOT_RUN.value else None
+        )
+        autofix.judge_tests_round(t, run, reason)
+        autofix.save(project, data)
+        db.commit()
+
     def _fix_tests(self, db: Session, project: Project, row: PhaseResult) -> bool:
         """Send QA's failing tests to whoever can turn them green (#76).
 
@@ -562,19 +580,12 @@ class PipelineRunner:
         """
         name = autofix.TESTS
         data = autofix.load(project)
-        problems = autofix.test_failures(row.test_run)
-        if not problems and name not in data["tracks"]:
+        if name not in data["tracks"] and not autofix.test_failures(row.test_run):
             return False
         t = autofix.track(data, name)
-        run = row.test_run if isinstance(row.test_run, dict) else {}
-        if autofix.open_round(t) is not None and run.get("status") not in (TestStatus.FAILED.value, TestStatus.OK.value):
-            # The re-check couldn't run, so it can't say the fix worked. Recorded as
-            # such — never as "fixed" — and the card says why the tests didn't run.
-            autofix.unjudge_round(t, str(run.get("reason") or "The tests didn't run again."))
-            autofix.settle(t)
-            autofix.save(project, data)
-            db.commit()
-            return False
+        # What the run reports failing, and what the last round sent that it couldn't
+        # reach: a re-check that didn't run never counts as a fix.
+        problems, _carried = autofix.test_problems(t, row.test_run)
         keys = [p["key"] for p in problems]
         if autofix.accepted(data, name):
             if autofix.covers(t, keys):
@@ -661,6 +672,8 @@ class PipelineRunner:
             "is_local": row.is_local,
             "skills_used": row.skills_used,
             "handoff": row.handoff,
+            # Reused as it is when the kept files hash the same (no second build).
+            "build_run": row.build_run,
         }
 
     def _fix_code(self, db: Session, project: Project, row: PhaseResult) -> bool:
@@ -1393,8 +1406,10 @@ class PipelineRunner:
         if (
             phase_key == Phase.FRONTEND_ENGINEER.value
             and last_result
-            # A kept frontend (#76) is the code the mockup already pictures.
-            and not (last_result.get("handoff") or {}).get("kept")
+            # A kept frontend (#76) is the code the mockup already pictures — unless
+            # there is no mockup yet: a draw queued for the row this one replaced
+            # gives up on finding its row gone, so this one draws it instead.
+            and (not (last_result.get("handoff") or {}).get("kept") or not self._has_mockup(db, project.id))
         ):
             self._draw_mockup_later(project.id, row.id)
 

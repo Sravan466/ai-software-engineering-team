@@ -194,8 +194,15 @@ export function FixingPanel({ project }: { project: Project }) {
                   {onIt && (
                     <>
                       {" · "}
-                      <b>{AGENT_BY_KEY[onIt]?.codename ?? onIt}</b> is on{" "}
-                      {onFile ? <code className="mono">{onFile}</code> : "it"}
+                      <b>{AGENT_BY_KEY[onIt]?.codename ?? onIt}</b>{" "}
+                      {name === "tests" && onIt !== "qa_engineer" ? (
+                        // The engineer fixes the code a test checks, never the test.
+                        <>
+                          is fixing what {onFile ? <code className="mono">{onFile}</code> : "the failing test"} checks
+                        </>
+                      ) : (
+                        <>is on {onFile ? <code className="mono">{onFile}</code> : "it"}</>
+                      )}
                     </>
                   )}
                   {!onIt && name === "security" && " · Warden is re-checking the rebuilt code"}
@@ -260,10 +267,14 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               <span className="ledger-how">{approach(name, r.strategy, r)}</span>
             </div>
             <span
-              className={`badge ${r.unjudged ? "badge-warn" : fixed > 0 ? "badge-ok" : "badge"}`}
+              className={`badge ${r.unjudged && fixed === 0 ? "badge-warn" : fixed > 0 ? "badge-ok" : "badge"}`}
               title={r.unjudged}
             >
-              {r.fixed === null ? "Not re-checked" : r.unjudged ? "Couldn't re-check" : `Fixed ${fixed} of ${sent}`}
+              {r.fixed === null
+                ? "Not re-checked"
+                : r.unjudged && fixed === 0
+                  ? "Couldn't re-check"
+                  : `Fixed ${fixed} of ${sent}`}
             </span>
           </li>
         );

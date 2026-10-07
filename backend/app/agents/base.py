@@ -367,7 +367,9 @@ class BaseAgent:
             charter_violations(ctx.charter, self.key, output) if settings.enforce_stack_charter else []
         )
         build = self._build_check(ctx, output)
-        build_run = self._run_build(ctx, output, build)
+        # The same files build the same way: a kept phase whose side hashes as it did
+        # when it was built isn't installed and built again.
+        build_run = self._run_build(ctx, output, build, reuse=kept.get("build_run"))
         test_run = self._run_tests(ctx, output, build)
         if isinstance(test_run, dict):
             test_run["kept"] = True
@@ -484,7 +486,9 @@ class BaseAgent:
             log.warning("%s: the compile check could not run: %s", self.title, e)
             return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")
 
-    def _run_build(self, ctx: AgentContext, output: dict, build: Optional[BuildCheck]) -> Optional[dict]:
+    def _run_build(
+        self, ctx: AgentContext, output: dict, build: Optional[BuildCheck], reuse: Optional[dict] = None
+    ) -> Optional[dict]:
         """Install, build and start what this phase wrote, once it parses (#75).
 
         Only after the parser passes: a file that doesn't parse can't build, and the
@@ -504,7 +508,14 @@ class BaseAgent:
             return None
         try:
             files, _ = phase_tree(ctx.prior_outputs, self.key, output, ctx.charter)
-            run = build_runner.run_build(files, side)
+            if (
+                isinstance(reuse, dict)
+                and reuse.get("fingerprint")
+                and reuse["fingerprint"] == build_runner.fingerprint(build_runner.side_files(files, side))
+            ):
+                run = build_runner.BuildRun.from_dict(reuse)
+            else:
+                run = build_runner.run_build(files, side)
         except (RequestCancelled, Superseded):
             raise
         except Exception as e:  # noqa: BLE001 - the runner must not become the failure

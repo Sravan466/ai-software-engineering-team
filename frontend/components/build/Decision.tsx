@@ -664,13 +664,23 @@ function TestsReview({
   const waived = project.auto_fix?.tracks?.tests?.accepted;
   const ready = Boolean(kind) && reason.trim().length >= 3;
   const count = tests.failures.length;
+  // A side whose suite couldn't run at all: no test to list, and never a pass.
+  const unrunnable = tests.runs.filter((r) => r.status === "failed" && !r.passed && !r.failed && !r.errored);
   return (
     <div className="artifact-pad tests-review">
       <h3 className="tests-review-head">
-        {count} failing test{count === 1 ? "" : "s"}
+        {count ? `${count} failing test${count === 1 ? "" : "s"}` : "The tests couldn't run"}
         <span>{tests.summary}</span>
       </h3>
-      <TestFailures failures={tests.failures} />
+      {unrunnable.map((r) => (
+        <p key={r.side} className="tests-unrunnable" role="note">
+          {Icon.alert}
+          <span>
+            <b>The {r.side} tests couldn&apos;t run.</b> {r.reason}
+          </span>
+        </p>
+      ))}
+      {count > 0 && <TestFailures failures={tests.failures} />}
       {held === 0 && waived ? (
         <p className="tests-waived" role="status">
           {Icon.check}
@@ -680,7 +690,7 @@ function TestsReview({
         </p>
       ) : (
         <div className="accept-form">
-          <b className="accept-title">Ship with these tests failing</b>
+          <b className="accept-title">{count ? "Ship with these tests failing" : "Ship without these tests running"}</b>
           <ReasonKinds name="tests-waive-kind" kind={kind} setKind={setKind} />
           <div className="field">
             <label htmlFor="tests-waive-reason">What should someone reading this build later know?</label>
