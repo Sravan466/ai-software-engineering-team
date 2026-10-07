@@ -106,6 +106,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # Nullable (#76): a QA row from before tests were run never ran them, and an
         # empty record would claim a suite nobody executed.
         "test_run",
+        # Nullable (#77): a Warden row from before the scanners never ran them, and an
+        # empty record would claim a scan that found nothing.
+        "scan",
         # Nullable for the same reason as `build_status`: a phase that ran before the
         # skill library existed cannot say which skills it had, and an empty list
         # would read as "it was offered skills and took none".
@@ -133,7 +136,20 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     "knowledge_docs": ("owner_id",),
     # Both nullable: a finding settled before the fix loop was fixed by hand or not at
     # all, and a waiver recorded before reasons had kinds keeps its free-text reason.
-    "security_dispositions": ("fixed_round", "waive_kind"),
+    # All nullable (#77): a finding from before the scanners is the model's, and has
+    # no tool, rule or line to record — the API reads a null source as "model".
+    "security_dispositions": (
+        "fixed_round",
+        "waive_kind",
+        "source",
+        "tool",
+        "rule_id",
+        "rule_url",
+        "cwe",
+        "path",
+        "line",
+        "fingerprint",
+    ),
 }
 
 

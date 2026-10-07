@@ -1084,6 +1084,10 @@ class ModelRouter:
             rows.append(row)
         return {
             "roles": rows,
+            # Warden reviewing on the very model that wrote the code (#77): shown as a
+            # one-line note, since the scanners now carry the verdicts and the model's
+            # review is an opinion — a second model makes it a second opinion.
+            "auditor_shares_builders": self._auditor_shares_builders(rows, view["default_model"]),
             "default_model": view["default_model"],
             "default_origin": view["default_origin"],
             "local_models": [m for m in view["models"]],
@@ -1105,6 +1109,23 @@ class ModelRouter:
                 and not self._refuses(name, self._default_model[name])
             ],
         }
+
+    @staticmethod
+    def _auditor_shares_builders(rows: list[dict], default_model: Optional[str]) -> bool:
+        """Whether the security review runs, unchosen, on the builders' own model.
+
+        Only when nobody chose a model for Warden: a choice, even of the same model, is
+        a decision made with this in view. The builders are compared by what they run
+        on — their own choice, or the default everyone without one shares.
+        """
+        from app.core.constants import Phase
+
+        by_role = {r["role"]: r for r in rows}
+        warden = by_role.get(Phase.SECURITY_ENGINEER.value)
+        if warden is None or warden.get("assigned") or not default_model:
+            return False
+        builders = (Phase.BACKEND_ENGINEER.value, Phase.FRONTEND_ENGINEER.value)
+        return all((by_role.get(b) or {}).get("assigned") in (None, default_model) for b in builders)
 
     def _tried(self) -> list[str]:
         """Every address a runtime was looked for at and none answered, once each.

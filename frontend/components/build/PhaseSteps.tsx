@@ -72,7 +72,12 @@ function finishedStep(t: ActivityStep): Pick<Line, "title" | "chip"> {
       return { title: "Checked the build" };
     case "building":
     case "testing":
-      return t.detail ? { title: "Ran", chip: t.detail } : { title: t.stage === "testing" ? "Ran the tests" : "Ran the build" };
+    case "scanning":
+      return t.detail
+        ? { title: "Ran", chip: t.detail }
+        : { title: t.stage === "testing" ? "Ran the tests" : t.stage === "scanning" ? "Ran the scanners" : "Ran the build" };
+    case "reviewing":
+      return { title: "Reviewed what the scanners can't see" };
     default:
       return { title: t.stage };
   }
@@ -100,7 +105,11 @@ function currentStep(a: Activity): Pick<Line, "title" | "past" | "object" | "chi
       return { title: "Checking the build", past: "Checked the build" };
     case "building":
     case "testing":
+    case "scanning":
       return a.detail ? { title: "Running", past: "Ran", chip: a.detail } : { title: a.label || "Running it", past: "Ran it" };
+    case "reviewing":
+      // Warden's model call, once the scanners have run (#77).
+      return { title: "Reviewing what the scanners can't see", past: "Reviewed what the scanners can't see" };
     default:
       return { title: a.label || "Working" };
   }

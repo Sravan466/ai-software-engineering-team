@@ -46,6 +46,9 @@ TESTS = "tests"
 #: Why a loop stopped.
 STOP_LIMIT = "limit"  # every round it was allowed has run
 STOP_NO_PROGRESS = "no_progress"  # the last round fixed nothing
+#: The re-check couldn't run at all (#77): the scanners had no sandbox, so nothing the
+#: round was sent can be called fixed or not — and another round wouldn't be either.
+STOP_UNCHECKED = "unchecked"
 
 #: Why a serious finding may be waived. GitHub's own dismissal reasons, minus the
 #: ones that do not apply to generated code: a waiver of something serious is a risk
@@ -579,6 +582,7 @@ __all__ = [
     "unwaived_tests",
     "STOP_LIMIT",
     "STOP_NO_PROGRESS",
+    "STOP_UNCHECKED",
     "WAIVE_KINDS",
     "accept",
     "accepted",

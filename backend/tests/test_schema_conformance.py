@@ -619,9 +619,10 @@ _CHEAP = {"summary": "…", "total_monthly_high_usd": 50}
         (ApprovalMode.CHECKPOINTS, Phase.SYSTEM_DESIGN, {}, "valid", GateKind.PLAN.value),
         (ApprovalMode.CHECKPOINTS, Phase.BACKEND_ENGINEER, {}, "valid", None),
         (ApprovalMode.CHECKPOINTS, Phase.COST_ESTIMATION, _CHEAP, "valid", GateKind.SHIP.value),
-        # …plus what the run raises for itself. A serious finding is not one of
-        # them: the crew fixes it (or asks for help) before any gate is decided.
-        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "valid", None),
+        # …plus what the run raises for itself. Since #77 everything in Warden's own
+        # report is a review note: a person's to read, whatever its severity. (A
+        # scanner's serious finding never reaches a gate — the crew fixes it first.)
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "valid", GateKind.SECURITY.value),
         (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SMALL, "valid", GateKind.SECURITY.value),
         (ApprovalMode.UNATTENDED, Phase.SECURITY_ENGINEER, _SMALL, "valid", None),
         (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _CLEAN, "valid", None),
@@ -632,7 +633,7 @@ _CHEAP = {"summary": "…", "total_monthly_high_usd": 50}
         # A finding it *could* read outranks "could not read": a known critical is
         # more actionable than an unreadable report.
         (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SMALL, "invalid", GateKind.SECURITY.value),
-        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "invalid", GateKind.UNCHECKED.value),
+        (ApprovalMode.CHECKPOINTS, Phase.SECURITY_ENGINEER, _SEVERE, "invalid", GateKind.SECURITY.value),
     ],
 )
 def test_the_whole_gate_policy_in_one_table(mode, phase, output, status, expected):
@@ -1016,7 +1017,7 @@ def test_a_stop_reports_every_reason_it_happened(ask_about_every_finding):
         SchemaStatus.INVALID.value,
     )
     assert gate.kind == GateKind.SECURITY.value
-    assert "raised 1 finding" in gate.note and "could not run" in gate.note
+    assert "raised 1 review note" in gate.note and "could not run" in gate.note
 
 
 def test_an_empty_idea_is_not_reported_as_truncated():

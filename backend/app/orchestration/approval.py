@@ -235,6 +235,7 @@ def decide_gate(
     stack_violations: Optional[list] = None,
     build_problems: Optional[list] = None,
     failing_tests: Optional[list] = None,
+    scan: Optional[dict] = None,
 ) -> Optional[Gate]:
     """Should the pipeline stop after `phase_key`? Returns the gate, or None.
 
@@ -248,6 +249,9 @@ def decide_gate(
 
     `stack_violations` is where this phase contradicts the architecture it was built
     on. That one is answered before the review policy is consulted at all — see below.
+
+    `scan` is the security scanners' run on Warden's row (#77): their critical and high
+    findings that are a person's call rather than the crew's stop here too.
     """
     mode = project.effective_approval_mode
 
@@ -320,13 +324,17 @@ def decide_gate(
         # a gate is being decided the fix loop has either fixed it or parked the build
         # as "needs help" — so asking about it here would ask the reviewer to judge a
         # leaked credential, which has one right answer.
+        # Since #77 everything Warden itself reports is a review note — never the
+        # crew's — so its severe ones are all asked about here, beside the scanners'
+        # severe findings that are small (a dependency, or under the auto-fix bar).
         severe = [f for f in severe_findings(output) if not _serious(f)]
-        if severe:
+        tools = _small_tool_findings(scan)
+        if severe or tools:
             # Both facts, not the louder one. "Warden raised a critical" read alone
             # invites the reviewer to fix that one thing and move on — when the
             # report it came from failed its shape, and the findings that did not
             # survive parsing are exactly the ones nobody is going to look for.
-            return Gate(GateKind.SECURITY.value, _both(_security_note(severe), unchecked))
+            return Gate(GateKind.SECURITY.value, _both(_security_note(severe, tools), unchecked))
         if unchecked:
             # Warden's report is unreadable, so "no severe findings" is not a fact —
             # it is the absence of one. Stop rather than infer the reassuring half,
@@ -338,13 +346,25 @@ def decide_gate(
 
 
 def _serious(finding: dict) -> bool:
-    from app.orchestration.remediation import is_serious
+    """A finding in Warden's own report is the model's (#77), and never the crew's."""
+    from app.orchestration.remediation import SOURCE_MODEL, finding_is_serious
 
-    return is_serious(
+    return finding_is_serious(
+        SOURCE_MODEL,
+        None,
         str(read_key(finding, "severity", "risk", "level", "impact") or ""),
         str(read_key(finding, "category", "type", "class") or ""),
         str(read_key(finding, "title", "name", "issue", "summary") or ""),
     )
+
+
+def _small_tool_findings(scan: Optional[dict]) -> list:
+    """The scanners' critical and high findings that are a person's to decide."""
+    if not isinstance(scan, dict):
+        return []
+    from app.orchestration.remediation import tool_findings
+
+    return [f for f in tool_findings(scan) if f.severe and not f.serious]
 
 
 def _both(*notes: Optional[str]) -> Optional[str]:
@@ -427,12 +447,20 @@ def cost_overrun_note(project, output: object) -> Optional[str]:
     )
 
 
-def _security_note(severe: list[dict]) -> str:
-    """"Warden raised 2 findings for you to decide on — XSS, UI contrast." """
-    named = (str(f.get("category") or f.get("title") or "").strip() for f in severe)
+def _security_note(severe: list[dict], tools: Optional[list] = None) -> str:
+    """"The scanners raised 1 finding and Warden 2 review notes for you to decide on —
+    Vulnerable dependency, IDOR, XSS." """
+    tools = tools or []
+    named = [str(f.category or f.title or "").strip() for f in tools]
+    named += [str(f.get("category") or f.get("title") or "").strip() for f in severe]
     # Deduplicate before taking three, or four findings across three categories can
     # report two of them and drop the one the reviewer most needed to see.
     kinds = list(dict.fromkeys(k for k in named if k))[:3]
-    count = len(severe)
-    subject = f"{count} finding{'' if count == 1 else 's'} for you to decide on"
-    return f"Warden raised {subject} — {', '.join(kinds)}." if kinds else f"Warden raised {subject}."
+    parts = []
+    if tools:
+        parts.append(f"The scanners raised {len(tools)} finding{'' if len(tools) == 1 else 's'}")
+    if severe:
+        notes = f"{len(severe)} review note{'' if len(severe) == 1 else 's'}"
+        parts.append(f"Warden {notes}" if tools else f"Warden raised {notes}")
+    subject = " and ".join(parts) + " for you to decide on"
+    return f"{subject} — {', '.join(kinds)}." if kinds else f"{subject}."

@@ -315,6 +315,15 @@ class Settings(BaseSettings):
     #: Shared with the builder service, which refuses requests without it when set.
     build_runner_token: Optional[SecretStr] = None
 
+    # ── Security scanners (#77): Semgrep, Bandit, npm audit, pip-audit ──
+    #: Run the scanners on the generated tree before Warden reviews it, in the same
+    #: sandbox as the real build. Their findings drive the fix loop; with the switch
+    #: off (or no sandbox), Warden's findings are its opinion and say so.
+    security_scan_enabled: bool = True
+    #: The scan's whole budget. The first scan on a computer also installs the tools
+    #: (about a minute) into a cache no build can touch.
+    security_scan_timeout_seconds: BlankTolerantInt(420) = 420
+
     # ── Cloud providers ──
     #: Keys are `SecretStr`, so a repr, a debug dump or an error report of these
     #: settings prints `**********` rather than the key.

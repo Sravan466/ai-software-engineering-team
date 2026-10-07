@@ -10,6 +10,7 @@ import json
 import re
 import os
 import tempfile
+from typing import Optional
 
 # Must be set BEFORE importing the app (settings are read at import time).
 _tmp = tempfile.mkdtemp(prefix="aiteam_test_")
@@ -28,6 +29,9 @@ os.environ["BUILD_CHECK_PROVISION"] = "false"
 # a fake engine in `app.build.runner.engine` and switches it on.
 os.environ["BUILD_RUN_ENABLED"] = "false"
 os.environ["BUILD_RUNNER_URL"] = ""
+# Nor scan anything (#77): the security scanners are off unless a test switches them
+# on and scripts what they report (`scripted_scan`).
+os.environ["SECURITY_SCAN_ENABLED"] = "false"
 # Model sources: none. Left alone, the suite would find whatever runtimes the machine
 # running it has on loopback — and the developer's `.env` would add its own — so a
 # test's answer would depend on what happened to be running.
@@ -266,3 +270,90 @@ def _fresh_key_check_limit():
 
     _connectors_routes.limiter.reset()
     yield
+
+
+# ── the security scanners, scripted (#77) ────────────────────────────────────
+#: The tree a scripted scan sees: one backend file and one frontend page, owned by the
+#: engineers who wrote them.
+SCAN_TREE = {
+    "backend/app/index.js": (
+        "const express = require('express');\n"
+        "const db = require('./db');\n"
+        "const MONGO = 'mongodb+srv://admin:hunter2pass@cluster0.example.net/app';\n"
+        "const app = express();\n"
+        "app.get('/u/:id', (req, res) => db.query(\"select * from users where id=\" + req.params.id));\n"
+        "module.exports = app;\n"
+    ),
+    "frontend/pages/groups/new.jsx": "export default function New({ html }) {\n" + "  // …\n" * 10
+    + "  return <div dangerouslySetInnerHTML={{ __html: html }} />;\n}\n",
+}
+SCAN_OWNERS = {"backend/app/index.js": "backend_engineer", "frontend/pages/groups/new.jsx": "frontend_engineer"}
+
+
+def semgrep_hit(rule: str, path: str, line: int, severity: str = "ERROR", cwe: str = "CWE-89", message: str = "") -> dict:
+    """One Semgrep result, as the in-sandbox reader condenses it."""
+    return {"rule": rule, "path": path, "line": line, "end": line, "severity": severity, "confidence": "HIGH",
+            "cwe": f"{cwe}: something", "message": message or f"{rule} matched.", "url": None, "fix": None}
+
+
+class ScriptedScanner:
+    """A fake sandbox that answers the scan's steps (#77).
+
+    Semgrep reports whatever `scans` says next — one list per scan, the last one
+    repeating — and every other tool runs clean. `down_after` makes every scan after
+    that many fail the way a missing Docker does. `trees` records what each scan was
+    handed.
+    """
+
+    kind = "docker"
+
+    def __init__(self, scans: list[list[dict]], npm: Optional[list[dict]] = None):
+        self.scans = scans
+        self.npm = npm or []
+        self.trees: list[dict] = []
+        self.down_after: Optional[int] = None
+
+    def run(self, image, files, steps, limits, on_cancel, on_step):
+        from app.build import scan as _scan, sandbox as _sandbox
+        from app.build.sandbox import StepResult
+
+        if self.down_after is not None and len(self.trees) >= self.down_after:
+            raise _sandbox.SandboxError("Docker isn't running.")
+        found: list[dict] = []
+        if image == _scan.PYTHON_IMAGE:
+            self.trees.append(dict(files))
+            found = self.scans.pop(0) if len(self.scans) > 1 else self.scans[0]
+        out = []
+        for step in steps:
+            on_step(step)
+            if step.label == "install scanners":
+                text = "scanners already installed"
+            elif step.label == "semgrep":
+                text = _scan.MARK + json.dumps({"tool": "semgrep", "ran": True, "version": "1.139.0",
+                                                "findings": found, "total": len(found)})
+            elif step.label == "bandit":
+                text = _scan.MARK + json.dumps({"tool": "bandit", "ran": True, "version": "1.8.6", "findings": []})
+            elif step.label == "pip-audit":
+                text = _scan.MARK + json.dumps({"tool": "pip-audit", "side": "backend", "ran": True, "findings": []})
+            else:
+                side = step.label[step.label.find("(") + 1 : -1]
+                text = _scan.MARK + json.dumps({"tool": "npm audit", "side": side, "ran": True, "version": "10.8.2",
+                                                "findings": self.npm, "total": len(self.npm)})
+            out.append(StepResult(step.name, step.label, 0, 0.1, text))
+        return out
+
+
+def scripted_scan(monkeypatch, scans: list[list[dict]], tree: Optional[dict] = None, npm: Optional[list] = None,
+                  owners: Optional[dict] = None) -> ScriptedScanner:
+    """Switch the scanners on over `tree`, with Semgrep reporting `scans` in turn."""
+    from app.build import runner as _runner, scan as _scan
+    from app.core.config import settings as _settings
+
+    scanner = ScriptedScanner(scans, npm)
+    monkeypatch.setattr(_settings, "security_scan_enabled", True)
+    monkeypatch.setattr(_runner, "engine", scanner)
+    chosen = dict(tree or SCAN_TREE)
+    if npm:
+        chosen.setdefault("frontend/package.json", '{\n  "dependencies": {\n    "lodash": "4.17.15"\n  }\n}\n')
+    monkeypatch.setattr(_scan, "scan_tree", lambda prior, charter=None: (dict(chosen), dict(owners or SCAN_OWNERS)))
+    return scanner

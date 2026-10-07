@@ -198,6 +198,9 @@ class PhaseResultOut(BaseModel):
     #: runs: [{side, framework, passed, failed, errored, skipped, failures, coverage}]}`.
     #: `None` for every other phase, and for QA rows from before tests were run.
     test_run: Optional[dict] = None
+    #: The security scanners (#77): `{status: ok|skipped, summary, reason, tools,
+    #: findings}`. `None` for every phase but Warden, and Warden rows from before.
+    scan: Optional[dict] = None
 
     #: The procedural skills this phase was actually given, by name and in the order
     #: they were injected. `None` on rows written before the library existed — which

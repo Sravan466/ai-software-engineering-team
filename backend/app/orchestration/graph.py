@@ -75,6 +75,9 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
         # QA's tests, run for real (#76): counts, failures, measured coverage — or
         # why they weren't run. Written by the platform, never by the model.
         "test_run": getattr(result, "test_run", None),
+        # The security scanners' run (#77): which tools ran, and what they reported
+        # with a rule and a line. Warden only; written by the platform.
+        "scan": getattr(result, "scan", None),
         # Which procedures this deliverable was actually written with. Recorded
         # because a skill you cannot confirm reached the model is indistinguishable
         # from one that did nothing — and because selection is a keyword score, so

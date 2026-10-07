@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from app.agents import get_agent
 from app.agents.base import AgentContext
 from app.analytics import tracker
-from app.build import dbconnect, integrations, testrun
+from app.build import dbconnect, integrations, scan, testrun
 from app.core import artifacts, identity, project_secrets
 from app.core.config import settings
 from app.core.constants import (
@@ -356,6 +356,7 @@ class PipelineRunner:
             self.build_problems(project),
             # Only the Ship review reads it, so only the Ship review pays for it.
             self.failing_tests(project) if row.phase == SHIP_GATE_PHASE.value else None,
+            scan=row.scan if row.phase == Phase.SECURITY_ENGINEER.value else None,
         )
 
     @staticmethod
@@ -811,7 +812,16 @@ class PipelineRunner:
         data = autofix.load(project)
         t = autofix.track(data, autofix.SECURITY)
         outstanding = remediation.unresolved(db, project, serious=True)
+        # Which of the findings the open round was sent the rescan could judge: only a
+        # tool that ran again can say its finding is gone (#77). One that couldn't run
+        # leaves its findings as they were — sent back, not fixed.
+        live = autofix.open_round(t)
+        unjudged = self._unrescanned(live, row.scan) if live is not None else []
         fixed = autofix.close_round(t, [f.finding_key for f in outstanding])
+        if live is not None and unjudged:
+            rescan = scan.ScanResult.from_dict(row.scan if isinstance(row.scan, dict) else None)
+            live["unjudged"] = (rescan.reason if rescan else None) or "The scanners didn't run again."
+            live["unjudged_all"] = {p.get("key") for p in live.get("problems") or []} <= set(unjudged)
         if fixed:
             last = t["rounds"][-1]
             for record in self._dispositions(db, project, fixed):
@@ -824,6 +834,10 @@ class PipelineRunner:
             return False
 
         step = autofix.next_step(t)
+        if live is not None and live.get("unjudged_all"):
+            # Nothing could be checked, and the next round's rescan would run on the
+            # same missing sandbox: ask now, with the reason, rather than spend rounds.
+            step = autofix.STOP_UNCHECKED
         if step != "fix":
             autofix.stop(t, step, [f.finding_key for f in outstanding])
             autofix.save(project, data)
@@ -835,18 +849,7 @@ class PipelineRunner:
             self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))
             return True
 
-        findings = [
-            remediation.Finding(
-                key=f.finding_key,
-                title=f.title,
-                severity=f.severity,
-                category=f.category,
-                location=f.location,
-                recommendation=f.recommendation,
-                owner_phase=f.owner_phase,
-            )
-            for f in outstanding
-        ]
+        findings = [remediation.as_finding(f) for f in outstanding]
         order = [p.value for p in PHASE_ORDER]
         by_owner: dict[str, list[remediation.Finding]] = {}
         for f in findings:
@@ -874,6 +877,8 @@ class PipelineRunner:
                     "where": f.location or None,
                     "phase": remediation.route_owner(f),
                     "kind": "security",
+                    # The rule the rescan runs again (#77).
+                    **({"tool": f.tool, "rule_id": f.rule_id, "cwe": f.cwe} if f.tool else {}),
                 }
                 for f in findings
             ],
@@ -903,6 +908,16 @@ class PipelineRunner:
             fix_track=autofix.SECURITY,
         )
         return True
+
+    @staticmethod
+    def _unrescanned(live: dict, scanned: object) -> list[str]:
+        """The keys a round was sent whose tool didn't run on the rebuilt code (#77)."""
+        result = scan.ScanResult.from_dict(scanned if isinstance(scanned, dict) else None)
+        return [
+            p.get("key")
+            for p in live.get("problems") or []
+            if p.get("tool") and (result is None or not result.ran(p["tool"]))
+        ]
 
     @staticmethod
     def _standing_fix_note(data: dict, phase: str) -> Optional[str]:
@@ -956,8 +971,9 @@ class PipelineRunner:
                 what = f"{left} code problem{'' if left == 1 else 's'} in {title}'s work"
             last = (t.get("rounds") or [None])[-1] or {}
             if last.get("unjudged_all"):
-                # Not the crew's failure: the tests couldn't run again to check its fix.
-                why = f"the tests couldn't run again to check the fix ({str(last.get('unjudged')).rstrip('.')})"
+                # Not the crew's failure: nothing could run again to check its fix.
+                what_ran = "scanners" if name == autofix.SECURITY else "tests"
+                why = f"the {what_ran} couldn't run again to check the fix ({str(last.get('unjudged')).rstrip('.')})"
             elif t["stopped"]["reason"] == autofix.STOP_NO_PROGRESS:
                 why = "the last round fixed none of them"
             elif rounds:
@@ -1505,6 +1521,7 @@ class PipelineRunner:
         row.build_note = lr.get("build_problems") or None
         row.build_run = lr.get("build_run") or None
         row.test_run = lr.get("test_run") or None
+        row.scan = lr.get("scan") or None
         # Provenance, not a verdict: which procedures this deliverable was written
         # with. Empty stays empty rather than becoming null — "this phase was
         # offered skills and none fitted" is a different fact from "this row was
@@ -1532,6 +1549,9 @@ class PipelineRunner:
                 # clear a critical finding because nobody could parse the report
                 # that raised it. The UNCHECKED gate already stops that run.
                 readable=row.schema_status != SchemaStatus.INVALID.value,
+                # What the scanners reported (#77): the findings with a rule and a
+                # line, and the rescan that decides whether a fix took.
+                scan=row.scan,
             )
         return row
 

@@ -1361,6 +1361,8 @@ kbd {
   color: var(--warn);
 }
 .role-warn > svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+/* Information, not a problem (#77): the same line, in the quiet ink. */
+.role-hint { color: var(--ink-3); }
 
 /* ===========================================================================
    SKILLS — the procedural library the crew is given

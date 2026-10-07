@@ -403,6 +403,8 @@
   .stack-review { padding: 12px 12px 0; }
   .finding-list { padding: 0 12px 12px; }
   .findings-head { padding: 12px 12px 8px; }
+  .findings-pad { padding: 12px 12px 0; }
+  .review-notes { margin: 6px 12px 12px; }
   .finding-waive .field { min-width: 0; }
   .confirm { padding: 10px 12px; }
   .confirm-text { flex-basis: 100%; }
@@ -1283,6 +1285,96 @@
 }
 .finding-note b { color: var(--ink); }
 
+/* ── where a finding came from (#77) ──
+   A scanner's finding names its tool, its rule, its CWE and its line; the line opens
+   in the Files view of whoever wrote it. Chips, not prose: these are identifiers, and
+   a reviewer scans down them the way they scan a stack trace. */
+.findings-pad { padding: 14px 16px 0; }
+.finding-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  color: var(--ink-2);
+  font-weight: 500;
+}
+.finding-tool > svg { width: 12px; height: 12px; color: var(--ink-3); }
+.finding-rule,
+.finding-cwe {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+a.finding-rule,
+a.finding-cwe {
+  text-decoration: underline;
+  text-decoration-color: var(--line-3);
+  text-underline-offset: 3px;
+  transition: color var(--tr), text-decoration-color var(--tr);
+}
+a.finding-rule:hover,
+a.finding-cwe:hover { color: var(--ink); text-decoration-color: var(--ink-3); }
+a.finding-rule:focus-visible,
+a.finding-cwe:focus-visible,
+.finding-where:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.finding-rule > svg { width: 11px; height: 11px; flex: none; color: var(--ink-3); }
+.finding-where {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+  font-size: inherit;
+  line-height: inherit;
+  overflow-wrap: anywhere;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--tr), color var(--tr);
+}
+.finding-where:hover { border-color: var(--line-3); color: var(--ink); }
+.finding-proof {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 9px 0 0;
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  color: var(--ok);
+}
+.finding-proof > svg { width: 13px; height: 13px; flex: none; margin-top: 2px; }
+.finding-proof code { color: var(--ink-2); overflow-wrap: anywhere; }
+
+/* Warden's own findings are its opinion: a dashed edge says "not confirmed", and a
+   critical one is never filled red — it doesn't hold the build, so it mustn't look
+   like the things that do. */
+.review-notes { margin: 6px 16px 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.findings > .review-notes:first-child { margin-top: 0; border-top: 0; }
+.review-notes-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.review-notes-head > :first-child { flex: none; margin-top: 1px; }
+.review-notes-titles { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.review-notes-title {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+.review-notes-text { margin: 0; max-width: 72ch; font-size: var(--t-xs); line-height: 1.5; color: var(--ink-3); }
+.review-notes .finding-list { padding: 0; }
+.finding[data-source="model"] { border-style: dashed; border-color: var(--line-3); background: transparent; }
+.finding[data-source="model"][data-status="open"][data-severity="critical"],
+.finding[data-source="model"][data-status="open"][data-severity="high"] {
+  border-color: var(--line-3);
+  background: transparent;
+}
+
 .finding-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 11px; }
 .finding-waive {
   display: flex;
@@ -1577,6 +1669,7 @@
 }
 .fixed-crew-title { color: var(--ink); }
 .fixed-crew-proof { margin-left: auto; font-size: var(--t-xs); color: var(--ok); }
+.fixed-crew-proof code { color: var(--ink-2); overflow-wrap: anywhere; }
 
 @media (max-width: 620px) {
   .fixing-head { flex-wrap: wrap; padding: 14px 14px 10px; }
@@ -2025,4 +2118,89 @@ textarea.db-input { min-height: 132px; white-space: pre; overflow-x: auto; }
 .accept-form .tests-waive-actions .btn { align-self: auto; }
 @media (max-width: 560px) {
   .tests-waive-actions .btn { min-height: 44px; flex: 1 1 100%; justify-content: center; }
+}
+
+/* ── the scanners behind Warden's review (#77) ──
+   The test line's sibling: same band, same rhythm, outcome first. Skipped is the
+   warning band, because then every finding on the card is the model's opinion. */
+.scanline { border-bottom: 1px solid var(--line); background: var(--bg-panel); }
+.scanline[data-state="skipped"] { background: var(--warn-soft); border-bottom-color: var(--accent-line); }
+.scanline > summary,
+.scanline-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 9px 14px;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.scanline > summary { list-style: none; cursor: pointer; }
+.scanline > summary::-webkit-details-marker { display: none; }
+.scanline > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.scanline-chev { display: inline-flex; color: var(--ink-3); transition: transform var(--tr); }
+.scanline-chev svg { width: 12px; height: 12px; }
+.scanline[open] > summary .scanline-chev { transform: rotate(90deg); }
+.scanline-mark { display: inline-flex; color: var(--ok); }
+.scanline-mark svg { width: 15px; height: 15px; }
+.scanline[data-state="found"] .scanline-mark { color: var(--ink-2); }
+.scanline[data-state="skipped"] .scanline-mark { color: var(--warn); }
+.scanline-title { color: var(--ink); font-weight: 600; }
+.scanline-summary { min-width: 0; color: var(--ink-2); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.scanline[data-state="skipped"] .scanline-summary { color: var(--ink); }
+.scanline-why { color: var(--ink-2); }
+.scanline > summary:hover .scanline-summary { color: var(--ink); }
+.scanline-count {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.scanline-where { margin-left: auto; font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
+.scanline-body { padding: 0 14px 12px 34px; display: flex; flex-direction: column; gap: 8px; }
+.scanline-tools { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.scanline-tool {
+  display: grid;
+  grid-template-columns: minmax(9rem, auto) minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--t-xs);
+}
+.scanline-tool:first-child { border-top: 0; }
+.scanline-tool-name { display: inline-flex; align-items: baseline; gap: 6px; color: var(--ink); font-weight: 600; font-size: var(--t-sm); }
+.scanline-tool-ver { font-weight: 400; font-size: var(--t-xs); color: var(--ink-3); }
+.scanline-tool-what { color: var(--ink-3); }
+.scanline-tool-state { color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+.scanline-tool[data-status="skipped"] .scanline-tool-state,
+.scanline-tool[data-status="failed"] .scanline-tool-state { color: var(--warn); }
+.scanline-tool[data-status="not_needed"] { opacity: 0.7; }
+.scanline-note { margin: 0; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.5; max-width: 72ch; }
+
+/* The line a finding points at, in the Files view (#77). */
+.code-line-mark { background: var(--accent-soft); }
+
+@media (max-width: 620px) {
+  .scanline-where { margin-left: 0; flex-basis: 100%; }
+  .scanline-body { padding-left: 14px; }
+  .scanline-tool { grid-template-columns: minmax(0, 1fr); }
+  .scanline-tool-state { text-align: left; }
+}
+/* Touch: the line chip and the rule links are real targets. */
+@media (pointer: coarse) {
+  .finding-where,
+  a.finding-rule,
+  a.finding-cwe { min-height: 32px; padding-top: 4px; padding-bottom: 4px; }
+  .scanline > summary { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scanline-chev,
+  .finding-where,
+  a.finding-rule,
+  a.finding-cwe { transition: none; }
 }

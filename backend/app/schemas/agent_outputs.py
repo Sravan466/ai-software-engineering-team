@@ -330,12 +330,29 @@ class QAEngineerOutput(_Shape):
 
 # ── Security ─────────────────────────────────────────────────────────────────
 class SecurityFinding(_Shape):
+    """One thing Warden found. Since #77 these are the model's review notes — the
+    scanners' findings are the platform's, kept with the phase as `scan`."""
+
     title: str
     severity: str = Field(description="critical | high | medium | low")
-    category: str = Field(description="e.g. SQL injection, XSS, CSRF, authz, secrets")
-    location: str
+    category: str = Field(description="e.g. authorization, business logic, data exposure")
+    #: The file, as the hand-off named it. `location` is the name models used before
+    #: #77 split it into a path and a line, and is still read.
+    path: str = Field(validation_alias=AliasChoices("path", "location", "file"))
+    line: Optional[int] = Field(None, description="the line in that file, when it is one line")
     description: str
     recommendation: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _line_from_text(cls, data: Any) -> Any:
+        """"42", "L42", "line 42" or "42-48" is line 42; anything else is no line."""
+        if isinstance(data, dict) and "line" in data and not isinstance(data["line"], int):
+            import re
+
+            found = re.search(r"\d+", str(data["line"] or ""))
+            data = {**data, "line": int(found.group()) if found else None}
+        return data
 
 
 class SecurityEngineerOutput(_Shape):

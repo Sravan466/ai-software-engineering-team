@@ -69,6 +69,12 @@ _CATEGORY_OWNER: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Where a finding came from (#77). A scanner's is the platform's evidence; Warden's
+#: is its opinion — shown as a review note, never the fix loop's, never blocking.
+SOURCE_TOOL = "tool"
+SOURCE_MODEL = "model"
+
+
 @dataclass(frozen=True)
 class Finding:
     """One finding, with the phase that owns the file it is about."""
@@ -80,6 +86,18 @@ class Finding:
     location: str
     recommendation: str
     owner_phase: Optional[str]
+    #: tool | model. A row from before #77 is the model's.
+    source: str = SOURCE_MODEL
+    #: For a scanner's finding: which tool, which rule, and exactly where.
+    tool: Optional[str] = None
+    rule_id: Optional[str] = None
+    cwe: Optional[str] = None
+    path: Optional[str] = None
+    line: Optional[int] = None
+    url: Optional[str] = None
+    fingerprint: Optional[str] = None
+    #: Other rules that reported the same problem at the same place: `tool:rule`.
+    also: tuple[str, ...] = ()
 
     @property
     def severe(self) -> bool:
@@ -87,8 +105,13 @@ class Finding:
 
     @property
     def serious(self) -> bool:
-        """The crew fixes this one itself. See `is_serious`."""
-        return is_serious(self.severity, self.category, self.title)
+        """The crew fixes this one itself. See `is_serious` and `finding_is_serious`."""
+        return finding_is_serious(self.source, self.tool, self.severity, self.category, self.title)
+
+    @property
+    def blocks(self) -> bool:
+        """Holds the build until it is fixed or waived: a scanner's, severe or serious."""
+        return self.source == SOURCE_TOOL and (self.severe or self.serious)
 
 
 # ── serious (the crew fixes it) and small (a person decides) ─────────────────
@@ -140,6 +163,24 @@ def is_serious(severity: str, category: str = "", title: str = "") -> bool:
     if rank not in SEVERITY_ORDER:
         return False
     return SEVERITY_ORDER.index(rank) <= _threshold() and not is_ui_ux(category, title)
+
+
+def finding_is_serious(
+    source: Optional[str], tool: Optional[str], severity: str, category: str = "", title: str = ""
+) -> bool:
+    """`is_serious`, for a finding whose source is known (#77).
+
+    Only a scanner's finding can be serious. Warden's own are review notes: one model's
+    opinion, re-judged by the same model, is not evidence enough to send the crew back
+    round after round — a person reads them and decides. Nor is a dependency audit's:
+    the platform owns the manifests (`build/packages.py`), so no agent can bump a
+    version, and a round spent asking one to would fix nothing.
+    """
+    from app.build.scan import DEPENDENCY_TOOLS
+
+    if (source or SOURCE_MODEL) != SOURCE_TOOL or (tool or "") in DEPENDENCY_TOOLS:
+        return False
+    return is_serious(severity, category, title)
 
 
 def _text(value: object) -> str:
@@ -243,13 +284,16 @@ def read_findings(output: object, project=None) -> list[Finding]:
             continue
         title = _text(read_key(row, "title", "name", "issue", "summary"))
         category = _text(read_key(row, "category", "type", "class"))
-        location = _text(read_key(row, "location", "file", "path", "component", "where"))
+        location = _text(read_key(row, "path", "location", "file", "component", "where"))
         severity = _text(read_key(row, "severity", "risk", "level", "impact")).lower()
         if not (title or category):
             continue
         recommendation = _text(
             read_key(row, "recommendation", "remediation", "fix", "mitigation")
         )
+        path, line = _path_and_line(location, read_key(row, "line", "line_number", "lineNumber"))
+        if line and location and not re.search(r":\d+", location):
+            location = f"{location}:{line}"
         owner = _owner_for(location, owned) or _owner_by_category(category, title)
         key = finding_key(category, title, owner)
         seen = out.get(key)
@@ -266,6 +310,8 @@ def read_findings(output: object, project=None) -> list[Finding]:
                 # Same by construction — the owner is part of the key — but stated
                 # rather than assumed, so this cannot drift if the key ever changes.
                 owner_phase=seen.owner_phase or owner,
+                path=seen.path or path,
+                line=seen.line or line,
             )
             continue
         out[key] = Finding(
@@ -276,8 +322,119 @@ def read_findings(output: object, project=None) -> list[Finding]:
             location=location,
             recommendation=recommendation,
             owner_phase=owner,
+            path=path,
+            line=line,
         )
     return list(out.values())
+
+
+def _path_and_line(location: str, line: object = None) -> tuple[Optional[str], Optional[int]]:
+    """A model's `path` (or old `location`) and `line`, as a file and a line number.
+
+    Models write `authController.js`, `src/controllers/authController.js:42` and
+    `authController.js (line 42)`; the file is everything before the first `:` or
+    space, and the line is the `line` field or the number after it.
+    """
+    text = (location or "").strip().replace("\\", "/")
+    found = re.match(r"\s*`?([^\s:`,()]+)`?(?::(\d+))?", text)
+    path = found.group(1).lstrip("./") if found else None
+    number: Optional[int] = None
+    if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+        number = line
+    elif isinstance(line, str) and re.search(r"\d+", line):
+        number = int(re.search(r"\d+", line).group())
+    elif found and found.group(2):
+        number = int(found.group(2))
+    elif re.search(r"\bline\s+(\d+)", text, re.IGNORECASE):
+        number = int(re.search(r"\bline\s+(\d+)", text, re.IGNORECASE).group(1))
+    return (path or None), number
+
+
+def tool_key(tool: str, rule_id: str, path: str, line: Optional[int]) -> str:
+    """A scanner finding's identity when first seen: `tool:rule_id:path:line bucket`.
+
+    The bucket is four lines wide, so two reports of one rule that `scan.dedupe` kept
+    apart (more than three lines between them) can never share it. Later rescans
+    recognise the same finding by `same_tool_finding`, not by this key — a fix that
+    moves the code down the file keeps the finding it hasn't fixed.
+    """
+    from app.build.scan import LINE_WINDOW
+
+    bucket = (line or 0) // (LINE_WINDOW + 1)
+    basis = f"{tool}:{rule_id}:{path}:{bucket}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
+
+
+def tool_findings(scan_record: object) -> list[Finding]:
+    """The scanners' findings on a Warden row (`PhaseResult.scan`), as `Finding`s."""
+    from app.build import scan
+
+    out = []
+    for f in scan.findings_of(scan_record):
+        advice = " ".join(x for x in (f.message if f.message.strip() != f.title.strip() else "", f.fix_hint) if x)
+        out.append(
+            Finding(
+                key=tool_key(f.tool, f.rule_id, f.path, f.line),
+                title=f.title or f.rule_id,
+                severity=f.severity,
+                category=f.category,
+                location=f.location,
+                recommendation=advice,
+                owner_phase=f.owner_phase,
+                source=SOURCE_TOOL,
+                tool=f.tool,
+                rule_id=f.rule_id,
+                cwe=f.cwe,
+                path=f.path,
+                line=f.line,
+                url=f.url,
+                fingerprint=f.fingerprint,
+                also=tuple(f.also),
+            )
+        )
+    return out
+
+
+def _same_file(a: Optional[str], b: Optional[str]) -> bool:
+    """One file, however much of its path each side wrote: `users.js` is
+    `backend/routes/users.js`, but never `admin/users.js` vs `routes/users.js`."""
+    if not a or not b:
+        return False
+    a, b = a.lower().lstrip("./"), b.lower().lstrip("./")
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+
+def _near(a: Optional[int], b: Optional[int]) -> bool:
+    from app.build.scan import LINE_WINDOW
+
+    return a is not None and b is not None and abs(a - b) <= LINE_WINDOW
+
+
+def same_tool_finding(row, f: Finding) -> bool:
+    """Whether a tracked scanner finding is the one a rescan just reported.
+
+    The same rule (or one of the rules reporting the same problem with it) in the same
+    file, and either within three lines of where it was or on the very same code — a
+    fix that added an import above it moved it, and did not fix it.
+    """
+    rules = {f"{f.tool}:{f.rule_id}", *f.also}
+    if f"{row.tool}:{row.rule_id}" not in rules or not _same_file(row.path, f.path):
+        return False
+    if row.line is None and f.line is None:
+        return True
+    return _near(row.line, f.line) or bool(row.fingerprint and row.fingerprint == f.fingerprint)
+
+
+def same_model_finding(row, f: Finding) -> bool:
+    """Whether a tracked review note is the one the model just reported.
+
+    Its own words (the key), or — reworded — the same file and line: a model that calls
+    "Missing ownership check" "IDOR on GET /orders/:id" the next time is still pointing
+    at the same handler, and the first must not be called fixed for it.
+    """
+    if row.finding_key == f.key:
+        return True
+    return _same_file(row.path, f.path) and _near(row.line, f.line)
 
 
 def _worst(*severities: str) -> str:
@@ -453,7 +610,17 @@ def fix_instruction(
             fix = f" Fix it the way the {skills[0].title.lower()} procedure below says."
         else:
             fix = ""
-        lines.append(f"- [{f.severity or 'unrated'}] {f.title}{where}.{app_wide}{fix}")
+        if f.source == SOURCE_TOOL:
+            # The scanner's own words, with the rule and the exact line (#77): the
+            # rescan that judges this fix runs the same rule on the same file.
+            cwe = f", {f.cwe}" if f.cwe else ""
+            title = f.title.rstrip(".")
+            lines.append(
+                f"- [{f.severity}] {f.tool} `{f.rule_id}` at `{f.location}` ({f.category or 'security'}{cwe}): "
+                f"{title}.{fix}"
+            )
+        else:
+            lines.append(f"- [{f.severity or 'unrated'}] {f.title}{where}.{app_wide}{fix}")
         if strategy != STRATEGY_GUIDED:
             code = snippet(project, f, owner)
             if code:
@@ -466,6 +633,11 @@ def fix_instruction(
             "these — the re-check still reports every one of them. Do not repeat that "
             "attempt: change the code shown above, and make sure the fix is actually in "
             "the files you return."
+        )
+    if any(f.source == SOURCE_TOOL for f in items):
+        retry += (
+            "\n\nThe scanner runs again on the files you return: a finding is fixed when "
+            "its rule no longer matches there, not when the code looks different."
         )
     if strategy == STRATEGY_STRONGER:
         retry += (
@@ -520,83 +692,132 @@ def group_by_owner(findings: Iterable[Finding]) -> dict[str, list[Finding]]:
 
 
 # ── persistence ──────────────────────────────────────────────────────────────
-def sync_dispositions(db, project, output: object, readable: bool = True) -> list:
+def sync_dispositions(
+    db, project, output: object, readable: bool = True, scan: object = None
+) -> list:
     """Record this audit's findings against the ones already being tracked.
 
     Called after every security phase, including the re-audit that follows a fix, so
-    it has to answer four questions at once and get all four right:
+    it has to answer these questions at once and get all of them right:
 
-      * a finding the audit no longer reports, and which was sent back to be fixed,
-        is **fixed** — that is what a re-audit not finding it means;
+      * a **scanner's** finding a rescan no longer reports — that rule, in that file,
+        near that line or on that code — and which was sent back to be fixed, is
+        **fixed**. Only a rescan by the tool that found it can say so: one whose tool
+        didn't run this time (no sandbox, no network) is left exactly as it was;
       * a finding that vanished without having been sent back is **gone**, not fixed.
         It stops blocking, because refusing to ship over something the current report
         does not mention is asking the reviewer to waive a finding that is not there
         — but it is not called a remediation, because nobody performed one;
       * a finding the reviewer **waived** stays waived when it reappears, or waiving
         would last until the next audit and mean nothing;
-      * anything else is open, and the gate will ask about it.
+      * Warden's own findings are **review notes** (#77): matched by their words, or —
+        reworded — by the same file and line, and closed by the model's re-review as
+        before. One that repeats a scanner's finding at the same place is the
+        scanner's, and isn't tracked twice;
+      * anything else is open.
 
-    `readable` is what stops the second rule becoming a hole. An audit that failed
-    its own schema yields no findings at all, and treating that as "everything went
-    away" would clear a critical finding because nobody could parse the report that
-    raised it. When the report is unreadable, this only adds — it never resolves.
+    `readable` is what stops the model half becoming a hole. A report that failed its
+    own schema yields no findings at all, and treating that as "everything went away"
+    would close a note because nobody could parse the report that raised it. When the
+    report is unreadable, that half only adds — it never resolves. The scanners' half
+    doesn't depend on it: their reports were read by the platform.
     """
+    from app.build import scan as scanner
     from app.db.models import SecurityDisposition
 
-    findings = read_findings(output, project)
-    # Ordered, so "which row wins when two share a key" has an answer that does not
-    # depend on how SQLite felt like returning them. The routes settle every row with
-    # the key, so this only decides which one carries the merged detail forward.
-    existing: dict[str, "SecurityDisposition"] = {}
-    for row in (
+    rows = (
         db.query(SecurityDisposition)
         .filter(SecurityDisposition.project_id == project.id)
         .order_by(SecurityDisposition.created_at)
         .all()
-    ):
-        existing.setdefault(row.finding_key, row)
-    seen: set[str] = set()
+    )
+    tools_rows = [r for r in rows if r.source == SOURCE_TOOL]
+    model_rows = [r for r in rows if r.source != SOURCE_TOOL]
+    keys = {r.finding_key for r in rows}
 
-    for f in findings:
-        seen.add(f.key)
-        row = existing.get(f.key)
+    # ── the scanners ──
+    result = scanner.ScanResult.from_dict(scan if isinstance(scan, dict) else None)
+    ran = {t for t in scanner.TOOLS if result is not None and result.ran(t)}
+    current = tool_findings(scan) if result is not None else []
+    matched: set[str] = set()
+    for f in current:
+        row = _closest(
+            [r for r in tools_rows if r.id not in matched and same_tool_finding(r, f)], f.line
+        )
         if row is None:
-            db.add(
-                SecurityDisposition(
-                    project_id=project.id,
-                    finding_key=f.key,
-                    title=f.title,
-                    severity=f.severity,
-                    category=f.category,
-                    location=f.location,
-                    recommendation=f.recommendation,
-                    owner_phase=f.owner_phase,
-                    status=FindingStatus.OPEN.value,
-                )
-            )
+            key = f.key
+            n = 1
+            while key in keys:
+                # A different finding was first seen in this bucket and has since moved
+                # on: same identity, distinct key.
+                key = hashlib.sha256(f"{f.key}:{n}".encode("utf-8")).hexdigest()[:32]
+                n += 1
+            keys.add(key)
+            row = SecurityDisposition(project_id=project.id, finding_key=key, status=FindingStatus.OPEN.value)
+            _fill(row, f)
+            db.add(row)
+            tools_rows.append(row)
+            matched.add(id(row))
             continue
+        matched.add(row.id)
         # Still reported. A waiver is the reviewer's standing decision and survives;
         # anything else goes back to open, including a fix that did not take.
+        if row.status != FindingStatus.WAIVED.value:
+            row.status = FindingStatus.OPEN.value
+        _fill(row, f, keep_title=True)
+    for row in tools_rows:
+        if row.id in matched or id(row) in matched or row.status in FindingStatus.settled():
+            continue
+        if row.tool not in ran:
+            # Not rescanned: its tool couldn't run this time, so nothing can be said.
+            continue
+        _resolve(row, project, f"{row.tool} no longer reports it at {row.location or row.path}")
+
+    # ── Warden's review notes ──
+    notes = read_findings(output, project)
+    for f in notes:
+        if any(_same_file(t.path, f.path) and _near(t.line, f.line) for t in current):
+            # A repeat of what a scanner already reported there: the scanner's finding
+            # is the one tracked, with its rule and its rescan.
+            continue
+        row = next((r for r in model_rows if r.id not in matched and same_model_finding(r, f)), None)
+        if row is None:
+            if f.key in keys:
+                continue
+            keys.add(f.key)
+            row = SecurityDisposition(
+                project_id=project.id,
+                finding_key=f.key,
+                title=f.title,
+                severity=f.severity,
+                category=f.category,
+                location=f.location,
+                recommendation=f.recommendation,
+                owner_phase=f.owner_phase,
+                status=FindingStatus.OPEN.value,
+                source=SOURCE_MODEL,
+                path=f.path,
+                line=f.line,
+            )
+            db.add(row)
+            model_rows.append(row)
+            matched.add(id(row))
+            continue
+        matched.add(row.id)
         if row.status != FindingStatus.WAIVED.value:
             row.status = FindingStatus.OPEN.value
         row.severity = f.severity or row.severity
         row.location = f.location or row.location
         row.recommendation = f.recommendation or row.recommendation
         row.owner_phase = f.owner_phase or row.owner_phase
-
-    for key, row in existing.items():
-        if key in seen or row.status in FindingStatus.settled() or not readable:
-            continue
-        # Gone from the report. Only a finding that was actually sent back can be
-        # called *fixed* — one that simply stopped being mentioned is a rebuild that
-        # may have removed it or a model being inconsistent, and this cannot tell
-        # which. Both stop blocking; only one claims a remediation happened.
-        if row.status == FindingStatus.FIX_REQUESTED.value:
-            row.status = FindingStatus.FIXED.value
-            log.info("Security finding fixed and re-audited: %s (%s)", row.title, project.id)
-        else:
-            row.status = FindingStatus.GONE.value
-            log.info("Security finding no longer reported: %s (%s)", row.title, project.id)
+        row.path = f.path or row.path
+        row.line = f.line or row.line
+        row.source = SOURCE_MODEL
+    if readable:
+        for row in model_rows:
+            if row.id in matched or id(row) in matched or row.status in FindingStatus.settled():
+                continue
+            _resolve(row, project, "the re-review no longer mentions it")
 
     db.commit()
     return list(
@@ -607,15 +828,90 @@ def sync_dispositions(db, project, output: object, readable: bool = True) -> lis
     )
 
 
+def _closest(rows: list, line: Optional[int]):
+    """Of several tracked findings a report could be, the nearest one."""
+    if not rows:
+        return None
+    return min(rows, key=lambda r: abs((r.line or 0) - (line or 0)))
+
+
+def _fill(row, f: Finding, keep_title: bool = False) -> None:
+    """A tracked scanner finding, brought up to what the latest scan says."""
+    if not keep_title or not row.title:
+        row.title = f.title
+        row.category = f.category
+    row.severity = f.severity or row.severity
+    row.location = f.location
+    row.recommendation = f.recommendation or row.recommendation
+    row.owner_phase = f.owner_phase or row.owner_phase
+    row.source = SOURCE_TOOL
+    row.tool = f.tool
+    row.rule_id = f.rule_id
+    row.rule_url = f.url or row.rule_url
+    row.cwe = f.cwe or row.cwe
+    row.path = f.path
+    row.line = f.line
+    row.fingerprint = f.fingerprint or row.fingerprint
+
+
+def _resolve(row, project, why: str) -> None:
+    """Gone from the report. Only a finding that was actually sent back can be called
+    *fixed* — one that simply stopped being mentioned is a rebuild that may have
+    removed it, and this cannot tell. Both stop blocking; only one claims a fix."""
+    if row.status == FindingStatus.FIX_REQUESTED.value:
+        row.status = FindingStatus.FIXED.value
+        log.info("Security finding fixed — %s: %s (%s)", why, row.title, project.id)
+    else:
+        row.status = FindingStatus.GONE.value
+        log.info("Security finding no longer reported — %s: %s (%s)", why, row.title, project.id)
+
+
+def row_source(row) -> str:
+    """A row from before #77 has no source: it was the model's."""
+    return row.source or SOURCE_MODEL
+
+
 def row_is_serious(row) -> bool:
-    return is_serious(row.severity, row.category or "", row.title or "")
+    return finding_is_serious(row_source(row), row.tool, row.severity, row.category or "", row.title or "")
+
+
+def row_blocks(row) -> bool:
+    """Whether this finding holds the build until it is fixed or waived.
+
+    A scanner's critical or high finding, or a serious one. Never a review note: what
+    one model thinks of the code is read and decided on, but it doesn't hold a build
+    back on its own (#77).
+    """
+    return row_source(row) == SOURCE_TOOL and (row.severity in STOPPING_SEVERITIES or row_is_serious(row))
+
+
+def as_finding(row) -> Finding:
+    """A tracked row, as the `Finding` a fix note is written from."""
+    return Finding(
+        key=row.finding_key,
+        title=row.title,
+        severity=row.severity,
+        category=row.category,
+        location=row.location,
+        recommendation=row.recommendation,
+        owner_phase=row.owner_phase,
+        source=row_source(row),
+        tool=row.tool,
+        rule_id=row.rule_id,
+        cwe=row.cwe,
+        path=row.path,
+        line=row.line,
+        url=row.rule_url,
+        fingerprint=row.fingerprint,
+    )
 
 
 def unresolved(db, project, serious: Optional[bool] = None) -> list:
-    """Severe findings that have been neither fixed nor waived.
+    """Findings that hold the build and have been neither fixed nor waived.
 
     `serious=True` is the crew's to-do list, `serious=False` the reviewer's question,
-    and `None` both — what has to be settled before a build ships.
+    and `None` both — what has to be settled before a build ships. Only scanners'
+    findings: see `row_blocks`.
     """
     from app.db.models import SecurityDisposition
 
@@ -625,7 +921,7 @@ def unresolved(db, project, serious: Optional[bool] = None) -> list:
         .filter(SecurityDisposition.project_id == project.id)
         .order_by(SecurityDisposition.created_at)
         .all()
-        if (row.severity in STOPPING_SEVERITIES or row_is_serious(row))
+        if row_blocks(row)
         and row.status not in FindingStatus.settled()
         and (serious is None or row_is_serious(row) == serious)
     ]
@@ -633,7 +929,16 @@ def unresolved(db, project, serious: Optional[bool] = None) -> list:
 
 __all__ = [
     "CODE_PHASES",
+    "SOURCE_MODEL",
+    "SOURCE_TOOL",
     "Finding",
+    "as_finding",
+    "finding_is_serious",
+    "row_blocks",
+    "same_model_finding",
+    "same_tool_finding",
+    "tool_findings",
+    "tool_key",
     "finding_key",
     "fix_instruction",
     "group_by_owner",

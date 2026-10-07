@@ -383,6 +383,11 @@ class PhaseResult(Base):
     #: Written by the runner, never by the model. Null for every phase but QA, and for
     #: QA rows from before tests were run.
     test_run: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: What the security scanners did (#77): `{status, summary, tools: {semgrep: {status,
+    #: version, count}, …}, findings: [{tool, rule_id, cwe, severity, path, line, …}]}`.
+    #: Written by the platform before Warden's model call, never by the model. Null for
+    #: every phase but Warden, and for Warden rows from before scanners ran.
+    scan: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     #: The skills this phase was actually given, by name, in the order they were
     #: injected. What was *selected* is a different fact: a skill that did not fit
@@ -503,10 +508,16 @@ class SecurityDisposition(Base):
     record by the reviewer. Neither of those is "shipped silently", which is the
     only outcome this table exists to remove.
 
-    The key is derived from the finding's own words rather than its position in a
-    list, because the list is regenerated every time the phase re-runs: a waiver has
-    to survive the re-audit that follows it, or waiving a finding would mean being
-    asked about it again on the very next pass.
+    The key is derived from what the finding *is* rather than its position in a list,
+    because the list is regenerated every time the phase re-runs: a waiver has to
+    survive the re-audit that follows it, or waiving a finding would mean being asked
+    about it again on the very next pass.
+
+    Since #77 two kinds of finding share this table. A scanner's (`source="tool"`) is
+    identified by its tool, rule, file and place in the file, and is fixed only when a
+    rescan stops reporting it there. Warden's own (`source="model"`) are review notes:
+    shown, sent back or waived like any finding, but never the fix loop's and never
+    what holds a build back.
     """
 
     __tablename__ = "security_dispositions"
@@ -514,9 +525,12 @@ class SecurityDisposition(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
 
-    #: Stable across re-audits: a hash of category + title. Deliberately not the
-    #: location — that is the most volatile field a model writes, and including it
-    #: meant a reworded path minted a new key and resurrected a waived finding.
+    #: Stable across re-audits. A scanner finding's is a hash of `tool:rule_id:path:
+    #: line bucket`, minted when it is first seen and kept while a rescan reports the
+    #: same rule in the same file within a few lines (or on the same code, moved). A
+    #: model finding's is a hash of category + title + owning phase — never the
+    #: location, the most volatile field a model writes — and a reworded title at the
+    #: same path and line is matched to the finding it rewords (`remediation`).
     finding_key: Mapped[str] = mapped_column(String(64), index=True)
     title: Mapped[str] = mapped_column(Text, default="")
     severity: Mapped[str] = mapped_column(String(16), default="")
@@ -539,6 +553,24 @@ class SecurityDisposition(Base):
     #: Required for those — a leaked credential is not waived on a free-text shrug —
     #: and null on every waiver of a small finding, which keeps its free-text reason.
     waive_kind: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+
+    # ── where it came from (#77). All nullable: a row from before scanners ran is the
+    # model's finding, and is read as one.
+    #: tool | model. Null on rows from before #77, which were all the model's.
+    source: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    #: semgrep | bandit | npm audit | pip-audit, for a scanner's finding.
+    tool: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: The rule that fired: a Semgrep check id, a Bandit test, the vulnerable package.
+    rule_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    #: The rule's own page — the registry, Bandit's docs, the advisory.
+    rule_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cwe: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: The file and line, as the tree places them: `backend/routes/users.js`, 42.
+    path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    line: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: A hash of the code the rule matched: how the finding is recognised after a fix
+    #: moved it further down the file.
+    fingerprint: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
