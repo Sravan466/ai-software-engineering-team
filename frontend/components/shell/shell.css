@@ -849,6 +849,22 @@ kbd {
 .pv-row-ctl { min-width: 0; }
 .pv-field { display: flex; flex-direction: column; gap: 5px; }
 .pv-hint { margin: 0; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.5; }
+/* Where an app element is drawn in the code (#78), under its name. */
+.pv-src {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 2px 0 0;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.pv-src svg { width: 13px; height: 13px; flex: none; }
+.pv-src-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); color: var(--ink-2); }
+.pv-src-lines { flex: none; white-space: nowrap; }
+.pv-ask-foot .pv-src-path { display: inline; white-space: normal; overflow-wrap: anywhere; }
+/* Why the code can't take a direct edit here. */
+.pv-why { padding: 8px 10px; border-radius: var(--r-sm); background: var(--bg-raised); color: var(--ink-2); }
 .pv-muted { color: var(--ink-3); }
 .pv-input, .pv-select { min-height: 30px; font-size: var(--t-sm); }
 .pv-textarea { min-height: 0; font-size: var(--t-sm); line-height: 1.45; resize: vertical; }
@@ -999,6 +1015,164 @@ kbd {
 }
 
 .mk-stack { display: flex; flex-direction: column; gap: 14px; }
+
+/* ── what is on screen: the app, or the sketch (#78) ──
+   One line, always in the same place, in words — the dot only repeats them. Live
+   is the running app; a pulse is the app starting or changing; a hollow dot is a
+   sketch, which is drawn, not run. */
+.pv-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 11px 0 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  font-size: var(--t-sm);
+  line-height: 1;
+  color: var(--ink-3);
+  white-space: nowrap;
+  transition: border-color var(--tr-slow), background-color var(--tr-slow);
+}
+.pv-source-dot {
+  position: relative;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+  transition: background-color var(--tr-slow), box-shadow var(--tr-slow), border-color var(--tr-slow);
+}
+.pv-source-what { color: var(--ink); font-weight: 600; }
+.pv-source-why { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pv-source[data-tone="busy"] .pv-source-dot { background: var(--run); box-shadow: 0 0 0 3px var(--run-soft); }
+.pv-source[data-tone="busy"] .pv-source-dot::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--run);
+  animation: pv-source-pulse 1.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+@keyframes pv-source-pulse {
+  from { transform: scale(0.7); opacity: 0.9; }
+  to { transform: scale(2.1); opacity: 0; }
+}
+.pv-source[data-tone="sketch"],
+.pv-source[data-tone="bad"] { border-color: var(--accent-line); background: var(--warn-soft); }
+.pv-source[data-tone="sketch"] .pv-source-dot,
+.pv-source[data-tone="bad"] .pv-source-dot {
+  background: transparent;
+  border: 1.5px solid var(--warn);
+  box-shadow: none;
+}
+.pv-source[data-tone="sketch"] .pv-source-what,
+.pv-source[data-tone="bad"] .pv-source-what { color: var(--warn); }
+.pv-source[data-tone="sketch"] .pv-source-why,
+.pv-source[data-tone="bad"] .pv-source-why { color: var(--ink-2); }
+.pv-source[data-tone="bad"] .pv-source-dot { border-color: var(--bad); }
+.pv-source-link {
+  flex: none;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line-3);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: text-decoration-color var(--tr);
+}
+.pv-source-link:hover { text-decoration-color: currentColor; }
+.pv-source-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.pv-ship-head { display: flex; margin-bottom: 10px; min-width: 0; }
+
+/* ── the app, starting: in the frame's own place, so nothing moves when it lands ── */
+.prev-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 1px 1px, var(--line) 1px, transparent 0) 0 0 / 22px 22px,
+    var(--bg-sunken);
+}
+.pv-start { width: 100%; max-width: 460px; padding: 28px 24px; }
+.pv-start-in {
+  padding: 20px 22px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-3);
+  animation: ap-rise 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.pv-start-title { margin: 0; font-size: var(--t-lg); font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.pv-start-lead { margin: 6px 0 14px; font-size: var(--t-sm); line-height: 1.55; color: var(--ink-3); max-width: 52ch; }
+.pv-start-steps { gap: 0; }
+.pv-start-step .ap-head { gap: 2px 9px; }
+.pv-start-step.is-todo .ap-title-ink { color: var(--ink-4); }
+.pv-start-step.is-done .ap-icon { color: var(--ok); }
+.pv-start-tick {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin: 0 3.5px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-3);
+}
+.pv-start-step.is-live .pv-start-tick { border-color: var(--run); background: var(--run); box-shadow: 0 0 0 3px var(--run-soft); }
+
+/* ── a change on its way into the code ──
+   Opens its own height and folds it away again; closed, it also gives back the
+   stack's gap, so the frame below slides rather than jumps. */
+.pv-fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows 360ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 240ms ease-out,
+    margin-top 360ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.pv-fold[data-open="false"] { grid-template-rows: 0fr; opacity: 0; margin-top: -14px; pointer-events: none; }
+.pv-fold-in { min-height: 0; overflow: hidden; }
+.pv-change {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(34, 184, 207, 0.32);
+  border-radius: var(--r-lg);
+  background: var(--run-soft);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.pv-change > svg { width: 16px; height: 16px; flex: none; color: var(--bad); }
+.pv-change[data-tone="bad"] { border-color: rgba(240, 82, 82, 0.38); background: var(--bad-soft); }
+.pv-change-text { min-width: 0; }
+.pv-change-text b { color: var(--ink); font-weight: 600; }
+.pv-change-file { font-family: var(--mono); font-size: 0.92em; color: var(--ink); overflow-wrap: anywhere; }
+.pv-change-meta { color: var(--ink-3); }
+.pv-change .btn-spinner { flex: none; }
+
+.pv-stale { display: flex; align-items: center; gap: 6px; margin: 0; }
+.pv-stale svg { width: 14px; height: 14px; flex: none; color: var(--warn); }
+.pv-problems { margin: 6px 0 0; padding-left: 18px; font-size: var(--t-xs); color: var(--ink-2); line-height: 1.6; }
+.pv-problems code { font-family: var(--mono); color: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pv-source[data-tone="busy"] .pv-source-dot::after { animation: none; opacity: 0; }
+  .pv-fold, .pv-source, .pv-source-dot { transition: none; }
+  .pv-start-in { animation: none; }
+}
 
 /* ── a build in flight ── */
 .mk-build {

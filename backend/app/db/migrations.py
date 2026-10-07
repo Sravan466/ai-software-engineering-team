@@ -84,6 +84,8 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "deploy_error",
         # Nullable (#75): only a deploy that failed on Vercel since then has a log kept.
         "deploy_log",
+        # Nullable (#78): a build whose preview was never opened remembers nothing about it.
+        "preview_app",
     ),
     "phase_results": (
         # Nullable (#63): only a phase that fell back past a refused key has one.
@@ -128,6 +130,8 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # before it as its parent, and with no head recorded the newest is live.
         "parent_id",
         "head_at",
+        # Nullable (#78): a sketch from before can't say which Frontend attempt it shows.
+        "built_from",
     ),
     # `cost_known` is nullable rather than defaulted to true: an existing row cannot
     # say whether its zero was a price or a gap, and claiming it was a price would

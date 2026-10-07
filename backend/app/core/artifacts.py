@@ -250,8 +250,11 @@ def assemble(project: Project) -> dict:
     frontend = next((ph for ph in phases if ph.phase == "frontend_engineer"), None)
     run = getattr(frontend, "build_run", None) if frontend is not None else None
     built = isinstance(run, dict) and run.get("status") == BuildStatus.OK.value
+    theme = (frontend.output or {}).get("app_theme") if frontend is not None and isinstance(frontend.output, dict) else None
     scaffold = scaffold_build(
-        {p: f["content"] for p, f in files.items()}, charter, design, product, type_check=built
+        {p: f["content"] for p, f in files.items()}, charter, design, product, type_check=built,
+        # The site style chosen on the app preview (#78): in the archive as on the preview.
+        theme=theme if isinstance(theme, dict) else None,
     )
 
     for path, (content, notes) in scaffold.rewrites.items():

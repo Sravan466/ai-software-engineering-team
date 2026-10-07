@@ -520,7 +520,13 @@ def phase_tree(
         mine.append(placed)
 
     design = prior_outputs.get("system_design") if isinstance(prior_outputs, dict) else None
-    scaffold = scaffold_build(files, charter, design if isinstance(design, dict) else None)
+    # The app's site style (#78) lives with the Frontend attempt and lands in the
+    # platform's Tailwind config, so a check builds against the config that ships.
+    front = output if phase_key == "frontend_engineer" else (prior_outputs or {}).get("frontend_engineer")
+    theme = front.get("app_theme") if isinstance(front, dict) else None
+    scaffold = scaffold_build(
+        files, charter, design if isinstance(design, dict) else None, theme=theme if isinstance(theme, dict) else None
+    )
     # What the scaffold writes replaces the agent's copy, here as in the archive — the
     # check has to resolve imports against the config that will actually ship.
     written = scaffold.paths()

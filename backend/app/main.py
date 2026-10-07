@@ -54,6 +54,13 @@ async def lifespan(app: FastAPI):
     from app.build import runner as build_runner
 
     build_runner.warm_up()
+    # App previews (#78) a previous run of this backend left behind are nobody's now.
+    from app.build import sandbox as build_sandbox
+    from app.preview import app_runtime
+
+    import threading
+
+    threading.Thread(target=build_sandbox.sweep_previews, name="sweep-previews", daemon=True).start()
     # Find the model runtimes on this machine now rather than inside the first
     # request that needs one. Loopback only; in the background, so a runtime that is
     # slow to answer never holds up startup.
@@ -81,6 +88,8 @@ async def lifespan(app: FastAPI):
         ).start()
     yield
     log.info("Shutting down.")
+    # The running app previews are this process's: they go with it.
+    app_runtime.stop_all()
 
 
 app = FastAPI(
@@ -104,6 +113,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Outermost (#78): a request to a running app preview's own origin
+# (`<token>.localhost`) is answered from its sandbox and never reaches the API, its
+# CORS or its sign-in. Everything else passes straight through.
+from app.preview.app_proxy import AppPreviewMiddleware  # noqa: E402
+
+app.add_middleware(AppPreviewMiddleware)
 
 # Routers (imported here so DB/graph modules initialise after settings are loaded).
 from app.api.routes import (  # noqa: E402

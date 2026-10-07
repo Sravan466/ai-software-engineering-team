@@ -491,6 +491,21 @@
 }
 .decision-approve { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .decision-approve .field-hint { max-width: 46ch; }
+/* Approving while the review shows a sketch, not the app (#78): allowed, and said. */
+.decision-caution {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-basis: 100%;
+  margin: 0;
+  max-width: 72ch;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.decision-caution > svg { width: 15px; height: 15px; flex: none; margin-top: 2px; color: var(--warn); }
+.decision-caution b { color: var(--warn); font-weight: 600; }
+.btn-accent.is-cautioned { outline: 1.5px dashed var(--accent-line); outline-offset: 3px; }
 .decision-send { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
 .decision-send .field { flex: 1; min-width: 240px; }
 .decision-send code {

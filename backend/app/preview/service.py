@@ -36,8 +36,10 @@ def bill(db: Session, project: Project, responses: Iterable[LLMResponse]) -> Non
         tracker.record(db, response=resp, project_id=project.id, phase="preview")
 
 
-def save(db: Session, project: Project, result: BuildResult) -> PreviewRevision:
-    """Keep a finished build as the newest revision, and bill every call it made."""
+def save(db: Session, project: Project, result: BuildResult, built_from: Optional[str] = None) -> PreviewRevision:
+    """Keep a finished build as the newest revision, and bill every call it made.
+
+    `built_from`: the Frontend attempt the sketch was drawn from (#78), when there was one."""
     row = history.new_row(
         db,
         project.id,
@@ -46,6 +48,7 @@ def save(db: Session, project: Project, result: BuildResult) -> PreviewRevision:
         model_used=result.report.get("model"),
         provider_used=result.report.get("provider"),
         report=result.report,
+        built_from=built_from,
     )
     bill(db, project, result.responses)
     return row
@@ -57,6 +60,7 @@ def build_and_save(
     reporter: Optional[Reporter] = None,
     *,
     still_wanted: Callable[[Session, Project], bool] = lambda _db, _project: True,
+    built_from: Optional[str] = None,
 ) -> Optional[PreviewRevision]:
     """Build, then save only if `still_wanted` says the picture is still of something.
 
@@ -73,4 +77,4 @@ def build_and_save(
     if not still_wanted(db, project):
         bill(db, project, result.responses)
         return None
-    return save(db, project, result)
+    return save(db, project, result, built_from=built_from)

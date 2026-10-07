@@ -16,12 +16,20 @@
  *
  * Plain ES5 in a string, because it is injected into a document this app does not
  * build: no bundler helper can reach it there.
+ *
+ * The same picker runs on the generated app itself (#78). There the elements carry
+ * `data-src="frontend/components/Navbar.tsx:12:5"` — where the code draws them — from
+ * the preview build, and the app's own origin can't be scripted from here: the
+ * backend puts a few lines at the top of each page that wait for the Preview tab to
+ * post this code, and set `window.__pvAttr` first. Then the "oid" a selection reports
+ * is that address, and the app's own router moves between pages.
  */
-export const BRIDGE_SCRIPT = String.raw`
-<script>
+export const BRIDGE_JS = String.raw`
 (function(){
   if (window.__pvBridge) return; window.__pvBridge = true;
   var doc = document, win = window;
+  var ATTR = win.__pvAttr === 'data-src' ? 'data-src' : 'data-oid';
+  var APP = ATTR === 'data-src';
   var mode = 'use';
   var selected = [];       // elements; the last one is primary
   var hoverEl = null;
@@ -33,18 +41,18 @@ export const BRIDGE_SCRIPT = String.raw`
   var NOTEXT = /^(IMG|SVG|INPUT|SELECT|TEXTAREA|HR|BR|MAIN|UL|OL|TABLE|FORM|NAV|HEADER|FOOTER|SECTION)$/;
 
   function post(m){ m.__preview = true; try { parent.postMessage(m, '*'); } catch(_){} }
-  function oidOf(el){ return el && el.getAttribute ? el.getAttribute('data-oid') : null; }
+  function oidOf(el){ return el && el.getAttribute ? el.getAttribute(ATTR) : null; }
   function pickable(t){
     if (!t || !t.closest) return null;
     if (host && (t === host || host.contains(t))) return null;
-    var el = t.closest('[data-oid]');
+    var el = t.closest('[' + ATTR + ']');
     if (!el || el === doc.body) return null;
     return el;
   }
-  function parentPick(el){ var p = el && el.parentElement; return p ? p.closest('[data-oid]') : null; }
+  function parentPick(el){ var p = el && el.parentElement; return p ? p.closest('[' + ATTR + ']') : null; }
   function firstChildPick(el){
     if (!el) return null;
-    var kids = el.querySelectorAll('[data-oid]');
+    var kids = el.querySelectorAll('[' + ATTR + ']');
     for (var i = 0; i < kids.length; i++) { if (visible(kids[i])) return kids[i]; }
     return null;
   }
@@ -102,8 +110,9 @@ export const BRIDGE_SCRIPT = String.raw`
     var s = sectionOf(el);
     return s && s !== el ? name(s) + ' › ' + name(el) : name(el);
   }
-  function templated(el){ return !!el.closest('[data-row]'); }
-  function filled(el){ return el.hasAttribute('data-field') || el.hasAttribute('data-stat') || el.hasAttribute('data-count') || el.hasAttribute('data-year'); }
+  // The app's lists are its own code: an element drawn in a loop is one place in a file.
+  function templated(el){ return !APP && !!el.closest('[data-row]'); }
+  function filled(el){ return !APP && (el.hasAttribute('data-field') || el.hasAttribute('data-stat') || el.hasAttribute('data-count') || el.hasAttribute('data-year')); }
   function textEditable(el){
     if (NOTEXT.test(el.tagName.toUpperCase()) || templated(el) || filled(el)) return false;
     var kids = el.children;
@@ -198,6 +207,8 @@ export const BRIDGE_SCRIPT = String.raw`
   var queued = false;
   function draw(){
     queued = false;
+    // A framework re-rendering the document can drop the overlay: put it back.
+    if (!host.isConnected) (doc.documentElement || doc.body).appendChild(host);
     while (layer.firstChild) layer.removeChild(layer.firstChild);
     if (mode !== 'edit') return;
     selected = selected.filter(function(el){ return el.isConnected; });
@@ -240,7 +251,7 @@ export const BRIDGE_SCRIPT = String.raw`
   }
   function byOid(oid){
     if (!oid) return null;
-    var all = doc.querySelectorAll('[data-oid="' + String(oid).replace(/"/g, '') + '"]');
+    var all = doc.querySelectorAll('[' + ATTR + '="' + String(oid).replace(/"/g, '') + '"]');
     for (var i = 0; i < all.length; i++) { if (visible(all[i])) return all[i]; }
     return all[0] || null;
   }
@@ -353,7 +364,7 @@ export const BRIDGE_SCRIPT = String.raw`
   // ── what the Preview tab sends ───────────────────────────────────────────
   function applyOps(ops){
     (ops || []).forEach(function(op){
-      var all = doc.querySelectorAll('[data-oid="' + String(op.oid).replace(/"/g, '') + '"]');
+      var all = doc.querySelectorAll('[' + ATTR + '="' + String(op.oid).replace(/"/g, '') + '"]');
       for (var i = 0; i < all.length; i++) {
         var el = all[i];
         if (op.kind === 'classes') {
@@ -393,9 +404,29 @@ export const BRIDGE_SCRIPT = String.raw`
       // A key pressed with the focus in the Preview tab rather than in here.
       key({ key: d.key, shiftKey: !!d.shift, metaKey: false, ctrlKey: false, altKey: false, target: doc.body, preventDefault: function(){} });
     } else if (d.type === 'route?') {
-      post({ type: 'route', path: win.__app && win.__app.current ? win.__app.current : '/' });
+      post({ type: 'route', path: APP ? here() : (win.__app && win.__app.current ? win.__app.current : '/') });
+    } else if (d.type === 'go' && APP && typeof d.path === 'string') {
+      // The app's address bar: a real navigation, on the app's own origin.
+      if (d.path.charAt(0) === '/') { try { win.location.assign(d.path); } catch(_){} }
     }
   });
+
+  // ── the app's own navigation (#78) ───────────────────────────────────────
+  function here(){ return win.location.pathname + win.location.search; }
+  if (APP) {
+    var last = null;
+    var tell = function(){ var p = here(); if (p !== last) { last = p; post({ type: 'route', path: p }); } };
+    ['pushState', 'replaceState'].forEach(function(k){
+      var orig = win.history[k];
+      if (typeof orig !== 'function') return;
+      win.history[k] = function(){ var out = orig.apply(this, arguments); setTimeout(tell, 0); return out; };
+    });
+    win.addEventListener('popstate', tell);
+    tell();
+  }
   post({ type: 'bridge' });
 })();
-</script>`;
+`;
+
+/** The picker inline, for a sketch's `srcdoc`. */
+export const BRIDGE_SCRIPT = `\n<script>${BRIDGE_JS}</script>`;

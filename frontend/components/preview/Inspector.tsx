@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { PreviewSection, PreviewTheme, ThemeTokens } from "@/lib/api";
+import type { PreviewLocate, PreviewSection, PreviewTheme, ThemeTokens } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
 import * as tw from "./tw";
 
@@ -16,6 +16,11 @@ import * as tw from "./tw";
  * Its controls are the Tailwind scale, stepped, rather than free numbers: the
  * mockup is written in it, and a value off the scale is one the model's next edit
  * would not recognise.
+ *
+ * On the running app (#78) the same controls change the code: the selection names the
+ * file and lines that draw it, a direct edit is written into that JSX when the code
+ * says it plainly (and says why not when it doesn't), and "Ask the crew" names the file
+ * it will change before anything is sent. Colours are the app's own Tailwind families.
  */
 
 export type ElementInfo = {
@@ -66,9 +71,20 @@ type Props = {
   onDiscardAll: () => void;
   onApply: () => void;
   onTheme: (changes: Partial<ThemeTokens>) => Promise<boolean>;
+  /** What the selection is part of: the running app, whose code it changes, or the sketch. */
+  scope?: "app" | "sketch";
+  /** On the app: where the selected element is drawn, and what can change there. */
+  where?: PreviewLocate | null;
+  /** On the app: why nothing can be changed right now. */
+  blocked?: string | null;
 };
 
 type Tab = "element" | "site";
+
+/** `frontend/components/Navbar.tsx` → `components/Navbar.tsx`. */
+function short(path: string): string {
+  return path.replace(/^frontend\//, "");
+}
 
 export default function Inspector(props: Props) {
   const [tab, setTab] = useState<Tab>("element");
@@ -99,7 +115,19 @@ export default function Inspector(props: Props) {
         </button>
       </div>
       <div className="pv-panel" id="pv-panel" role="tabpanel" aria-labelledby={`pv-tab-${tab}`}>
-        {tab === "element" ? <ElementPanel {...props} /> : <SitePanel theme={props.theme} busy={props.busy} onTheme={props.onTheme} />}
+        {props.blocked && (
+          <div className="notice notice-warn pv-note" role="note">
+            {Icon.info}
+            <div className="notice-body">
+              <span className="notice-text">{props.blocked}</span>
+            </div>
+          </div>
+        )}
+        {tab === "element" ? (
+          <ElementPanel {...props} />
+        ) : (
+          <SitePanel theme={props.theme} busy={props.busy || Boolean(props.blocked)} onTheme={props.onTheme} app={props.scope === "app"} />
+        )}
       </div>
       <PendingBar {...props} />
     </aside>
@@ -112,7 +140,9 @@ function ElementPanel(p: Props) {
   if (!sel) {
     return (
       <div className="pv-empty">
-        <p className="pv-empty-lead">Click anything in the mockup to select it.</p>
+        <p className="pv-empty-lead">
+          {p.scope === "app" ? "Click anything in the app to select it, and see the code that draws it." : "Click anything in the sketch to select it."}
+        </p>
         <ul className="pv-keys">
           <li>
             <kbd>↑</kbd> / <kbd>Esc</kbd> parent · <kbd>↵</kbd> first child
@@ -149,7 +179,14 @@ function ElementPanel(p: Props) {
 function ElementEditor(p: Props & { selection: Selection }) {
   const { info, others } = p.selection;
   const classes = p.classesOf(info.oid, info.classes);
-  const direct = !info.templated;
+  const onApp = p.scope === "app";
+  const where = onApp ? p.where ?? null : null;
+  // On the app: written by someone other than the frontend, or not found in the code.
+  const foreign = Boolean(where && (where.owner || (where.why && where.start_line == null)));
+  const textWhy = where && where.text && where.text.editable === false ? where.text.why ?? null : null;
+  const classWhy = where && where.classes && where.classes.editable === false ? where.classes.why ?? null : null;
+  const direct = !info.templated && !foreign && !(onApp && p.blocked);
+  const styled = direct && !classWhy;
   const parent = info.crumbs.length > 1 ? info.crumbs[info.crumbs.length - 2] : null;
   const count = others.length + 1;
   const isText = /^(h[1-6]|p|span|a|button|li|label|strong|em|small|td|th|blockquote|figcaption)$/.test(info.tag) || info.text !== null;
@@ -181,6 +218,23 @@ function ElementEditor(p: Props & { selection: Selection }) {
           <h3 className="pv-sel-name">{count > 1 ? `${count} elements` : info.name}</h3>
           <span className="badge badge-mono">{count > 1 ? "multi" : `<${info.tag}>`}</span>
         </div>
+        {onApp && (
+          <p className="pv-src" title={where ? `${where.path}${where.start_line ? `, lines ${where.start_line}–${where.end_line}` : ""}` : undefined}>
+            {Icon.file}
+            {where ? (
+              <>
+                <code className="pv-src-path">{short(where.path)}</code>
+                {where.start_line ? (
+                  <span className="pv-src-lines">
+                    {where.start_line === where.end_line ? `line ${where.start_line}` : `lines ${where.start_line}–${where.end_line}`}
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span className="pv-src-lines">Finding it in the code…</span>
+            )}
+          </p>
+        )}
         <div className="pv-sel-actions">
           <button type="button" className="btn btn-sm" disabled={!parent} onClick={() => parent && p.onSelect(parent.oid)} title="Select the parent (↑ or Esc)">
             {Icon.arrowUp} Parent
@@ -190,6 +244,16 @@ function ElementEditor(p: Props & { selection: Selection }) {
           </button>
         </div>
       </header>
+
+      {foreign && where && (
+        <div className="notice notice-warn pv-note" role="note">
+          {Icon.info}
+          <div className="notice-body">
+            <span className="notice-title">Not the crew&apos;s frontend code</span>
+            <span className="notice-text">{where.why}</span>
+          </div>
+        </div>
+      )}
 
       {info.templated && (
         <div className="notice notice-warn pv-note" role="note">
@@ -206,7 +270,8 @@ function ElementEditor(p: Props & { selection: Selection }) {
 
       {direct && count === 1 && (info.text !== null || info.tag === "a" || info.tag === "img") && (
         <Group title="Content">
-          {info.text !== null && <TextField value={info.text} onCommit={p.onText} onTypeOnPage={p.onTypeOnPage} />}
+          {info.text !== null && !textWhy && <TextField value={info.text} onCommit={p.onText} onTypeOnPage={p.onTypeOnPage} />}
+          {info.text !== null && textWhy && <p className="pv-hint pv-why">{textWhy}</p>}
           {info.filled && <p className="pv-hint">These words come from the mockup&apos;s sample data.</p>}
           {info.tag === "a" && <LinkField value={info.attrs.href ?? ""} onCommit={(v) => p.onAttr("href", v)} />}
           {info.tag === "img" && (
@@ -217,7 +282,9 @@ function ElementEditor(p: Props & { selection: Selection }) {
         </Group>
       )}
 
-      {direct && (
+      {direct && classWhy && <p className="pv-hint pv-why">{classWhy}</p>}
+
+      {styled && (
         <>
           {isText && (
             <Group title="Typography">
@@ -242,11 +309,19 @@ function ElementEditor(p: Props & { selection: Selection }) {
               <Row label="Font">
                 <Seg
                   value={tw.read(classes, tw.G.family)}
-                  options={[
-                    ["display", "Display"],
-                    ["sans", "Body"],
-                    ["mono", "Mono"],
-                  ]}
+                  options={
+                    onApp
+                      ? [
+                          ["sans", "Sans"],
+                          ["serif", "Serif"],
+                          ["mono", "Mono"],
+                        ]
+                      : [
+                          ["display", "Display"],
+                          ["sans", "Body"],
+                          ["mono", "Mono"],
+                        ]
+                  }
                   onChange={(v) => p.onClasses("family", "Font", (c) => tw.set(c, tw.G.family, v))}
                 />
               </Row>
@@ -272,6 +347,7 @@ function ElementEditor(p: Props & { selection: Selection }) {
             <Row label="Text">
               <Swatches
                 theme={p.theme}
+                app={onApp}
                 value={tw.read(classes, tw.G.color)}
                 onChange={(v) => p.onClasses("color", "Text colour", (c) => tw.set(c, tw.G.color, v))}
               />
@@ -279,6 +355,7 @@ function ElementEditor(p: Props & { selection: Selection }) {
             <Row label="Fill">
               <Swatches
                 theme={p.theme}
+                app={onApp}
                 value={tw.read(classes, tw.G.bg)}
                 onChange={(v) => p.onClasses("bg", "Background", (c) => tw.set(c, tw.G.bg, v))}
               />
@@ -408,7 +485,8 @@ function ElementEditor(p: Props & { selection: Selection }) {
                   p.onClasses("border", "Border", (c) => {
                     const next = tw.set(c, tw.G.border, v);
                     // A border you can see needs a colour; the hairline token is the site's own.
-                    return v !== "0" && v !== null && tw.read(next.join(" "), tw.G.borderColor) === null ? [...next, "border-line"] : next;
+                    const hairline = onApp ? `border-${appFamilies(p.theme).neutral}-200` : "border-line";
+                    return v !== "0" && v !== null && tw.read(next.join(" "), tw.G.borderColor) === null ? [...next, hairline] : next;
                   })
                 }
               />
@@ -417,7 +495,14 @@ function ElementEditor(p: Props & { selection: Selection }) {
         </>
       )}
 
-      <AskBox busy={p.busy} blocked={p.pending.length > 0} name={count > 1 ? info.name : info.name} onAsk={p.onAsk} />
+      <AskBox
+        busy={p.busy}
+        blocked={p.pending.length > 0}
+        name={info.name}
+        onAsk={p.onAsk}
+        file={onApp ? (where && !foreign ? short(where.path) : null) : undefined}
+        refused={onApp ? (foreign ? where?.why ?? null : p.blocked ?? null) : null}
+      />
     </div>
   );
 }
@@ -561,8 +646,45 @@ const BASIC: [string, string][] = [
   ["amber-500", "#f59e0b"],
 ];
 
-function Swatches({ theme, value, onChange }: { theme: PreviewTheme | null; value: string | null; onChange: (v: string | null) => void }) {
+/** The app's own palette families (#78): what its classes already say `bg-indigo-600` with. */
+function appFamilies(theme: PreviewTheme | null): { primary: string; accent: string; neutral: string } {
+  const f = (theme as (PreviewTheme & { families?: Record<string, string | null> }) | null)?.families ?? {};
+  return { primary: f.primary || "blue", accent: f.accent || "amber", neutral: f.neutral || "gray" };
+}
+
+function Swatches({
+  theme,
+  value,
+  app = false,
+  onChange,
+}: {
+  theme: PreviewTheme | null;
+  value: string | null;
+  app?: boolean;
+  onChange: (v: string | null) => void;
+}) {
   const list: [string, string][] = useMemo(() => {
+    if (app) {
+      // Real Tailwind classes, in the families the app already uses — a class the app's
+      // config doesn't define would show here and do nothing once built.
+      const fam = appFamilies(theme);
+      const P = theme?.palette.primary ?? {};
+      const A = theme?.palette.accent ?? {};
+      const N = theme?.palette.neutral ?? {};
+      return [
+        [`${fam.neutral}-900`, N["900"] ?? "#111827"],
+        [`${fam.neutral}-600`, N["600"] ?? "#4b5563"],
+        [`${fam.neutral}-200`, N["200"] ?? "#e5e7eb"],
+        [`${fam.neutral}-50`, N["50"] ?? "#f9fafb"],
+        ["white", "#ffffff"],
+        [`${fam.primary}-600`, theme?.current.primary ?? "#2563eb"],
+        [`${fam.primary}-700`, P["700"] ?? "#1d4ed8"],
+        [`${fam.primary}-100`, P["100"] ?? "#dbeafe"],
+        [`${fam.primary}-50`, P["50"] ?? "#eff6ff"],
+        [`${fam.accent}-500`, A["500"] ?? "#f59e0b"],
+        [`${fam.accent}-100`, A["100"] ?? "#fef3c7"],
+      ] as [string, string][];
+    }
     if (!theme) return BASIC;
     const P = theme.palette.primary;
     const A = theme.palette.accent;
@@ -580,7 +702,7 @@ function Swatches({ theme, value, onChange }: { theme: PreviewTheme | null; valu
       ["accent", theme.current.accent],
       ["accent-100", A["100"]],
     ];
-  }, [theme]);
+  }, [theme, app]);
   return (
     <div className="pv-swatches" role="group">
       <button type="button" className="pv-swatch pv-swatch-none" aria-pressed={value === null} onClick={() => onChange(null)} title="Inherit">
@@ -668,15 +790,23 @@ function AskBox({
   blocked,
   name,
   onAsk,
+  file,
+  refused,
 }: {
   busy: boolean;
   blocked: boolean;
   name: string;
   onAsk: (instruction: string) => Promise<boolean>;
+  /** On the app: the file the crew will change — null while it's being found. */
+  file?: string | null;
+  /** On the app: why the crew can't change this. */
+  refused?: string | null;
 }) {
   const [text, setText] = useState("");
+  const onApp = file !== undefined;
+  const cannot = onApp && (Boolean(refused) || !file);
   const submit = async () => {
-    if (!text.trim() || busy || blocked) return;
+    if (!text.trim() || busy || blocked || cannot) return;
     if (await onAsk(text.trim())) setText("");
   };
   return (
@@ -698,9 +828,23 @@ function AskBox({
       />
       <div className="pv-ask-foot">
         <span className="pv-hint">
-          {blocked ? "Apply or discard your pending changes first." : "Only this element goes to the model. ⌘↵ to send."}
+          {blocked ? (
+            "Apply or discard your pending changes first."
+          ) : onApp ? (
+            refused ? (
+              refused
+            ) : file ? (
+              <>
+                The crew will change <code className="pv-src-path">{file}</code>, then it&apos;s checked and built. ⌘↵ to send.
+              </>
+            ) : (
+              "Finding the file that draws it…"
+            )
+          ) : (
+            "Only this element goes to the model. ⌘↵ to send."
+          )}
         </span>
-        <button type="button" className="btn btn-sm btn-accent" disabled={busy || blocked || !text.trim()} onClick={submit}>
+        <button type="button" className="btn btn-sm btn-accent" disabled={busy || blocked || cannot || !text.trim()} onClick={submit}>
           {busy && <span className="btn-spinner" aria-hidden="true" />}
           {busy ? "Working…" : "Ask"}
         </button>
@@ -761,19 +905,26 @@ function SitePanel({
   theme,
   busy,
   onTheme,
+  app = false,
 }: {
   theme: PreviewTheme | null;
   busy: boolean;
   onTheme: (changes: Partial<ThemeTokens>) => Promise<boolean>;
+  /** The app's style (#78): written into its Tailwind config, so it ships. */
+  app?: boolean;
 }) {
   const [draft, setDraft] = useState<ThemeTokens | null>(theme?.current ?? null);
   useEffect(() => setDraft(theme?.current ?? null), [theme]);
 
   if (!theme || !draft) {
-    return (
+    return app ? (
       <div className="pv-empty">
-        <p className="pv-empty-lead">This mockup was drawn before site styles existed.</p>
-        <p className="pv-hint">Rebuild it to change its fonts and colours from here, on every page at once.</p>
+        <p className="pv-empty-lead">The app&apos;s style can be changed once it&apos;s running.</p>
+      </div>
+    ) : (
+      <div className="pv-empty">
+        <p className="pv-empty-lead">This sketch was drawn before site styles existed.</p>
+        <p className="pv-hint">Redraw it to change its fonts and colours from here, on every page at once.</p>
       </div>
     );
   }
@@ -784,10 +935,15 @@ function SitePanel({
 
   return (
     <div className="pv-editor">
-      <p className="pv-hint">Every page restyles at once. No model is asked, and it can be undone.</p>
+      <p className="pv-hint">
+        {app
+          ? "Written into the app's Tailwind config, so every page — and the download and the deploy — changes at once. No model is asked, and it can be undone."
+          : "Every page restyles at once. No model is asked, and it can be undone."}
+      </p>
       <Group title="Type">
         <Field label="Font pairing">
           <select className="select pv-select" value={draft.font_pair} onChange={(e) => put("font_pair", e.target.value)}>
+            {app && <option value="">The app&apos;s own</option>}
             {theme.fonts.map((f) => (
               <option key={f.id} value={f.id}>
                 {f.display === f.body ? f.display : `${f.display} + ${f.body}`}
@@ -828,11 +984,13 @@ function SitePanel({
           <Seg value={draft.radius} options={theme.radii.map((t) => [t, t === "none" ? "0" : t] as [string, string])} onChange={(v) => v && put("radius", v)} />
         </Row>
         <Row label="Shadow">
-          <Select value={draft.shadow} options={theme.shadows} placeholder="—" onChange={(v) => v && put("shadow", v)} />
+          <Select value={draft.shadow || null} options={theme.shadows} placeholder={app ? "The app's own" : "—"} onChange={(v) => v && put("shadow", v)} />
         </Row>
-        <Row label="Density">
-          <Seg value={draft.density} options={theme.densities.map((t) => [t, t[0].toUpperCase() + t.slice(1)] as [string, string])} onChange={(v) => v && put("density", v)} />
-        </Row>
+        {theme.densities.length > 0 && (
+          <Row label="Density">
+            <Seg value={draft.density} options={theme.densities.map((t) => [t, t[0].toUpperCase() + t.slice(1)] as [string, string])} onChange={(v) => v && put("density", v)} />
+          </Row>
+        )}
       </Group>
       <div className="pv-pending-actions pv-site-actions">
         <button type="button" className="btn btn-sm btn-ghost" disabled={!changed.length || busy} onClick={() => setDraft(theme.current)}>

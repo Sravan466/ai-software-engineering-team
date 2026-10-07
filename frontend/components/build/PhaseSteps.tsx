@@ -68,6 +68,8 @@ function finishedStep(t: ActivityStep): Pick<Line, "title" | "chip"> {
       return { title: t.total > 0 ? `Wrote ${plural(t.done, "file")}` : "Wrote it in one reply" };
     case "fixing":
       return { title: "Fixed the files the build flagged" };
+    case "changing":
+      return { title: "Made the change asked for on the preview" };
     case "checking":
       return { title: "Checked the build" };
     case "building":
@@ -90,6 +92,11 @@ function currentStep(a: Activity): Pick<Line, "title" | "past" | "object" | "chi
       return { title: "Setting up", past: "Set up" };
     case "planning":
       return { title: "Planning the files", past: "Planned the files" };
+    case "changing":
+      // "Ask the crew" on the app preview (#78): one file, changed in place.
+      return a.detail
+        ? { title: "Changing", past: "Changed", object: <FilePath path={a.detail} /> }
+        : { title: "Changing the file", past: "Changed the file" };
     case "writing":
     case "fixing":
       if (!a.detail) {

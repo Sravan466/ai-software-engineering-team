@@ -150,7 +150,7 @@ export type Activity = {
    * `building`: installing, building and starting the code in a sandbox (#75).
    * Empty until the phase names one (QA setting up its test run, #86).
    */
-  stage: "" | "planning" | "writing" | "fixing" | "checking" | "building" | "testing" | "scanning" | "reviewing";
+  stage: "" | "planning" | "writing" | "fixing" | "checking" | "building" | "testing" | "scanning" | "reviewing" | "changing";
   label: string;
   done: number;
   total: number;
@@ -959,39 +959,48 @@ export const api = {
     req<IntegrationsState>(`/api/projects/${id}/integrations`, { method: "POST", body: JSON.stringify(body) }),
 
   // ── Visual preview (render + select-to-edit) ──
-  getPreview: (id: string) => req<PreviewState>(`/api/projects/${id}/preview`),
+  /** `touch`: the tab is open on the running app — keep it running (#78). */
+  getPreview: (id: string, touch = false) =>
+    req<PreviewState>(`/api/projects/${id}/preview${touch ? "?touch=true" : ""}`),
   // Starts the build and returns at once; `getPreview` reports how far it has got.
   generatePreview: (id: string) =>
     req<PreviewState>(`/api/projects/${id}/preview/generate`, { method: "POST" }),
+  /** Build and start the generated app (#78). Returns at once; the steps come by `getPreview`. */
+  startPreviewApp: (id: string, retry = false) =>
+    req<PreviewState>(`/api/projects/${id}/preview/app`, { method: "POST", body: JSON.stringify({ retry }) }),
+  /** Where an element on the app comes from in the code, and what can change there. */
+  locatePreview: (id: string, oid: string) =>
+    req<PreviewLocate>(`/api/projects/${id}/preview/locate?oid=${encodeURIComponent(oid)}`),
   editPreviewSection: (id: string, section_id: string, instruction: string) =>
     req<PreviewState>(
       `/api/projects/${id}/preview/edit`,
       { method: "POST", body: JSON.stringify({ section_id, instruction }) },
       LLM_TIMEOUT_MS
     ),
-  /** A plain-language change scoped to one element (by `data-oid`) — the model sees only it. */
-  editPreviewElement: (id: string, oid: string, instruction: string) =>
+  /** A plain-language change scoped to one element (by `data-oid`) — the model sees only it.
+   *  On the app (`to.target = "app"`) it changes the file that renders it, as a run of its own. */
+  editPreviewElement: (id: string, oid: string, instruction: string, to?: PreviewTarget) =>
     req<PreviewState>(
       `/api/projects/${id}/preview/edit`,
-      { method: "POST", body: JSON.stringify({ oid, instruction }) },
+      { method: "POST", body: JSON.stringify({ oid, instruction, ...to }) },
       LLM_TIMEOUT_MS
     ),
   /** Direct edits — text, classes, links, images. No model call. */
-  patchPreview: (id: string, ops: PatchOp[], summary?: string) =>
+  patchPreview: (id: string, ops: PatchOp[], summary?: string, to?: PreviewTarget) =>
     req<PreviewState>(`/api/projects/${id}/preview/patch`, {
       method: "POST",
-      body: JSON.stringify({ ops, summary }),
+      body: JSON.stringify({ ops, summary, ...to }),
     }),
   /** Site style: fonts, palette and shape for every page at once. No model call. */
-  themePreview: (id: string, changes: Partial<ThemeTokens>) =>
+  themePreview: (id: string, changes: Partial<ThemeTokens>, to?: PreviewTarget) =>
     req<PreviewState>(`/api/projects/${id}/preview/theme`, {
       method: "PATCH",
-      body: JSON.stringify(changes),
+      body: JSON.stringify({ ...changes, ...to }),
     }),
-  undoPreview: (id: string) =>
-    req<PreviewState>(`/api/projects/${id}/preview/undo`, { method: "POST" }),
-  redoPreview: (id: string) =>
-    req<PreviewState>(`/api/projects/${id}/preview/redo`, { method: "POST" }),
+  undoPreview: (id: string, to?: PreviewTarget) =>
+    req<PreviewState>(`/api/projects/${id}/preview/undo${targetQuery(to)}`, { method: "POST" }),
+  redoPreview: (id: string, to?: PreviewTarget) =>
+    req<PreviewState>(`/api/projects/${id}/preview/redo${targetQuery(to)}`, { method: "POST" }),
   getPreviewRevision: (id: string, revisionId: string) =>
     req<{ id: string; html: string }>(`/api/projects/${id}/preview/revisions/${revisionId}`),
 
@@ -1823,6 +1832,8 @@ export type ThemeTokens = {
   density: string;
 };
 export type PreviewTheme = {
+  /** "app" when the style is written into the app's code (#78); absent for the sketch. */
+  scope?: "app";
   current: ThemeTokens;
   fonts: { id: string; label: string; display: string; body: string }[];
   tints: string[];
@@ -1844,6 +1855,69 @@ export type PreviewRevision = {
   provider_used: string | null;
   created_at: string;
 };
+/** Which preview a change is for (#78): the running app, whose code it changes, or the sketch. */
+export type PreviewTarget = { target: "app" | "sketch"; built_from?: string | null };
+
+function targetQuery(to?: PreviewTarget): string {
+  if (!to || to.target !== "app") return "";
+  return `?target=app${to.built_from ? `&built_from=${encodeURIComponent(to.built_from)}` : ""}`;
+}
+
+/** A change made on the app preview: the crew applying it, applied, or refused. */
+export type PreviewAppEdit = {
+  kind: "ask" | "patch" | "theme" | "undo" | "redo";
+  label: string;
+  files: string[];
+  status: "running" | "landed" | "refused";
+  reason: string | null;
+  at: string | null;
+  /** The crew is still applying it: the build runs until the change is checked. */
+  active: boolean;
+};
+
+/** The generated app, running (#78) — or why it isn't. */
+export type PreviewApp = {
+  status: "none" | "unavailable" | "idle" | "starting" | "running" | "waiting" | "failed";
+  /** The app's own origin. Only while it runs. */
+  url: string | null;
+  built_from: string | null;
+  built_at: string | null;
+  current_from: string | null;
+  /** Running an older attempt than the current one: a newer one is starting. */
+  stale: boolean;
+  step: string | null;
+  reason: string | null;
+  problems: { path?: string; line?: number | null; message?: string }[];
+  stack: "nextjs" | "vite" | null;
+  routes: PreviewRoute[];
+  backend: { status?: string; why?: string };
+  traced: number;
+  trace_note: string | null;
+  ttl_seconds: number;
+  /** A failed start: the code's fault (it didn't build) or the sandbox's (it couldn't run). */
+  fault: "code" | "sandbox" | null;
+  editing: PreviewAppEdit | null;
+  can_edit: boolean;
+  edit_block: string | null;
+  can_undo: boolean;
+  can_redo: boolean;
+  theme: PreviewTheme | null;
+};
+
+/** Where an element on the app is drawn in the code. */
+export type PreviewLocate = {
+  path: string;
+  line: number;
+  start_line: number | null;
+  end_line: number | null;
+  tag: string | null;
+  /** Another phase or the platform wrote the file, so it can't be changed from here. */
+  owner: string | null;
+  text: { editable?: boolean; value?: string; why?: string };
+  classes: { editable?: boolean; value?: string; why?: string };
+  why: string | null;
+};
+
 export type PreviewState = {
   project_id: string;
   html: string | null;
@@ -1860,6 +1934,13 @@ export type PreviewState = {
   can_redo: boolean;
   /** Null for a single-page mockup drawn before sites — it can't be restyled in place. */
   theme: PreviewTheme | null;
+  /** What the Preview tab shows (#78): the running app, or the sketch — and why. */
+  source: "app" | "sketch" | null;
+  source_note: string | null;
+  app: PreviewApp | null;
+  /** The Frontend attempt the sketch was drawn from, and whether that's older code now. */
+  sketch_built_from: string | null;
+  sketch_stale: boolean;
 };
 
 export type GenFile = {

@@ -1202,11 +1202,14 @@ def build(
     design_output: Optional[dict] = None,
     product: str = "app",
     type_check: bool = True,
+    theme: Optional[dict] = None,
 ) -> Scaffold:
     """Everything the platform writes for this build, from what the agents wrote.
 
     `type_check`: whether the generated Next.js config lets `next build` fail on type
     errors — on for the real build, and for an archive whose frontend was built (#75).
+    `theme`: the site style chosen on the app preview (#78), written into the Tailwind
+    config and the global stylesheet — see `app.build.theme`.
     """
     sc = Scaffold()
     slug = _slug(product)
@@ -1294,7 +1297,40 @@ def build(
     js_first = [c for c in sc.commands if c.startswith("npm") or c.startswith("cp backend")]
     rest = [c for c in sc.commands if c not in js_first]
     sc.commands = list(dict.fromkeys(js_first + rest))
+    if theme and frontend_files:
+        _apply_theme(sc, frontend_files, theme)
     return sc
+
+
+_EMPTY_THEME = "  theme: { extend: {} },\n  plugins: [],\n"
+
+
+def _apply_theme(sc: Scaffold, files: dict[str, str], theme: dict) -> None:
+    """The app preview's site style (#78), in the config every page reads."""
+    from app.build import theme as site
+
+    block = site.tailwind_block(theme)
+    config = next((f for f in sc.files if re.match(rf"^{FRONTEND}/tailwind\.config\.[cm]?js$", f.path)), None)
+    if block and config is not None and _EMPTY_THEME in config.content:
+        config.content = config.content.replace(_EMPTY_THEME, block)
+        config.purpose += " Carries the site style chosen on the Preview tab."
+    font = site.font_import(theme)
+    if not font:
+        return
+    # The stylesheet Tailwind's layers are in: the one every page loads.
+    for f in sc.files:
+        if f.path.startswith(f"{FRONTEND}/") and f.path.endswith(".css") and "@tailwind base" in f.content:
+            if font not in f.content:
+                f.content = font + f.content
+            return
+    for rel in sorted(files, key=lambda p: (0 if re.search(r"(globals?|index)\.css$", p) else 1, p)):
+        content = files[rel]
+        if rel.endswith(".css") and "@tailwind base" in content:
+            path = f"{FRONTEND}/{rel}"
+            current, notes = sc.rewrites.get(path, (content, []))
+            if font not in current:
+                sc.rewrites[path] = (font + current, notes + ["imports the fonts chosen on the Preview tab"])
+            return
 
 
 _GITIGNORE = """node_modules/

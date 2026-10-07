@@ -1,30 +1,35 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { PatchOp, PreviewRoute } from "@/lib/api";
 import { Icon } from "@/components/shell/icons";
-import { BRIDGE_SCRIPT } from "./bridge";
+import { BRIDGE_JS, BRIDGE_SCRIPT } from "./bridge";
 
 /**
- * The rendered mockup, in a browser frame, in a sandbox it cannot escape.
+ * The preview, in a browser frame, in a sandbox it cannot escape — either of the two
+ * things the Preview tab can show (#78):
  *
- * The mockup is a small site — pages, a router, forms that store — so the frame
- * behaves like a browser around it: the address bar shows the page the prototype is
- * on and takes a new one, and the page tabs move it. Both follow the prototype's own
- * runtime, which reports every navigation up by `postMessage`; nothing here reloads
- * the document to change page, so records added on one page are still there on the
- * next.
+ *   * **the app** (`src`) — the generated frontend, built and served from the sandbox
+ *     at an origin of its own. Its pages are its own: it routes, stores and fetches
+ *     like the app it is, and reports where it is so the address bar follows;
+ *   * **the sketch** (`html`) — the mockup drawn from the plan, a `srcdoc` document
+ *     with a prototype runtime, before there is code or when the app can't run.
+ *
+ * The frame behaves like a browser around either: the address bar shows the page
+ * and takes a new one, and the page tabs move it.
  *
  * With `stage`, the frame is the Preview tab's full canvas: the site renders at a real
  * device width (desktop 1280, tablet 768, mobile 390, or dragged to any width) and is
  * scaled to fit when the column is narrower, so `xl:` layouts render as they would on
  * a laptop. It can fill the whole window, open in its own tab, and reload. Without `stage` it
- * is the plain framed picture the Ship review shows.
+ * is the plain framed picture the Ship review shows. `placeholder` stands where the
+ * page will be while there is none yet — the app starting — so nothing moves when it lands.
  *
- * Two modes, and the difference is who gets the click. In **use** mode the prototype
+ * Two modes, and the difference is who gets the click. In **use** mode the page
  * does. In **edit** mode the bridge (`bridge.ts`) does: hover shows what a click will
  * pick, and the pick is reported up. The mode is sent to the frame rather than baked
- * into it, so switching never reloads.
+ * into it, so switching never reloads. On the app, the bridge is posted to the frame
+ * once it loads; the backend's few lines at the top of each page install it.
  */
 
 // Injected into every document the frame shows. The frame is `allow-scripts
@@ -70,7 +75,12 @@ export type MockupFrameHandle = {
 };
 
 type Props = {
-  html: string;
+  /** The sketch's document. */
+  html?: string | null;
+  /** The running app's address — its own origin (#78). Wins over `html`. */
+  src?: string | null;
+  /** Where the page will be, while there is none yet. */
+  placeholder?: ReactNode;
   /** The element selector, for the Preview tab's edit loop. */
   selectable?: boolean;
   /** Who gets the click: the prototype ("use") or the selector ("edit"). */
@@ -90,10 +100,21 @@ type Props = {
   onLoad?: () => void;
 };
 
-const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
-  { html, selectable = false, mode = "use", routes = [], height, stage = false, expanded = false, onExpand, host = "localhost:3000", onLoad },
+export type PreviewFrameHandle = MockupFrameHandle;
+
+const PreviewFrame = forwardRef<MockupFrameHandle, Props>(function PreviewFrame(
+  { html, src, placeholder, selectable = false, mode = "use", routes = [], height, stage = false, expanded = false, onExpand, host = "localhost:3000", onLoad },
   ref,
 ) {
+  const app = Boolean(src);
+  const origin = useMemo(() => {
+    if (!src) return null;
+    try {
+      return new URL(src).origin;
+    } catch {
+      return null;
+    }
+  }, [src]);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -109,23 +130,40 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
   pathRef.current = path;
 
   const srcDoc = useMemo(
-    () => inject(html, GUARD_SCRIPT + (selectable ? BRIDGE_SCRIPT : "")),
-    [html, selectable],
+    () => (html && !app ? inject(html, GUARD_SCRIPT + (selectable ? BRIDGE_SCRIPT : "")) : ""),
+    [html, app, selectable],
   );
+  // The page of the app the frame loads. Navigating inside the app moves `path`, not
+  // this, so the frame isn't reloaded under it; the address bar and a new build of
+  // the app (a new `src`) set it.
+  const [nav, setNav] = useState("/");
 
   // The page to go back to once a new document loads. Captured when the document
   // changes, not when it loads: the new one's runtime boots on its home page and
   // reports that, and the report can arrive before the frame's load event.
   const restore = useRef<string | null>(null);
-  const lastDoc = useRef(srcDoc);
-  if (lastDoc.current !== srcDoc) {
-    lastDoc.current = srcDoc;
+  const doc = app ? src ?? "" : srcDoc;
+  const lastDoc = useRef(doc);
+  if (lastDoc.current !== doc) {
+    lastDoc.current = doc;
     restore.current = pathRef.current;
   }
+  // A new build of the app opens on the page you were on.
+  const lastSrc = useRef(src);
+  useEffect(() => {
+    if (!src || lastSrc.current === src) return;
+    const was = lastSrc.current;
+    lastSrc.current = src;
+    if (was && pathRef.current && pathRef.current !== "/") setNav(pathRef.current);
+  }, [src]);
 
-  const post = useCallback((message: Record<string, unknown>) => {
-    frameRef.current?.contentWindow?.postMessage({ __preview: true, ...message }, "*");
-  }, []);
+  const post = useCallback(
+    (message: Record<string, unknown>) => {
+      // An app page gets messages addressed to its own origin only.
+      frameRef.current?.contentWindow?.postMessage({ __preview: true, ...message }, origin ?? "*");
+    },
+    [origin],
+  );
 
   useImperativeHandle(
     ref,
@@ -158,12 +196,19 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
 
   // A new revision keeps the page you were on, as long as the site still has it.
   useEffect(() => {
+    if (app) return; // the app says where it is itself
     if (!routes.some((r) => r.path === pathRef.current)) setPath(first);
-  }, [routes, first]);
+  }, [routes, first, app]);
 
   const go = (target: string) => {
     const clean = "/" + target.replace(/^[#/]+/, "").trim();
     setPath(clean);
+    if (app) {
+      // A real page load on the app's origin; the same page twice is a reload.
+      if (clean === nav) setReloads((n) => n + 1);
+      setNav(clean);
+      return;
+    }
     post({ type: "go", path: clean });
   };
 
@@ -221,7 +266,13 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
 
   // Its own tab, still sandboxed: the page is a wrapper with no script of its own
   // around the same sandboxed frame, so the mockup never runs as this app's origin.
+  // The app is already on an origin of its own, so it simply opens there.
   function openInTab() {
+    if (app && src) {
+      window.open(src.replace(/\/$/, "") + (pathRef.current || "/"), "_blank", "noopener");
+      return;
+    }
+    if (!html) return;
     const doc = inject(html, GUARD_SCRIPT);
     const escaped = doc.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
     const title = (html.match(/<title>([^<]*)<\/title>/i)?.[1] ?? "Mockup").replace(/[<"]/g, "");
@@ -234,10 +285,20 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
-  const address = routes.length ? `#${draft ?? path}` : host;
+  const address = app ? (draft ?? path) : routes.length ? `#${draft ?? path}` : host;
 
   const onFrameLoad = () => {
+    if (app && selectable) {
+      // The app's pages wait for the picker; it comes from here, in order before
+      // anything that needs it.
+      post({ type: "install", code: BRIDGE_JS });
+    }
     if (selectable) post({ type: "mode", mode });
+    if (app) {
+      restore.current = null;
+      onLoad?.();
+      return;
+    }
     // Back to the page you were on: a new revision or a reload starts at home.
     const target = restore.current;
     restore.current = null;
@@ -248,20 +309,39 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
     onLoad?.();
   };
 
-  const iframe = (
+  const frameStyle = (
+    stage
+      ? { width, height: frameH, transform: scale !== 1 ? `scale(${scale})` : undefined, transformOrigin: "0 0" }
+      : height
+        ? { height }
+        : undefined
+  ) as React.CSSProperties | undefined;
+  const iframe = !src && !html ? (
+    // Drawn unscaled at the stage's own size: it is this page's UI, not a page at a
+    // device width, so it reads at full size whatever the device.
+    <div className="prev-placeholder" style={stage ? { width: Math.round(width * scale), height: frameH ? Math.round(frameH * scale) : undefined } : height ? { height } : undefined}>
+      {placeholder}
+    </div>
+  ) : app ? (
+    <iframe
+      key={`${src}:${reloads}`}
+      ref={frameRef}
+      title="The generated app"
+      // Its own origin, so same-origin here is the app's own — it stores and routes
+      // as it would deployed — and never this page's.
+      sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+      src={src!.replace(/\/$/, "") + nav}
+      style={frameStyle}
+      onLoad={onFrameLoad}
+    />
+  ) : (
     <iframe
       key={reloads}
       ref={frameRef}
       title="Generated mockup"
       sandbox="allow-scripts allow-forms"
       srcDoc={srcDoc}
-      style={
-        stage
-          ? { width, height: frameH, transform: scale !== 1 ? `scale(${scale})` : undefined, transformOrigin: "0 0" }
-          : height
-            ? { height }
-            : undefined
-      }
+      style={frameStyle}
       onLoad={onFrameLoad}
     />
   );
@@ -274,7 +354,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
           <i />
           <i />
         </span>
-        {stage && routes.length ? (
+        {stage && (routes.length || app) ? (
           <form
             className="prev-url prev-url-edit"
             onSubmit={(e) => {
@@ -293,7 +373,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
               value={address}
               spellCheck={false}
               autoComplete="off"
-              onChange={(e) => setDraft(e.target.value.replace(/^#/, ""))}
+              onChange={(e) => setDraft(app ? e.target.value : e.target.value.replace(/^#/, ""))}
               onBlur={() => setDraft(null)}
               onKeyDown={(e) => {
                 if (e.key === "Escape") {
@@ -304,7 +384,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
             />
             <datalist id="prev-routes">
               {routes.map((r) => (
-                <option key={r.path} value={`#${r.path}`}>
+                <option key={r.path} value={app ? r.path : `#${r.path}`}>
                   {r.title}
                 </option>
               ))}
@@ -316,7 +396,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
           </span>
         )}
         {routes.length > 1 && (
-          <nav className="prev-pages" aria-label="Mockup pages">
+          <nav className="prev-pages" aria-label={app ? "The app's pages" : "Sketch pages"}>
             {routes.map((r) => (
               <button
                 key={r.path}
@@ -324,7 +404,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
                 className="prev-page"
                 aria-current={r.path === path ? "page" : undefined}
                 onClick={() => go(r.path)}
-                title={`${r.title} — #${r.path}`}
+                title={`${r.title} — ${app ? "" : "#"}${r.path}`}
               >
                 {r.title}
               </button>
@@ -369,7 +449,7 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
                 restore.current = pathRef.current;
                 setReloads((n) => n + 1);
               }}
-              title="Reload the mockup"
+              title={app ? "Reload the app" : "Reload the sketch"}
               aria-label="Reload"
             >
               {Icon.refresh}
@@ -427,4 +507,4 @@ const MockupFrame = forwardRef<MockupFrameHandle, Props>(function MockupFrame(
   );
 });
 
-export default MockupFrame;
+export default PreviewFrame;

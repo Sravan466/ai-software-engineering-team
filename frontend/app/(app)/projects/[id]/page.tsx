@@ -592,7 +592,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             }}
           />
         )}
-        {tab === "preview" && <PreviewTab id={id} />}
+        {tab === "preview" && <PreviewTab id={id} onOpenBuild={() => setTab("build")} />}
         {tab === "summary" && (
           <SummaryTab
             id={id}
@@ -1089,8 +1089,8 @@ function PhaseList({
  * sit where decisions about them are made — at the review, and in Deliver — and
  * Preview is what its name says.
  */
-function PreviewTab({ id }: { id: string }) {
-  return <VisualPreview id={id} />;
+function PreviewTab({ id, onOpenBuild }: { id: string; onOpenBuild: () => void }) {
+  return <VisualPreview id={id} onOpenBuild={onOpenBuild} />;
 }
 
 // ── Deliver tab ──────────────────────────────────────────────────────────────

@@ -59,11 +59,15 @@ class Step:
     #: This step's own cap, inside the build's budget. None: whatever is left.
     timeout: Optional[float] = None
     env: dict = field(default_factory=dict)
+    #: Another of `IMAGES` for this step alone — the app preview (#78) installs a Python
+    #: backend in the same volume as the Node frontend it serves. None: the sandbox's.
+    image: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
             "name": self.name, "label": self.label, "command": self.command,
             "network": self.network, "timeout": self.timeout, "env": dict(self.env),
+            **({"image": self.image} if self.image else {}),
         }
 
     @classmethod
@@ -75,6 +79,7 @@ class Step:
             network=bool(data.get("network")),
             timeout=float(data["timeout"]) if data.get("timeout") else None,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
+            image=str(data["image"]) if data.get("image") in IMAGES else None,
         )
 
 
@@ -200,6 +205,63 @@ def ensure_image(image: str, timeout: float = 600.0) -> None:
 SWEEP_AFTER_SECONDS = 3600
 
 
+#: What the app preview's sandboxes (#78) carry besides `LABEL`: they outlive a step,
+#: so each also names the backend process that runs it — see `sweep_previews`.
+PREVIEW_LABEL = "aiteam.preview=1"
+
+
+#: This process, as its previews are labelled: a PID can come round again — a backend
+#: in a container is PID 1 on every restart — so a PID alone can't say whose they are.
+INSTANCE = uuid.uuid4().hex[:12]
+
+
+def _alive(pid: str) -> bool:
+    import os
+
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sweep_previews() -> None:
+    """Remove app previews whose backend process is gone.
+
+    A preview lives as long as someone looks at it, held by the backend process that
+    started it; when that process dies its containers and volumes are nobody's. Another
+    backend running beside this one (a second port, a test run) keeps its own.
+    """
+    cli = docker()
+    if cli is None:
+        return
+    import os
+
+    try:
+        # `.Label` for both: on `volume ls`, `.Labels` is a string and can't be indexed.
+        for kind, fmt in (("container", '{{.Names}} {{.Label "aiteam.pid"}} {{.Label "aiteam.instance"}}'),
+                          ("volume", '{{.Name}} {{.Label "aiteam.pid"}} {{.Label "aiteam.instance"}}')):
+            listed = subprocess.run(
+                [cli, kind, "ls", *(["-a"] if kind == "container" else []), "--filter", f"label={PREVIEW_LABEL}",
+                 "--format", fmt],
+                capture_output=True, text=True, timeout=30,
+            )
+            gone = []
+            for line in listed.stdout.splitlines():
+                name, pid, instance = (line.split(" ") + ["", ""])[:3]
+                # Its process is gone — or the PID is ours now, but we didn't start it.
+                ours_by_pid = pid.strip() == str(os.getpid())
+                if name and (not _alive(pid.strip() or "0") or (ours_by_pid and instance.strip() != INSTANCE)):
+                    gone.append(name)
+            if gone:
+                subprocess.run([cli, kind, "rm", "-f", *gone],
+                               capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def sweep() -> None:
     """Remove volumes a crashed run left behind — only old ones.
 
@@ -213,7 +275,9 @@ def sweep() -> None:
     try:
         listed = subprocess.run(
             [cli, "volume", "ls", "--filter", f"label={LABEL}",
-             "--format", '{{.Name}} {{index .Labels "aiteam.created"}}'],
+             # `.Label`, not `index .Labels`: on `volume ls` the labels are one string,
+             # and indexing it fails the whole listing — so nothing was ever swept.
+             "--format", '{{.Name}} {{.Label "aiteam.created"}}'],
             capture_output=True, text=True, timeout=30,
         )
         now = time.time()
@@ -246,9 +310,15 @@ def _tar(files: dict[str, str]) -> bytes:
 
 
 class Sandbox:
-    """One build: a volume, a container per step, and a way to stop it from outside."""
+    """One build: a volume, a container per step, and a way to stop it from outside.
 
-    def __init__(self, image: str, limits: Limits) -> None:
+    An app preview (#78) is a build that is kept: `run(..., keep=True)` leaves the
+    volume in place, `serve` starts a long-lived container on it — with no network
+    and no published port, reached only through its stdin and stdout — and `remove`
+    takes both away.
+    """
+
+    def __init__(self, image: str, limits: Limits, preview: bool = False) -> None:
         if image not in IMAGES:
             raise SandboxError(f"{image} is not an image builds may run in.")
         cli = docker()
@@ -258,12 +328,25 @@ class Sandbox:
         self.image = image
         self.limits = limits
         self.id = uuid.uuid4().hex[:12]
-        self.volume = f"aiteam-build-{self.id}"
-        kind = "npm" if image == NODE_IMAGE else "pip"
-        self.cache = f"aiteam-cache-{kind}-{_safe(limits.cache)}"
+        self.preview = preview
+        self.volume = f"aiteam-{'preview' if preview else 'build'}-{self.id}"
+        self.cache = self._cache_for(image)
         self.cancelled = False
         self._current: Optional[str] = None
         self._lock = threading.Lock()
+        self._served: list[str] = []
+
+    def _cache_for(self, image: str) -> str:
+        kind = "npm" if image == NODE_IMAGE else "pip"
+        return f"aiteam-cache-{kind}-{_safe(self.limits.cache)}"
+
+    def _labels(self) -> list[str]:
+        import os
+
+        out = ["--label", LABEL]
+        if self.preview:
+            out += ["--label", PREVIEW_LABEL, "--label", f"aiteam.pid={os.getpid()}", "--label", f"aiteam.instance={INSTANCE}"]
+        return out
 
     # ── stopping ─────────────────────────────────────────────────────────────
     def cancel(self) -> None:
@@ -282,17 +365,21 @@ class Sandbox:
             pass
 
     # ── containers ───────────────────────────────────────────────────────────
-    def _args(self, name: str, command: str, *, network: bool, env: dict, root: bool = False) -> list[str]:
+    def _args(self, name: str, command: str, *, network: bool, env: dict, root: bool = False,
+              image: Optional[str] = None, interactive: bool = False, cache: bool = True) -> list[str]:
         lim = self.limits
+        image = image if image in IMAGES else self.image
         args = [
-            self.cli, "run", "--rm", *(["-i"] if root else []), "--name", name, "--label", LABEL,
+            self.cli, "run", "--rm", *(["-i"] if root or interactive else []), "--name", name, *self._labels(),
             "--network", "bridge" if network else "none",
             "--memory", f"{lim.memory_mb}m", "--memory-swap", f"{lim.memory_mb}m",
             "--cpus", str(lim.cpus), "--pids-limit", str(lim.pids),
             "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,size=512m",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--mount", f"type=volume,src={self.volume},dst=/work",
-            "--mount", f"type=volume,src={self.cache},dst=/cache",
+            # A served preview has no use for the package cache, and no business
+            # reading the account's other builds' packages.
+            *(["--mount", f"type=volume,src={self._cache_for(image)},dst=/cache"] if cache else []),
             "-w", "/work",
             "-e", "HOME=/tmp", "-e", "CI=1",
             "-e", "npm_config_cache=/cache/npm", "-e", "npm_config_update_notifier=false",
@@ -306,7 +393,7 @@ class Sandbox:
             args += ["--user", USER]
         for key, value in env.items():
             args += ["-e", f"{key}={value}"]
-        return args + [self.image, "sh", "-c", command]
+        return args + [image, "sh", "-c", command]
 
     def _exec(self, name: str, args: list[str], timeout: float, stdin: Optional[bytes] = None) -> tuple[Optional[int], str, bool]:
         """(exit code, output, timed out)."""
@@ -331,21 +418,21 @@ class Sandbox:
                 self._current = None
         return proc.returncode, proc.stdout.decode("utf-8", errors="replace")[-OUTPUT_BYTES:], False
 
-    def run(self, files: dict[str, str], steps: list[Step], on_step=None) -> list[StepResult]:
+    def run(self, files: dict[str, str], steps: list[Step], on_step=None, keep: bool = False) -> list[StepResult]:
         """Put `files` in the volume, then each step in order until one fails.
 
-        `on_step(step)` is told as each step starts, for a progress line."""
+        `on_step(step)` is told as each step starts, for a progress line. `keep` leaves
+        the volume for `serve`; the caller then owns it, and `remove` ends it."""
         if self.cancelled:  # stopped while its image was pulled: nothing runs
             return [StepResult(s.name, s.label, None, 0.0, skipped=True) for s in steps]
         start = time.monotonic()
         deadline = start + self.limits.seconds
         made = subprocess.run(
-            [self.cli, "volume", "create", "--label", LABEL, "--label", f"aiteam.created={int(time.time())}", self.volume],
+            [self.cli, "volume", "create", *self._labels(), "--label", f"aiteam.created={int(time.time())}", self.volume],
             capture_output=True, text=True, timeout=60,
         )
         if made.returncode != 0:
             raise SandboxError(f"Docker couldn't make the build's volume: {made.stderr.strip()[-200:]}")
-        results: list[StepResult] = []
         try:
             code, out, late = self._exec(
                 f"{self.volume}-copy",
@@ -359,31 +446,79 @@ class Sandbox:
                 return [StepResult(s.name, s.label, None, 0.0, skipped=True) for s in steps]
             if code != 0:
                 raise SandboxError(f"The files couldn't be copied into the sandbox: {out.strip()[-200:]}")
-            failed = False
-            for i, step in enumerate(steps):
-                left = deadline - time.monotonic()
-                if failed or self.cancelled or left <= 1:
-                    results.append(StepResult(step.name, step.label, None, 0.0, skipped=True,
-                                              output="" if failed or self.cancelled else "The build ran out of time before this step."))
-                    failed = True
-                    continue
-                cap = min(left, step.timeout) if step.timeout else left
-                name = f"{self.volume}-{i}"
-                if on_step is not None:
-                    on_step(step)
-                began = time.monotonic()
-                code, out, late = self._exec(name, self._args(name, step.command, network=step.network, env=step.env), cap)
-                took = time.monotonic() - began
-                if self.cancelled and code != 0:
-                    results.append(StepResult(step.name, step.label, None, took, out, skipped=True))
-                    failed = True
-                    continue
-                result = StepResult(step.name, step.label, code, took, out, timed_out=late)
-                results.append(result)
-                failed = not result.ok
-            return results
+            return self._steps(steps, deadline, on_step)
         finally:
-            try:
-                subprocess.run([self.cli, "volume", "rm", "-f", self.volume], capture_output=True, timeout=60)
-            except (OSError, subprocess.SubprocessError):
-                pass
+            if not keep:
+                self._drop_volume()
+
+    def _steps(self, steps: list[Step], deadline: float, on_step=None, tag: str = "") -> list[StepResult]:
+        """Each step in order on the volume, until one fails or the budget runs out."""
+        results: list[StepResult] = []
+        failed = False
+        for i, step in enumerate(steps):
+            left = deadline - time.monotonic()
+            if failed or self.cancelled or left <= 1:
+                results.append(StepResult(step.name, step.label, None, 0.0, skipped=True,
+                                          output="" if failed or self.cancelled else "The build ran out of time before this step."))
+                failed = True
+                continue
+            cap = min(left, step.timeout) if step.timeout else left
+            name = f"{self.volume}-{tag}{i}"
+            if on_step is not None:
+                on_step(step)
+            began = time.monotonic()
+            code, out, late = self._exec(
+                name, self._args(name, step.command, network=step.network, env=step.env, image=step.image), cap
+            )
+            took = time.monotonic() - began
+            if self.cancelled and code != 0:
+                results.append(StepResult(step.name, step.label, None, took, out, skipped=True))
+                failed = True
+                continue
+            result = StepResult(step.name, step.label, code, took, out, timed_out=late)
+            results.append(result)
+            failed = not result.ok
+        return results
+
+    def more(self, steps: list[Step], seconds: float, on_step=None) -> list[StepResult]:
+        """More steps on a kept volume (#78) — the preview's backend, installed once its
+        frontend is already being served — with a budget of their own."""
+        return self._steps(steps, time.monotonic() + seconds, on_step, tag="more")
+
+    def _drop_volume(self) -> None:
+        try:
+            subprocess.run([self.cli, "volume", "rm", "-f", self.volume], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    # ── a kept build, served (#78) ───────────────────────────────────────────
+    def serve(self, suffix: str, command: str, env: dict, image: Optional[str] = None,
+              stdout: bool = True) -> subprocess.Popen:
+        """Start a long-lived container on the kept volume, attached by its stdin and
+        stdout. No network, no port: whatever it serves is reached through those pipes
+        alone. Its memory and CPU caps are the sandbox's.
+
+        `stdout=False` sends its stdout nowhere: a pipe nobody reads fills after 64 KB,
+        and the next write — an access-log line — blocks the server for good."""
+        name = f"{self.volume}-{_safe(suffix)}"
+        with self._lock:
+            if self.cancelled:
+                raise SandboxError("The preview was stopped.")
+            self._served.append(name)
+        args = self._args(name, command, network=False, env=env, image=image, interactive=True, cache=False)
+        try:
+            return subprocess.Popen(
+                args, stdin=subprocess.PIPE, stdout=subprocess.PIPE if stdout else subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as e:
+            raise SandboxError(f"Docker couldn't start the preview: {e}") from e
+
+    def remove(self) -> None:
+        """Stop everything served from this sandbox, then drop its volume."""
+        self.cancel()
+        with self._lock:
+            served = list(self._served)
+        for name in served:
+            self._kill(name)
+        self._drop_volume()

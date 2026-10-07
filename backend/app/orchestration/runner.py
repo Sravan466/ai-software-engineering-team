@@ -32,7 +32,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session, object_session
 
 from app.agents import get_agent
-from app.agents.base import AgentContext
+from app.agents.base import AgentContext, RevisionRefused
 from app.analytics import tracker
 from app.build import dbconnect, integrations, scan, testrun
 from app.core import artifacts, identity, project_secrets
@@ -55,6 +55,7 @@ from app.core.constants import (
 from app.core.logging import get_logger
 from app.db.base import SessionLocal
 from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
+from app.preview import app_state
 from app.preview import history as preview_history
 from app.memory.store import memory_store
 from app.orchestration import activity, autofix, claim, connectors, remediation
@@ -803,6 +804,100 @@ class PipelineRunner:
             fix_track=name,
         )
 
+    @_as_owner
+    def revise_frontend(self, db: Session, project: Project, spec: dict) -> Project:
+        """A change made on the app preview (#78), made to the code.
+
+        The Frontend attempt the preview runs, with the change — through the same
+        rewind as a redo from the Ship review, so the change is checked, kept with the
+        attempt history, and in the archive, the repository and the deploy. Every phase
+        after it is re-checked against the new code rather than rewritten: QA's suite
+        runs again on it, and the rest carry over, because the code changed in one
+        place at the person's hand. The route has already claimed the build.
+
+        `spec` is `BaseAgent.revise`'s change (`files`, `theme`, `ask`) or
+        `restore_row` — the attempt undo or redo brings back — plus `kind`, `label`
+        and `was`, the status the build returns to if the change is refused.
+        """
+        from app.preview import app_runtime
+
+        phase = Phase.FRONTEND_ENGINEER.value
+        spec = {**spec, "was_phase": project.current_phase, "was_gate": project.gate_kind, "was_note": project.gate_note}
+        row = self.latest_row(db, project, phase)
+        db.expire(project, ["phases"])
+        shown, _ = app_runtime.current_frontend(project)
+        if row is None or not isinstance(row.output, dict) or not row.output.get("files"):
+            app_state.refuse_edit(project, "There's no frontend to change yet.")
+            db.commit()
+            self._back_to(db, project, spec)
+            return project
+        if shown is None or shown.id != row.id:
+            # The change was made on one attempt; another is the newest. Applying it
+            # to code the person never saw would be a change nobody asked for.
+            app_state.refuse_edit(project, "The frontend changed under that edit, so nothing was changed. Try again.")
+            db.commit()
+            self._back_to(db, project, spec)
+            return project
+        spec = {
+            **spec,
+            "output": row.output,
+            "build_run": row.build_run,
+            "build_status": row.build_status,
+            "handoff": row.handoff,
+            "skills_used": row.skills_used,
+        }
+        restore = spec.pop("restore_row", None)
+        if restore:
+            older = db.get(PhaseResult, restore)
+            if older is None or older.project_id != project.id or older.phase != phase:
+                app_state.refuse_edit(project, "That version of the frontend isn't kept any more.")
+                db.commit()
+                self._back_to(db, project, spec)
+                return project
+            spec["restore"] = {"output": older.output, "build_run": older.build_run}
+        if spec.get("was") == PipelineStatus.COMPLETED.value:
+            # Finished builds go back to the end, as for a deploy fix: the rewind then
+            # re-checks everything after the frontend rather than leaving it be.
+            project.current_phase = PHASE_ORDER[-1].value
+            db.commit()
+        keep = {}
+        for later in self._phases_after(phase):
+            done = self.latest_row(db, project, later)
+            if done is not None and isinstance(done.output, dict) and done.output and done.status not in (
+                PhaseStatus.FAILED.value, PhaseStatus.RUNNING.value
+            ):
+                keep[later] = self._kept(done)
+        log.info("Applying a preview change to %s: %s", project.id, spec.get("label"))
+        return self.redo(
+            db,
+            project,
+            phase,
+            str(spec.get("label") or "A change made on the app preview"),
+            continue_after=True,
+            keep=keep or None,
+            revise=spec,
+        )
+
+    def _back_to(self, db: Session, project: Project, spec: dict) -> None:
+        """A preview change that wasn't made: the build goes back to where it was —
+        finished, or waiting on the gate it was on when the change was asked for."""
+        if spec.get("was") == PipelineStatus.COMPLETED.value:
+            project.status = PipelineStatus.COMPLETED.value
+            project.gate_kind = None
+            project.gate_note = None
+            if spec.get("was_phase"):
+                project.current_phase = spec["was_phase"]
+            db.commit()
+        else:
+            self._park(db, project, Gate(spec.get("was_gate") or project.gate_kind or GateKind.PHASE.value,
+                                         spec.get("was_note", project.gate_note)))
+
+    def draw_sketch_for(self, project_id: str, row_id: str, owner_id: Optional[str]) -> None:
+        """Draw the sketch for a frontend whose app preview couldn't run (#78): the
+        fallback, on the owner's models, alongside whatever else is happening."""
+        with identity.acting_as(owner_id):
+            self._draw_mockup_later(project_id, row_id)
+
     def _remediate(self, db: Session, project: Project) -> bool:
         """Send serious findings back to the agents that own them. True if it fired.
 
@@ -1039,6 +1134,7 @@ class PipelineRunner:
         continue_after: bool = False,
         fix_track: Optional[str] = None,
         keep: Optional[dict] = None,
+        revise: Optional[dict] = None,
     ) -> Project:
         """Re-run one phase with reviewer feedback, patching the checkpoint in place.
 
@@ -1058,6 +1154,9 @@ class PipelineRunner:
         the same decision — the crew fixing its own work is not a person's redo.
         `keep` names later phases the rewind re-checks rather than regenerates, with
         the attempt to re-check: QA's suite, while an engineer fixes what it tests.
+        `revise` is a change made on the app preview (#78) — `BaseAgent.revise`: the
+        current attempt with that change, not a regeneration. One that breaks the
+        build is refused and leaves everything as it was.
         """
         if not phase_key:
             return project
@@ -1092,6 +1191,9 @@ class PipelineRunner:
         # has replaced it — see the failure path below.
         superseded = self.latest_row(db, project, phase_key)
         was = superseded.status if superseded is not None else None
+        # Where the build stood, for a preview change that isn't kept (#78): starting
+        # the phase moves both, and committing makes that a rollback can't undo.
+        was_at = (project.current_phase, project.phase_started_at)
         # Its note too. `_mark_phase` is about to overwrite `feedback` with this
         # redo's, and if the attempt being superseded was itself a rejection, that
         # note is the record of why — restoring the row without it would put the
@@ -1138,6 +1240,7 @@ class PipelineRunner:
                         extra_context=(
                             connectors_note() if phase_key == Phase.SYSTEM_DESIGN.value else ""
                         ),
+                        revising=revise is not None,
                     )
                     # Inside the lock, model call and all. This is a read-modify-write:
                     # the patch below is built from the snapshot above, so a write to this
@@ -1145,7 +1248,7 @@ class PipelineRunner:
                     # keeps every other writer of *this* build out until the patch lands;
                     # it is per project, so it holds up nothing else. It does not stop a
                     # second driver existing — see `_checkpoint_lock`.
-                    result = agent.run(ctx)
+                    result = agent.revise(ctx, revise) if revise is not None else agent.run(ctx)
 
                     from app.orchestration.graph import _last_debate, _serialize_result, build_integrations
                     from app.orchestration.charter import freeze
@@ -1212,7 +1315,19 @@ class PipelineRunner:
                         # leave the pipeline sitting at the end.
                         as_node=phase_key,
                     )
+        except RevisionRefused as e:
+            # A change made on the app preview that broke the build (#78): not kept.
+            return self._unrevise(db, project, row, superseded, was, was_feedback, revise, was_at, str(e))
         except ProviderError as e:
+            if revise is not None:
+                # A change made on the preview whose model call failed changed nothing,
+                # so the build is put back exactly as it was — never failed for it.
+                return self._unrevise(
+                    db, project, row, superseded, was, was_feedback, revise, was_at,
+                    "The run was stopped before the change was made."
+                    if isinstance(e, RequestCancelled)
+                    else f"The model didn't answer, so nothing was changed: {e}",
+                )
             if fix_track:
                 self._abandon_round(db, project, fix_track)
             # Put the previous attempt back. Both `rejected` and `failed` count as
@@ -1252,6 +1367,17 @@ class PipelineRunner:
             else:
                 self._fail(db, project, str(e), kind=e.kind, provider=e.provider)
             return project
+        except Exception as e:  # noqa: BLE001 - see below
+            if revise is None or isinstance(e, claim.Superseded):
+                raise
+            # Anything else going wrong inside a preview change — the sandbox, the
+            # checks — must not leave the frontend half-replaced (its attempt rejected,
+            # the new one running): it is put back, and the person told.
+            log.exception("A preview change to %s failed", project.id)
+            return self._unrevise(
+                db, project, row, superseded, was, was_feedback, revise, was_at,
+                f"The change couldn't be made, so nothing was changed: {e}",
+            )
 
         self._complete_row(db, project, row, last_result)
         if charter_update is not None:
@@ -1261,7 +1387,16 @@ class PipelineRunner:
             self.settle_integrations(project, before)
             db.commit()
             log.info("Stack charter re-frozen for %s after redoing the architecture", project.id)
-        if phase_key == Phase.FRONTEND_ENGINEER.value:
+        if revise is not None:
+            # A change made on the app preview (#78): the preview rebuilds from this
+            # attempt, and undo can bring back the one it replaced. The sketch is
+            # left as it is — it was never the code, and it says so.
+            app_state.landed(
+                project, str(revise.get("kind") or "patch"), superseded.id if superseded else None, row.id,
+                theme=(row.output or {}).get("app_theme") if isinstance(row.output, dict) else None,
+            )
+            db.commit()
+        elif phase_key == Phase.FRONTEND_ENGINEER.value:
             # The front end was rewritten, so the picture of it is of code that no
             # longer exists. `_run_phase`'s hook does not fire on this path.
             if self._clear_generated_mockup(db, project.id):
@@ -1300,6 +1435,35 @@ class PipelineRunner:
         db.commit()
         log.info("Rebuilding %s from %s after a redo", project.id, phase_key)
         return self.continue_run(db, project)
+
+    def _unrevise(
+        self,
+        db: Session,
+        project: Project,
+        row: PhaseResult,
+        superseded: Optional[PhaseResult],
+        was: Optional[str],
+        was_feedback: Optional[str],
+        revise: dict,
+        was_at: tuple,
+        reason: str,
+    ) -> Project:
+        """A change made on the app preview that wasn't kept (#78): the attempt it was
+        made from is put back as it was, nothing after it was touched, and the build
+        returns to where it waited — finished, or on its gate, at the phase it was at."""
+        db.rollback()
+        if superseded is not None and was is not None:
+            superseded.status = was
+            superseded.feedback = was_feedback
+        self._delete_rows(db, project, [row])
+        app_state.refuse_edit(project, reason)
+        # A Stop pressed during the change stopped the change, not the build.
+        project.cancel_requested = False
+        project.current_phase, project.phase_started_at = was_at
+        db.commit()
+        log.info("A preview change to %s wasn't kept: %s", project.id, reason)
+        self._back_to(db, project, revise)
+        return project
 
     @staticmethod
     def _delete_rows(db: Session, project: Project, rows: list[PhaseResult]) -> None:
@@ -1712,7 +1876,12 @@ class PipelineRunner:
                 # of model time, and a stale draw would spend them on nothing.
                 if not still_wanted(db, project):
                     return
-                mockup.build_and_save(db, project, reporter, still_wanted=still_wanted)
+                if self._app_preview_runs(db, source_row_id):
+                    # The Preview tab shows the built app (#78). The sketch is for when
+                    # there is no app to show, and six passes of model time otherwise.
+                    log.info("No sketch drawn for %s: its app preview runs the code.", project_id)
+                    return
+                mockup.build_and_save(db, project, reporter, still_wanted=still_wanted, built_from=source_row_id)
             finally:
                 db.close()
         except Exception as e:  # noqa: BLE001 - the build is the deliverable, not the picture
@@ -1720,6 +1889,23 @@ class PipelineRunner:
             error = f"Drawing the mockup failed: {e}"
         finally:
             mockup_jobs.finish(project_id, error)
+
+    @staticmethod
+    def _app_preview_runs(db: Session, row_id: str) -> bool:
+        """Whether the app preview (#78) can run this Frontend attempt: it built for
+        real, as a stack the preview serves, on a computer that can run it."""
+        from app.preview import app_runtime
+
+        row = db.get(PhaseResult, row_id)
+        run = row.build_run if row is not None and isinstance(row.build_run, dict) else None
+        if run is None or run.get("status") != BuildStatus.OK.value or run.get("stack") not in ("nextjs", "vite"):
+            return False
+        project = db.get(Project, row.project_id)
+        known = app_state.failed(project) if project is not None else None
+        if known and known.get("row") == row_id:
+            return False  # its app preview was tried, and didn't build
+        ok, _ = app_runtime.available()
+        return ok
 
     def _abandon_row(self, db: Session, row: PhaseResult, reason: str) -> None:
         row.status = PhaseStatus.FAILED.value

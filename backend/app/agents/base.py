@@ -122,6 +122,13 @@ class AgentContext:
     escalate: bool = False
     #: The model an escalated call is pinned to, resolved once per run by the router.
     pin_model: Optional[str] = None
+    #: A change made on the app preview (#78): the attempt says its own site style.
+    revising: bool = False
+
+
+class RevisionRefused(Exception):
+    """A change made on the app preview (#78) that wasn't kept, with the reason a
+    person reads: it broke the build, or the crew didn't send the file back."""
 
 
 @dataclass
@@ -410,6 +417,93 @@ class BaseAgent:
             kept=True,
         )
 
+    def revise(self, ctx: AgentContext, spec: dict) -> AgentResult:
+        """A change made on the app preview (#78), as a new attempt at this phase.
+
+        The person changed the running app, so the change is to the code: this attempt
+        is the current one with that change made, then checked the way any attempt is
+        — compiled, and built for real. `spec` carries the current attempt (`output`,
+        `build_run`, `build_status`) and one change:
+
+          * `files` — `{path: content}`, typed over on the preview (no model);
+          * `theme` — the site style, kept with the attempt for the scaffold to write;
+          * `restore` — an earlier attempt's `output` and `build_run` (undo and redo);
+          * `ask` — "change this element", for the crew: one write call for one file
+            (`_ask`, code phases only).
+
+        A change that breaks what built before is refused, not kept: `RevisionRefused`
+        names why, and the attempt on screen stays the current one. The fix loop is for
+        the crew's own mistakes, and it rewrites a whole phase to fix one.
+        """
+        from copy import deepcopy
+
+        base = spec.get("restore") if isinstance(spec.get("restore"), dict) else spec
+        output = deepcopy(base.get("output") or {})
+        changed: list[str] = []
+        files = [dict(f) for f in output.get("files") or [] if isinstance(f, dict)]
+        for path, content in (spec.get("files") or {}).items():
+            entry = next((f for f in files if f.get("path") == path), None)
+            if entry is None:
+                raise RevisionRefused(f"{path} isn't one of the files this phase wrote.")
+            entry["code"] = content
+            entry.pop("content", None)
+            changed.append(path)
+        output["files"] = files
+        if "theme" in spec:
+            if spec["theme"]:
+                output["app_theme"] = spec["theme"]
+            else:
+                output.pop("app_theme", None)
+        calls: list[LLMResponse] = []
+        if isinstance(spec.get("ask"), dict):
+            output, calls = self._ask(ctx, output, spec["ask"])
+            changed.append(str(spec["ask"].get("path") or ""))
+
+        output, errors = self._validate(output)
+        if not errors:
+            output, own = self.own_checks(output, ctx)
+            errors = errors + own
+        stack_errors = (
+            charter_violations(ctx.charter, self.key, output) if settings.enforce_stack_charter else []
+        )
+        build = self._build_check(ctx, output)
+        before_ok = spec.get("build_status") != BuildStatus.FAILED.value
+        if build is not None and build.status == BuildStatus.FAILED.value and before_ok:
+            raise RevisionRefused("That change doesn't compile: " + "; ".join(build.messages()[:2]))
+        build_run = self._run_build(ctx, output, build, reuse=base.get("build_run"))
+        built_before = (spec.get("build_run") or {}).get("status") != BuildStatus.FAILED.value
+        if isinstance(build_run, dict) and build_run.get("status") == BuildStatus.FAILED.value and built_before:
+            first = next(iter(build_run.get("problems") or []), None)
+            detail = f" — {first.get('path')}: {first.get('message')}" if isinstance(first, dict) else ""
+            raise RevisionRefused(f"That change didn't build ({build_run.get('summary')}){detail}"[:400])
+        response = _merge(calls) if calls else LLMResponse(
+            text="", provider="platform", model="preview edit", usage=Usage(), latency_ms=0, is_local=None
+        )
+        handoff = {k: v for k, v in (spec.get("handoff") or {}).items() if k not in ("kept", "kept_from", "edit")}
+        handoff["edit"] = {
+            "kind": spec.get("kind") or ("ask" if calls else "patch"),
+            "label": spec.get("label") or "",
+            "files": [c for c in changed if c][:6],
+        }
+        return AgentResult(
+            output=output,
+            content_md=self.to_markdown(output),
+            response=response,
+            schema_status=SchemaStatus.INVALID.value if errors else SchemaStatus.VALID.value,
+            schema_note="; ".join(e.replace("`", "") for e in errors[:3]) or None,
+            calls=calls,
+            stack_violations=stack_errors,
+            build_status=build.status if build else None,
+            build_problems=build.as_list() if build else [],
+            skills_used=list(spec.get("skills_used") or []),
+            handoff=handoff,
+            build_run=build_run,
+        )
+
+    def _ask(self, ctx: AgentContext, output: dict, ask: dict) -> tuple[dict, list[LLMResponse]]:
+        """Change one file as the person asked (#78). Only code phases write files."""
+        raise RevisionRefused(f"{self.title} doesn't write files, so it can't change one.")
+
     def _run_tests(self, ctx: AgentContext, output: dict, build: Optional[BuildCheck]) -> Optional[dict]:
         """Run the tests this phase wrote (#76). Only QA writes any."""
         return None
@@ -490,6 +584,7 @@ class BaseAgent:
         may well be correct, so a failure here is logged and the phase is simply not
         checked — which the status then says, rather than claiming it passed.
         """
+        self._carry_theme(ctx, output)
         if not settings.enforce_build_check or self.key not in CODE_PHASES:
             return None
         try:
@@ -497,6 +592,32 @@ class BaseAgent:
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure
             log.warning("%s: the compile check could not run: %s", self.title, e)
             return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")
+
+    def _carry_theme(self, ctx: AgentContext, output: dict) -> None:
+        """A frontend the crew (re)writes keeps the site style the person chose on the
+        app preview (#78) — before it is checked and built, so the build that passes
+        is of the Tailwind config that ships. A change made on the preview itself says
+        its own style (an undo may be taking one away), so it is left alone."""
+        if self.key != Phase.FRONTEND_ENGINEER.value or ctx.revising or not isinstance(output, dict):
+            return
+        if "app_theme" in output:
+            return
+        build = inflight.current() or {}
+        if not build.get("id"):
+            return
+        from app.db.base import SessionLocal
+        from app.db.models import Project
+        from app.preview import app_state
+
+        try:
+            with SessionLocal() as db:
+                project = db.get(Project, build["id"])
+                theme = app_state.theme(project) if project is not None else None
+        except Exception:  # noqa: BLE001 - a style is never worth failing a phase over
+            log.exception("Couldn't read the chosen site style")
+            return
+        if theme:
+            output["app_theme"] = theme
 
     def _run_build(
         self, ctx: AgentContext, output: dict, build: Optional[BuildCheck], reuse: Optional[dict] = None

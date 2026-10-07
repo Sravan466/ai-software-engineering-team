@@ -190,6 +190,10 @@ class Project(Base):
     #: A failed Vercel build's whole event log, scrubbed, line by line (#75) — what the
     #: crew's fix round was given, and what the page shows. Null until one fails.
     deploy_log: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    #: What the app preview (#78) remembers between starts: the last preview build that
+    #: failed and why, the change made on the preview the crew is applying, and undo/redo
+    #: over those changes (`app.preview.app_state`). Null until the preview is used.
+    preview_app: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # ── the stack this build is held to ──────────────────────────────────────
     #: Frozen once the architecture is settled, and binding on every phase after it:
@@ -438,6 +442,11 @@ class PreviewRevision(Base):
     # assembled site and their results. Null for single-document mockups drawn
     # before the site builder, and for edits — an edit carries its parent's report.
     report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    #: The Frontend attempt a sketch the pipeline drew was drawn from (#78), so "this
+    #: sketch is of older code" is exact rather than a guess from timestamps. Null for a
+    #: sketch a person asked for, and for every revision from before.
+    built_from: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     # Undo and redo move a pointer instead of deleting rows. `parent_id` is the
     # revision this one was made from; the live one is the row with the latest

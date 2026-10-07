@@ -31,6 +31,8 @@ STAGES = {
     "planning": "Planning the files",
     "writing": "Writing",
     "fixing": "Fixing",
+    # A change asked for on the app preview (#78): one file, rewritten in place.
+    "changing": "Changing",
     "checking": "Checking the build",
     "building": "Building and starting it",
     "testing": "Running the tests",
@@ -45,7 +47,7 @@ FILE_STATES = ("planned", "writing", "ok", "fixing", "failed", "missing")
 #: Stages whose `detail` is a command: each command is a step of its own.
 COMMAND_STAGES = ("building", "testing", "scanning")
 #: Writing and fixing are one step, file to file — the file list carries the rest.
-FILE_STAGES = ("writing", "fixing")
+FILE_STAGES = ("writing", "fixing", "changing")
 #: Finished steps kept per phase. The oldest fall off the front.
 TRAIL_MAX = 24
 #: The planner's summary, as the page shows it under "Planned 9 files".
