@@ -153,12 +153,34 @@ def latest_number(db: Session, project: Project) -> int:
     return int(newest[0]) if newest else 0
 
 
+#: Where `prime` leaves a build's version for `summary_of` — a plain attribute on the
+#: instance, not a column.
+_PRIMED = "_primed_version"
+
+
+def prime(db: Session, projects: list) -> None:
+    """Read the current version of every build in a list at once, for `summary_of`."""
+    ids = [p.current_version_id for p in projects if p.current_version_id]
+    found = (
+        {v.id: v for v in db.query(Version).options(defer(Version.snapshot)).filter(Version.id.in_(ids)).all()}
+        if ids
+        else {}
+    )
+    for p in projects:
+        setattr(p, _PRIMED, found.get(p.current_version_id) if p.current_version_id else None)
+
+
 def summary_of(project: Project) -> Optional[dict]:
     """`{number, label, kind, created_at}` for the page — one lookup, never a write."""
-    db = object_session(project)
-    if db is None or not project.current_version_id:
+    if not project.current_version_id:
         return None
-    found = db.get(Version, project.current_version_id, options=[defer(Version.snapshot)])
+    if hasattr(project, _PRIMED):
+        found = getattr(project, _PRIMED)
+    else:
+        db = object_session(project)
+        if db is None:
+            return None
+        found = db.get(Version, project.current_version_id, options=[defer(Version.snapshot)])
     if found is None:
         return None
     return {
@@ -179,7 +201,10 @@ def _file_count(snap: dict) -> int:
 
 def out(version: Version, project: Project) -> dict:
     """One version as the API shows it."""
-    files = version.file_count if version.file_count is not None else _file_count(version.snapshot)
+    if version.file_count is None:
+        # Recorded before versions were counted: counted once, kept (the caller commits).
+        version.file_count = _file_count(version.snapshot)
+    files = version.file_count
     live = project.deploy_status in ("ready", "handed_off")
     return {
         "id": version.id,
@@ -279,7 +304,13 @@ def matches_current(db: Session, project: Project, version: Optional[Version] = 
     version = version or current(db, project)
     if version is None:
         return False
-    return set(current_ids(db, project)) == set(version.phase_result_ids or [])
+    ids = set(version.phase_result_ids or [])
+    rows = [r for r in current_rows(db, project) if r.status != PhaseStatus.RUNNING.value]
+    # A row put back from a version (a discard, a restore) is a copy with its own id; it
+    # still holds exactly the row it restores, which is the one the version names.
+    return len(rows) == len(ids) and all(
+        r.id in ids or (r.handoff or {}).get("restored_row") in ids for r in rows
+    )
 
 
 # ── assembling one ────────────────────────────────────────────────────────────
@@ -353,6 +384,10 @@ def restore_rows(db: Session, project: Project, version: Version, note: str) -> 
         if row is not None and row.project_id == project.id and newest is not None and newest.id == row.id:
             row.status = PhaseStatus.APPROVED.value
         else:
+            fields = {name: item.get(name) for name in SNAP_FIELDS if name not in ("phase", "agent")}
+            # Which row this copy restores: the version names that one, and the copy
+            # still holds exactly it (`matches_current`).
+            fields["handoff"] = {**(item.get("handoff") or {}), "restored_row": item.get("id")}
             row = PhaseResult(
                 project_id=project.id,
                 phase=phase,
@@ -360,7 +395,7 @@ def restore_rows(db: Session, project: Project, version: Version, note: str) -> 
                 status=PhaseStatus.APPROVED.value,
                 feedback=note,
                 completed_at=_now(),
-                **{name: item.get(name) for name in SNAP_FIELDS if name not in ("phase", "agent")},
+                **fields,
             )
             row.total_tokens = int(item.get("total_tokens") or 0)
             row.latency_ms = int(item.get("latency_ms") or 0)

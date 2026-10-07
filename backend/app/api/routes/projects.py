@@ -217,11 +217,18 @@ def update_project(
 
 @router.get("", response_model=list[ProjectOut])
 def list_projects(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[Project]:
-    return list(
+    found = list(
         db.execute(
             select(Project).where(Project.owner_id == user.id).order_by(Project.created_at.desc())
         ).scalars()
     )
+    # Each build's version and open change (#79), read for the whole list in two queries
+    # rather than two per build.
+    from app.orchestration import changes, versions
+
+    versions.prime(db, found)
+    changes.prime(db, found)
+    return found
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -257,7 +264,7 @@ def get_artifacts(
 
     What ships, by default (#79): while a change is being made, the version it is made
     on. `live` is the build as it stands — what a review is about; `version` names one."""
-    assembled, shipped = _shipping(db, project, version, live)
+    assembled, shipped = shipping_or_404(db, project, version, live)
     return {
         "idea": project.idea,
         "name": project.name,
@@ -268,8 +275,6 @@ def get_artifacts(
     }
 
 
-def _shipping(db: Session, project: Project, version: Optional[int], live: bool = False):
-    return shipping_or_404(db, project, version, live)
 
 
 @router.get("/{project_id}/download")
@@ -307,7 +312,7 @@ def download_project(
         except secretbox.SecretsLocked as e:
             raise HTTPException(503, str(e))
     # A named version (#79): the one asked for, else the one that ships.
-    assembled, shipped = _shipping(db, project, version)
+    assembled, shipped = shipping_or_404(db, project, version)
     if env is not None:
         try:
             client_env = artifacts.frontend_env(project, assembled)

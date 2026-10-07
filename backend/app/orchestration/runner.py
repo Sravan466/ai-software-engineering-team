@@ -954,7 +954,7 @@ class PipelineRunner:
             continue_after=True,
             start_change=record,
         )
-        if not self._change_started(project) and project.status in (
+        if not self._change_started(project, found) and project.status in (
             PipelineStatus.FAILED.value,
             PipelineStatus.CANCELLED.value,
             PipelineStatus.PAUSED.value,
@@ -1049,11 +1049,23 @@ class PipelineRunner:
         return keep, extra
 
     @staticmethod
-    def _change_started(project: Project) -> bool:
-        """Whether the open change's first edit landed in the checkpoint."""
+    def _change_started(project: Project, found: Optional[ChangeRequest] = None) -> bool:
+        """Whether the open change's first edit landed in the checkpoint — its own record,
+        not one a finish that was cut short left behind."""
         with _checkpoint_lock(project.id):
             values = dict(graph.get_state(_config(project.id)).values)
-        return bool(values.get("change"))
+        held = values.get("change")
+        if not held:
+            return False
+        return found is None or held.get("id") == found.id
+
+    @staticmethod
+    def _live_change(db: Session, held: Optional[dict]) -> Optional[dict]:
+        """The checkpoint's change record, while that change is still open."""
+        if not held or not held.get("id"):
+            return None
+        found = db.get(ChangeRequest, held["id"])
+        return held if found is not None and found.status == changes.OPEN else None
 
     def _change_failed(self, db: Session, project: Project, found: ChangeRequest, reason: str) -> Project:
         """A change that changed nothing: closed, and the build finished again as it was."""
@@ -1062,9 +1074,18 @@ class PipelineRunner:
         found.status = changes.FAILED
         found.note = scrub(reason)[:1000]
         found.finished_at = _now()
+        self._put_back(project, found)
         self._finished_again(db, project)
         log.info("Change #%d on %s failed before any edit: %s", found.number, project.id, reason)
         return project
+
+    @staticmethod
+    def _put_back(project: Project, found: ChangeRequest) -> None:
+        """What the build held before a change that wasn't kept: the fix loop's record."""
+        saved = found.saved or {}
+        if "auto_fix" in saved:
+            project.auto_fix = saved.get("auto_fix")
+            project.remediation_rounds = saved.get("remediation_rounds")
 
     @staticmethod
     def _finished_again(db: Session, project: Project) -> None:
@@ -1091,10 +1112,7 @@ class PipelineRunner:
         base = db.get(Version, found.base_version_id) if found.base_version_id else versions.current(db, project)
         if base is not None:
             self._reinstate(db, project, base, f"Put back from v{base.number}: change #{found.number} was discarded.")
-        saved = found.saved or {}
-        if "auto_fix" in saved:
-            project.auto_fix = saved.get("auto_fix")
-            project.remediation_rounds = saved.get("remediation_rounds")
+        self._put_back(project, found)
         found.status = changes.DISCARDED
         found.note = (reason or "").strip()[:1000] or None
         found.finished_at = _now()
@@ -1163,11 +1181,12 @@ class PipelineRunner:
         when a change was kept, and the checkpoint's record of it is to be cleared."""
         found = changes.open_change(db, project)
         if found is not None:
-            if not self._change_started(project):
+            if not self._change_started(project, found):
                 # Resumed to the end without the change's first edit ever landing.
                 found.status = changes.FAILED
                 found.note = "The change stopped before anything was changed."
                 found.finished_at = _now()
+                self._put_back(project, found)
                 return False
             version = versions.record(db, project, found.text, versions.CHANGE, change_id=found.id)
             found.status = changes.DONE
@@ -1177,11 +1196,15 @@ class PipelineRunner:
             return True
         current = versions.current(db, project)
         if current is None:
-            if not versions.all_for(db, project, light=True):
+            existing = versions.all_for(db, project, light=True)
+            if not existing:
                 versions.record(db, project, "First build", versions.FIRST_BUILD)
                 if not project.decisions:
                     project.decisions = changes.first_decisions(project) or None
-            return False
+                return False
+            # The pointer was lost: the newest version, if that is what the build holds.
+            current = existing[-1]
+            project.current_version_id = current.id
         if not versions.matches_current(db, project, current):
             record = app_state.edit(project) or {}
             frontend = next(
@@ -1525,7 +1548,13 @@ class PipelineRunner:
                     snapshot = graph.get_state(cfg)
                     values: PipelineState = dict(snapshot.values)  # type: ignore[assignment]
                     # The change request this redo starts or belongs to (#79).
-                    change = start_change if start_change is not None else (values.get("change") or None)
+                    left_behind = False
+                    if start_change is not None:
+                        change = start_change
+                    else:
+                        change = self._live_change(db, values.get("change"))
+                        # A record left by a finish that was cut short: cleared below.
+                        left_behind = bool(values.get("change")) and change is None
                     if change and stale:
                         keep, extra_feedback = self._change_rewind(db, project, change, phase_key, keep, extra_feedback)
                     editing = changes.editing(change, phase_key)
@@ -1623,6 +1652,8 @@ class PipelineRunner:
                     }
                     if change is not None:
                         patch["change"] = changes.landed(change, phase_key, result.output) if editing else change
+                    elif left_behind:
+                        patch["change"] = None
                     if phase_key == Phase.SYSTEM_DESIGN.value:
                         # The architecture was rewritten, so the charter frozen from
                         # the old one describes a build that no longer exists. Every

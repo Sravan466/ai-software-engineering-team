@@ -385,3 +385,63 @@ def test_a_failed_deploy_doesnt_relabel_whats_live(client, script):
         db.get(Project, pid).deploy_status = "ready"
         db.commit()
     assert client.get(f"/api/projects/{pid}/versions").json()["versions"][0]["deployed"]
+
+
+def test_a_devops_only_change_still_gets_tests_and_a_rescan(client, script):
+    pid = _finished(client)
+    script.plan = {**script.plan, "phases": ["devops_engineer"], "files_likely": [], "summary": "Tweak the deploy files"}
+    mark = len(script.calls)
+    client.post(f"/api/projects/{pid}/changes", json={"text": "use node 20 in the deploy files"})
+    roles = script.roles_since(mark)
+    assert {"qa_engineer", "security_engineer", "devops_engineer", "cost_estimation"} <= roles
+    assert client.get(f"/api/projects/{pid}").json()["current_version"]["number"] == 2
+
+
+def test_after_a_discard_the_build_is_its_version_again(client, script):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.orchestration import versions
+
+    pid = _finished(client)
+    client.patch(f"/api/projects/{pid}", json={"approval_mode": "checkpoints"})
+    client.post(f"/api/projects/{pid}/changes", json={"text": "add a /health endpoint"})
+    change = client.get(f"/api/projects/{pid}").json()["change"]
+    client.post(f"/api/projects/{pid}/changes/{change['id']}/discard")
+    with SessionLocal() as db:
+        assert versions.matches_current(db, db.get(Project, pid))
+    assert client.get(f"/api/projects/{pid}/artifacts?live=true").json()["version"] == 1
+
+
+def test_a_change_that_fails_before_its_first_edit_puts_the_fix_loop_back(client, script, monkeypatch):
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.router.base import ProviderError
+
+    pid = _finished(client)
+    with SessionLocal() as db:
+        p = db.get(Project, pid)
+        p.auto_fix = {"tracks": {"security": {"rounds": [{"n": 1}], "allowed": 1, "stopped": None, "accepted": None,
+                                               "resumed_after": 0, "episode_start": 0}}}
+        db.commit()
+    real = script.__call__
+
+    def failing(messages, **kwargs):
+        if kwargs.get("role") == "backend_engineer":
+            raise ProviderError("the runtime went away")
+        return real(messages, **kwargs)
+
+    stub(monkeypatch, "complete", failing)
+    client.post(f"/api/projects/{pid}/changes", json={"text": "add a /health endpoint"})
+    project = client.get(f"/api/projects/{pid}").json()
+    assert project["status"] == "completed" and project["current_version"]["number"] == 1
+    assert project["auto_fix"]["tracks"]["security"]["episode_start"] == 0
+
+
+def test_the_project_list_carries_versions_and_open_changes(client, script):
+    done = _finished(client)
+    changing = _finished(client)
+    client.patch(f"/api/projects/{changing}", json={"approval_mode": "checkpoints"})
+    client.post(f"/api/projects/{changing}/changes", json={"text": "add a /health endpoint"})
+    listed = {p["id"]: p for p in client.get("/api/projects").json()}
+    assert listed[done]["current_version"]["number"] == 1 and listed[done]["change"] is None
+    assert listed[changing]["change"]["status"] == "awaiting_approval"

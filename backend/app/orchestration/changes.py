@@ -124,12 +124,35 @@ def out(project: Project, change: ChangeRequest, versions_by_id: Optional[dict] 
     }
 
 
+#: Where `prime` leaves a build's open change for `open_summary`.
+_PRIMED = "_primed_change"
+
+
+def prime(db: Session, projects: list) -> None:
+    """Read the open change of every build in a list at once, for `open_summary`."""
+    ids = [p.id for p in projects]
+    found: dict[str, ChangeRequest] = {}
+    if ids:
+        for c in (
+            db.query(ChangeRequest)
+            .filter(ChangeRequest.project_id.in_(ids), ChangeRequest.status == OPEN)
+            .order_by(ChangeRequest.number)
+            .all()
+        ):
+            found[c.project_id] = c  # the newest open one wins, as `open_change` reads it
+    for p in projects:
+        setattr(p, _PRIMED, found.get(p.id))
+
+
 def open_summary(project: Project) -> Optional[dict]:
     """The open change for `ProjectOut` — reads, never writes."""
-    db = object_session(project)
-    if db is None:
-        return None
-    found = open_change(db, project)
+    if hasattr(project, _PRIMED):
+        found = getattr(project, _PRIMED)
+    else:
+        db = object_session(project)
+        if db is None:
+            return None
+        found = open_change(db, project)
     return out(project, found) if found is not None else None
 
 
@@ -191,9 +214,13 @@ def edit_phases(plan: dict, has: set[str]) -> list[str]:
 
 
 def first_phase(plan: dict, has: set[str]) -> Optional[str]:
-    """Where the change starts: the earliest phase that edits."""
-    edits = [p for p in edit_phases(plan, has) if p not in TESTERS]
-    return edits[0] if edits else None
+    """Where the change starts: the earliest phase that edits — QA included, so a change
+    to something after the tests (the deployment files) still gets its tests and its
+    rescan. None when nothing but the tests would edit: there is nothing to change."""
+    edits = edit_phases(plan, has)
+    if not [p for p in edits if p not in TESTERS]:
+        return None
+    return edits[0]
 
 
 def note_for(change: dict, phase: str) -> str:

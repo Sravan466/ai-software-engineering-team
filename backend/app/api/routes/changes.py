@@ -213,8 +213,11 @@ def list_versions(project: Project = Depends(get_project), db: Session = Depends
     versions.ensure_first(db, project)
     found = versions.all_for(db, project, light=True)
     current = versions.current(db, project)
+    listed = [versions.out(v, project) for v in reversed(found)]
+    if db.dirty:
+        db.commit()  # a count `out` worked out once, for a version from before counts
     return {
-        "versions": [versions.out(v, project) for v in reversed(found)],
+        "versions": listed,
         "current": current.number if current is not None else None,
         "deployed": project.deployed_version,
         "pushed": project.github_pushed_version,

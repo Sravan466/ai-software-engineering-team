@@ -187,7 +187,7 @@ def _label(info: dict, database: Optional[str]) -> str:
 @router.get("/api/projects/{project_id}/ship")
 def ship(request: Request, project: Project = Depends(get_project), db: Session = Depends(get_db)) -> dict:
     user_id = _user_id(request)
-    assembled, shipped = _shipping(db, project)
+    assembled, shipped = shipping_or_404(db, project)
     info = assembled.get("scaffold") or {}
     kind = blueprint.kind(info) if assembled["files"] else None
     if project.deploy_target == "vercel" and project.deploy_status in ("fixing", "fixed") and kind is None:
@@ -313,11 +313,6 @@ class DeployRequest(BaseModel):
     version: Optional[int] = None
 
 
-def _shipping(db: Session, project: Project, number: Optional[int] = None):
-    """(the archive, its version) — what a deploy sends (#79)."""
-    return shipping_or_404(db, project, number)
-
-
 def _shippable(db: Session, project: Project) -> bool:
     """A finished build, or one being changed on top of a version that still ships."""
     from app.orchestration import versions
@@ -393,7 +388,7 @@ def _run_vercel(project_id: str, user_id: str, number: Optional[int] = None) -> 
                 db.commit()
                 return
             # The version the route chose (#79), not whatever the build holds by now.
-            assembled, _ = _shipping(db, project, number)
+            assembled, _ = shipping_or_404(db, project, number)
             prefix = FRONTEND + "/"
             # The frontend's own folder, sent as the project root: its package.json is
             # complete on its own, and Vercel needs no `rootDirectory`.
@@ -445,7 +440,7 @@ def deploy(
     user_id = _user_id(request)
     if not _shippable(db, project):
         raise HTTPException(409, "Deploy is ready once the build is complete.")
-    assembled, shipped = _shipping(db, project, body.version)
+    assembled, shipped = shipping_or_404(db, project, body.version)
     number = shipped.number if shipped is not None else None
     kind = blueprint.kind(assembled.get("scaffold") or {}) if assembled["files"] else None
     target = blueprint.target(kind)

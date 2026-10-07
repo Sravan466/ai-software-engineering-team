@@ -1214,6 +1214,8 @@ function SummaryTab({
        it, and a copy to take away. */
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <ShipCard
+        // Reloaded when the version does (#79): it says which version Deploy sends.
+        key={versionKey}
         id={id}
         defaultName={art.name || art.idea}
         intent={shipIntent}
