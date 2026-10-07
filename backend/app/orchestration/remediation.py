@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -337,7 +338,8 @@ def _path_and_line(location: str, line: object = None) -> tuple[Optional[str], O
     """
     text = (location or "").strip().replace("\\", "/")
     found = re.match(r"\s*`?([^\s:`,()]+)`?(?::(\d+))?", text)
-    path = found.group(1).lstrip("./") if found else None
+    # The `./` prefix only: `lstrip` would take the dot off `.env` too.
+    path = _unprefixed(found.group(1)) if found else None
     number: Optional[int] = None
     if isinstance(line, int) and not isinstance(line, bool) and line > 0:
         number = line
@@ -400,11 +402,19 @@ def _same_file(a: Optional[str], b: Optional[str]) -> bool:
     `backend/routes/users.js`, but never `admin/users.js` vs `routes/users.js`."""
     if not a or not b:
         return False
-    a, b = a.lower().lstrip("./"), b.lower().lstrip("./")
+    a, b = _unprefixed(a.lower()), _unprefixed(b.lower())
     return a == b or a.endswith("/" + b) or b.endswith("/" + a)
 
 
+def _unprefixed(path: str) -> str:
+    """A path without a leading `./` or `/` — never a dotfile's own dot."""
+    return re.sub(r"^(?:\./|/)+", "", path)
+
+
 def _near(a: Optional[int], b: Optional[int]) -> bool:
+    """Two known lines within the window. A missing line is never near anything here:
+    a note with no line is matched by its words, not by sharing a file
+    (`scan._near`, which deduplicates one report, treats two missing lines as one)."""
     from app.build.scan import LINE_WINDOW
 
     return a is not None and b is not None and abs(a - b) <= LINE_WINDOW
@@ -737,8 +747,9 @@ def sync_dispositions(
 
     # ── the scanners ──
     result = scanner.ScanResult.from_dict(scan if isinstance(scan, dict) else None)
-    ran = {t for t in scanner.TOOLS if result is not None and result.ran(t)}
     current = tool_findings(scan) if result is not None else []
+    # Every row has its id from the moment it exists (the column default only lands at
+    # flush), so one made a moment ago is never matched to a second report as well.
     matched: set[str] = set()
     for f in current:
         row = _closest(
@@ -753,11 +764,13 @@ def sync_dispositions(
                 key = hashlib.sha256(f"{f.key}:{n}".encode("utf-8")).hexdigest()[:32]
                 n += 1
             keys.add(key)
-            row = SecurityDisposition(project_id=project.id, finding_key=key, status=FindingStatus.OPEN.value)
+            row = SecurityDisposition(
+                id=uuid.uuid4().hex, project_id=project.id, finding_key=key, status=FindingStatus.OPEN.value
+            )
             _fill(row, f)
             db.add(row)
             tools_rows.append(row)
-            matched.add(id(row))
+            matched.add(row.id)
             continue
         matched.add(row.id)
         # Still reported. A waiver is the reviewer's standing decision and survives;
@@ -766,10 +779,11 @@ def sync_dispositions(
             row.status = FindingStatus.OPEN.value
         _fill(row, f, keep_title=True)
     for row in tools_rows:
-        if row.id in matched or id(row) in matched or row.status in FindingStatus.settled():
+        if row.id in matched or row.status in FindingStatus.settled():
             continue
-        if row.tool not in ran:
-            # Not rescanned: its tool couldn't run this time, so nothing can be said.
+        if result is None or not result.covers(row.tool, row.path):
+            # Not rescanned where it is: its tool didn't run this time, didn't read that
+            # file, ran on the other side of the tree, or was cut short. Silence.
             continue
         _resolve(row, project, f"{row.tool} no longer reports it at {row.location or row.path}")
 
@@ -786,6 +800,7 @@ def sync_dispositions(
                 continue
             keys.add(f.key)
             row = SecurityDisposition(
+                id=uuid.uuid4().hex,
                 project_id=project.id,
                 finding_key=f.key,
                 title=f.title,
@@ -801,7 +816,7 @@ def sync_dispositions(
             )
             db.add(row)
             model_rows.append(row)
-            matched.add(id(row))
+            matched.add(row.id)
             continue
         matched.add(row.id)
         if row.status != FindingStatus.WAIVED.value:
@@ -815,7 +830,7 @@ def sync_dispositions(
         row.source = SOURCE_MODEL
     if readable:
         for row in model_rows:
-            if row.id in matched or id(row) in matched or row.status in FindingStatus.settled():
+            if row.id in matched or row.status in FindingStatus.settled():
                 continue
             _resolve(row, project, "the re-review no longer mentions it")
 

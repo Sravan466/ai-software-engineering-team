@@ -233,6 +233,23 @@ class ScanResult:
     def ran(self, tool: str) -> bool:
         return (self.tools.get(tool) or {}).get("status") == RAN
 
+    def covers(self, tool: Optional[str], path: Optional[str]) -> bool:
+        """Whether this scan can say a finding of `tool`'s at `path` is gone.
+
+        Only when that tool ran; its report wasn't cut short; it read that file (Semgrep
+        and Bandit list the files they couldn't parse); and, for a dependency audit, it
+        ran on that file's side of the tree. Anything less is silence, never a fix.
+        """
+        entry = self.tools.get(tool or "") or {}
+        if entry.get("status") != RAN or entry.get("truncated"):
+            return False
+        if path and path in (entry.get("unscanned") or []):
+            return False
+        if tool in DEPENDENCY_TOOLS:
+            side = layout.side_of(path or "")
+            return (entry.get("sides") or {}).get(side or "") == RAN
+        return True
+
     def summary(self) -> str:
         """"semgrep 1.139.0 · bandit 1.8.6 · npm audit · 9.1 s" — the Warden card's line."""
         if self.status == SKIPPED:
@@ -440,7 +457,15 @@ def clip(s, n):
     return s if len(s) <= n else s[: n - 1] + "\u2026"
 def rel(p):
     p = str(p or "")
-    return p[6:] if p.startswith("/work/") else p.lstrip("./")
+    if p.startswith("/work/"):
+        return p[6:]
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+RANK = {"CRITICAL": 0, "ERROR": 1, "HIGH": 1, "WARNING": 2, "MEDIUM": 2, "INFO": 3, "LOW": 3}
+def worst_first(rows, key):
+    # Most severe first, so a cap — here, or the line-length cut below — drops the least.
+    return sorted(rows, key=lambda r: RANK.get(str(key(r) or "").upper(), 4))
 def tail(p, n=600):
     try:
         with open(p, errors="replace") as f:
@@ -459,7 +484,16 @@ if kind == "semgrep":
         out["errors"] = len(errs)
         if errs:
             out["error_sample"] = clip((errs[0] or {}).get("message"), 300)
-        results = d.get("results") or []
+        # Files Semgrep couldn't read through (a parse error, a rule timeout): it says
+        # nothing about them, so nothing in them can be called fixed.
+        missed = []
+        for e in errs:
+            e = e or {}
+            path = e.get("path") or next((sp.get("file") for sp in e.get("spans") or [] if isinstance(sp, dict)), None)
+            if path:
+                missed.append(rel(path))
+        out["unscanned"] = sorted(set(missed))[:100]
+        results = worst_first(d.get("results") or [], lambda r: (r.get("extra") or {}).get("severity"))
         out["total"] = len(results)
         for r in results[:MAX]:
             rid = str(r.get("check_id") or "")
@@ -486,8 +520,10 @@ elif kind == "bandit":
         out["reason"] = "Bandit stopped without a report (exit %s): %s" % (code, tail("/tmp/bandit.err", 300))
     else:
         out["ran"], out["version"] = True, version
-        out["errors"] = len(d.get("errors") or [])
-        results = d.get("results") or []
+        errs = d.get("errors") or []
+        out["errors"] = len(errs)
+        out["unscanned"] = sorted({rel((e or {}).get("filename")) for e in errs if (e or {}).get("filename")})[:100]
+        results = worst_first(d.get("results") or [], lambda r: r.get("issue_severity"))
         out["total"] = len(results)
         for r in results[:MAX]:
             cwe = r.get("issue_cwe") or {}
@@ -548,7 +584,10 @@ if (lockCode !== '0') {
   out.reason = 'npm audit had no answer: ' + clip((d && d.error && (d.error.summary || d.error.code)) || tail('/tmp/audit-' + side + '.err', 300), 300);
 } else {
   out.ran = true;
-  const vulns = Object.entries(d.vulnerabilities || {});
+  // Most severe first, so a cap drops the least.
+  const rank = { critical: 0, high: 1, moderate: 2, low: 3, info: 4 };
+  const vulns = Object.entries(d.vulnerabilities || {})
+    .sort((a, b) => (rank[a[1].severity] ?? 5) - (rank[b[1].severity] ?? 5));
   out.total = vulns.length;
   for (const [name, v] of vulns.slice(0, MAX)) {
     const via = (v.via || []).filter((x) => x && typeof x === 'object').slice(0, 6)
@@ -636,6 +675,9 @@ def plan_python(files: dict[str, str]) -> Optional[ScanPlan]:
         '  if [ ! -f "$T/.ok" ]; then rm -rf "$T"; mv "$P" "$T"; else rm -rf "$P"; fi\n'
         "  echo 'installed the scanners'\n"
         "else echo 'scanners already installed'; fi\n"
+        # Only the tools' own install may fail this step. A side whose requirements
+        # don't resolve is that side's pip-audit's problem, never Semgrep's or Bandit's.
+        "set +e\n"
         + _heredoc("/tmp/aiteam-fetch.py", _RULES_FETCH)
         + f"python /tmp/aiteam-fetch.py {_RULES_DIR} {','.join(REGISTRY_PACKS)} {RULES_MAX_AGE_HOURS} || true\n"
         f"mkdir -p {_SCRATCH}\n"
@@ -948,6 +990,11 @@ def judge(results_by_plan: list[tuple[ScanPlan, list[StepResult], Optional[str]]
                 entry["reason"] = entry["reason"] or f"{name} printed no report: {_tail(r.output)}"
                 continue
             for rep in reports:
+                side = str(rep.get("side") or "")
+                if name in DEPENDENCY_TOOLS and side:
+                    # Per side: the backend's audit running says nothing about the
+                    # frontend's, whose findings can't be called gone if it didn't.
+                    entry.setdefault("sides", {})[side] = RAN if rep.get("ran") else FAILED
                 if rep.get("ran"):
                     entry["status"] = RAN
                     entry["version"] = rep.get("version") or entry["version"]
@@ -956,9 +1003,12 @@ def judge(results_by_plan: list[tuple[ScanPlan, list[StepResult], Optional[str]]
                     entry["reason"] = scrub.scrub(str(rep.get("reason") or f"{name} didn't run."))[:400]
                 if rep.get("truncated") or int(rep.get("total") or 0) > len(rep.get("findings") or []):
                     truncated = True
+                    # A report cut short can't say a finding is gone: it may be in the cut.
+                    entry["truncated"] = True
                 if rep.get("errors"):
                     entry["errors"] = int(entry.get("errors") or 0) + int(rep["errors"])
-                side = str(rep.get("side") or "")
+                if rep.get("unscanned"):
+                    entry["unscanned"] = sorted(set(entry.get("unscanned") or []) | {str(x) for x in rep["unscanned"]})
                 for raw in rep.get("findings") or []:
                     if not isinstance(raw, dict):
                         continue
@@ -981,6 +1031,8 @@ def judge(results_by_plan: list[tuple[ScanPlan, list[StepResult], Optional[str]]
         f.fix_hint = scrub.scrub(f.fix_hint)
     kept = dedupe(found)
     if len(kept) > MAX_KEPT:
+        for f in kept[MAX_KEPT:]:
+            tools.setdefault(f.tool, {})["truncated"] = True
         kept, truncated = kept[:MAX_KEPT], True
     for name, entry in tools.items():
         entry["count"] = sum(1 for f in kept if f.tool == name)
@@ -1050,6 +1102,8 @@ def run_scan(files: dict[str, str], owners: dict[str, str]) -> ScanResult:
     if chosen is None:
         return ScanResult.skipped(why or "No sandbox is available to run the scanners in.")
     started = time.monotonic()
+    # One budget for the whole scan, shared by its sandboxes — never one each.
+    deadline = started + _budget()
     done: list[tuple[ScanPlan, list[StepResult], Optional[str]]] = []
     user = identity.current_user_id() or "shared"
     for plan in plans:
@@ -1058,9 +1112,13 @@ def run_scan(files: dict[str, str], owners: dict[str, str]) -> ScanResult:
         # npm's metadata cache is the account's own.
         cache = "scan-tools" if plan.image == PYTHON_IMAGE else f"scan-{user}"
         unrun = [StepResult(s.name, s.label, None, 0.0, skipped=True) for s in plan.steps]
+        left = deadline - time.monotonic()
+        if left < 20:
+            done.append((plan, unrun, "The scan ran out of time before this part of it."))
+            continue
         try:
             results = runner._execute(plan.image, plan.files, plan.steps, "security", "scanning", chosen,
-                                      cache=cache, seconds=_budget())
+                                      cache=cache, seconds=left)
         except runner._CouldntRun as e:
             log.warning("The scanners couldn't run: %s", e)
             done.append((plan, unrun, str(e)))

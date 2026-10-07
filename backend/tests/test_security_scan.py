@@ -99,7 +99,7 @@ _SEMGREP_JSON = {
             },
         },
     ],
-    "errors": [],
+    "errors": [{"type": "Syntax error", "message": "Syntax error at line backend/broken.py:3", "path": "/work/backend/broken.py"}],
 }
 _BANDIT_JSON = {
     "errors": [],
@@ -163,6 +163,11 @@ def test_the_readers_turn_each_tools_json_into_findings_with_a_rule_and_a_line(t
     result = scan.judge([(_plan(scan.SEMGREP, scan.BANDIT, scan.PIP_AUDIT), outputs, None)], _TREE, owners)
 
     assert result.status == "ok" and result.ran(scan.SEMGREP) and result.ran(scan.BANDIT)
+    # A file Semgrep couldn't parse is one it says nothing about.
+    assert result.tools[scan.SEMGREP]["unscanned"] == ["backend/broken.py"]
+    assert not result.covers(scan.SEMGREP, "backend/broken.py") and result.covers(scan.SEMGREP, "backend/main.py")
+    # pip-audit ran for the backend, so the backend's manifest is covered.
+    assert result.covers(scan.PIP_AUDIT, "backend/requirements.txt")
     sqli = next(f for f in result.findings if f.cwe == "CWE-89")
     # The config path Semgrep prefixes every rule id with is gone.
     assert sqli.rule_id == "aiteam.javascript.sql-built-from-request"
@@ -435,12 +440,13 @@ def test_the_gate_asks_about_a_scanners_small_severe_findings(client):
         effective_approval_mode = Mode.CHECKPOINTS.value
         cost_cap_usd = None
 
-    dep = scan.ToolFinding(tool="npm audit", rule_id="next", severity="critical", path="frontend/package.json",
-                           line=4, category="Vulnerable dependency", title="next has a known vulnerability")
-    gate = decide_gate(P(), Phase.SECURITY_ENGINEER.value, {"findings": []}, "valid", scan=_scan(dep))
+    (dep,) = remediation.tool_findings(_scan(scan.ToolFinding(
+        tool="npm audit", rule_id="next", severity="critical", path="frontend/package.json",
+        line=4, category="Vulnerable dependency", title="next has a known vulnerability")))
+    gate = decide_gate(P(), Phase.SECURITY_ENGINEER.value, {"findings": []}, "valid", tool_findings=[dep])
     assert gate.kind == GateKind.SECURITY.value and "scanners raised 1 finding" in gate.note
-    # A serious one is the crew's: the loop has dealt with it before any gate is read.
-    assert decide_gate(P(), Phase.SECURITY_ENGINEER.value, {"findings": []}, "valid", scan=_scan(_hit(5))) is None
+    # Nothing unsettled for a person: no stop.
+    assert decide_gate(P(), Phase.SECURITY_ENGINEER.value, {"findings": []}, "valid", tool_findings=[]) is None
 
 
 # ── the whole loop, end to end ───────────────────────────────────────────────
@@ -500,6 +506,8 @@ def test_a_rescan_that_cannot_run_fixes_nothing_and_says_so(client, monkeypatch)
     assert finding["status"] == "fix_requested"
     warden = next(p for p in project["phases"] if p["phase"] == "security_engineer")
     assert warden["scan"]["status"] == "skipped" and "Docker isn't running" in warden["scan"]["reason"]
+    # The poll carries the scan's count, never its findings: those are `/security`'s.
+    assert "findings" not in warden["scan"] and warden["scan"]["found"] == 0
 
 
 def test_runner_unavailable_means_scanners_skipped_and_the_card_says_so(client, monkeypatch):
@@ -558,10 +566,22 @@ def test_a_vulnerable_dependency_stops_the_review_with_fix_available(client, mon
     assert (dep["tool"], dep["rule_id"], dep["path"], dep["line"]) == ("npm audit", "lodash", "frontend/package.json", 3)
     assert "fixAvailable: lodash@4.18.1" in dep["recommendation"]
     assert dep["blocks"] and not dep["serious"]
+    # No agent can change a version the platform sets: sending it back is refused.
+    refused = client.post(f"/api/projects/{pid}/security/{dep['key']}/fix")
+    assert refused.status_code == 400 and "platform sets package versions" in refused.json()["detail"]
     # Blocks the way any severe finding a person decides does: waive it, or it stays.
     assert client.post(f"/api/projects/{pid}/approve").status_code == 409
     waived = client.post(f"/api/projects/{pid}/security/{dep['key']}/waive", json={"reason": "No user input reaches lodash"})
     assert waived.status_code == 200
+    # Waived holds: the gate reads what is unsettled, not what the scanner reported.
+    from app.db.base import SessionLocal
+    from app.db.models import Project
+    from app.orchestration.runner import runner
+
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        warden = runner.latest_row(db, project, Phase.SECURITY_ENGINEER.value)
+        assert runner.gate_for(project, warden) is None
     assert client.post(f"/api/projects/{pid}/approve").status_code == 200
 
 
@@ -647,3 +667,83 @@ def test_the_real_scanners_find_the_injection_the_secret_and_the_dependency(monk
     # Three Semgrep rules and Bandit's B602 on the one `shell=True` line: one finding.
     shell = [f for f in result.findings if f.path == "backend/main.py" and f.line == 6]
     assert len(shell) == 1 and len(shell[0].also) >= 2, [f.as_dict() for f in shell]
+
+
+# ── what the review found (#77, PR #88) ──────────────────────────────────────
+def test_a_side_that_wont_resolve_never_stops_semgrep_or_bandit():
+    plan = scan.plan_python(_TREE)
+    install = plan.steps[0].command
+    # The tools' own install is the only thing allowed to fail the step.
+    assert install.index("set +e") < install.index("pip install --dry-run")
+    assert install.index("set -e") < install.index(f"semgrep=={scan.SEMGREP_VERSION}") < install.index("set +e")
+
+
+def test_a_rescan_only_speaks_for_what_it_covered():
+    result = scan.ScanResult(status="ok", tools={
+        "semgrep": {"status": "ran", "unscanned": ["backend/broken.py"]},
+        "bandit": {"status": "ran", "truncated": True},
+        "npm audit": {"status": "ran", "sides": {"backend": "ran", "frontend": "failed"}},
+        "pip-audit": {"status": "failed"},
+    })
+    assert result.covers("semgrep", "backend/app.py")
+    assert not result.covers("semgrep", "backend/broken.py")  # it couldn't parse that file
+    assert not result.covers("bandit", "backend/app.py")  # its report was cut short
+    assert result.covers("npm audit", "backend/package.json")
+    assert not result.covers("npm audit", "frontend/package.json")  # the other side failed
+    assert not result.covers("pip-audit", "backend/requirements.txt")
+
+
+def test_a_failed_side_or_a_cut_report_resolves_nothing(client):
+    from app.core.constants import FindingStatus
+    from app.db.base import SessionLocal
+
+    dep = scan.ToolFinding(tool="npm audit", rule_id="lodash", severity="high", path="frontend/package.json",
+                           line=3, category="Vulnerable dependency", title="lodash has a known vulnerability")
+    with SessionLocal() as db:
+        project = _project(db, client)
+        rows = remediation.sync_dispositions(db, project, {"findings": []}, scan=_scan(dep, _hit(5)))
+        assert len(rows) == 2
+        rescan = _scan()
+        rescan["tools"]["npm audit"]["sides"] = {"backend": "ran", "frontend": "failed"}
+        rescan["tools"]["semgrep"]["truncated"] = True
+        rows = remediation.sync_dispositions(db, project, {"findings": []}, scan=rescan)
+        assert {r.status for r in rows} == {FindingStatus.OPEN.value}
+
+
+def test_two_new_findings_on_identical_lines_are_two_findings(client):
+    from app.db.base import SessionLocal
+
+    with SessionLocal() as db:
+        project = _project(db, client)
+        rows = remediation.sync_dispositions(
+            db, project, {"findings": []}, scan=_scan(_hit(10, "same-code"), _hit(40, "same-code"))
+        )
+        assert sorted(r.line for r in rows) == [10, 40]
+
+
+def test_a_dotfile_keeps_its_dot():
+    assert remediation._path_and_line(".env")[0] == ".env"
+    assert remediation._path_and_line("./backend/.env:3") == ("backend/.env", 3)
+    assert remediation._same_file(".env", "backend/.env")
+    assert not remediation._same_file("env", "backend/.env")
+
+
+def test_the_scan_shares_one_budget_across_its_sandboxes(monkeypatch):
+    from app.build import runner
+
+    budgets = []
+
+    class Slow:
+        kind = "docker"
+
+        def run(self, image, files, steps, limits, on_cancel, on_step):
+            budgets.append(limits.seconds)
+            return [StepResult(s.name, s.label, 0, 0.1, "") for s in steps]
+
+    clock = iter([0.0, 0.0, 300.0, 300.0, 300.0, 300.0])
+    monkeypatch.setattr(scan.time, "monotonic", lambda: next(clock, 300.0))
+    monkeypatch.setattr(settings, "security_scan_enabled", True)
+    monkeypatch.setattr(settings, "security_scan_timeout_seconds", 420)
+    monkeypatch.setattr(runner, "engine", Slow())
+    scan.run_scan({**_TREE, "frontend/package.json": "{}"}, {})
+    assert budgets[0] == 420 and budgets[1] <= 120

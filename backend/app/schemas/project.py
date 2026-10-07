@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import AliasChoices, BaseModel, BeforeValidator, Field, model_validator
+from pydantic import AliasChoices, BaseModel, BeforeValidator, Field, field_validator, model_validator
 from typing_extensions import Annotated
 
 from app.core.constants import ApprovalMode, RoutingMode
@@ -198,9 +198,20 @@ class PhaseResultOut(BaseModel):
     #: runs: [{side, framework, passed, failed, errored, skipped, failures, coverage}]}`.
     #: `None` for every other phase, and for QA rows from before tests were run.
     test_run: Optional[dict] = None
-    #: The security scanners (#77): `{status: ok|skipped, summary, reason, tools,
-    #: findings}`. `None` for every phase but Warden, and Warden rows from before.
+    #: The security scanners (#77): `{status: ok|skipped, summary, reason, tools, found}`.
+    #: `None` for every phase but Warden, and Warden rows from before. Sent without its
+    #: findings — up to two hundred, on every poll, for every audit — with their count
+    #: instead: the findings themselves are `/security`'s.
     scan: Optional[dict] = None
+
+    @field_validator("scan", mode="before")
+    @classmethod
+    def _scan_without_findings(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        out = {k: v for k, v in value.items() if k != "findings"}
+        out["found"] = len(value.get("findings") or [])
+        return out
 
     #: The procedural skills this phase was actually given, by name and in the order
     #: they were injected. `None` on rows written before the library existed — which

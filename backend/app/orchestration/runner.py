@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from sqlalchemy import update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.agents import get_agent
 from app.agents.base import AgentContext
@@ -356,8 +356,15 @@ class PipelineRunner:
             self.build_problems(project),
             # Only the Ship review reads it, so only the Ship review pays for it.
             self.failing_tests(project) if row.phase == SHIP_GATE_PHASE.value else None,
-            scan=row.scan if row.phase == Phase.SECURITY_ENGINEER.value else None,
+            tool_findings=self._small_tool_findings(project) if row.phase == Phase.SECURITY_ENGINEER.value else None,
         )
+
+    @staticmethod
+    def _small_tool_findings(project: Project) -> list:
+        """The scanners' findings a person decides, still unsettled (#77) — read from
+        the dispositions, so a waiver holds across every re-audit."""
+        db = object_session(project)
+        return remediation.unresolved(db, project, serious=False) if db is not None else []
 
     @staticmethod
     def database_question(project: Project) -> Optional[Gate]:
@@ -878,7 +885,7 @@ class PipelineRunner:
                     "phase": remediation.route_owner(f),
                     "kind": "security",
                     # The rule the rescan runs again (#77).
-                    **({"tool": f.tool, "rule_id": f.rule_id, "cwe": f.cwe} if f.tool else {}),
+                    **({"tool": f.tool, "rule_id": f.rule_id, "cwe": f.cwe, "path": f.path} if f.tool else {}),
                 }
                 for f in findings
             ],
@@ -916,7 +923,8 @@ class PipelineRunner:
         return [
             p.get("key")
             for p in live.get("problems") or []
-            if p.get("tool") and (result is None or not result.ran(p["tool"]))
+            if p.get("tool")
+            and (result is None or not result.covers(p["tool"], p.get("path") or (p.get("where") or "").rsplit(":", 1)[0]))
         ]
 
     @staticmethod

@@ -235,7 +235,7 @@ def decide_gate(
     stack_violations: Optional[list] = None,
     build_problems: Optional[list] = None,
     failing_tests: Optional[list] = None,
-    scan: Optional[dict] = None,
+    tool_findings: Optional[list] = None,
 ) -> Optional[Gate]:
     """Should the pipeline stop after `phase_key`? Returns the gate, or None.
 
@@ -250,8 +250,10 @@ def decide_gate(
     `stack_violations` is where this phase contradicts the architecture it was built
     on. That one is answered before the review policy is consulted at all — see below.
 
-    `scan` is the security scanners' run on Warden's row (#77): their critical and high
-    findings that are a person's call rather than the crew's stop here too.
+    `tool_findings` are the scanners' findings at Warden (#77) that hold the build and
+    are a person's call rather than the crew's — critical or high, not yet fixed or
+    waived (`remediation.unresolved(serious=False)`). They stop here too; one already
+    waived does not, however many times a re-audit's scanner reports it again.
     """
     mode = project.effective_approval_mode
 
@@ -327,8 +329,8 @@ def decide_gate(
         # Since #77 everything Warden itself reports is a review note — never the
         # crew's — so its severe ones are all asked about here, beside the scanners'
         # severe findings that are small (a dependency, or under the auto-fix bar).
-        severe = [f for f in severe_findings(output) if not _serious(f)]
-        tools = _small_tool_findings(scan)
+        severe = severe_findings(output)
+        tools = list(tool_findings or [])
         if severe or tools:
             # Both facts, not the louder one. "Warden raised a critical" read alone
             # invites the reviewer to fix that one thing and move on — when the
@@ -343,28 +345,6 @@ def decide_gate(
             return Gate(GateKind.UNCHECKED.value, unchecked)
 
     return None
-
-
-def _serious(finding: dict) -> bool:
-    """A finding in Warden's own report is the model's (#77), and never the crew's."""
-    from app.orchestration.remediation import SOURCE_MODEL, finding_is_serious
-
-    return finding_is_serious(
-        SOURCE_MODEL,
-        None,
-        str(read_key(finding, "severity", "risk", "level", "impact") or ""),
-        str(read_key(finding, "category", "type", "class") or ""),
-        str(read_key(finding, "title", "name", "issue", "summary") or ""),
-    )
-
-
-def _small_tool_findings(scan: Optional[dict]) -> list:
-    """The scanners' critical and high findings that are a person's to decide."""
-    if not isinstance(scan, dict):
-        return []
-    from app.orchestration.remediation import tool_findings
-
-    return [f for f in tool_findings(scan) if f.severe and not f.serious]
 
 
 def _both(*notes: Optional[str]) -> Optional[str]:

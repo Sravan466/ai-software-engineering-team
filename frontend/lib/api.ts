@@ -328,6 +328,8 @@ export type Scan = {
   seconds: number;
   tools: Partial<Record<ScanToolName, ScanTool>>;
   findings?: ScanFinding[];
+  /** How many findings the scan kept. The phase payload sends this, not `findings`. */
+  found?: number;
   truncated?: boolean;
   /** Set when Semgrep ran without some registry packs. */
   rules?: string | null;

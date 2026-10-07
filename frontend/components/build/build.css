@@ -1376,6 +1376,7 @@ a.finding-cwe:focus-visible,
 }
 
 .finding-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 11px; }
+.finding-acts-hint { flex-basis: 100%; max-width: 72ch; }
 .finding-waive {
   display: flex;
   align-items: flex-end;

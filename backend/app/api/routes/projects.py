@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.connector.hub import hub
 from app.api.deps import current_user, get_project
-from app.build import dbconnect
+from app.build import dbconnect, scan
 from app.core import artifacts, model_roles, project_secrets, secretbox
 from app.core.config import settings
 from app.core.constants import (
@@ -852,6 +852,15 @@ def fix_finding(
             400,
             "No phase owns this finding — it doesn't point at a file anyone wrote. "
             "Fix it by sending a phase back with your own note, or waive it.",
+        )
+    if remediation.row_source(row) == remediation.SOURCE_TOOL and row.tool in scan.DEPENDENCY_TOOLS:
+        # The platform owns the manifests (#77): no agent can change a version, so a
+        # rebuild would come back with the same dependency and the same finding.
+        raise HTTPException(
+            400,
+            "This is a dependency's known vulnerability. The platform sets package "
+            "versions, so no agent can fix it by rebuilding. Waive it with a reason, or "
+            "update the version after you download the build.",
         )
     if project.status != PipelineStatus.AWAITING_APPROVAL.value:
         raise (

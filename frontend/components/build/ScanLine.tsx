@@ -25,7 +25,8 @@ const WHAT: Record<ScanToolName, string> = {
 export default function ScanLine({ scan }: { scan: Scan | null | undefined }) {
   if (!scan) return null;
   const skipped = scan.status === "skipped";
-  const found = scan.findings?.length ?? 0;
+  // The phase payload carries the count, not the findings (those are `/security`'s).
+  const found = scan.found ?? scan.findings?.length ?? 0;
   const tools = ORDER.filter((t) => scan.tools[t]);
   const ran = tools.filter((t) => scan.tools[t]?.status === "ran");
 

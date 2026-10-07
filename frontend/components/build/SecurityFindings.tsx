@@ -478,6 +478,9 @@ function FindingCard({
   const status = statusOf(f);
   const needsDecision = !SETTLED.has(f.status);
   const mine = working === f.key;
+  // The platform sets package versions: a rebuild can't change one, so a dependency's
+  // finding is waived or updated by hand, never sent back.
+  const dependency = f.source === "tool" && (f.tool === "npm audit" || f.tool === "pip-audit");
   return (
     <li className="finding" data-severity={f.severity} data-status={f.status} data-source={f.source}>
       <div className="finding-top">
@@ -513,7 +516,7 @@ function FindingCard({
       {needsDecision && waiving !== f.key && (!f.serious || allowWaive) && (
         <div className="finding-acts">
           {/* On "needs help" the crew already sent these back, round after round. */}
-          {scope !== "serious" && (
+          {scope !== "serious" && !dependency && (
             <button
               className="btn btn-sm btn-primary"
               disabled={busy || mine || !f.owner_phase}
@@ -532,6 +535,12 @@ function FindingCard({
           <button className="btn btn-sm" disabled={busy || mine} onClick={() => setWaiving(f.key)}>
             Waive it
           </button>
+          {dependency && (
+            <span className="field-hint finding-acts-hint">
+              The platform sets package versions, so no agent can fix this by rebuilding. Waive it, or
+              update the version after you download the build.
+            </span>
+          )}
         </div>
       )}
 
