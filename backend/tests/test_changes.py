@@ -322,6 +322,21 @@ def test_a_diff_keeps_content_lines_that_look_like_headers():
     assert (found["added"], found["removed"]) == (1, 1)
 
 
+def test_a_diff_skips_a_file_whose_lines_are_all_the_same():
+    from app.orchestration import versions
+
+    before = {"files": [{"path": "a.py", "content": "x = 1\ny = 2", "phase": "backend_engineer"}]}
+    after = {"files": [{"path": "a.py", "content": "x = 1\r\ny = 2\n", "phase": "backend_engineer"}]}
+    assert versions.diff(before, after) == {"files": [], "counts": {"added": 0, "changed": 0, "deleted": 0}}
+
+
+def test_the_edit_task_asks_for_lists_that_arent_files_in_full():
+    from app.agents.system_design import SystemDesignAgent
+
+    task = SystemDesignAgent().edit_task_text()
+    assert "replaces it whole" in task and "comes back in full" in task
+
+
 def test_two_requests_at_once_record_one_first_version(client, script):
     import threading
 

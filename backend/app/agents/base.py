@@ -90,7 +90,8 @@ _EDIT_TASK = (
     "with the change made. In every list of files (`files`, `test_files`, …) return ONLY "
     "the files you add or change, each complete, and put the paths of files you remove in "
     "`deleted`. Every file you don't return is kept exactly as it is; every other field "
-    "you leave out keeps its current value."
+    "you leave out keeps its current value, and one you return replaces it whole — so a "
+    "list that isn't files (endpoints, models, pages) comes back in full, with the change in it."
 )
 #: The text wrapping each optional section. Written once and used twice — to build
 #: the section, and to charge its cost against the budget — because a frame that is

@@ -434,7 +434,8 @@ def diff(before: dict, after: dict) -> dict:
     for path in sorted(set(a) | set(b)):
         old = a.get(path, {}).get("content")
         new = b.get(path, {}).get("content")
-        if old == new:
+        if old == new or (old is not None and new is not None and old.splitlines() == new.splitlines()):
+            # Only line endings or the last newline moved: no line of it changed.
             continue
         if old is None:
             status = "added"
