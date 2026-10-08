@@ -86,7 +86,18 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         "deploy_log",
         # Nullable (#78): a build whose preview was never opened remembers nothing about it.
         "preview_app",
+        # All nullable (#79): a finished build from before versions gets its v1 the first
+        # time it is read (`versions.ensure_first`), and nothing was deployed or pushed
+        # as a version before then. The `versions` and `change_requests` tables are new,
+        # so `create_all` makes them.
+        "current_version_id",
+        "deployed_version",
+        "github_pushed_version",
+        "deploying_version",
+        "decisions",
     ),
+    # Nullable (#79): a version recorded before it was counted is counted when listed.
+    "versions": ("file_count",),
     "phase_results": (
         # Nullable (#63): only a phase that fell back past a refused key has one.
         "fallback_note",

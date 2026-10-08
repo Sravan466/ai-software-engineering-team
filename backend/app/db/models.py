@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import settings
@@ -195,6 +195,23 @@ class Project(Base):
     #: over those changes (`app.preview.app_state`). Null until the preview is used.
     preview_app: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # ── versions and change requests (#79) ───────────────────────────────────
+    #: The version the build is at: what Deploy, Download and a GitHub push send while
+    #: a change is being made on top of it. Null on a build that never finished, and on
+    #: a finished build from before versions until its first version is recorded.
+    current_version_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: The version number the last deploy and the last GitHub push sent. Null when
+    #: nothing went out since versions existed.
+    deployed_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    github_pushed_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: The version a Vercel deploy in flight is sending; it becomes `deployed_version`
+    #: once Vercel reports it ready, so a deploy that fails doesn't relabel what's live.
+    deploying_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: What this app has settled on, one line each — its stack, then every change kept
+    #: ("v2: Add login with email + password"). Handed to the crew when it changes the
+    #: app, so a change doesn't undo an earlier one. Null until the build finishes.
+    decisions: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     # ── the stack this build is held to ──────────────────────────────────────
     #: Frozen once the architecture is settled, and binding on every phase after it:
     #: language, frameworks, database, test runner, package manager. Mirrored out of
@@ -237,6 +254,14 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
         order_by="PreviewRevision.created_at",
+    )
+    # Deleted with the build. Read through queries (`orchestration.versions`) rather
+    # than these collections, which a long-lived runner session would hold stale.
+    versions: Mapped[list["Version"]] = relationship(
+        cascade="all, delete-orphan", order_by="Version.number"
+    )
+    change_requests: Mapped[list["ChangeRequest"]] = relationship(
+        cascade="all, delete-orphan", order_by="ChangeRequest.number"
     )
 
     # ── derived state ────────────────────────────────────────────────────────
@@ -311,6 +336,20 @@ class Project(Base):
         if found is None or found.get("phase") != self.current_phase:
             return None
         return found
+
+    @property
+    def current_version(self) -> Optional[dict]:
+        """`{number, label, kind, created_at}` of the version the build is at (#79)."""
+        from app.orchestration import versions
+
+        return versions.summary_of(self)
+
+    @property
+    def change(self) -> Optional[dict]:
+        """The change request being made on this build right now, if one is (#79)."""
+        from app.orchestration import changes
+
+        return changes.open_summary(self)
 
 
 class PhaseResult(Base):
@@ -458,6 +497,74 @@ class PreviewRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="preview_revisions")
+
+
+class Version(Base):
+    """One named state of a finished build: what Deploy, Download and a push send (#79).
+
+    v1 is the first build; every change kept, preview edit landed or version restored
+    adds one. A version holds its own copy of each phase's deliverable (`snapshot`),
+    not only pointers to the rows: a change rewinds phases and their rows are replaced,
+    and a version that pointed at rows that no longer exist could not be restored.
+    Never edited or deleted once written — restoring v1 after v3 makes v4.
+    """
+
+    __tablename__ = "versions"
+    # One v2 per build: two writers racing for the next number can't both take it.
+    __table_args__ = (UniqueConstraint("project_id", "number", name="uq_versions_project_number"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: "First build", the change's words, "Restored v1".
+    label: Mapped[str] = mapped_column(String(300), default="")
+    #: first_build | change | restore | edit — how it came to be.
+    kind: Mapped[str] = mapped_column(String(16), default="change")
+    change_request_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: The version a restore brought back.
+    restored_from: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: The phase rows that were current when it was recorded, by id.
+    phase_result_ids: Mapped[list] = mapped_column(JSON, default=list)
+    #: `{"charter": …, "phases": [{id, phase, agent, output, content_md, …}]}` — enough
+    #: to assemble the archive and to make the version current again.
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: How many files it holds, counted once when recorded, so a list of versions
+    #: doesn't read every version's code to say so.
+    file_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChangeRequest(Base):
+    """One message to a finished build: "now add login" (#79).
+
+    Planned by a small scoping call, then made by the agents that own the code — on
+    top of the files they wrote, through the same compile check, build, tests, scan
+    and fix loop as the first build — and reviewed. Kept, it becomes a version; a
+    change that is discarded, or never gets there, leaves the current version as it was.
+    """
+
+    __tablename__ = "change_requests"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: open | done | failed | discarded. What an open one is doing right now — planning,
+    #: running, waiting for review, needing help — is read off the build (`changes.state`).
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    #: The scoping pass: `{summary, phases, files_likely, needs_design, needs_db_change}`.
+    plan: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: Why it failed or was discarded, in words a person reads.
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The version it was made on, and the one it produced once kept.
+    base_version_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    version_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: What the build held before the change, put back if it's discarded: the fix
+    #: loop's record (`auto_fix`) and its round count.
+    saved: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DebateRecord(Base):

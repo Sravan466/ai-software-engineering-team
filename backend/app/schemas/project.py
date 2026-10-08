@@ -153,6 +153,18 @@ class RedoRequest(BaseModel):
     feedback: str = Field(..., min_length=1, description="What to change.")
 
 
+class ChangeCreate(BaseModel):
+    """A change to a finished build, in the person's words (#79): "now add login"."""
+
+    text: str = Field(..., min_length=1, max_length=2000, description="What should change.")
+
+
+class DiscardRequest(BaseModel):
+    """Why a change is being thrown away — optional, kept with it."""
+
+    reason: Optional[str] = Field(None, max_length=1000)
+
+
 class PhaseResultOut(BaseModel):
     id: str
     phase: str
@@ -283,6 +295,11 @@ class ProjectOut(BaseModel):
     deploy_target: Optional[str] = None
     deploy_url: Optional[str] = None
     deploy_status: Optional[str] = None
+    #: The version the build is at, and the change being made on it (#79).
+    current_version: Optional[dict] = None
+    change: Optional[dict] = None
+    deployed_version: Optional[int] = None
+    github_pushed_version: Optional[int] = None
 
     #: The technology decisions frozen after the architecture was approved, which
     #: every phase after it is written against and checked against. `None` on a run

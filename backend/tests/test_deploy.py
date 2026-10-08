@@ -136,12 +136,19 @@ class FakeGitHub:
             if repo["head"] is None:
                 return httpx.Response(409, json={"message": "Git Repository is empty."})
             return httpx.Response(200, json={"object": {"sha": repo["head"]}})
+        if rest.startswith("git/trees/") and request.method == "GET":
+            files = self.trees.get(parts[-1]) or {}
+            return httpx.Response(200, json={"tree": [{"path": p, "type": "blob"} for p in files], "truncated": False})
         if rest.startswith("git/commits/") and request.method == "GET":
             return httpx.Response(200, json={"tree": {"sha": self.commits[parts[-1]]["tree"]}})
         if rest == "git/trees":
             data = json.loads(body)
             files = dict(self.trees[data["base_tree"]])
-            files.update({e["path"]: e["content"] for e in data["tree"]})
+            for e in data["tree"]:
+                if "content" in e:
+                    files[e["path"]] = e["content"]
+                elif e.get("sha", "") is None:
+                    files.pop(e["path"], None)  # a null sha deletes the path
             return httpx.Response(201, json={"sha": self._tree_sha(files)})
         if rest == "git/commits":
             data = json.loads(body)

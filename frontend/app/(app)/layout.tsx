@@ -2,6 +2,7 @@ import "@/components/shell/shell.css";
 import "@/components/agents/agents.css";
 import "@/components/build/build.css";
 import "@/components/build/progress.css";
+import "@/components/build/changes.css";
 import "@/components/models/models.css";
 import "@/components/setup/setup.css";
 import "@/components/deploy/deploy.css";

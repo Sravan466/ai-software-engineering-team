@@ -54,11 +54,11 @@ from app.core.constants import (
 )
 from app.core.logging import get_logger
 from app.db.base import SessionLocal
-from app.db.models import DebateRecord, PhaseResult, PreviewRevision, Project
+from app.db.models import ChangeRequest, DebateRecord, PhaseResult, PreviewRevision, Project, Version
 from app.preview import app_state
 from app.preview import history as preview_history
 from app.memory.store import memory_store
-from app.orchestration import activity, autofix, claim, connectors, remediation
+from app.orchestration import activity, autofix, changes, claim, connectors, remediation, versions
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import Charter, binding_on
 from app.orchestration.graph import connectors_note, graph, gather_skills
@@ -892,6 +892,346 @@ class PipelineRunner:
             self._park(db, project, Gate(spec.get("was_gate") or project.gate_kind or GateKind.PHASE.value,
                                          spec.get("was_note", project.gate_note)))
 
+    # ── change requests on a finished build (#79) ─────────────────────────────
+    @_as_owner
+    def change(self, db: Session, project: Project, change_id: str) -> Project:
+        """Make one change request on the finished build. The route has claimed it.
+
+        Scoped first — one small call names who edits what — then started as the fix
+        loop starts a round: a redo of the earliest phase that edits, carrying on into
+        the run, with every later phase told what it has to do (`_change_rewind`). From
+        there it is the pipeline: the compile check, the real build, the tests, the
+        scanners and the fix loop, and the Ship review as the change's review.
+        A change that never gets as far as its first edit changed nothing: it is
+        closed as failed and the build is finished again, at the same version.
+        """
+        found = db.get(ChangeRequest, change_id)
+        if found is None or found.project_id != project.id or found.status != changes.OPEN:
+            self._finished_again(db, project)
+            return project
+        try:
+            plan = self._scope(db, project, found)
+        except (CancelledRun, RequestCancelled):
+            return self._change_failed(db, project, found, "Stopped before the crew started on it.")
+        except ProviderError as e:
+            return self._change_failed(db, project, found, f"The planner's model didn't answer: {e}")
+        except claim.Superseded:
+            raise
+        except Exception as e:  # noqa: BLE001 - nothing was changed yet, so nothing is lost
+            log.exception("Scoping change #%d on %s failed", found.number, project.id)
+            db.rollback()
+            return self._change_failed(db, project, found, f"The change couldn't be planned: {e}")
+
+        rows = {r.phase: r for r in versions.current_rows(db, project)}
+        has = {phase for phase, r in rows.items() if isinstance(r.output, dict) and r.output}
+        edit = changes.edit_phases(plan, has)
+        first = changes.first_phase(plan, has)
+        if first is None:
+            return self._change_failed(db, project, found, "Nothing in this app writes code the change could edit.")
+        record = {
+            "id": found.id,
+            "number": found.number,
+            "text": found.text,
+            "plan": plan,
+            "decisions": list(project.decisions or changes.first_decisions(project)),
+            "edit": edit,
+            "base": {phase: rows[phase].output for phase in edit},
+            "done": [],
+        }
+        found.plan = plan
+        found.saved = {"auto_fix": project.auto_fix, "remediation_rounds": project.remediation_rounds}
+        # A change is a new episode for every kind of problem: a fresh budget, the
+        # first approach first — whatever the build that finished went through.
+        data = autofix.load(project)
+        for t in data["tracks"].values():
+            autofix.settle(t)
+        autofix.save(project, data)
+        # Positioned at the end, as a deploy fix is, so the redo rewinds everything
+        # after the phase it starts from.
+        project.current_phase = PHASE_ORDER[-1].value
+        db.commit()
+        log.info("Change #%d on %s: %s (%s first; editing %s)", found.number, project.id, found.text[:80], first, ", ".join(edit))
+        self.redo(
+            db,
+            project,
+            first,
+            changes.note_for(record, first),
+            extra_feedback={p: changes.note_for(record, p) for p in edit if p != first},
+            continue_after=True,
+            start_change=record,
+        )
+        if not self._change_started(project, found) and project.status in (
+            PipelineStatus.FAILED.value,
+            PipelineStatus.CANCELLED.value,
+            PipelineStatus.PAUSED.value,
+        ):
+            # The first edit never landed — the model failed, or Stop came first. The
+            # redo put the attempt back, so the build holds exactly what it did.
+            db.refresh(project)
+            return self._change_failed(
+                db, project, found, project.last_error or "The change stopped before anything was changed."
+            )
+        return project
+
+    def _scope(self, db: Session, project: Project, found: ChangeRequest) -> dict:
+        """The scoping pass: which phases edit, which files are likely to change."""
+        from app.agents.change_planner import planner
+        from app.orchestration.graph import _serialize_result
+
+        rows = versions.current_rows(db, project)
+        has = {r.phase for r in rows if isinstance(r.output, dict) and r.output}
+        with _checkpoint_lock(project.id):
+            values = dict(graph.get_state(_config(project.id)).values)
+        ctx = AgentContext(
+            idea=project.idea,
+            routing_mode=RoutingMode(values.get("routing_mode") or project.routing_mode or "local_only"),
+            preferred_model=values.get("preferred_model") or project.preferred_model,
+            charter=Charter.from_dict(project.charter),
+            change=found.text,
+            extra_context=self._app_index(project, rows),
+        )
+        activity.clear(project.id)
+        with _heartbeat(project.id), inflight.agent("Change planner"):
+            result = planner.run(ctx)
+        claim.check()
+        self._record_usage(db, project, {**_serialize_result("change_plan", planner.title, result), "phase": "change_plan"})
+        plan = changes.normalise_plan(result.output, found.text, has)
+        found.plan = plan
+        db.commit()
+        return plan
+
+    @staticmethod
+    def _app_index(project: Project, rows: list) -> str:
+        """What the planner reads: every file by phase with what it's for, and what
+        the app has settled on."""
+        lines: list[str] = []
+        order = {p.value: i for i, p in enumerate(PHASE_ORDER)}
+        for row in sorted(rows, key=lambda r: order.get(r.phase, 99)):
+            files = list(artifacts.iter_files(row.output if isinstance(row.output, dict) else {}))
+            if not files:
+                continue
+            lines.append(f"{row.phase}:")
+            purposes = {
+                str(f.get("path") or "").strip().lstrip("/"): str(f.get("purpose") or f.get("targets") or "")
+                for key in ("files", "test_files")
+                for f in (row.output or {}).get(key) or []
+                if isinstance(f, dict)
+            }
+            for path, _code, _lang in files:
+                purpose = purposes.get(path, "").strip()
+                lines.append(f"- {path}" + (f" — {purpose[:100]}" if purpose else ""))
+        notes = project.decisions or changes.first_decisions(project)
+        if notes:
+            lines += ["", "Already settled:"] + [f"- {n}" for n in notes[-10:]]
+        return "\n".join(lines)
+
+    def _change_rewind(
+        self, db: Session, project: Project, change: dict, phase_key: str, keep: Optional[dict], extra: Optional[dict]
+    ) -> tuple[dict, dict]:
+        """What each phase a change's rewind drops does next (#79).
+
+        A phase the change still has to edit edits (its note goes with the rewind). The
+        auditor and the estimator run again in full: an audit and an estimate are of the
+        whole app. Everything else — a phase this change already edited and nobody asked
+        to fix, or one it doesn't touch — is kept and re-checked against what changed.
+        A phase the caller asked something of keeps that ask.
+        """
+        keep = dict(keep or {})
+        extra = dict(extra or {})
+        done = set(change.get("done") or [])
+        for later in self._phases_after(phase_key):
+            if later in keep or later in extra:
+                continue
+            if changes.editing(change, later) and later not in done:
+                extra[later] = changes.note_for(change, later)
+                continue
+            if later in changes.REVIEWERS:
+                continue
+            row = self.latest_row(db, project, later)
+            if row is not None and isinstance(row.output, dict) and row.output and row.status not in (
+                PhaseStatus.FAILED.value, PhaseStatus.RUNNING.value
+            ):
+                keep[later] = self._kept(row)
+        return keep, extra
+
+    @staticmethod
+    def _change_started(project: Project, found: Optional[ChangeRequest] = None) -> bool:
+        """Whether the open change's first edit landed in the checkpoint — its own record,
+        not one a finish that was cut short left behind."""
+        with _checkpoint_lock(project.id):
+            values = dict(graph.get_state(_config(project.id)).values)
+        held = values.get("change")
+        if not held:
+            return False
+        return found is None or held.get("id") == found.id
+
+    @staticmethod
+    def _live_change(db: Session, held: Optional[dict]) -> Optional[dict]:
+        """The checkpoint's change record, while that change is still open."""
+        if not held or not held.get("id"):
+            return None
+        found = db.get(ChangeRequest, held["id"])
+        return held if found is not None and found.status == changes.OPEN else None
+
+    def _change_failed(self, db: Session, project: Project, found: ChangeRequest, reason: str) -> Project:
+        """A change that changed nothing: closed, and the build finished again as it was."""
+        self._close_failed(project, found, reason)
+        self._finished_again(db, project)
+        log.info("Change #%d on %s failed before any edit: %s", found.number, project.id, reason)
+        return project
+
+    def _close_failed(self, project: Project, found: ChangeRequest, reason: str) -> None:
+        """Close a change that changed nothing, with its reason; the caller commits."""
+        from app.core.scrub import scrub
+
+        found.status = changes.FAILED
+        found.note = scrub(reason)[:1000]
+        found.finished_at = _now()
+        self._put_back(project, found)
+
+    @staticmethod
+    def _put_back(project: Project, found: ChangeRequest) -> None:
+        """What the build held before a change that wasn't kept: the fix loop's record."""
+        saved = found.saved or {}
+        if "auto_fix" in saved:
+            project.auto_fix = saved.get("auto_fix")
+            project.remediation_rounds = saved.get("remediation_rounds")
+
+    @staticmethod
+    def _finished_again(db: Session, project: Project) -> None:
+        project.status = PipelineStatus.COMPLETED.value
+        project.current_phase = None
+        project.phase_started_at = None
+        project.gate_kind = None
+        project.gate_note = None
+        project.last_error = None
+        project.last_error_kind = None
+        project.last_error_provider = None
+        project.cancel_requested = False
+        db.commit()
+
+    @_as_owner
+    def discard_change(self, db: Session, project: Project, found: ChangeRequest, reason: str = "") -> Project:
+        """Throw a change away: the version it was made on is the build again (#79).
+
+        The route has claimed the build, so nothing is driving it. The phases the change
+        re-ran go back to what that version saved, the checkpoint with them — so the
+        next change starts from that version — and the fix loop's record and the
+        findings' standing are put back as they were before the change.
+        """
+        base = db.get(Version, found.base_version_id) if found.base_version_id else versions.current(db, project)
+        if base is not None:
+            self._reinstate(db, project, base, f"Put back from v{base.number}: change #{found.number} was discarded.")
+        self._put_back(project, found)
+        found.status = changes.DISCARDED
+        found.note = (reason or "").strip()[:1000] or None
+        found.finished_at = _now()
+        if base is not None:
+            project.current_version_id = base.id
+        self._finished_again(db, project)
+        log.info("Change #%d on %s discarded; back to v%s", found.number, project.id, base.number if base else "?")
+        return project
+
+    @_as_owner
+    def restore_version(self, db: Session, project: Project, version: Version) -> Version:
+        """Bring an earlier version back as the newest one: restoring v1 after v3 makes v4."""
+        self._reinstate(db, project, version, f"Restored from v{version.number}.")
+        with versions.writing(project.id):
+            restored = versions.record(
+                db, project, f"Restored v{version.number}", versions.RESTORE, restored_from=version.number
+            )
+            changes.remember(project, f"v{restored.number}: restored v{version.number}")
+            self._finished_again(db, project)
+        return restored
+
+    def _reinstate(self, db: Session, project: Project, version: Version, note: str) -> None:
+        """Make `version` the build's current state: its phases, its stack, its
+        checkpoint — so the next run or change starts from exactly what it saved."""
+        chosen = versions.restore_rows(db, project, version, note)
+        before = project.charter
+        charter = (version.snapshot or {}).get("charter")
+        project.charter = charter or None
+        db.commit()
+        self.settle_database(project, before)
+        self.settle_integrations(project, before)
+        with _checkpoint_lock(project.id):
+            claim.check()
+            graph.update_state(
+                _config(project.id),
+                {
+                    "prior_outputs": {phase: row.output for phase, row in chosen.items() if isinstance(row.output, dict)},
+                    "charter": charter or {},
+                    "feedback": {},
+                    "kept": {},
+                    "escalate": [],
+                    "change": None,
+                    "last_phase": versions.phase_order_last(),
+                    # Nothing to salvage: a later failed row must not be filled from here.
+                    "last_result": {},
+                },
+                as_node=versions.phase_order_last(),
+            )
+        warden = chosen.get(Phase.SECURITY_ENGINEER.value)
+        if warden is not None:
+            # The findings' standing is the restored audit's, not the discarded one's.
+            remediation.sync_dispositions(
+                db, project, warden.output,
+                readable=warden.schema_status != SchemaStatus.INVALID.value, scan=warden.scan,
+            )
+        activity.clear(project.id)
+        db.commit()
+
+    def _version_on_finish(self, db: Session, project: Project) -> bool:
+        """Every way of finishing names a version (#79): the first build is v1, a kept
+        change the next, and anything else that changed the build — an edit made on the
+        app preview, a fix after Vercel failed — one more.
+
+        Writes nothing itself: `_finalize` commits it with the build's COMPLETED, so a
+        failure in between can't leave a finished build holding an open change. True
+        when a change was kept, and the checkpoint's record of it is to be cleared."""
+        found = changes.open_change(db, project)
+        if found is not None:
+            if not self._change_started(project, found):
+                # Resumed to the end without the change's first edit ever landing. Closed —
+                # and the build still gets a version below if anything else changed it.
+                self._close_failed(project, found, "The change stopped before anything was changed.")
+                found = None
+        if found is not None:
+            version = versions.record(db, project, found.text, versions.CHANGE, change_id=found.id)
+            found.status = changes.DONE
+            found.version_id = version.id
+            found.finished_at = _now()
+            changes.remember(project, f"v{version.number}: {found.text}")
+            return True
+        current = versions.current(db, project)
+        if current is None:
+            existing = versions.all_for(db, project, light=True)
+            if not existing:
+                versions.record(db, project, "First build", versions.FIRST_BUILD)
+                if not project.decisions:
+                    project.decisions = changes.first_decisions(project) or None
+                return False
+            # The pointer was lost: the newest version, if that is what the build holds.
+            current = existing[-1]
+            project.current_version_id = current.id
+        if not versions.matches_current(db, project, current):
+            record = app_state.edit(project) or {}
+            frontend = next(
+                (r for r in versions.current_rows(db, project) if r.phase == Phase.FRONTEND_ENGINEER.value), None
+            )
+            edit = (
+                str(record.get("label") or "").strip()
+                if record.get("status") == "landed" and frontend is not None and record.get("row") == frontend.id
+                else ""
+            )
+            label = (
+                f"Edited on the preview: {edit}" if edit
+                else "Rebuilt after Vercel failed" if project.deploy_status == "fixed"
+                else "Rebuilt"
+            )
+            versions.record(db, project, label, versions.EDIT)
+        return False
+
     def draw_sketch_for(self, project_id: str, row_id: str, owner_id: Optional[str]) -> None:
         """Draw the sketch for a frontend whose app preview couldn't run (#78): the
         fallback, on the owner's models, alongside whatever else is happening."""
@@ -1135,6 +1475,7 @@ class PipelineRunner:
         fix_track: Optional[str] = None,
         keep: Optional[dict] = None,
         revise: Optional[dict] = None,
+        start_change: Optional[dict] = None,
     ) -> Project:
         """Re-run one phase with reviewer feedback, patching the checkpoint in place.
 
@@ -1157,6 +1498,13 @@ class PipelineRunner:
         `revise` is a change made on the app preview (#78) — `BaseAgent.revise`: the
         current attempt with that change, not a regeneration. One that breaks the
         build is refused and leaves everything as it was.
+
+        While a change request is open (#79) — `start_change` begins one, the checkpoint
+        holds it after — a phase the change edits is handed its current deliverable and
+        returns only what it adds or changes, a fix round included. Of the phases the
+        rewind rebuilds, those the change still has to edit edit, the auditor and the
+        estimator run again, and everything else is kept and re-checked: a change that
+        touches the backend doesn't rewrite the deployment plan.
         """
         if not phase_key:
             return project
@@ -1208,6 +1556,17 @@ class PipelineRunner:
                 with _checkpoint_lock(project.id):
                     snapshot = graph.get_state(cfg)
                     values: PipelineState = dict(snapshot.values)  # type: ignore[assignment]
+                    # The change request this redo starts or belongs to (#79).
+                    left_behind = False
+                    if start_change is not None:
+                        change = start_change
+                    else:
+                        change = self._live_change(db, values.get("change"))
+                        # A record left by a finish that was cut short: cleared below.
+                        left_behind = bool(values.get("change")) and change is None
+                    if change and stale:
+                        keep, extra_feedback = self._change_rewind(db, project, change, phase_key, keep, extra_feedback)
+                    editing = changes.editing(change, phase_key)
 
                     agent = get_agent(phase_key)
                     # The phases this redo drops are dropped from the scoring too:
@@ -1242,6 +1601,18 @@ class PipelineRunner:
                         ),
                         revising=revise is not None,
                     )
+                    if editing:
+                        # Its own work, not stripped: what it delivered is what it
+                        # changes (#79) — on a fix round, the change's own attempt.
+                        from app.orchestration.graph import edit_context
+
+                        edit_context(
+                            ctx,
+                            change,
+                            phase_key,
+                            values.get("prior_outputs", {}).get(phase_key)
+                            or (change.get("base") or {}).get(phase_key),
+                        )
                     # Inside the lock, model call and all. This is a read-modify-write:
                     # the patch below is built from the snapshot above, so a write to this
                     # checkpoint in between would be silently overwritten by it. The lock
@@ -1288,6 +1659,10 @@ class PipelineRunner:
                             - {phase_key}
                         ),
                     }
+                    if change is not None:
+                        patch["change"] = changes.landed(change, phase_key, result.output) if editing else change
+                    elif left_behind:
+                        patch["change"] = None
                     if phase_key == Phase.SYSTEM_DESIGN.value:
                         # The architecture was rewritten, so the charter frozen from
                         # the old one describes a build that no longer exists. Every
@@ -2110,7 +2485,17 @@ class PipelineRunner:
         if project.deploy_status == "fixing":
             # The crew's fix of a failed Vercel build is finished: deploy it again.
             project.deploy_status = "fixed"
-        db.commit()
+        # Finished and its version named in one commit (#79).
+        with versions.writing(project.id):
+            kept_change = self._version_on_finish(db, project)
+            db.commit()
+        if kept_change:
+            # The change is over: the next one starts from this version, told nothing
+            # of this one but what `decisions` keeps.
+            with _checkpoint_lock(project.id):
+                graph.update_state(
+                    _config(project.id), {"change": None, "feedback": {}}, as_node=versions.phase_order_last()
+                )
         self._write_memory(project, values)
 
     def _record_usage(self, db: Session, project: Project, lr: dict) -> None:

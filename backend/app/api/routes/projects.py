@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.connector.hub import hub
-from app.api.deps import current_user, get_project
+from app.api.deps import current_user, get_project, shipping_or_404
 from app.build import dbconnect, scan
 from app.core import artifacts, model_roles, project_secrets, secretbox
 from app.core.config import settings
@@ -217,11 +217,18 @@ def update_project(
 
 @router.get("", response_model=list[ProjectOut])
 def list_projects(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[Project]:
-    return list(
+    found = list(
         db.execute(
             select(Project).where(Project.owner_id == user.id).order_by(Project.created_at.desc())
         ).scalars()
     )
+    # Each build's version and open change (#79), read for the whole list in two queries
+    # rather than two per build.
+    from app.orchestration import changes, versions
+
+    versions.prime(db, found)
+    changes.prime(db, found)
+    return found
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -247,23 +254,36 @@ def delete_project(project: Project = Depends(get_project), db: Session = Depend
 
 # ── Generated-project artifacts (preview + download) ─────────────────────────
 @router.get("/{project_id}/artifacts")
-def get_artifacts(project: Project = Depends(get_project)) -> dict:
-    """Assembled files + docs + setup steps the agents produced (for Preview/Summary)."""
-    assembled = artifacts.assemble(project)
+def get_artifacts(
+    version: Optional[int] = None,
+    live: bool = False,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Assembled files + docs + setup steps the agents produced (for Preview/Summary).
+
+    What ships, by default (#79): while a change is being made, the version it is made
+    on. `live` is the build as it stands — what a review is about; `version` names one."""
+    assembled, shipped = shipping_or_404(db, project, version, live)
     return {
         "idea": project.idea,
         "name": project.name,
         "status": project.status,
         "readme": artifacts.readme_md(project, assembled),
+        "version": shipped.number if shipped is not None else None,
         **assembled,
     }
+
+
 
 
 @router.get("/{project_id}/download")
 def download_project(
     request: Request,
     include_credentials: bool = False,
+    version: Optional[int] = None,
     project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
 ):
     """Stream the generated project as a .zip (code + docs + README).
 
@@ -291,14 +311,16 @@ def download_project(
             env = {**project_secrets.reveal(project.owner_id, project.id), **connectors.values_for(project)}
         except secretbox.SecretsLocked as e:
             raise HTTPException(503, str(e))
-    assembled = artifacts.assemble(project)
+    # A named version (#79): the one asked for, else the one that ships.
+    assembled, shipped = shipping_or_404(db, project, version)
     if env is not None:
         try:
             client_env = artifacts.frontend_env(project, assembled)
         except secretbox.SecretsLocked as e:
             raise HTTPException(503, str(e))
     data = artifacts.build_zip(project, assembled, env=env, client_env=client_env)
-    filename = artifacts.slug(project.name or project.idea) + ".zip"
+    suffix = f"-v{shipped.number}" if shipped is not None else ""
+    filename = artifacts.slug(project.name or project.idea) + suffix + ".zip"
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/zip",

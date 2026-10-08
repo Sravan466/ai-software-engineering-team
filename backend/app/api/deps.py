@@ -6,6 +6,8 @@ id can't be probed to learn that something is there.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -26,6 +28,17 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
 def current_router(user: User = Depends(current_user)) -> ModelRouter:
     """The signed-in account's own router: its keys, its sources, its choices."""
     return routers.for_user(user.id)
+
+
+def shipping_or_404(db: Session, project: Project, version: Optional[int] = None, live: bool = False):
+    """(the archive, its version) of what a route sends (#79) — a version that doesn't
+    exist is a 404, not a crash."""
+    from app.orchestration import versions
+
+    try:
+        return versions.shipping(db, project, version, live=live)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
 
 
 def get_project(

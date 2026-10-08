@@ -61,7 +61,7 @@ from app.orchestration.charter import violations as charter_violations
 from app.router import inflight
 from app.router.model_profile import ModelProfile, files_per_call
 from app.router.router import router
-from app.schemas.agent_outputs import response_schema
+from app.schemas.agent_outputs import EditPlan, response_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
 
 
@@ -154,6 +154,39 @@ class _Planner(BaseAgent):
     def _build_check(self, ctx: AgentContext, output: dict):
         return None  # a plan has no code to compile
 
+    def merge_edit(self, base: dict, raw: object) -> dict:
+        # The plan is a new object, not an edit of the deliverable it is shown.
+        return raw if isinstance(raw, dict) else {}
+
+
+#: How a code phase plans a change (#79): only the files it touches.
+_EDIT_PLAN_TASK = (
+    "Plan this change to your part of the app. List ONLY the files you will add or "
+    "change: an existing path to change that file, a new path to add one, each with what "
+    "changes in it. Put files to remove in `deleted`. Files you don't list stay exactly "
+    "as they are. Keep the change as small as the request allows."
+)
+
+
+class _EditPlanner(_Planner):
+    """The plan call for a change (#79): the owner's prompt, an edit plan for a shape."""
+
+    def __init__(self, owner: "CodePhaseAgent") -> None:
+        super().__init__(owner)
+        self.output_model = EditPlan
+
+    def task_instruction(self) -> str:
+        return _EDIT_PLAN_TASK
+
+    def task_text(self) -> str:
+        return TASK_OVERRIDES.get(f"{self.key}.edit") or _EDIT_PLAN_TASK
+
+    def edit_task_text(self) -> str:
+        return self.task_text()
+
+    def own_checks(self, output: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
+        return output, []  # changing nothing is an answer
+
 
 class CodePhaseAgent(BaseAgent):
     """A phase that writes code: planned first, then written in batches (see module)."""
@@ -163,6 +196,7 @@ class CodePhaseAgent(BaseAgent):
 
     def __init__(self) -> None:
         self.planner = _Planner(self)
+        self.edit_planner = _EditPlanner(self)
 
     # ── what each subclass says ──────────────────────────────────────────────
     def plan_instruction(self) -> str:
@@ -186,6 +220,11 @@ class CodePhaseAgent(BaseAgent):
 
     # ── the run ──────────────────────────────────────────────────────────────
     def run(self, ctx: AgentContext) -> AgentResult:
+        if ctx.editing:
+            # A change request (#79): the files as they are, changed where asked. File
+            # by file whatever the setting, because that is the only way to send back
+            # three files without writing the other twenty again.
+            return _Run(self, ctx).change()
         if not settings.code_by_file or MODE_OVERRIDE == "whole":
             result = BaseAgent.run(self, ctx)
             result.handoff = {**(result.handoff or {}), "generation": _whole_record(result, "configured")}
@@ -236,6 +275,19 @@ class _Run:
         self.cap: Optional[int] = None
         self.largest = 0
         self.lengths: list[int] = []
+        #: A change request (#79): every file as it was, the ones this run changes, and
+        #: every path a reply landed. Empty on a first build.
+        self.existing: dict[str, str] = {}
+        self.changing: set[str] = set()
+        self.landed: set[str] = set()
+        self.edits: list[_Planned] = []
+        self.edit_summary = ""
+        #: path -> what the change asks of that file.
+        self.asks: dict[str, str] = {}
+        self.change_mode = False
+        #: Files a change left as they were: too long to show, or the reply cut off.
+        self.too_long: list[str] = []
+        self.cut_off: list[str] = []
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -366,6 +418,168 @@ class _Run:
             out_files.append(entry)
         return {**output, "files": out_files}, list(self.calls)
 
+    # ── a change request (#79) ───────────────────────────────────────────────
+    def change(self) -> AgentResult:
+        """Change this phase's files as a change request asks — and only those.
+
+        One small plan call names the files to add, change or delete; each is then
+        written by the per-file call, a file being changed shown to the model whole
+        first. Every file the plan doesn't name is kept byte for byte. What comes out is
+        checked as any attempt is: parsed, compiled as a tree, built for real.
+        """
+        agent, ctx = self.agent, self.ctx
+        agent._pin(ctx)
+        board = activity.begin(agent.key)
+        try:
+            result = self._change()
+        except BaseException:
+            activity.end(board, finished=False)
+            raise
+        activity.end(board)
+        return result
+
+    def _change(self) -> AgentResult:
+        from types import SimpleNamespace
+
+        from app.build.scaffold import platform_owned
+
+        agent, ctx = self.agent, self.ctx
+        self.change_mode = True
+        base = ctx.base_output or {}
+        for f in base.get("files") or []:
+            if not isinstance(f, dict) or not isinstance(f.get("path"), str) or not f["path"].strip():
+                continue
+            code = f.get("code") if isinstance(f.get("code"), str) else str(f.get("content") or "")
+            purpose = str(f.get("purpose") or "")
+            self.planned.append(_Planned(path=f["path"], purpose=purpose, origin="kept"))
+            self.written[f["path"]] = _Written(f["path"], code, str(f.get("language") or ""), purpose, origin="kept")
+        self.existing = {p: w.code for p, w in self.written.items()}
+
+        activity.stage("planning")
+        with inflight.agent(f"{agent.title} — planning the change"):
+            plan = agent.edit_planner.run(ctx)
+        self.calls += plan.calls or [plan.response]
+        self.truncated += plan.truncated_replies
+        out = plan.output if isinstance(plan.output, dict) else {}
+        self.edit_summary = str(out.get("summary") or "").strip()[:300]
+        # The deliverable keeps its own fields — its summary, endpoints, pages; the
+        # change is to its files.
+        self.plan = SimpleNamespace(
+            output={k: v for k, v in base.items() if k != "files"},
+            repair_rounds=plan.repair_rounds,
+            calls=plan.calls or [plan.response],
+            response=plan.response,
+            handoff=plan.handoff or {},
+            skills_used=plan.skills_used,
+        )
+        self.profile = router.profile_for(
+            ctx.routing_mode, ctx.preferred_model, complexity=agent._complexity(ctx), role=agent.key, pin=ctx.pin_model,
+        )
+        known = {layout.place(agent.key, p): p for p in self.existing}
+
+        deleted: list[str] = []
+        for item in _strings(out.get("deleted")):
+            found = self._existing(item, known)
+            if found and found not in deleted:
+                deleted.append(found)
+        for path in deleted:
+            self.planned = [p for p in self.planned if p.path != path]
+            self.written.pop(path, None)
+
+        too_long = self.too_long
+        room = int(self.profile.prompt_char_budget * 0.6)
+        for item in out.get("files") or []:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not layout.clean(item["path"]):
+                continue
+            found = self._existing(item["path"], known)
+            path = found or layout.place(agent.key, item["path"])
+            if not path or path in deleted or any(e.path == path for e in self.edits):
+                continue
+            if not found and platform_owned(path):
+                self.left_to_platform.append(path)
+                continue
+            what = str(item.get("purpose") or "").strip()
+            exports = _strings(item.get("exports"))[:20]
+            imports = []
+            for name in _strings(item.get("imports")):
+                target = self._existing(name, known) or layout.place(agent.key, name)
+                if target and target != path and target not in imports:
+                    imports.append(target)
+            if found:
+                if len(self.existing[found]) + 400 > room:
+                    # Whole or not at all: a file clipped to fit would be written back
+                    # without its end. It stays as it is, and the record says why.
+                    too_long.append(found)
+                    continue
+                entry = self._entry(found)
+                entry.exports = exports or entry.exports
+                entry.imports = imports or entry.imports
+                self.asks[found] = what
+            else:
+                entry = _Planned(path=path, purpose=what, exports=exports, imports=imports)
+                self.planned.append(entry)
+            self.edits.append(entry)
+        known_paths = {p.path for p in self.planned}
+        for e in self.edits:
+            e.imports = [i for i in e.imports if i in known_paths]
+        self.changing = {e.path for e in self.edits if e.path in self.existing}
+
+        self.choice = 1
+        self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
+        self.digests = {
+            dep: handoff.digest(dep, ctx.prior_outputs[dep])
+            for dep in agent.depends_on
+            if isinstance(ctx.prior_outputs.get(dep), dict)
+        }
+        activity.plan([e.path for e in self.edits], 1, note=self.edit_summary or ctx.change.splitlines()[0][:200])
+        queue = list(self.edits)
+        while queue:
+            claim.between_calls()
+            batch, queue = queue[:1], queue[1:]
+            try:
+                queue = self._write(batch) + queue
+            except _NoRoom as e:
+                too_long.append(e.path)
+                activity.file(e.path, "missing")
+            queue = [p for p in queue if p.path not in self.landed and p.path not in self.cut_off]
+
+        result = self._finish()
+        changed = sorted(
+            p for p in self.changing if p in self.written and self.written[p].code != self.existing.get(p)
+        )
+        added = sorted(p.path for p in self.planned if p.path not in self.existing and p.path in self.written)
+        generation = dict((result.handoff or {}).get("generation") or {})
+        generation.update({"mode": "edit", "files_planned": len(self.edits)})
+        result.handoff = {
+            **(result.handoff or {}),
+            "generation": generation,
+            "change": {
+                "summary": self.edit_summary,
+                "changed": changed,
+                "added": added,
+                "deleted": deleted,
+                # Asked for and not changed: the model sent it back as it was, or never.
+                "unchanged": sorted(
+                    p for p in self.changing if p not in changed and p not in too_long and p not in self.cut_off
+                ),
+                "too_long": too_long,
+                "cut_off": list(self.cut_off),
+                "kept": len([p for p in self.existing if p not in changed and p not in deleted]),
+            },
+        }
+        return result
+
+    def _existing(self, path: str, known: dict[str, str]) -> Optional[str]:
+        """The file a change names, as it is stored, or None for a new one."""
+        if path in self.existing:
+            return path
+        placed = layout.place(self.agent.key, path)
+        if placed in known:
+            return known[placed]
+        clean = layout.clean(path)
+        ends = [p for p in self.existing if p.endswith("/" + clean)]
+        return ends[0] if len(ends) == 1 else None
+
     def _batch_size(self, remaining: int) -> int:
         n = files_per_call(self.profile, remaining, avg_file_tokens=self._avg(), override=self.choice)
         if self.cap:
@@ -401,6 +615,12 @@ class _Run:
                 self.cap = max(1, len(batch) // 2)
                 log.info("%s: a reply was cut off at the output limit; batches of %d now.", self.agent.title, self.cap)
                 again = missing
+            elif self.change_mode and batch[0].path in self.changing:
+                # A change (#79) to a file that exists: splitting it would write it anew
+                # from nothing, and a cut-off copy would replace working code. It stays
+                # as it was, and the change's record says why.
+                self.cut_off.append(batch[0].path)
+                activity.file(batch[0].path, "missing")
             else:
                 landed += self._split(batch[0], partial.get(batch[0].path))
         else:
@@ -554,6 +774,7 @@ class _Run:
         )
         if planned.path in self.unwritten:  # it came in late, unasked: it is written now
             self.unwritten.remove(planned.path)
+        self.landed.add(planned.path)
         self.lengths.append(len(code))
 
     def _judge(self, w: _Written) -> None:
@@ -581,8 +802,13 @@ class _Run:
     def _call(self, messages: list[ChatMessage], batch: list[_Planned], doing: str) -> LLMResponse:
         agent, ctx = self.agent, self.ctx
         first = batch[0].path
-        number = len([p for p in self.planned if p.path in self.written]) + 1
-        total = len(self.planned)
+        if self.change_mode and self.edits:
+            # A change counts its own files, not the ones it keeps (#79).
+            number = len([e for e in self.edits if e.path in self.landed]) + 1
+            total = len(self.edits)
+        else:
+            number = len([p for p in self.planned if p.path in self.written]) + 1
+            total = len(self.planned)
         more = f" and {len(batch) - 1} more" if len(batch) > 1 else ""
         label = f"{agent.title} — {doing} {first}{more} ({min(number, total)} of {total})"
         activity.stage(doing, detail=first, total=total)
@@ -642,12 +868,25 @@ class _Run:
                     f"{editing.path} is too long for this model to rewrite in one reply, so nothing was changed. "
                     "Pick a model with a larger window for the frontend, or ask for a smaller change."
                 )
+        if self.change_mode and not fixing and not split:
+            # A change request (#79): each file being changed, as it is now, whole —
+            # sized to fit when the change was planned.
+            for p in batch:
+                if p.path in self.changing:
+                    was = _Written(p.path, self.existing[p.path], self.written[p.path].language if p.path in self.written else "", p.purpose)
+                    if not put(f"echo:{p.path}", _echo(was, max(len(was.code) + 200, 400), _EDIT_ECHO)):
+                        # Never asked for blind: a file the model can't see would be
+                        # written from its purpose alone, and everything else in it lost.
+                        raise _NoRoom(p.path)
 
         for compact in (0, 1, 2):
             if put("plan", self._plan_text(batch, compact)):
                 break
         if ctx.idea:
             put("idea", f"# Product idea\n{_clip(ctx.idea, min(len(ctx.idea), max(budget // 8, 200), max(left - 200, 0)))}\n")
+        if self.change_mode and ctx.change:
+            share = min(len(ctx.change), budget // 6, max(left - 200, 0))
+            put("change", f"# The change to make\n{_clip(ctx.change, share)}\n")
         if ctx.feedback:
             share = min(len(ctx.feedback), budget // 7, max(left - 200, 0))
             put(
@@ -685,7 +924,7 @@ class _Run:
 
         order = [
             "idea", *[k for k in sections if k.startswith("dep:")], "skills", "rag", "memory",
-            "extra", "feedback", "plan", "written", "bodies",
+            "extra", "change", "feedback", "plan", "written", "bodies",
         ]
         parts = [sections[k] for k in order if k in sections]
         parts.append(sections.get("write", ""))
@@ -710,6 +949,8 @@ class _Run:
                 "else exactly as it is: the other files import from it.\n"
                 "Answer with `### path` and one fenced block — nothing else.\n"
             )
+        if self.change_mode and not fixing and not split:
+            return self._change_now(batch)
         if fixing:
             head = f"{_WRITE_NOW} — fix {len(fixing)} file{'s' if len(fixing) > 1 else ''}"
         elif len(batch) == 1:
@@ -743,8 +984,48 @@ class _Run:
         lines.append("Answer with `### path` and one fenced block per file — nothing else.")
         return "\n".join(lines) + "\n"
 
+    def _change_now(self, batch: list[_Planned]) -> str:
+        """The ask for a change request's files (#79): change these, add those."""
+        at = next((i for i, e in enumerate(self.edits) if e.path == batch[0].path), 0) + 1
+        lines = [f"{_WRITE_NOW} — change {at} of {len(self.edits)}"]
+        for p in batch:
+            if p.path in self.changing:
+                lines.append(f"- `{p.path}`" + (f" — {p.purpose}" if p.purpose else ""))
+                if self.asks.get(p.path):
+                    lines.append(f"  - change: {self.asks[p.path]}")
+                lines.append(
+                    "  Its current version is below. Make that change and only that change: return "
+                    "the whole file, with everything else in it exactly as it is."
+                )
+            else:
+                line = f"- `{p.path}` (new file)" + (f" — {p.purpose}" if p.purpose else "")
+                if p.exports:
+                    line += f". Exports: {', '.join(p.exports[:12])}"
+                if p.imports:
+                    line += f". Imports: {', '.join(p.imports[:8])}"
+                lines.append(line)
+        instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
+        if instruction:
+            lines.append(instruction)
+        lines.append("Answer with `### path` and one fenced block per file — nothing else.")
+        return "\n".join(lines) + "\n"
+
     def _plan_text(self, batch: list[_Planned], compact: int) -> str:
         """The plan: whole (0), purposes only outside this batch (1), or paths only (2)."""
+        if self.change_mode:
+            # The change's plan, not the app's: what is being added and changed.
+            body = json.dumps(
+                {
+                    "change": self.edit_summary,
+                    "files": [
+                        {"path": e.path, "action": "change" if e.path in self.changing else "add",
+                         "what": self.asks.get(e.path) or e.purpose}
+                        for e in self.edits
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            return f"# The change plan\n```json\n{body}\n```\n"
         mine = {p.path for p in batch}
         meta = {k: v for k, v in (self.plan.output or {}).items() if k != "files" and k in self.agent.plan_model.model_fields}
         files = []
@@ -765,10 +1046,15 @@ class _Run:
         return f"# The plan\n```json\n{body}\n```\n"
 
     def _written_index(self, batch: list[_Planned]) -> str:
-        done = [w for w in self.written.values()]
+        mine = {p.path for p in batch}
+        done = [w for w in self.written.values() if not (self.change_mode and w.path in mine)]
         if not done:
             return ""
-        lines = ["# Written so far — import from these by their real paths; do not write them again"]
+        lines = [
+            "# The app's other files — import from these by their real paths; don't write them"
+            if self.change_mode
+            else "# Written so far — import from these by their real paths; do not write them again"
+        ]
         for w in done:
             planned = self._entry(w.path)
             line = f"- `{w.path}`"
@@ -1024,6 +1310,14 @@ class _Run:
 # ── helpers ─────────────────────────────────────────────────────────────────
 #: `_fix_build`'s answer when the tree it was given is still the one that ships.
 _UNCHANGED = object()
+
+
+class _NoRoom(Exception):
+    """A file a change would edit doesn't fit in this model's window beside the ask."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.path = path
 
 
 def _choice(value: object) -> object:

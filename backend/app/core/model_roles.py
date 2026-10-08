@@ -39,6 +39,8 @@ _PATH = Path("data") / "model_roles.local.json"
 #: had anywhere to be pointed at a smaller model.
 EXTRA_ROLES: tuple[tuple[str, str, str], ...] = (
     ("debate", "Debate", "Settles the stack before the architecture is drawn"),
+    # #79: one small call per change request, before any engineer is asked anything.
+    ("planner", "Change planner", "Reads a change to a finished app and picks who changes what"),
     ("preview", "Mockup", "The visual preview of the front end"),
     ("embeddings", "Embeddings", "Long-term memory and the knowledge base"),
 )

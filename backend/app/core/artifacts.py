@@ -108,7 +108,7 @@ def test_run(project: Project) -> Optional[dict]:
     return run if isinstance(run, dict) else None
 
 
-def build_problems(project: Project) -> list[dict]:
+def build_problems(project: Project, rows: Optional[list] = None) -> list[dict]:
 
     """Every compile problem still outstanding in the current build, phase by phase.
 
@@ -116,23 +116,11 @@ def build_problems(project: Project) -> list[dict]:
     collection once and, with `expire_on_commit=False`, never sees a row added after —
     so asking it at the last phase answered for a build without its backend, and a
     build that did not compile was waved through as finished.
+
+    `rows` answers for a version instead (#79): its saved phases, not the live ones.
     """
-    from sqlalchemy.orm import object_session
-
-    from app.db.models import PhaseResult
-
-    try:
-        session = object_session(project)
-    except Exception:  # noqa: BLE001 - not an ORM instance (a scoring stand-in)
-        session = None
-    rows = (
-        session.query(PhaseResult)
-        .filter(PhaseResult.project_id == project.id)
-        .order_by(PhaseResult.created_at, PhaseResult.id)
-        .all()
-        if session is not None
-        else list(project.phases)
-    )
+    if rows is None:
+        rows = _rows(project)
     out: list[dict] = []
     for ph in _current(rows):
         if ph.phase not in CODE_PHASES or ph.build_status != BuildStatus.FAILED.value:
@@ -187,13 +175,20 @@ def devops_may_write(path: str, output: dict) -> bool:
     return True
 
 
-def assemble(project: Project) -> dict:
-    """Collapse the current attempt at each phase into a placed, scaffolded build."""
+#: `assemble`'s charter left out: the project's own.
+_PROJECT_CHARTER = object()
+
+
+def assemble(project: Project, rows: Optional[list] = None, charter: object = _PROJECT_CHARTER) -> dict:
+    """Collapse the current attempt at each phase into a placed, scaffolded build.
+
+    `rows` and `charter` assemble a version instead (#79): the phases it saved and the
+    stack it was built on, rather than whatever the build holds now."""
     from app.build import layout
     from app.build.scaffold import build as scaffold_build, platform_owned, superseded
     from app.orchestration.charter import Charter
 
-    charter = Charter.from_dict(project.charter)
+    charter = Charter.from_dict(project.charter if charter is _PROJECT_CHARTER else charter)
     backend_language = charter.get("language").token if charter and charter.get("language") else None
 
     files: dict[str, dict] = {}  # placed path -> record (later phases win)
@@ -206,7 +201,8 @@ def assemble(project: Project) -> dict:
     # the folders the Frontend phase was placed in, and a Frontend re-run is newer
     # than the QA it came before. The compile check places them the same way.
     order = {p.value: i for i, p in enumerate(PHASE_ORDER)}
-    phases = sorted(current_phases(project), key=lambda ph: order.get(ph.phase, len(order)))
+    chosen = current_phases(project) if rows is None else _current(rows)
+    phases = sorted(chosen, key=lambda ph: order.get(ph.phase, len(order)))
     placer = layout.Placer(backend_language)
     for ph in phases:
         out = ph.output if isinstance(ph.output, dict) else {}
@@ -287,7 +283,7 @@ def assemble(project: Project) -> dict:
             replaced.append(path)
             del files[path]
 
-    problems = build_problems(project)
+    problems = build_problems(project, rows)
     statuses = {ph.phase: ph.build_status for ph in phases if ph.phase in CODE_PHASES}
     for problem in problems:
         record = files.get(problem.get("path") or "")

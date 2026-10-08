@@ -273,6 +273,37 @@ class PlannedFile(_Shape):
     imports: StrList = Field(default_factory=list)
 
 
+class PlannedEdit(_Shape):
+    """One file a change adds or changes (#79): an existing path to change it, a new one
+    to add it."""
+
+    path: str
+    purpose: str = Field(description="What changes in this file, or what a new file is for")
+    exports: StrList = Field(default_factory=list)
+    imports: StrList = Field(default_factory=list)
+
+
+class EditPlan(_Shape):
+    """A code phase's plan for a change (#79): only what it touches. Everything it
+    doesn't list is kept exactly as it is."""
+
+    summary: str = Field(description="One sentence: what this phase changes")
+    files: _list_of(PlannedEdit) = Field(default_factory=list, description="Only files you add or change")
+    deleted: StrList = Field(default_factory=list, description="Paths of files to remove, if any")
+
+
+class ChangePlan(_Shape):
+    """The scoping pass over a change request (#79): who changes what."""
+
+    summary: str = Field(description="One sentence a person reads: what will change")
+    phases: StrList = Field(
+        description="Who edits their files: backend_engineer, frontend_engineer, devops_engineer"
+    )
+    files_likely: StrList = Field(default_factory=list, description="Paths likely to change or be added")
+    needs_design: bool = Field(False, description="True if the architecture itself must change")
+    needs_db_change: bool = Field(False, description="True if the database schema must change")
+
+
 class BackendPlan(_Shape):
     """Everything in `BackendEngineerOutput` but the code: the code comes file by file."""
 

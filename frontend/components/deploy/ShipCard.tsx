@@ -256,6 +256,18 @@ export default function ShipCard({
       {!info.ready && info.kind && (
         <p className="field-hint ship-foot">Deploy is ready once the build is complete. GitHub takes any output.</p>
       )}
+      {info.version != null && (
+        // Which version goes out (#79) — and when the one live is older.
+        <p className="field-hint ship-foot ship-version">
+          Deploy and GitHub send <b className="mono">v{info.version}</b>.
+          {info.deployed_version && info.deployed_version !== info.version
+            ? ` v${info.deployed_version} is the one deployed now.`
+            : ""}
+          {info.pushed_version && info.pushed_version !== info.version
+            ? ` GitHub has v${info.pushed_version}.`
+            : ""}
+        </p>
+      )}
       <p className="ship-trust">
         {Icon.lock}
         <span>Your tokens stay encrypted on this server. Nothing is hosted on our account.</span>
@@ -782,7 +794,9 @@ function VercelFlow({ id, info, onChange }: { id: string; info: ShipInfo; onChan
           {live
             ? "Deploying…"
             : status === "ready"
-              ? "Redeploy"
+              ? info.version && info.deployed_version && info.deployed_version !== info.version
+                ? `Deploy v${info.version}`
+                : "Redeploy"
               : status === "fixed"
                 ? "Deploy again"
                 : fixing

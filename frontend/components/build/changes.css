@@ -1,0 +1,341 @@
+/* ===========================================================================
+   KEEP TALKING AFTER A BUILD (#79)
+
+   The finished notice carries the next turn: one surface, three zones — the
+   build is done (green, the one good-news colour), what should change next, and
+   what changed before. No card inside a card: the zones share one border and are
+   divided by rules. While a change is in flight the same slot is a strip in the
+   run colour; at its review the Ship review is the change's own surface.
+   =========================================================================== */
+
+/* ── the finished build, and the composer under it ── */
+.finish {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  transition: border-color var(--tr), box-shadow var(--tr-slow);
+}
+.finish:focus-within { border-color: var(--accent-line); box-shadow: var(--shadow-2); }
+
+.finish-done {
+  display: flex;
+  gap: 12px;
+  padding: 15px 18px 16px;
+  background: var(--ok-soft);
+  border-bottom: 1px solid rgba(61, 214, 140, 0.28);
+}
+.finish-mark { flex: none; color: var(--ok); margin-top: 1px; }
+.finish-mark svg { width: 18px; height: 18px; display: block; }
+.finish-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.finish-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  font-size: var(--t-base);
+  font-weight: 600;
+  color: var(--ink);
+}
+/* The version is the build's name now: quiet, but always there. */
+.finish-version {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.finish-version b {
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid rgba(61, 214, 140, 0.35);
+  color: var(--ok);
+  font-size: var(--t-xs);
+  font-weight: 600;
+}
+.finish-version span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
+.finish-text { margin: 0; font-size: var(--t-sm); color: var(--ink-2); line-height: 1.55; }
+
+.finish-ask { display: flex; flex-direction: column; }
+.finish-label {
+  padding: 16px 18px 0;
+  font-size: var(--t-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+.finish-ask textarea {
+  display: block;
+  width: 100%;
+  min-height: 72px;
+  padding: 8px 18px 6px;
+  border: 0;
+  background: none;
+  outline: none;
+  resize: vertical;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--t-md);
+  line-height: 1.55;
+  caret-color: var(--accent);
+}
+.finish-ask textarea::placeholder { color: var(--ink-3); }
+.finish-ask textarea:disabled { opacity: 0.6; }
+.finish-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  flex-wrap: wrap;
+  padding: 10px 14px 4px 18px;
+}
+.finish-examples { margin-top: 0; gap: 6px; }
+.finish-examples .example { min-height: 32px; font-size: var(--t-xs); }
+.finish-examples .example:disabled { opacity: 0.5; cursor: not-allowed; }
+.finish-hint { margin: 0; padding: 6px 18px 15px; }
+
+/* Earlier changes: a ledger, not a feed — one line each, newest first. */
+.finish-ledger { padding: 13px 18px 15px; border-top: 1px solid var(--line); }
+.finish-ledger .label { margin: 0 0 8px; }
+.ledger { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.ledger-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: var(--t-sm);
+  border-top: 1px solid var(--line);
+}
+.ledger-row:first-child { border-top: 0; }
+.ledger-num { color: var(--ink-3); font-size: var(--t-xs); }
+.ledger-text { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ledger-state { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); font-size: var(--t-xs); }
+.ledger-state svg { width: 13px; height: 13px; color: var(--ok); }
+.ledger-row[data-state="done"] .ledger-state { color: var(--ok); }
+.ledger-row[data-state="discarded"] .ledger-text,
+.ledger-row[data-state="failed"] .ledger-text { color: var(--ink-3); }
+.ledger-time { color: var(--ink-3); font-size: var(--t-xs); white-space: nowrap; }
+
+/* ── a change in flight ── */
+.change-strip {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 18px 15px;
+  border: 1px solid rgba(34, 184, 207, 0.38);
+  border-radius: var(--r-lg);
+  background: var(--run-soft);
+  overflow: hidden;
+  /* Opens its own height from the top edge, rather than popping in. */
+  animation: strip-open var(--tr-slow) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.change-strip[data-state="needs_help"] { border-color: var(--accent-line); background: var(--warn-soft); }
+.change-strip[data-state="stopped"] { border-color: var(--line-2); background: var(--bg-panel); }
+/* While the planner reads the app: a thin scan along the top edge — the only
+   motion here, and it says one thing: someone is working on this. */
+.change-strip[data-state="planning"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 30%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--run), transparent);
+  animation: scan 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.change-strip-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.change-strip-num { flex: none; font-size: var(--t-xs); color: var(--ink-3); }
+.change-strip-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--t-md);
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.change-strip-head .badge { flex: none; align-self: center; }
+.change-strip-plan {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  line-height: 1.55;
+  max-width: 78ch;
+  animation: rise var(--tr-slow) ease both;
+}
+.change-strip-foot { margin: 0; }
+.change-strip .change-discard,
+.change-strip .change-confirm { margin-top: 4px; align-self: flex-start; }
+
+@keyframes strip-open {
+  from { opacity: 0; clip-path: inset(0 0 100% 0 round var(--r-lg)); }
+  to   { opacity: 1; clip-path: inset(0 0 0 0 round var(--r-lg)); }
+}
+
+.change-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid rgba(240, 82, 82, 0.35);
+  border-radius: var(--r);
+  background: var(--bad-soft);
+  font-size: var(--t-sm);
+  color: var(--ink);
+  animation: rise var(--tr) ease both;
+}
+.change-confirm > span { flex: 1 1 260px; line-height: 1.5; }
+.decision-approve .change-discard,
+.decision-approve .change-confirm { margin-top: 10px; }
+
+/* The asked change, above the plan, in the change's review. */
+.decision-asked {
+  margin: 4px 0 2px !important;
+  font-size: var(--t-md) !important;
+  font-weight: 600;
+  color: var(--ink) !important;
+  overflow-wrap: anywhere;
+}
+.decision-asked .mono { font-size: var(--t-xs); font-weight: 500; color: var(--ink-3); margin-right: 4px; }
+.change-checks { margin: 0 0 12px; border: 1px solid var(--line); border-radius: var(--r); }
+
+/* ── what changed ── */
+.diff { display: flex; flex-direction: column; gap: 10px; }
+.diff-sum {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+}
+.diff-counts { display: inline-flex; gap: 6px; font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+.diff-plus { color: var(--ok); }
+.diff-minus { color: var(--bad); }
+.diff-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.diff-file { border: 1px solid var(--line-2); border-radius: var(--r); background: var(--bg-panel); overflow: hidden; }
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--t-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--tr);
+}
+.diff-head:hover { background: var(--bg-raised); }
+.diff-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.diff-head .phase-chev.open { transform: rotate(90deg); color: var(--ink-2); }
+.diff-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 82px;
+  font-size: var(--t-xs);
+  font-weight: 600;
+}
+.diff-status svg { width: 13px; height: 13px; }
+.diff-file[data-status="added"] .diff-status { color: var(--ok); }
+.diff-file[data-status="changed"] .diff-status { color: var(--run); }
+.diff-file[data-status="deleted"] .diff-status { color: var(--bad); }
+.diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-xs); }
+.diff-file[data-status="deleted"] .diff-path { color: var(--ink-3); text-decoration: line-through; text-decoration-color: var(--line-3); }
+.diff-who { flex: none; font-size: var(--t-xs); color: var(--ink-3); letter-spacing: 0.04em; }
+
+/* Opens its own height; closed, `visibility` hides it from focus once the fold ends. */
+.diff-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition: grid-template-rows var(--tr-slow), visibility 0s linear var(--tr-slow);
+}
+.diff-body[data-open="true"] {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  transition: grid-template-rows var(--tr-slow), visibility 0s;
+}
+.diff-clip { min-height: 0; overflow: hidden; border-top: 1px solid var(--line); }
+.diff-body[data-open="false"] .diff-clip { border-top-color: transparent; }
+.diff-lines {
+  margin: 0;
+  padding: 6px 0;
+  max-height: 420px;
+  overflow: auto;
+  background: var(--bg-sunken);
+  font-size: var(--t-xs);
+  line-height: 1.6;
+  tab-size: 2;
+}
+.dl { display: block; padding: 0 14px 0 0; white-space: pre; color: var(--ink-2); }
+.dl-mark { display: inline-block; width: 26px; text-align: center; color: var(--ink-4); user-select: none; }
+.dl-add { background: rgba(61, 214, 140, 0.09); color: var(--ink); }
+.dl-add .dl-mark { color: var(--ok); }
+.dl-del { background: rgba(240, 82, 82, 0.09); color: var(--ink); }
+.dl-del .dl-mark { color: var(--bad); }
+.dl-hunk { padding-left: 26px; color: var(--ink-3); background: var(--bg-raised); }
+.diff-more { margin: 0; padding: 8px 14px 10px; }
+.diff-note { margin: 0; }
+.diff-skeleton { display: flex; flex-direction: column; gap: 8px; }
+.diff-skeleton span {
+  height: 42px;
+  border-radius: var(--r);
+  background: linear-gradient(90deg, var(--bg-panel) 25%, var(--bg-raised) 50%, var(--bg-panel) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* ── versions, in the card that takes a copy ── */
+.versions { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+.versions-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 10px; }
+.versions-head .label { margin: 0; }
+.version-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.version-row { border-top: 1px solid var(--line); }
+.version-row:first-child { border-top: 0; }
+.version-line {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+.version-num { font-size: var(--t-sm); font-weight: 600; color: var(--ink-3); }
+.version-row[data-current] .version-num { color: var(--ok); }
+.version-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.version-label { font-size: var(--t-base); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.version-meta { font-size: var(--t-xs); color: var(--ink-3); }
+.version-tags { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.version-tags .badge svg { width: 11px; height: 11px; }
+.version-actions { display: flex; gap: 6px; }
+.version-diff { padding: 2px 0 14px 56px; animation: rise var(--tr) ease both; }
+.versions-foot { margin: 8px 0 0; }
+
+.ship-version b { color: var(--ink-2); }
+
+@media (max-width: 720px) {
+  .finish-foot { flex-direction: column; align-items: stretch; }
+  .finish-foot .composer-submit { justify-content: flex-end; }
+  .finish-foot .composer-hint { display: none; }
+  .ledger-row { grid-template-columns: 30px minmax(0, 1fr) auto; }
+  .ledger-time { display: none; }
+  .version-line { grid-template-columns: 40px minmax(0, 1fr); }
+  .version-tags { grid-column: 2; justify-content: flex-start; }
+  .version-actions { grid-column: 1 / -1; justify-content: flex-start; padding-left: 52px; }
+  .version-diff { padding-left: 0; }
+  .diff-who { display: none; }
+  .diff-status { min-width: 0; }
+}
