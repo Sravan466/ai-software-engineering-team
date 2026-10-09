@@ -93,8 +93,9 @@ export type FloorTheme = {
   scanlines: boolean;
   vignette: boolean;
   props: PropId[];
-  /** Where each of the room's animated pieces goes, once its sheet exists. */
-  pieces: Record<string, PiecePlace>;
+  /** Where each of the room's animated pieces goes, once its sheet exists. A list
+   *  places the same sheet more than once (rain behind each pane). */
+  pieces: Record<string, PiecePlace | PiecePlace[]>;
   /**
    * Overrides for the room's colour tokens (agents.css, `.floor`). Kept dim and
    * low in saturation in every room: the sprites are shared, and their dark
@@ -166,8 +167,15 @@ export const THEMES: FloorTheme[] = [
     vignette: false,
     props: ["plant", "plant-2", "cooler", "mug", "monitors"],
     pieces: {
-      // Behind the left window, so the wall crops it to the glass (day and dark walls).
-      rain: { x: 4.8, y: 25, w: 20.5, tier: "out" },
+      // Behind both windows, so the wall crops it to the glass (day and dark walls).
+      // Drawn at the art's own scale (a frame is 148px of the 1536), so it takes two
+      // copies side by side to fill a window.
+      rain: [
+        { x: 5.1, y: 25, w: 9.8, tier: "out" },
+        { x: 14.9, y: 25, w: 9.8, tier: "out" },
+        { x: 75.2, y: 25, w: 9.8, tier: "out" },
+        { x: 85, y: 25, w: 9.8, tier: "out" },
+      ],
     },
     tokens: {
       "--cabin-back-a": "#4f5550",

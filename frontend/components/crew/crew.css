@@ -139,6 +139,37 @@
 .layer-floor { background-image: var(--layer-floor); }
 .floor.has-art .wall::after { display: none; }
 
+/* ── the crew at the art's scale ──
+   The generated rooms are drawn bigger than the CSS one: their pixel grain is about
+   twice the sprites', and a window or a filing cabinet at the back wall stood
+   taller than an agent at the front. So in a room with art the crew, the props
+   standing in it and the courier are drawn --crew times larger, and the ranks
+   spread further back so the bigger figures don't hide the name plates behind
+   them. The figure grows up from its feet, and its bubble rises with it (86px is
+   the figure's unscaled height). */
+.floor.has-art { --crew: 1.5; }
+.floor.has-art.is-compact { --crew: 1.3; }
+.floor.has-art .figure { transform: scale(calc((1 - var(--depth, 0) * 0.42) * var(--crew))); }
+.floor.has-art .set .prop { transform: scale(var(--crew)); transform-origin: 50% 100%; }
+.floor.has-art .bubble {
+  bottom: calc(100% - 6px + 86px * (1 - var(--depth, 0) * 0.42) * (var(--crew) - 1));
+}
+@media (min-width: 861px) {
+  .floor.has-art .station { bottom: calc(var(--depth, 0) * 150px); }
+  .floor.has-art.is-compact .station { bottom: calc(var(--depth, 0) * 132px); }
+  /* Just over the head the figure is drawn with: its feet are 112px below the
+     station's top (26px padding + 86px figure), its head 86px × its scale above
+     them, and the bubble sits 8px clear. A back-rank bubble no longer floats. */
+  .floor.has-art .bubble {
+    bottom: calc(100% - 104px + 86px * (1 - var(--depth, 0) * 0.42) * var(--crew));
+  }
+}
+/* Two ranks of four on a phone: each column is a quarter of the screen. */
+@media (max-width: 860px) {
+  .floor.has-art,
+  .floor.has-art.is-compact { --crew: 1.15; }
+}
+
 /* ── animated set pieces: a sheet of frames, one loop per row ── */
 .piece,
 .courier-sheet {
@@ -153,7 +184,7 @@
 }
 .set-back .piece { filter: brightness(var(--prop-dim, 0.66)) saturate(0.68); }
 .set-mid .piece { filter: brightness(0.82) saturate(0.84); }
-.courier-sheet { position: relative; width: 38px; }
+.courier-sheet { position: relative; width: calc(38px * var(--crew, 1)); }
 @keyframes piece-loop {
   from { background-position-x: 0%; }
   to   { background-position-x: 100%; }
@@ -176,10 +207,16 @@
   color: inherit;
   line-height: 0;
   cursor: pointer;
-  transform: translate(calc(var(--cx) - 23px), calc(var(--cy) - 16px));
+  /* Centred on its spot by its own width, so a bigger drone (--crew) lands there too. */
+  transform: translate(calc(var(--cx) - 50%), calc(var(--cy) - 16px * var(--crew, 1)));
   filter: brightness(1.05) drop-shadow(0 8px 12px rgba(0, 0, 0, 0.75));
 }
 .courier.is-home { pointer-events: none; }
+/* The generated drone's parcel is kraft paper, so whose work it carries is a thin
+   outline in the sender's colour instead of a second, coloured parcel. */
+.courier:not(.is-home) .courier-sheet {
+  filter: drop-shadow(0 0 1px var(--from, transparent)) drop-shadow(0 0 1px var(--from, transparent));
+}
 .courier.is-flying { transition: transform 1100ms cubic-bezier(0.45, 0, 0.2, 1); }
 .courier-body {
   position: relative;
