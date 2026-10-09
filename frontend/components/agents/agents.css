@@ -1639,9 +1639,11 @@
     z-index: auto !important;
     padding: 22px 2px 8px;
   }
-  /* Rank one stands behind rank two. */
-  .station:nth-child(-n + 4) { --depth: 0.42; }
-  .station:nth-child(n + 5) { --depth: 0.02; }
+  /* Rank one stands behind rank two. `!important` because each station sets its
+     plan depth inline, and an inline value beats any rule without it: the ranks
+     came out as a row of mixed sizes, nearer and further at random. */
+  .station:nth-child(-n + 4) { --depth: 0.42 !important; }
+  .station:nth-child(n + 5) { --depth: 0.02 !important; }
   .station .sprite { --sprite-size: 54px !important; }
   .desk { width: 100%; max-width: 66px; }
   .cabin { width: 82px; height: 52px; }

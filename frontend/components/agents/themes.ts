@@ -43,8 +43,6 @@ export type ThemeArt = {
 export type FloorManifest = {
   version: number;
   themes: Partial<Record<ThemeId, ThemeArt>>;
-  /** Shared across rooms: the hand-off courier. */
-  courier?: PieceSheet;
 };
 
 /** The props drawn in code (components/agents/props.ts) a room can stand up. */
@@ -277,7 +275,6 @@ export type FloorThemeState = {
   /** This room's layers for the viewer's light or dark setting, if it has art. */
   layers: Layers | null;
   pieces: Record<string, PieceSheet>;
-  courier: PieceSheet | null;
   /** Rooms that can be shown: drawn, or with their art cut. */
   available: FloorTheme[];
   choose: (id: ThemeId) => void;
@@ -318,5 +315,5 @@ export function useFloorTheme(): FloorThemeState {
     writeChoice(id);
   }, []);
 
-  return { theme, layers, pieces: art?.pieces ?? {}, courier: manifest.courier ?? null, available, choose };
+  return { theme, layers, pieces: art?.pieces ?? {}, available, choose };
 }

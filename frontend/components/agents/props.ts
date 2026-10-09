@@ -5,7 +5,7 @@
  * Props exist at three depths, and depth is the whole point: a room reads as a
  * room when things sit *behind* and *in front of* the people in it, not beside
  * them. So the set is split into what stands against the back wall (rack,
- * board, plant, monitors), what hovers over the floor (drone), and what sits
+ * board, plant, monitors), what stands on the floor (cooler, plant), and what sits
  * near the camera (crate, spool, mug) — the near tier is rendered larger and
  * darker, which is the cheapest honest depth cue there is.
  *
@@ -137,20 +137,6 @@ export const COOLER: string[] = [
   ".oooooooo.",
   "..o....o..",
   "..oo..oo..",
-];
-
-/* ── mid tier: on the floor between the wall and the crew, and in the air ── */
-
-/** RELAY's courier drone, permanently mid-errand. */
-export const DRONE: string[] = [
-  ".oooo....oooo.",
-  "oMmmMo..oMmmMo",
-  "..oo......oo..",
-  "...oooooooo...",
-  "..oMMMMMMMMo..",
-  "..oMLLWWLLMo..",
-  "..oMMMMMMMMo..",
-  "...oooooooo...",
 ];
 
 /* ── near tier: sits between you and the crew ───────────────────────────── */

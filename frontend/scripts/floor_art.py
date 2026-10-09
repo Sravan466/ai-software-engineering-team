@@ -14,7 +14,6 @@ WebPs can always be rebuilt. Outputs, in `frontend/public/floor/`:
     <room>/sky.webp, wall.webp, floor.webp    the room's three layers
     <room>/sky-dark.webp …                    the same room after dark, if drawn
     <room>/<piece>.webp                       an animated set piece, re-cut
-    shared/courier.webp                       the hand-off courier, every room
     manifest.json                             what exists; the page reads it
 
 A room is offered in the picker only once all three of its layers are cut.
@@ -416,10 +415,6 @@ def run_room(room: str, check: bool, manifest: dict) -> list:
         else:
             raise Refused(f"{prompt}: `Kind:` must be layer or sheet")
 
-    if room == "shared":
-        if "courier" in pieces:
-            manifest["courier"] = pieces["courier"]
-        return notes
     if all(k in layers for k in LAYERS):
         art: dict = {"layers": layers}
         if all(k in dark for k in LAYERS):
@@ -436,8 +431,8 @@ def run_room(room: str, check: bool, manifest: dict) -> list:
 def main(argv: list) -> int:
     check = "--check" in argv
     only = [a for a in argv if not a.startswith("--")]
-    rooms = only or [*ROOMS, "shared"]
-    unknown = [r for r in rooms if r not in (*ROOMS, "shared")]
+    rooms = only or list(ROOMS)
+    unknown = [r for r in rooms if r not in ROOMS]
     if unknown:
         raise SystemExit(f"unknown room: {', '.join(unknown)}")
 
@@ -446,10 +441,9 @@ def main(argv: list) -> int:
         manifest = json.loads(path.read_text())
     except (OSError, ValueError):
         manifest = {}
-    manifest = {"version": 1, "themes": manifest.get("themes", {}), **({"courier": manifest["courier"]} if "courier" in manifest else {})}
+    manifest = {"version": 1, "themes": manifest.get("themes", {})}
     for room in rooms:
-        if room != "shared":
-            manifest["themes"].pop(room, None)
+        manifest["themes"].pop(room, None)
         print(room)
         for line in run_room(room, check, manifest):
             print(line)

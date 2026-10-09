@@ -1,8 +1,7 @@
 import type { PhaseResult, Project } from "@/lib/api";
-import { AGENTS, AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
+import { AGENTS, suiteLine, type Persona } from "@/components/agents/personas";
 import type { SpriteState } from "@/components/agents/AgentSprite";
 import {
-  HANDOFF_STATE,
   SPRITE_STATE,
   crewAtRest,
   effectiveStatus,
@@ -238,22 +237,6 @@ export function liveFloor(project: Project, tick = 0): Floor {
       foot,
     },
   };
-}
-
-/** What the phase that just took the work was given, in the hand-off note's words. */
-export function handoffLine(project: Project, from: number, to: number, attempt?: PhaseResult): string {
-  const a = AGENTS[from].codename;
-  const b = AGENTS[to];
-  // The attempt on screen (in a replay, the one being replayed), else the latest.
-  const row = attempt ?? latestRow(project, b.key);
-  // What the running phase was handed belongs to the attempt running now, not to an
-  // earlier one being replayed.
-  const running = !!row && row.status === "running" && row === latestRow(project, b.key);
-  const deps = row?.handoff?.deps ?? (running && project.given?.phase === b.key ? project.given.deps : null) ?? [];
-  const given = deps
-    .map((d) => `${AGENT_BY_KEY[d.phase]?.codename ?? d.phase} ${(HANDOFF_STATE[d.full] ?? HANDOFF_STATE.whole).label.toLowerCase()}`)
-    .join(" · ");
-  return given ? `${a} → ${b.codename}: ${given}` : `${a} → ${b.codename}`;
 }
 
 // ── a finished build, replayed ───────────────────────────────────────────────

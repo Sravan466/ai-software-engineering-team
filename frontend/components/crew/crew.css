@@ -2,8 +2,8 @@
    crew.css: the crew floor wired to your builds (#91).
 
    The room itself is in agents.css. This file holds what a real build added to
-   it: the board's fourth row, bubbles with a file and a note, the courier, the
-   art layers and set pieces a room theme brings, the inspector's record, and the
+   it: the board's fourth row, bubbles with a file and a note, the art layers
+   and set pieces a room theme brings, the inspector's record, and the
    window's controls (build switcher, theme picker, replay scrubber).
    Square corners and hard 1–2px edges, like the rest of the room.
    =========================================================================== */
@@ -142,10 +142,10 @@
 /* ── the crew at the art's scale ──
    The generated rooms are drawn bigger than the CSS one: their pixel grain is about
    twice the sprites', and a window or a filing cabinet at the back wall stood
-   taller than an agent at the front. So in a room with art the crew, the props
-   standing in it and the courier are drawn --crew times larger, and the ranks
-   spread further back so the bigger figures don't hide the name plates behind
-   them. The figure grows up from its feet, and its bubble rises with it (86px is
+   taller than an agent at the front. So in a room with art the crew and the props
+   standing in it are drawn --crew times larger, and the ranks spread further back
+   (175px a unit of depth, 154px in the Relay card) so the back rank's desks and
+   name plates stand clear of the front rank's heads. The figure grows up from its feet, and its bubble rises with it (86px is
    the figure's unscaled height). */
 .floor.has-art { --crew: 1.5; }
 .floor.has-art.is-compact { --crew: 1.3; }
@@ -155,8 +155,8 @@
   bottom: calc(100% - 6px + 86px * (1 - var(--depth, 0) * 0.42) * (var(--crew) - 1));
 }
 @media (min-width: 861px) {
-  .floor.has-art .station { bottom: calc(var(--depth, 0) * 150px); }
-  .floor.has-art.is-compact .station { bottom: calc(var(--depth, 0) * 132px); }
+  .floor.has-art .station { bottom: calc(var(--depth, 0) * 175px); }
+  .floor.has-art.is-compact .station { bottom: calc(var(--depth, 0) * 154px); }
   /* Just over the head the figure is drawn with: its feet are 112px below the
      station's top (26px padding + 86px figure), its head 86px × its scale above
      them, and the bubble sits 8px clear. A back-rank bubble no longer floats. */
@@ -171,8 +171,7 @@
 }
 
 /* ── animated set pieces: a sheet of frames, one loop per row ── */
-.piece,
-.courier-sheet {
+.piece {
   position: absolute;
   display: block;
   background-image: var(--piece);
@@ -184,78 +183,9 @@
 }
 .set-back .piece { filter: brightness(var(--prop-dim, 0.66)) saturate(0.68); }
 .set-mid .piece { filter: brightness(0.82) saturate(0.84); }
-.courier-sheet { position: relative; width: calc(38px * var(--crew, 1)); }
 @keyframes piece-loop {
   from { background-position-x: 0%; }
   to   { background-position-x: 100%; }
-}
-
-/* ── the courier ──
-   RELAY's drone carries each hand-off from the desk that finished to the one that
-   took the work, then waits there with the parcel (in the sender's colour) until
-   the next one. Placed by transform from measured desk positions, so it lands on
-   the desk at every layout. */
-.courier {
-  position: absolute;
-  left: 0;
-  top: 0;
-  z-index: 5;
-  display: block;
-  padding: 4px;
-  border: 0;
-  background: none;
-  color: inherit;
-  line-height: 0;
-  cursor: pointer;
-  /* Centred on its spot by its own width, so a bigger drone (--crew) lands there too. */
-  transform: translate(calc(var(--cx) - 50%), calc(var(--cy) - 16px * var(--crew, 1)));
-  filter: brightness(1.05) drop-shadow(0 8px 12px rgba(0, 0, 0, 0.75));
-}
-.courier.is-home { pointer-events: none; }
-/* The generated drone's parcel is kraft paper, so whose work it carries is a thin
-   outline in the sender's colour instead of a second, coloured parcel. */
-.courier:not(.is-home) .courier-sheet {
-  filter: drop-shadow(0 0 1px var(--from, transparent)) drop-shadow(0 0 1px var(--from, transparent));
-}
-.courier.is-flying { transition: transform 1100ms cubic-bezier(0.45, 0, 0.2, 1); }
-.courier-body {
-  position: relative;
-  display: block;
-  animation: courier-hover 5.5s ease-in-out infinite;
-}
-.courier.is-flying .courier-body {
-  animation:
-    courier-hop 1100ms cubic-bezier(0.3, 0, 0.3, 1) 1,
-    courier-hover 5.5s ease-in-out 1100ms infinite;
-}
-@keyframes courier-hover {
-  0%, 100% { transform: translate(0, 0); }
-  30%      { transform: translate(-5px, -3px); }
-  62%      { transform: translate(4px, 2px); }
-}
-/* The arc and the lean into the flight: up and over, not along a rail. */
-@keyframes courier-hop {
-  0%   { transform: translateY(0) rotate(0deg); }
-  38%  { transform: translateY(-36px) rotate(var(--tilt, 0deg)); }
-  100% { transform: translateY(0) rotate(0deg); }
-}
-.courier-parcel {
-  position: absolute;
-  left: 50%;
-  top: calc(100% - 2px);
-  width: 11px;
-  height: 8px;
-  margin-left: -5px;
-  background: var(--from, var(--run));
-  box-shadow:
-    0 0 0 1px #05070c,
-    inset 0 2px 0 rgba(255, 255, 255, 0.35),
-    inset 0 -2px 0 rgba(0, 0, 0, 0.3);
-}
-.courier:focus-visible {
-  outline: 2px solid var(--run);
-  outline-offset: 1px;
-  border-radius: 4px;
 }
 
 /* ── inspector: the agent's record ── */
@@ -630,12 +560,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .courier,
-  .courier.is-flying { transition: none; }
-  .courier-body,
-  .courier.is-flying .courier-body,
   .piece,
-  .courier-sheet,
   .crew-menu { animation: none; }
   .bubble-l,
   .bubble-r { animation: none; }
@@ -643,8 +568,6 @@
 
 /* The art's own box, for set pieces placed in its coordinates. */
 .stage { position: absolute; display: block; pointer-events: none; }
-/* The courier art faces right; flying left, it turns round. */
-.courier[data-dir="left"] .courier-sheet { transform: scaleX(-1); }
 
 /* Beside the room, the inspector scrolls inside the room's height instead of
    setting it: otherwise every agent you pick (and every hand-off the inspector

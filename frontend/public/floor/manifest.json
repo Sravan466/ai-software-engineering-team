@@ -74,13 +74,5 @@
         }
       }
     }
-  },
-  "courier": {
-    "src": "shared/courier.webp",
-    "cols": 12,
-    "rows": 1,
-    "w": 122,
-    "h": 197,
-    "fps": 16.0
   }
 }

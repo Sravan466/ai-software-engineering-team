@@ -11,7 +11,7 @@ import { useProject } from "@/components/build/useProject";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { STATUS_DOT, STATUS_TEXT, floorBuild, isLive, statusOf } from "@/lib/buildStatus";
-import Room, { type Courier } from "@/components/crew/Room";
+import Room from "@/components/crew/Room";
 import Inspector from "@/components/crew/Inspector";
 import { AlsoRunning, BuildSwitcher, ReplayBar, ThemePicker } from "@/components/crew/Controls";
 import { useBoardTick } from "@/components/crew/useBoardTick";
@@ -19,7 +19,6 @@ import { useFloorEvents } from "@/components/crew/useFloorEvents";
 import {
   SCENARIOS,
   emptyFloor,
-  handoffLine,
   liveFloor,
   replayFloor,
   timeline,
@@ -233,12 +232,12 @@ function CrewFloor() {
     if (!empty) floor.board.foot = poll.error ? "BUILD NOT FOUND" : "LOADING";
   }
 
-  // ── selection, and what changed: the log, the bow, the courier ─────────────
+  // ── selection, and what changed: the log and the bow ──────────────────────
   const [selected, setSelected] = useState(0);
   // Once you pick someone, the inspector stays on them; until then it follows the work.
   const [pinned, setPinned] = useState(false);
   const viewKey = tour ? "tour" : project ? `${project.id}:${replaying ? "replay" : "live"}` : "none";
-  const { log, setLog, flight, pokeAgent, pokeOf, clearPoke } = useFloorEvents(floor, viewKey, {
+  const { log, setLog, pokeAgent, pokeOf, clearPoke } = useFloorEvents(floor, viewKey, {
     quiet: tour,
     onFresh: (next) => {
       if (!pinned && next.board.active >= 0) setSelected(next.board.active);
@@ -279,11 +278,6 @@ function CrewFloor() {
       setPinned(false);
     }
   }, [chosen]);
-
-  const courier: Courier | null =
-    flight && project
-      ? { ...flight, label: handoffLine(project, flight.from, flight.to, floor.stations[flight.to]?.row) }
-      : null;
 
   function pickBuild(id: string) {
     if (id === chosen) return;
@@ -431,7 +425,6 @@ function CrewFloor() {
             onSelect={select}
             pokeOf={pokeOf}
             look={look}
-            courier={tour || !project ? null : courier}
             hint={hint}
           />
           <Inspector
