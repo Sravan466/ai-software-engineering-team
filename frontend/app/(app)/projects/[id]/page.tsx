@@ -5,7 +5,18 @@ import { api, type Artifacts, type DatabaseState, type Project, type RunResponse
 import { listOf } from "@/lib/text";
 import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
 import { AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
-import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
+import AgentSprite from "@/components/agents/AgentSprite";
+import {
+  NODE_STATUS,
+  VOICE_FOR,
+  crewAtRest,
+  effectiveStatus,
+  latestRow,
+  nodeStateFor,
+  spriteFor,
+  type NodeState,
+} from "@/components/agents/phaseState";
+import { useProject } from "@/components/build/useProject";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { Skeleton, SkeletonLines } from "@/components/ui/Skeleton";
@@ -29,10 +40,9 @@ import PhaseSteps from "@/components/build/PhaseSteps";
 import { onOpenFile } from "@/lib/openFile";
 import type { FileFocus } from "@/components/build/FileBrowser";
 
-import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
+import { artifactFiles } from "@/components/build/payload";
 
 type Tab = "build" | "preview" | "summary";
-type NodeState = "done" | "running" | "gate" | "redo" | "failed" | "pending";
 
 // ── status → presentation ────────────────────────────────────────────────────
 const STATUS_LABEL: Record<string, string> = {
@@ -52,11 +62,6 @@ function badgeClass(status: string): string {
   if (status === "running") return "badge-run";
   if (status === "failed" || status === "stalled") return "badge-bad";
   return "";
-}
-
-/** A stalled run says `running` in the database and is not running. Say the truth. */
-function effectiveStatus(project: Project): string {
-  return project.status === "running" && project.stalled ? "stalled" : project.status;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -80,65 +85,6 @@ function StatusBadge({ status }: { status: string }) {
     </span>
   );
 }
-
-// Latest row produced for a phase (phases re-run when sent back). One definition,
-// shared with the decision panel — two answers to "which attempt is current" would
-// let the badge on a phase and the artifact under review disagree.
-const latestRow = (project: Project, key: string) => rowFor(project.phases, key);
-
-/**
- * What a phase is doing, read from the phase's own row first.
- *
- * This used to be inferred from the *project* status plus `current_phase`, and both
- * of those only moved once an agent had finished — so a phase mid-generation was
- * indistinguishable from one that had never started. A row now exists from the moment
- * generation begins, and it carries its own status, which makes this a lookup instead
- * of a guess.
- */
-function nodeStateFor(project: Project, key: string): NodeState {
-  const row = latestRow(project, key);
-  if (!row) return "pending";
-  if (row.status === "running") return "running";
-  if (row.status === "approved") return "done";
-  if (row.status === "rejected") return "redo";
-  if (row.status === "failed") return "failed";
-  if (row.status === "pending_approval") {
-    const waiting =
-      project.status === "awaiting_approval" && project.current_phase === key;
-    return waiting ? "gate" : "done";
-  }
-  return "done";
-}
-
-// Which of an agent's voice lines fits the state it's in. A phase waiting at a
-// gate has finished its work, so it speaks its "done" line.
-const VOICE_FOR: Record<NodeState, keyof Persona["lines"]> = {
-  pending: "queued",
-  running: "working",
-  gate: "done",
-  done: "done",
-  redo: "rejected",
-  failed: "rejected",
-};
-
-// The build view and the sprite share one idea of what an agent is doing.
-const SPRITE_STATE: Record<NodeState, SpriteState> = {
-  done: "done",
-  running: "working",
-  gate: "gate",
-  redo: "rejected",
-  failed: "rejected",
-  pending: "queued",
-};
-
-const NODE_STATUS: Record<NodeState, string> = {
-  pending: "Queued",
-  running: "Running",
-  redo: "Rejected, re-running",
-  failed: "Stopped mid-phase",
-  gate: "Needs your approval",
-  done: "Done",
-};
 
 /**
  * What a queued phase is actually waiting for.
@@ -222,10 +168,12 @@ function formatCost(usd: unknown): string {
 // ── page ─────────────────────────────────────────────────────────────────────
 export default function ProjectPage({ params }: { params: { id: string } }) {
   const { id } = params;
-  const [project, setProject] = useState<Project | null>(null);
-  const [analytics, setAnalytics] = useState<any>(null);
+  // The build, kept fresh at the cadence its status calls for (shared with the crew
+  // floor, #91).
+  const { project, setProject, analytics, error, setError, load, actionFailed } = useProject(id, {
+    analytics: true,
+  });
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("build");
   // "Deploy it" / "Connect to GitHub" from the completion banner: open Deliver on
   // that flow. Cleared once the card has taken it, so a tab switch doesn't re-open it.
@@ -247,74 +195,18 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
       }),
     [],
   );
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Whether the error on screen is a control's refusal, which the status poll must
-  // leave alone — it is cleared by the next action, not by the next reload.
-  const actionFailed = useRef(false);
-
-  const load = useCallback(async () => {
-    try {
-      const p = await api.getProject(id);
-      setProject(p);
-      setAnalytics(await api.analytics(id));
-      if (!actionFailed.current) setError("");
-    } catch (e: any) {
-      setError(e.message);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
   // Returning from the GitHub OAuth round-trip? Land on Deliver, where the ship
   // card lives (it reads ?github= and ?next= itself).
+  // From the crew floor (#91): `?phase=` lands on that phase's row.
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
     if (sp.get("github") || sp.get("next")) setTab("summary");
-  }, []);
-
-  // Poll while anything can still change under us — at a cadence matched to how
-  // fast it can change.
-  //
-  // A live `running` build is the only thing worth a tight loop. A *stalled* one is
-  // not running at all, and hammering it every 2.5s forever is precisely the old
-  // behaviour this issue is about. `awaiting_approval` looks static but isn't:
-  // another tab can approve, stop or reject it, and a tab showing a gate that no
-  // longer exists is how one click's worth of intent used to advance two phases.
-  // Stopped, a run still has someone finishing the call Stop can't interrupt — its
-  // row says `running` until that call returns — and the row's steps say "stopping
-  // once this step finishes" (#86). Keep watching until it has.
-  // A stopped run whose process died before its call returned never will: `stalled`.
-  const finishing =
-    project?.status === "cancelled" &&
-    !project.stalled &&
-    !!project.current_phase &&
-    latestRow(project, project.current_phase)?.status === "running";
-  const pollMs = !project
-    ? 0
-    : (project.status === "running" && !project.stalled) || finishing
-      ? 2500
-      : project.status === "running" || project.status === "awaiting_approval"
-        ? 10000
-        : // Paused for the user's computer: it resumes by itself when the connector
-          // is back, so keep watching — slowly — to show that happening.
-          project.status === "paused"
-          ? 5000
-          : 0;
-
-  useEffect(() => {
-    if (pollMs > 0) {
-      pollRef.current = setInterval(load, pollMs);
-    } else if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
+    const phase = sp.get("phase");
+    if (phase) {
+      setTab("build");
+      setJump({ key: phase });
     }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [pollMs, load]);
+  }, []);
 
   /** Run a control call. Returns whether it landed, so callers can keep the
    *  reviewer's typing when it didn't. */
@@ -1123,26 +1015,6 @@ function producedByPhase(art: Artifacts): Map<string, number> {
 }
 
 /** A run that can still produce something hasn't finished failing to. */
-/**
- * Whether the crew is off duty: nobody holds the work, so whoever waits dozes.
- * Only a running build or one waiting on your approval is on duty — a build
- * that hasn't started is at rest (as on the crew floor's "Before the build"),
- * and so is a stalled one: it stopped responding, and the crew says so.
- */
-function crewAtRest(project: Project): boolean {
-  const s = effectiveStatus(project);
-  return s !== "running" && s !== "awaiting_approval";
-}
-
-/**
- * The sprite for a phase. On a stalled run the phase that stopped responding
- * still reads `running`; it dozes with everyone else instead of looping its
- * work beside a sleeping crew.
- */
-function spriteFor(project: Project, ns: NodeState): SpriteState {
-  return ns === "running" && effectiveStatus(project) === "stalled" ? "queued" : SPRITE_STATE[ns];
-}
-
 function stillRunning(status: string): boolean {
   return status === "created" || status === "running" || status === "awaiting_approval";
 }

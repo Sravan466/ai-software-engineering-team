@@ -560,6 +560,34 @@ export type Project = {
   elapsed_seconds: number | null;
   /** What the running phase is doing inside itself — planning, or which file (#81). */
   activity?: Activity | null;
+  /**
+   * What the running phase was handed by the phases before it (#91), before its row
+   * records the same as `handoff.deps`. Null until its prompt is built.
+   */
+  given?: { phase: string; deps: HandoffDep[] } | null;
+};
+
+/** One agent's record across the account's builds (#91), from `/api/analytics/crew`. */
+export type CrewRecord = {
+  builds: number;
+  calls: number;
+  tokens: number;
+  cost_usd: number;
+  /** Calls on a model nobody priced: while above zero, `cost_usd` is a floor. */
+  unpriced_calls: number;
+  avg_latency_ms: number;
+  local_calls: number;
+  /** Calls that recorded where they ran; `local_share` is over these. */
+  located_calls: number;
+  local_share: number | null;
+  approved: number;
+  /** Sent back, by you or by the crew's own fix loop. */
+  rejected: number;
+  failed: number;
+  schema_repaired: number;
+  schema_invalid: number;
+  build_ok: number;
+  build_failed: number;
 };
 
 
@@ -974,6 +1002,8 @@ export const api = {
   routerStatus: () => req<RouterStatus>("/api/models/status"),
   pipelineShape: () => req<{ phases: Phase[]; mermaid: string }>("/api/models/pipeline"),
   analytics: (id: string) => req<any>(`/api/analytics/projects/${id}`),
+  /** Each agent's record across every build of yours (#91), keyed by phase. */
+  crewRecord: () => req<{ phases: Record<string, CrewRecord> }>("/api/analytics/crew"),
 
   // ── Generated-project artifacts (Preview / Summary / Download) ──
   /** What ships by default — while a change is open, the version it is made on.

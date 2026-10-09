@@ -10,7 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core import identity
-from app.db.models import Project, UsageEvent
+from app.core.constants import PHASE_ORDER, BuildStatus, PhaseStatus, SchemaStatus
+from app.db.models import PhaseResult, Project, UsageEvent
 from app.router.registry import estimate_cost
 from app.schemas.llm import LLMResponse
 
@@ -116,6 +117,91 @@ def summary(db: Session, owner_id: str, project_id: Optional[str] = None) -> dic
         "unpriced_calls": len(unpriced),
         "unpriced_models": sorted({e.model for e in unpriced}),
     }
+
+
+def crew(db: Session, owner_id: str) -> dict:
+    """Each phase's record across one account's builds: what that agent has done for them.
+
+    Two sources, because neither answers alone. The calls (`UsageEvent`, tagged with
+    the phase that made them) say what the work cost; the phase rows say how it went:
+    approved, sent back, repaired, whether its code built. An account with no builds
+    gets every phase at zero rather than an error, and the page shows dashes.
+    """
+    keys = [p.value for p in PHASE_ORDER]
+    out: dict[str, dict] = {
+        k: {
+            "builds": 0,
+            "calls": 0,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "unpriced_calls": 0,
+            "avg_latency_ms": 0.0,
+            "local_calls": 0,
+            # Calls that recorded where they ran; the share is over these, not all calls.
+            "located_calls": 0,
+            "local_share": None,
+            "approved": 0,
+            "rejected": 0,
+            "failed": 0,
+            "schema_repaired": 0,
+            "schema_invalid": 0,
+            "build_ok": 0,
+            "build_failed": 0,
+        }
+        for k in keys
+    }
+
+    latency = {k: 0 for k in keys}
+    events = db.execute(
+        select(UsageEvent).where(UsageEvent.owner_id == owner_id, UsageEvent.phase.in_(keys))
+    ).scalars()
+    for e in events:
+        rec = out[e.phase]
+        rec["calls"] += 1
+        rec["tokens"] += e.total_tokens
+        rec["cost_usd"] = round(rec["cost_usd"] + e.cost_usd, 6)
+        latency[e.phase] += e.latency_ms
+        if e.cost_known is False:
+            rec["unpriced_calls"] += 1
+        if e.is_local is not None:
+            rec["located_calls"] += 1
+            if e.is_local:
+                rec["local_calls"] += 1
+
+    rows = db.execute(
+        select(PhaseResult)
+        .join(Project, Project.id == PhaseResult.project_id)
+        .where(Project.owner_id == owner_id, PhaseResult.phase.in_(keys))
+    ).scalars()
+    touched: dict[str, set] = {k: set() for k in keys}
+    for r in rows:
+        # A restored version (#79) copies its rows. The copy is the same work, not more.
+        if isinstance(r.handoff, dict) and r.handoff.get("restored_row"):
+            continue
+        rec = out[r.phase]
+        touched[r.phase].add(r.project_id)
+        if r.status == PhaseStatus.APPROVED.value:
+            rec["approved"] += 1
+        elif r.status == PhaseStatus.REJECTED.value:
+            rec["rejected"] += 1
+        elif r.status == PhaseStatus.FAILED.value:
+            rec["failed"] += 1
+        if r.schema_status == SchemaStatus.REPAIRED.value:
+            rec["schema_repaired"] += 1
+        elif r.schema_status == SchemaStatus.INVALID.value:
+            rec["schema_invalid"] += 1
+        if r.build_status == BuildStatus.OK.value:
+            rec["build_ok"] += 1
+        elif r.build_status == BuildStatus.FAILED.value:
+            rec["build_failed"] += 1
+
+    for k, rec in out.items():
+        rec["builds"] = len(touched[k])
+        if rec["calls"]:
+            rec["avg_latency_ms"] = round(latency[k] / rec["calls"], 1)
+        if rec["located_calls"]:
+            rec["local_share"] = round(rec["local_calls"] / rec["located_calls"], 3)
+    return {"phases": out}
 
 
 def project_count(db: Session, owner_id: str) -> int:

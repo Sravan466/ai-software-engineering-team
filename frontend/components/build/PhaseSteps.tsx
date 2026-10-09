@@ -123,6 +123,17 @@ function currentStep(a: Activity): Pick<Line, "title" | "past" | "object" | "chi
 }
 
 /**
+ * The step in hand as plain words, for places with no room for the feed: the crew
+ * floor's bubble and nameplate (#91). The same step the feed's live line shows.
+ */
+export function stepWords(a: Activity): { title: string; path?: string; chip?: string; count?: string } {
+  if (a.ended) return { title: "Wrapping up" };
+  const s = currentStep(a);
+  const onFile = a.stage === "writing" || a.stage === "fixing" || a.stage === "changing";
+  return { title: s.title, path: onFile && a.detail ? a.detail : undefined, chip: s.chip, count: s.count };
+}
+
+/**
  * The files that have landed, one line each, in plan order — the latest few by name.
  * While the phase is still writing, the file in hand is the live line instead; once
  * it has moved on (`settled`), a file being fixed is still one that was written.

@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, type LocalStatus, type Preflight, type RouterStatus } from "@/lib/api";
+import { api, type LocalStatus, type Preflight, type Project, type RouterStatus } from "@/lib/api";
+import { crewHref, floorBuild } from "@/lib/buildStatus";
 import { EXAMPLES } from "@/components/shell/phases";
 import { AGENTS } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
@@ -63,6 +64,19 @@ export default function NewBuildPage() {
   useEffect(() => {
     probe();
   }, [probe]);
+
+  // The roster opens the crew floor on the build in hand, or the latest one (#91).
+  const [floorOn, setFloorOn] = useState<Project | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .listProjects()
+      .then((list) => live && setFloorOn(floorBuild(list)))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // The server's own answer to "would this start?", for the routing chosen. Asked
   // again whenever the routing or the runtime changes; a stale reply is dropped, and
@@ -280,7 +294,7 @@ export default function NewBuildPage() {
         <div className="sec-head">
           <h2 className="label">The crew · runs in this order</h2>
           <span className="rule" />
-          <Link className="link" href="/crew" style={{ fontSize: "var(--t-xs)" }}>
+          <Link className="link" href={crewHref(floorOn)} style={{ fontSize: "var(--t-xs)" }}>
             Visit the floor
           </Link>
         </div>
@@ -288,7 +302,7 @@ export default function NewBuildPage() {
           {AGENTS.map((a) => (
             <Link
               key={a.key}
-              href="/crew"
+              href={crewHref(floorOn, a.key)}
               className="agent-card"
               style={{ ["--agent" as string]: a.accent }}
               title={`Meet ${a.codename} on the crew floor`}

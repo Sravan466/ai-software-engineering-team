@@ -126,6 +126,10 @@ class _Activity:
 
 _lock = threading.Lock()
 _board: dict[str, _Activity] = {}
+#: What the phase working now was handed by the phases before it (#91), per build:
+#: `{"phase", "deps"}` in the shape `phase_results.handoff.deps` takes once the row is
+#: saved. Kept apart from the board, which only code, QA and security phases open.
+_given: dict[str, dict] = {}
 
 
 def _project() -> Optional[str]:
@@ -229,6 +233,22 @@ def clear(project_id: str) -> None:
     """Forget the project's progress. A new phase starts clean."""
     with _lock:
         _board.pop(project_id, None)
+        _given.pop(project_id, None)
+
+
+def given(phase: str, deps: Iterable[dict]) -> None:
+    """The phase's prompt was built: record what it was handed, for the crew floor."""
+    pid = _project()
+    if pid is None:
+        return
+    with _lock:
+        _given[pid] = {"phase": phase, "deps": [dict(d) for d in deps]}
+
+
+def given_for(project_id: str) -> Optional[dict]:
+    with _lock:
+        found = _given.get(project_id)
+        return {"phase": found["phase"], "deps": list(found["deps"])} if found else None
 
 
 def drop_ended(project_id: str) -> None:

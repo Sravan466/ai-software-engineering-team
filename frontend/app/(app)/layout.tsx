@@ -1,5 +1,6 @@
 import "@/components/shell/shell.css";
 import "@/components/agents/agents.css";
+import "@/components/crew/crew.css";
 import "@/components/build/build.css";
 import "@/components/build/progress.css";
 import "@/components/build/changes.css";

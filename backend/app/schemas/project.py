@@ -339,6 +339,9 @@ class ProjectOut(BaseModel):
     #: writing | fixing | checking, label, done, total, detail, per_call, files: [{path,
     #: state}]}` — "writing frontend/app/page.tsx (3 of 9)". None when nothing reports.
     activity: Optional[dict] = None
+    #: What the running phase was handed (#91): `{phase, deps: [{phase, digest, full,
+    #: omitted}]}`, before its row records the same as `handoff.deps`.
+    given: Optional[dict] = None
 
 
     model_config = {"from_attributes": True, "populate_by_name": True}

@@ -18,6 +18,12 @@ def overall_summary(user: User = Depends(current_user), db: Session = Depends(ge
     return tracker.summary(db, user.id)
 
 
+@router.get("/crew")
+def crew_record(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """Each agent's record across the account's builds, for the crew floor's inspector."""
+    return tracker.crew(db, user.id)
+
+
 @router.get("/projects/{project_id}")
 def project_summary(
     project: Project = Depends(get_project),

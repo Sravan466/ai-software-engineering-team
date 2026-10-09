@@ -11,9 +11,21 @@ each straight out of an image model (1254x1254 squares, except ATLAS's
 1024x1536 portrait sheet — any size works). Outputs, in
 `frontend/public/agents/`:
 
-    <codename>.webp        the sheet, re-cut onto an even 4x6 grid of CELL cells:
-                           the 5 rows of the sprite sheet, then the sleep loop
+    <codename>.webp        the sheet, re-cut onto an even grid of CELL cells: the
+                           5 rows of the sprite sheet, then the sleep loop
     <codename>-still.webp  the still at ICON px, for the smallest renders
+
+and `frontend/components/agents/sheets.json`, which says how many frames each
+row of each sheet has. AgentSprite reads it, so a sheet regenerated with 10 or
+12 frames a row plays with no code change (#91): run this script and rebuild.
+
+How many frames a row has is read from the sheet, not assumed: the columns are
+the runs of ink between clean vertical gaps (a stray mark too narrow to be a
+figure joins the column beside it). The rows are the five states, always, in
+order: queued, working, done, rejected, gate. When the prompt that made a sheet
+is kept in `assets/prompts/crew/<codename>.md` (or `<codename>-sleep.md`) and
+declares `Grid: 10 columns × 5 rows`, the frames found must match it, or the run
+stops and names that prompt.
 
 The model output can't be used as-is, for three reasons this script exists to fix:
 
@@ -44,12 +56,15 @@ little height, and ATLAS's bottom row ran off the canvas twice; its sheet is a
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from collections import deque
 from pathlib import Path
+from typing import Optional
 
 from PIL import Image, ImageFilter
 
@@ -57,8 +72,11 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "assets"
 OUT = ROOT / "frontend" / "public" / "agents"
 
-COLS, ROWS = 4, 5  # the sprite sheet as generated
+ROWS = 5  # the sprite sheet's rows, one per state; its columns are read from it
+STATES = ["queued", "working", "done", "rejected", "gate"]
 OUT_ROWS = ROWS + 1  # …plus the sleep loop as a sixth row
+PROMPTS = ROOT / "assets" / "prompts" / "crew"
+MANIFEST = ROOT / "frontend" / "components" / "agents" / "sheets.json"
 CELL = 224  # 104px inspector portrait at 2x DPR, with headroom
 ICON = 96  # stills are only used at <= 32px
 FEET_Y = 0.95  # where the soles land in a cell (matches .sprite transform-origin)
@@ -211,7 +229,83 @@ def cut_lines(counts, n, reach):
     return out
 
 
-def frames(sheet: Image.Image):
+
+def ink_runs(counts, min_share=0.5):
+    """The runs of ink between clean gaps, as (start, end). A run much narrower than
+    the others is a stray mark (an effect, a "!") and joins its nearer neighbour."""
+    runs, i, n = [], 0, len(counts)
+    while i < n:
+        if counts[i] > 0:
+            j = i
+            while j < n and counts[j] > 0:
+                j += 1
+            runs.append([i, j])
+            i = j
+        else:
+            i += 1
+    if len(runs) < 2:
+        return [tuple(r) for r in runs]
+    widths = sorted(r[1] - r[0] for r in runs)
+    median = widths[len(widths) // 2]
+    merged = True
+    while merged and len(runs) > 1:
+        merged = False
+        for k, r in enumerate(runs):
+            if r[1] - r[0] < median * min_share:
+                if k == 0:
+                    other = 1
+                elif k == len(runs) - 1:
+                    other = k - 1
+                else:
+                    other = k - 1 if r[0] - runs[k - 1][1] <= runs[k + 1][0] - r[1] else k + 1
+                lo, hi = min(k, other), max(k, other)
+                runs[lo] = [runs[lo][0], runs[hi][1]]
+                del runs[hi]
+                merged = True
+                break
+    return [tuple(r) for r in runs]
+
+
+def count_columns(sheet: Image.Image) -> int:
+    """How many frames across the sheet has, from its own pixels."""
+    alpha = sheet.getchannel("A").load()
+    W, H = sheet.size
+    ink_x = [sum(1 for y in range(0, H, 2) if alpha[x, y] > 40) for x in range(W)]
+    return len(ink_runs(ink_x))
+
+
+def count_rows(sheet: Image.Image) -> int:
+    alpha = sheet.getchannel("A").load()
+    W, H = sheet.size
+    ink_y = [sum(1 for x in range(0, W, 2) if alpha[x, y] > 40) for y in range(H)]
+    return len(ink_runs(ink_y))
+
+
+GRID_LINE = re.compile(r"(\d+)\s*columns?\s*[x×]\s*(\d+)\s*rows?", re.I)
+
+
+def declared_grid(prompt: Path) -> Optional[tuple]:
+    """`Grid: 10 columns × 5 rows` from the prompt that made a sheet, if it was kept."""
+    if not prompt.is_file():
+        return None
+    for line in prompt.read_text().splitlines():
+        if line.lower().lstrip("-*# ").startswith("grid"):
+            m = GRID_LINE.search(line)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def check_grid(name: str, found: tuple, prompt: Path) -> None:
+    want = declared_grid(prompt)
+    if want and want != found:
+        raise SystemExit(
+            f"{name}: the prompt asked for {want[0]} columns × {want[1]} rows but the sheet has "
+            f"{found[0]} × {found[1]} — regenerate it from {prompt.relative_to(ROOT)}"
+        )
+
+
+def frames(sheet: Image.Image, cols: int):
     """Yield (row, col, frame image, anchor, figure bbox) for each slot of the sheet.
 
     Slots are bounded by the empty gaps between figures, not by an even grid:
@@ -220,10 +314,10 @@ def frames(sheet: Image.Image):
     alpha = sheet.getchannel("A").load()
     W, H = sheet.size
     ink_x = [sum(1 for y in range(0, H, 2) if alpha[x, y] > 40) for x in range(W)]
-    xs = [0] + cut_lines(ink_x, COLS, round(W / COLS * 0.35)) + [W]
+    xs = [0] + cut_lines(ink_x, cols, round(W / cols * 0.35)) + [W]
     idle_h = {}
     bad = []
-    for c in range(COLS):
+    for c in range(cols):
         x0, x1 = xs[c], xs[c + 1]
         ink_y = [sum(1 for x in range(x0, x1) if alpha[x, y] > 40) for y in range(H)]
         ys = [0] + cut_lines(ink_y, ROWS, round(H / ROWS * 0.4)) + [H]
@@ -272,8 +366,8 @@ def sleep_file(name: str) -> str:
     return f"{name.capitalize()} Sleep Sheet.png"
 
 
-def sleep_frames(sheet: Image.Image):
-    """Yield (frame image, anchor, figure bbox) for the 2x2 sleep loop, in order.
+def sleep_frames(sheet: Image.Image, cols: int = 2, rows: int = 2):
+    """Yield (frame image, anchor, figure bbox) for the sleep loop, in reading order.
 
     Cut at the real gaps like the main sheets; the Zs are separate shapes and
     stay with the figure in their quadrant. Sleep is drawn standing, so the
@@ -283,12 +377,12 @@ def sleep_frames(sheet: Image.Image):
     W, H = sheet.size
     ink_x = [sum(1 for y in range(0, H, 2) if alpha[x, y] > 40) for x in range(W)]
     ink_y = [sum(1 for x in range(0, W, 2) if alpha[x, y] > 40) for y in range(H)]
-    xs = [0] + cut_lines(ink_x, 2, round(W * 0.2)) + [W]
-    ys = [0] + cut_lines(ink_y, 2, round(H * 0.2)) + [H]
-    for r in range(2):
-        for c in range(2):
+    xs = [0] + cut_lines(ink_x, cols, round(W / cols * 0.4)) + [W]
+    ys = [0] + cut_lines(ink_y, rows, round(H / rows * 0.4)) + [H]
+    for r in range(rows):
+        for c in range(cols):
             slot = (xs[c], ys[r], xs[c + 1], ys[r + 1])
-            n = r * 2 + c + 1
+            n = r * cols + c + 1
             mine = [k for k in components(alpha, slot) if k[0] > 12]
             if not mine:
                 raise SystemExit(f"sleep frame {n} is empty")
@@ -340,6 +434,45 @@ def place(frame, anchor, scale, cell=CELL):
     return out
 
 
+FPS_LINE = re.compile(r"(\d+(?:\.\d+)?)\s*fps", re.I)
+
+
+def declared_fps(prompt: Path) -> Optional[float]:
+    """`Frame rate: 12 fps` from the prompt, if it was kept and says one."""
+    if not prompt.is_file():
+        return None
+    for line in prompt.read_text().splitlines():
+        if line.lower().lstrip("-*# ").startswith("frame rate"):
+            m = FPS_LINE.search(line)
+            if m:
+                return float(m.group(1))
+    return None
+
+
+def check_baselines(name: str, grid: Image.Image, per_row: list, tolerance: int = 2):
+    """Every frame's feet on the same line, checked on the output rather than trusted.
+
+    `place` anchors each frame on its feet, so a frame whose lowest pixels sit off
+    the line was cut wrong (a tool or an effect taken for the feet). Played at 10–12
+    fps that frame would bob, so the run stops on it.
+    """
+    alpha = grid.getchannel("A").load()
+    want = round(CELL * FEET_Y)
+    bad = []
+    for r, n in enumerate(per_row):
+        for c in range(n):
+            shapes = components(alpha, (c * CELL, r * CELL, (c + 1) * CELL, (r + 1) * CELL))
+            if not shapes:
+                bad.append(f"row {r + 1} frame {c + 1} (empty)")
+                continue
+            # The figure, not a dropped page or a spark beside it.
+            bottom = max(shapes, key=lambda k: k[0])[1][3] - r * CELL
+            if abs(bottom - want) > tolerance and bottom < CELL:
+                bad.append(f"row {r + 1} frame {c + 1} ({bottom - want:+d}px)")
+    if bad:
+        raise SystemExit(f"{name}: frames off the baseline: {', '.join(bad)}")
+
+
 def webp(img: Image.Image, dest: Path):
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         img.save(tmp.name)
@@ -360,20 +493,24 @@ def main():
     # Every sheet is cut even when only some are written: the shared scale
     # depends on all eight, so a rebuilt agent stays the same size as the rest.
     cut = {}
+    cols = {}
     for name, (_, sheet_file) in AGENTS.items():
         sheet = strip_painted_checkerboard(Image.open(SRC / sheet_file))
+        cols[name] = count_columns(sheet)
+        if name in only:
+            check_grid(sheet_file, (cols[name], ROWS), PROMPTS / f"{name}.md")
         cut[name] = []
         try:
-            for f in frames(sheet):
+            for f in frames(sheet, cols[name]):
                 cut[name].append(f)
         except SystemExit as e:
             # Fatal only for a sheet being written; for the others the idle
             # row is all the shared scale needs, and it is always cut in full.
-            if name in only or sum(1 for r, *_ in cut[name] if r == 0) < COLS:
+            if name in only or sum(1 for r, *_ in cut[name] if r == 0) < cols[name]:
                 raise SystemExit(f"{sheet_file}: {e}") from None
             print(f"skip {name} (not being written): {e}")
             continue
-        print(f"cut {name}: {len(cut[name])} frames")
+        print(f"cut {name}: {cols[name]} frames a row, {len(cut[name])} frames")
 
     # The shared scale compares figures in source pixels, so a sheet drawn on a
     # different canvas than the rest can move everyone's size. Say so.
@@ -392,20 +529,30 @@ def main():
         if r == 0
     )
 
+    try:
+        manifest = json.loads(MANIFEST.read_text())
+    except (OSError, ValueError):
+        manifest = {}
+    manifest = {"cell": CELL, "feet": FEET_Y, "sheets": manifest.get("sheets", {})}
+
     for name, (still_file, _) in AGENTS.items():
         if name not in only:
             continue
-        grid = Image.new("RGBA", (CELL * COLS, CELL * OUT_ROWS), (0, 0, 0, 0))
-        idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
-        for r, c, frame, anchor, bbox in cut[name]:
-            grid.alpha_composite(place(frame, anchor, scale), (c * CELL, r * CELL))
-
         # The sleep loop is drawn at its own size, so each agent's is scaled to
         # its idle figure — dozing off and waking up never change their size.
         try:
-            sleep = list(sleep_frames(strip_painted_checkerboard(Image.open(SRC / sleep_file(name)))))
+            raw = strip_painted_checkerboard(Image.open(SRC / sleep_file(name)))
+            sc, sr = count_columns(raw), count_rows(raw)
+            check_grid(sleep_file(name), (sc, sr), PROMPTS / f"{name}-sleep.md")
+            sleep = list(sleep_frames(raw, sc, sr))
         except SystemExit as e:
             raise SystemExit(f"{sleep_file(name)}: {e}") from None
+
+        width = max(cols[name], len(sleep))
+        grid = Image.new("RGBA", (CELL * width, CELL * OUT_ROWS), (0, 0, 0, 0))
+        idle_h = next((b[3] - b[1]) * scale for r, c, _f, _a, b in cut[name] if r == 0 and c == 0)
+        for r, c, frame, anchor, bbox in cut[name]:
+            grid.alpha_composite(place(frame, anchor, scale), (c * CELL, r * CELL))
         k = idle_h / (sleep[0][2][3] - sleep[0][2][1])
         for c, (frame, anchor, _b) in enumerate(sleep):
             # Scaled to the idle figure, the rising Zs could reach past the
@@ -414,7 +561,15 @@ def main():
             if (anchor[1] - fb[1]) * k > CELL * FEET_Y or (max(anchor[0] - fb[0], fb[2] - anchor[0])) * k > CELL / 2:
                 print(f"  warning: {name} sleep frame {c + 1} is clipped by its cell")
             grid.alpha_composite(place(frame, anchor, k), (c * CELL, ROWS * CELL))
+        check_baselines(name, grid, [cols[name]] * ROWS + [len(sleep)])
         webp(grid, OUT / f"{name}.webp")
+        frames_per_row = {state: cols[name] for state in STATES}
+        frames_per_row["asleep"] = len(sleep)
+        entry = {"cols": width, "frames": frames_per_row}
+        fps = declared_fps(PROMPTS / f"{name}.md")
+        if fps:
+            entry["fps"] = fps
+        manifest["sheets"][name] = entry
 
         # The still is drawn at the same height as the idle frame, so swapping
         # one for the other never changes the figure's size.
@@ -425,6 +580,10 @@ def main():
         big = place(still, feet_anchor(figure[2], figure[1]), s)
         webp(big.resize((ICON, ICON), Image.LANCZOS), OUT / f"{name}-still.webp")
         print(f"wrote {name}")
+
+    manifest["sheets"] = dict(sorted(manifest["sheets"].items()))
+    MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"wrote {MANIFEST.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
