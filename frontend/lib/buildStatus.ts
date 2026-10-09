@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { Project } from "@/lib/api";
 
 /**
@@ -39,7 +40,8 @@ export function isLive(p: Project): boolean {
   return s === "running" || s === "awaiting_approval";
 }
 
-const byUpdate = (a: Project, b: Project) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
+/** Most recently touched first. */
+export const byUpdate = (a: Project, b: Project) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
 
 /**
  * The build the crew floor opens on: the live one, most recently touched first, or
@@ -58,4 +60,27 @@ export function crewHref(project: Project | null | undefined, agentKey?: string)
   if (agentKey) q.set("agent", agentKey);
   const qs = q.toString();
   return qs ? `/crew?${qs}` : "/crew";
+}
+
+// ── the sidebar's list, shared ───────────────────────────────────────────────
+// The sidebar already fetches the builds on every page; the home page's crew links
+// read that list instead of asking again, so both links always open the same build.
+let shared: Project[] | null = null;
+const listeners = new Set<(list: Project[]) => void>();
+
+export function publishProjects(list: Project[]): void {
+  shared = list;
+  listeners.forEach((fn) => fn(list));
+}
+
+export function useSharedProjects(): Project[] | null {
+  const [list, setList] = useState<Project[] | null>(shared);
+  useEffect(() => {
+    listeners.add(setList);
+    if (shared) setList(shared);
+    return () => {
+      listeners.delete(setList);
+    };
+  }, []);
+  return list;
 }

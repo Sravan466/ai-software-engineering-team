@@ -47,6 +47,12 @@ function readParams(): { project: string | null; agent: string | null } {
   return { project: sp.get("project"), agent: sp.get("agent") };
 }
 
+/** An agent named by phase key or codename, as `?agent=` gives it. */
+function agentIndex(want: string | null | undefined): number {
+  if (!want) return -1;
+  return AGENTS.findIndex((a) => a.key === want || a.codename.toLowerCase() === want.toLowerCase());
+}
+
 /** `?project=` follows the build on the floor, so a refresh or a shared link keeps it. */
 function writeProjectParam(id: string | null) {
   const url = new URL(window.location.href);
@@ -170,7 +176,8 @@ export default function CrewPage() {
   }, []);
   useEffect(() => clearTimers, [clearTimers]);
 
-  const empty = projects !== null && projects.length === 0 && !chosen;
+  // Only an answer of "none" is empty: a list that failed to load says so instead.
+  const empty = projects !== null && projects.length === 0 && !chosen && !listError;
   const tour = empty && touring;
 
   let floor: Floor;
@@ -194,6 +201,15 @@ export default function CrewPage() {
   const pokeSeq = useRef(0);
   const pokeAgent = useCallback((i: number) => setPoke({ i, n: ++pokeSeq.current }), []);
   const pokeOf = (i: number) => (poke?.i === i ? poke.n : undefined);
+  // `?agent=` (an agent card on the home page) selects that agent as the page loads,
+  // whether or not there is a build to show.
+  useEffect(() => {
+    const i = agentIndex(readParams().agent);
+    if (i >= 0) {
+      setSelected(i);
+      setPinned(true);
+    }
+  }, []);
   function select(i: number) {
     setSelected(i);
     setPinned(true);
@@ -245,14 +261,15 @@ export default function CrewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature, viewKey]);
 
-  // A new build starts with a clean slate.
+  // A new build starts with a clean slate. Not before one is chosen: `?agent=` is
+  // read here once, for the build it came with.
   useEffect(() => {
+    if (!chosen) return;
     setLog([]);
     setReplaying(false);
     setPlaying(false);
     setU(0);
-    const want = asked.current?.agent;
-    const i = want ? AGENTS.findIndex((a) => a.key === want || a.codename.toLowerCase() === want.toLowerCase()) : -1;
+    const i = agentIndex(asked.current?.agent);
     if (i >= 0) {
       setSelected(i);
       setPinned(true);

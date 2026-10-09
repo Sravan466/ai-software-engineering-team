@@ -253,11 +253,14 @@ def given_for(project_id: str) -> Optional[dict]:
 
 def drop_ended(project_id: str) -> None:
     """The run stopped driving: a phase's last word is history now. A live board — a
-    newer run's, mid-phase — is left alone."""
+    newer run's, mid-phase — is left alone, and so is what its phase was handed."""
     with _lock:
         found = _board.get(project_id)
         if found is not None and found.ended:
             del _board[project_id]
+            found = None
+        if found is None:
+            _given.pop(project_id, None)
 
 
 def latest(project_id: str) -> Optional[dict]:

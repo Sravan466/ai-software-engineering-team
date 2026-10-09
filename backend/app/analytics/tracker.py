@@ -6,7 +6,7 @@ token usage, estimated $ cost, per-provider/per-model breakdown, fallback rate.
 from __future__ import annotations
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core import identity
@@ -151,54 +151,72 @@ def crew(db: Session, owner_id: str) -> dict:
         for k in keys
     }
 
-    latency = {k: 0 for k in keys}
-    events = db.execute(
-        select(UsageEvent).where(UsageEvent.owner_id == owner_id, UsageEvent.phase.in_(keys))
-    ).scalars()
-    for e in events:
-        rec = out[e.phase]
-        rec["calls"] += 1
-        rec["tokens"] += e.total_tokens
-        rec["cost_usd"] = round(rec["cost_usd"] + e.cost_usd, 6)
-        latency[e.phase] += e.latency_ms
-        if e.cost_known is False:
-            rec["unpriced_calls"] += 1
-        if e.is_local is not None:
-            rec["located_calls"] += 1
-            if e.is_local:
-                rec["local_calls"] += 1
+    # The calls, summed in the database. Only builds that still exist: a deleted
+    # build's calls outlive it (they have no foreign key), its phase rows don't, and
+    # one record must not count two different sets of builds.
+    calls = db.execute(
+        select(
+            UsageEvent.phase,
+            func.count(),
+            func.coalesce(func.sum(UsageEvent.total_tokens), 0),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0.0),
+            func.coalesce(func.sum(UsageEvent.latency_ms), 0),
+            func.sum(case((UsageEvent.cost_known.is_(False), 1), else_=0)),
+            func.sum(case((UsageEvent.is_local.is_(True), 1), else_=0)),
+            func.count(UsageEvent.is_local),
+        )
+        .join(Project, Project.id == UsageEvent.project_id)
+        .where(UsageEvent.owner_id == owner_id, Project.owner_id == owner_id, UsageEvent.phase.in_(keys))
+        .group_by(UsageEvent.phase)
+    ).all()
+    for phase, n, tokens, cost, latency, unpriced, local, located in calls:
+        rec = out[phase]
+        rec["calls"] = int(n)
+        rec["tokens"] = int(tokens)
+        rec["cost_usd"] = round(float(cost), 6)
+        rec["unpriced_calls"] = int(unpriced or 0)
+        rec["local_calls"] = int(local or 0)
+        rec["located_calls"] = int(located or 0)
+        if n:
+            rec["avg_latency_ms"] = round(float(latency) / n, 1)
 
+    # The phase rows, only the columns that are counted: never the documents.
     rows = db.execute(
-        select(PhaseResult)
+        select(
+            PhaseResult.phase,
+            PhaseResult.project_id,
+            PhaseResult.status,
+            PhaseResult.schema_status,
+            PhaseResult.build_status,
+            PhaseResult.handoff,
+        )
         .join(Project, Project.id == PhaseResult.project_id)
         .where(Project.owner_id == owner_id, PhaseResult.phase.in_(keys))
-    ).scalars()
+    ).all()
     touched: dict[str, set] = {k: set() for k in keys}
-    for r in rows:
+    for phase, project_id, status, schema_status, build_status, handoff in rows:
         # A restored version (#79) copies its rows. The copy is the same work, not more.
-        if isinstance(r.handoff, dict) and r.handoff.get("restored_row"):
+        if isinstance(handoff, dict) and handoff.get("restored_row"):
             continue
-        rec = out[r.phase]
-        touched[r.phase].add(r.project_id)
-        if r.status == PhaseStatus.APPROVED.value:
+        rec = out[phase]
+        touched[phase].add(project_id)
+        if status == PhaseStatus.APPROVED.value:
             rec["approved"] += 1
-        elif r.status == PhaseStatus.REJECTED.value:
+        elif status == PhaseStatus.REJECTED.value:
             rec["rejected"] += 1
-        elif r.status == PhaseStatus.FAILED.value:
+        elif status == PhaseStatus.FAILED.value:
             rec["failed"] += 1
-        if r.schema_status == SchemaStatus.REPAIRED.value:
+        if schema_status == SchemaStatus.REPAIRED.value:
             rec["schema_repaired"] += 1
-        elif r.schema_status == SchemaStatus.INVALID.value:
+        elif schema_status == SchemaStatus.INVALID.value:
             rec["schema_invalid"] += 1
-        if r.build_status == BuildStatus.OK.value:
+        if build_status == BuildStatus.OK.value:
             rec["build_ok"] += 1
-        elif r.build_status == BuildStatus.FAILED.value:
+        elif build_status == BuildStatus.FAILED.value:
             rec["build_failed"] += 1
 
     for k, rec in out.items():
         rec["builds"] = len(touched[k])
-        if rec["calls"]:
-            rec["avg_latency_ms"] = round(latency[k] / rec["calls"], 1)
         if rec["located_calls"]:
             rec["local_share"] = round(rec["local_calls"] / rec["located_calls"], 3)
     return {"phases": out}

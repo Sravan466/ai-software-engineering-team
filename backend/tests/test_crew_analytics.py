@@ -115,3 +115,47 @@ def test_the_running_phase_says_what_it_was_handed_before_its_row_is_saved():
         assert activity.given_for(pid) is None
     finally:
         activity.clear(pid)
+
+
+def test_a_deleted_builds_calls_leave_the_record_with_it(two):
+    """Usage events have no foreign key and outlive their build; the record must not."""
+    a, a_user, *_ = two
+    kept = _build(a_user.id, "A plant watering log")
+    _row(kept, "frontend_engineer", "approved")
+    _call(a_user.id, kept, "frontend_engineer", total_tokens=100, latency_ms=1000)
+    r = a.post("/api/projects", json={"idea": "A build to delete"})
+    gone = r.json()["id"]
+    _row(gone, "frontend_engineer", "approved")
+    _call(a_user.id, gone, "frontend_engineer", total_tokens=900, latency_ms=3000)
+    assert a.get("/api/analytics/crew").json()["phases"]["frontend_engineer"]["tokens"] == 1000
+
+    assert a.delete(f"/api/projects/{gone}").status_code == 204
+    prism = a.get("/api/analytics/crew").json()["phases"]["frontend_engineer"]
+    assert prism["builds"] == 1 and prism["tokens"] == 100 and prism["calls"] == 1
+    assert prism["avg_latency_ms"] == 1000.0
+
+
+def test_what_a_phase_was_handed_goes_when_the_run_stops_or_the_build_does(two):
+    from app.orchestration import activity
+    from app.router import inflight
+
+    a, a_user, *_ = two
+    deps = [{"phase": "product_manager", "digest": True, "full": "whole", "omitted": []}]
+    pid = _build(a_user.id, "A reading list")
+    with inflight.building(pid):
+        activity.given("system_design", deps)
+        board = activity.begin("system_design")
+    assert activity.given_for(pid)
+    # A live board (a newer run, mid-phase) keeps it.
+    activity.drop_ended(pid)
+    assert activity.given_for(pid)
+    # The run stopped driving: gone.
+    with inflight.building(pid):
+        activity.end(board)
+    activity.drop_ended(pid)
+    assert activity.given_for(pid) is None
+
+    with inflight.building(pid):
+        activity.given("system_design", deps)
+    assert a.delete(f"/api/projects/{pid}").status_code == 204
+    assert activity.given_for(pid) is None

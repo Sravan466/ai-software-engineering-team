@@ -1,5 +1,6 @@
 import type { HandoffDep, PhaseResult, Project } from "@/lib/api";
 import { latestRow as rowFor } from "@/components/build/payload";
+import { isLive, statusOf } from "@/lib/buildStatus";
 import type { SpriteState } from "./AgentSprite";
 import type { Persona } from "./personas";
 
@@ -11,9 +12,7 @@ import type { Persona } from "./personas";
 export type NodeState = "done" | "running" | "gate" | "redo" | "failed" | "pending";
 
 /** A stalled run says `running` in the database and is not running. Say the truth. */
-export function effectiveStatus(project: Project): string {
-  return project.status === "running" && project.stalled ? "stalled" : project.status;
-}
+export const effectiveStatus = statusOf;
 
 // Latest row produced for a phase (phases re-run when sent back). One definition,
 // shared with the decision panel: two answers to "which attempt is current" would
@@ -81,8 +80,7 @@ export const NODE_STATUS: Record<NodeState, string> = {
  * the crew says so.
  */
 export function crewAtRest(project: Project): boolean {
-  const s = effectiveStatus(project);
-  return s !== "running" && s !== "awaiting_approval";
+  return !isLive(project);
 }
 
 /**

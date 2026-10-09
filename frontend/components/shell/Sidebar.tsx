@@ -10,22 +10,8 @@ import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { STATUS_DOT, STATUS_TEXT, crewHref, floorBuild, statusOf } from "@/lib/buildStatus";
-
-// Compact relative time ("3h", "2d") for the recent-builds list.
-function timeAgo(iso: string): string {
-  const then = +new Date(iso);
-  if (Number.isNaN(then)) return "";
-  const secs = Math.max(0, (Date.now() - then) / 1000);
-  if (secs < 60) return "now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d`;
-  return new Date(then).toLocaleDateString();
-}
+import { STATUS_DOT, STATUS_TEXT, crewHref, floorBuild, publishProjects, statusOf } from "@/lib/buildStatus";
+import { timeAgo } from "@/lib/time";
 
 const API_DOCS_URL =
   (process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000") + "/docs";
@@ -74,7 +60,10 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
 
   const refresh = useCallback(async () => {
     try {
-      setProjects(await api.listProjects());
+      const list = await api.listProjects();
+      setProjects(list);
+      // The home page's crew links read this list rather than fetching their own.
+      publishProjects(list);
     } catch {
       // Keep the last good list if the backend blips.
       setProjects((p) => p ?? []);

@@ -250,6 +250,10 @@ def delete_project(project: Project = Depends(get_project), db: Session = Depend
     db.commit()
     # The database credentials go with it: nothing is left for a project that isn't.
     project_secrets.remove_project(owner_id, project_id)
+    # And its live progress, which would otherwise sit in memory until a restart.
+    from app.orchestration import activity
+
+    activity.clear(project_id)
 
 
 # ── Generated-project artifacts (preview + download) ─────────────────────────

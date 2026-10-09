@@ -5,7 +5,8 @@ import type { Project } from "@/lib/api";
 import { AGENTS } from "@/components/agents/personas";
 import type { FloorTheme, ThemeId } from "@/components/agents/themes";
 import { Icon } from "@/components/shell/icons";
-import { STATUS_DOT, STATUS_TEXT, isLive, statusOf } from "@/lib/buildStatus";
+import { STATUS_DOT, STATUS_TEXT, byUpdate, isLive, statusOf } from "@/lib/buildStatus";
+import { timeAgo } from "@/lib/time";
 import { clock, type Timeline } from "./floor";
 
 /** Close on a click outside or Escape, and give focus back to the button that opened it. */
@@ -100,16 +101,6 @@ function Options<T extends string>({
   );
 }
 
-function ago(iso: string): string {
-  const t = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`);
-  if (Number.isNaN(t)) return "";
-  const m = Math.floor(Math.max(0, Date.now() - t) / 60000);
-  if (m < 1) return "now";
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
-}
-
 const nameOf = (p: Project) => p.name || p.idea;
 
 /** The build on the floor, and the way to put another one there. */
@@ -124,7 +115,7 @@ export function BuildSwitcher({
 }) {
   const m = useMenu();
   const id = useId();
-  const sorted = [...projects].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+  const sorted = [...projects].sort(byUpdate);
   const byId = new Map(sorted.map((p) => [p.id, p]));
   const state = current ? statusOf(current) : "";
   return (
@@ -168,7 +159,7 @@ export function BuildSwitcher({
                   <span className="crew-opt-name">{nameOf(p)}</span>
                   <span className="crew-opt-sub">{STATUS_TEXT[s] ?? s}</span>
                 </span>
-                <span className="crew-opt-time">{ago(p.updated_at)}</span>
+                <span className="crew-opt-time">{timeAgo(p.updated_at)}</span>
               </>
             );
           }}

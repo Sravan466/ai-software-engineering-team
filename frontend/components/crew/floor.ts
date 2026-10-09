@@ -14,6 +14,7 @@ import {
   type NodeState,
 } from "@/components/agents/phaseState";
 import { stepWords } from "@/components/build/PhaseSteps";
+import { serverTime } from "@/lib/time";
 
 /**
  * What the crew floor shows (#91), as data: each station's sprite, bubble and
@@ -39,6 +40,8 @@ export type Bubble = {
 
 export type Station = {
   agent: Persona;
+  /** The attempt on screen: the latest one live, the one at that moment in a replay. */
+  row?: PhaseResult;
   state: SpriteState;
   /** The phase's own state, when there is a build behind it. */
   ns: NodeState | null;
@@ -79,17 +82,24 @@ export function clock(seconds: number): string {
   return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
 
-/** Server times arrive without a zone on older rows; they are UTC. */
-export function ms(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  const t = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`);
-  return Number.isNaN(t) ? null : t;
+const ms = serverTime;
+
+/** A restored version's copy of a row (#79): the same work as the row it copies. */
+export function restoredFrom(row: PhaseResult | undefined): string | null {
+  const from = (row?.handoff as { restored_row?: unknown } | null | undefined)?.restored_row;
+  return typeof from === "string" ? from : null;
 }
 
-/** How long a finished attempt took, from its own row. */
-export function took(row: PhaseResult | undefined): number | null {
-  const a = ms(row?.started_at);
-  const b = ms(row?.completed_at);
+/**
+ * How long an attempt took, from its own row. A restored copy has no start of its
+ * own; it took what the attempt it copies took.
+ */
+export function took(row: PhaseResult | undefined, project?: Project): number | null {
+  const from = restoredFrom(row);
+  const original = from && project ? project.phases.find((r) => r.id === from) : undefined;
+  const r = original ?? row;
+  const a = ms(r?.started_at);
+  const b = ms(r?.completed_at);
   return a !== null && b !== null && b >= a ? (b - a) / 1000 : null;
 }
 
@@ -190,14 +200,14 @@ export function liveFloor(project: Project, tick = 0): Floor {
         plate = "Stopped";
         break;
       case "done": {
-        const t = took(row);
+        const t = took(row, project);
         plate = t === null ? "Done" : `Done ${clock(t)}`;
         break;
       }
       default:
         plate = asleep ? "Idle" : "Queued";
     }
-    return { agent, state: sprite, ns, bubble, plate, tone: stalled && ns === "running" ? "queued" : sprite };
+    return { agent, row, state: sprite, ns, bubble, plate, tone: stalled && ns === "running" ? "queued" : sprite };
   });
 
   const done = stations.filter((s) => s.ns === "done").length;
@@ -277,8 +287,9 @@ const GAP_SHARE = 0.012;
 export function timeline(project: Project): Timeline | null {
   const index = new Map(AGENTS.map((a, i) => [a.key, i]));
   const attempts: Attempt[] = [];
+  // A restored version's copies of rows are the same work again, not more of the run.
   const rows = project.phases
-    .filter((r) => index.has(r.phase))
+    .filter((r) => index.has(r.phase) && !restoredFrom(r))
     .map((r) => ({ r, s: ms(r.started_at) ?? ms(r.created_at) }))
     .filter((x): x is { r: PhaseResult; s: number } => x.s !== null)
     .sort((a, b) => a.s - b.s);
@@ -366,11 +377,11 @@ export function replayFloor(project: Project, line: Timeline, t: number): Floor 
     } else if (ns === "failed") {
       plate = "Stopped";
     } else if (ns === "done") {
-      const s = took(now.row);
+      const s = took(now.row, project);
       plate = s === null ? "Done" : `Done ${clock(s)}`;
     }
     const state = SPRITE_STATE[ns];
-    return { agent, state, ns, bubble, plate, tone: state };
+    return { agent, row: now?.row, state, ns, bubble, plate, tone: state };
   });
   const done = stations.filter((s) => s.ns === "done").length;
   const active = stations.findIndex((s) => s.ns === "running" || s.ns === "redo");

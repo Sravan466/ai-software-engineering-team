@@ -6,7 +6,7 @@ import type { CrewRecord, PhaseResult, Project } from "@/lib/api";
 import type { Persona } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
-import { HANDOFF_STATE, NODE_STATUS, latestRow } from "@/components/agents/phaseState";
+import { HANDOFF_STATE, NODE_STATUS } from "@/components/agents/phaseState";
 import { Icon } from "@/components/shell/icons";
 import { clock, doneLine, took, type Station } from "./floor";
 
@@ -112,9 +112,10 @@ function Context({ row, given }: { row: PhaseResult | undefined; given: Project[
 
 function ThisBuild({ project, station }: { project: Project; station: Station }) {
   const { agent } = station;
-  const row = latestRow(project, agent.key);
+  // The attempt on screen: in a replay, the one at that moment, not the last one.
+  const row = station.row;
   const href = `/projects/${project.id}?phase=${agent.key}`;
-  const t = took(row);
+  const t = took(row, project);
   return (
     <section className="insp-sec" aria-label={`${agent.codename} on this build`}>
       <h3 className="insp-h">This build</h3>
