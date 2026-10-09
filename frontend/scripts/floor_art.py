@@ -40,8 +40,17 @@ What this fixes or refuses, the same way agent_art.py does for the crew:
      room when the aspect is the one the prompt asked for. A bigger image of the
      same shape is scaled down.
   3. The wall must be empty below the horizon and the floor empty above it, or
-     they would paint over each other.
-  4. A sheet's frames are found by their own pixels, not by slicing in equal
+     they would paint over each other. The image model draws that line a few
+     percent off (ChatGPT's walls stop at 51-53%), and a wall that stops short
+     shows a band of sky under it. So a layer whose edge is within SEAT of the
+     horizon is seated on it first: a wall is moved down (or up) until its foot
+     is on the line; a floor that starts above the line is trimmed at it, and one
+     that starts below is stretched up to it. Only an edge further off than
+     that stops the run.
+  4. The model also leaves the canvas above the wall empty, so the sky showed over
+     the room (clouds above the office's drop ceiling). That band is filled with
+     the wall's own top surface in shadow, so every room has a ceiling.
+  5. A sheet's frames are found by their own pixels, not by slicing in equal
      parts, and the count must match the prompt's grid. Each frame is re-anchored
      on its base (unless the prompt says `Anchor: none`), and every frame's base
      is checked against the line before anything is written.
@@ -75,6 +84,11 @@ LAYERS = ("sky", "wall", "floor")
 SPILL = 0.02
 #: Share of a band's pixels that may be opaque on the wrong side of the horizon.
 STRAY = 0.01
+#: How far off the horizon a wall's foot or a floor's far edge may be drawn and
+#: still be seated on it, as a share of the height.
+SEAT = 0.06
+#: How dark the ceiling above a wall is, as a share of the wall's top surface.
+SHADE = 0.5
 #: Margin around a sheet's frames in each output cell, in output pixels.
 PAD = 4
 
@@ -143,7 +157,78 @@ def opaque_share(alpha, box) -> float:
     return n / (((x1 - x0 + 1) // 2) * ((y1 - y0 + 1) // 2))
 
 
-def cut_layer(meta: dict) -> Image.Image:
+def edge_row(alpha: Image.Image, foot: bool) -> Optional[int]:
+    """Where a layer meets the horizon: across the columns with anything solid in
+    them, the median of the first empty row under each one (a wall's foot) or of
+    its first solid row (a floor's far edge). The median, so a cabinet or a bike
+    standing against the wall doesn't move the line."""
+    a = alpha.load()
+    W, H = alpha.size
+    span = range(H - 1, -1, -1) if foot else range(H)
+    rows = []
+    for x in range(0, W, 4):
+        for y in span:
+            if a[x, y] >= 128:
+                rows.append(y + 1 if foot else y)
+                break
+    if not rows:
+        return None
+    rows.sort()
+    return rows[len(rows) // 2]
+
+
+def seat(im: Image.Image, layer: str, horizon: int, edge: Optional[int]) -> tuple:
+    """(the layer seated on the horizon, what was done or ""). Within SEAT of the
+    line a wall is moved, a floor drawn too high is trimmed and one drawn too low is
+    stretched up; further off, it is left as drawn for the checks to refuse."""
+    W, H = im.size
+    if edge is None or edge == horizon or abs(edge - horizon) > round(H * SEAT):
+        return im, ""
+    off = horizon - edge
+    if layer == "wall":
+        out = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        out.paste(im, (0, off))
+        return out, f"moved {abs(off)}px {'down' if off > 0 else 'up'} onto the horizon"
+    if off > 0:
+        out = im.copy()
+        out.paste((0, 0, 0, 0), (0, 0, W, horizon))
+        return out, f"far edge trimmed {off}px to the horizon"
+    out = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    out.paste(im.crop((0, edge, W, H)).resize((W, H - horizon), Image.LANCZOS), (0, horizon))
+    return out, f"stretched {-off}px up to the horizon"
+
+
+def close_ceiling(im: Image.Image) -> tuple:
+    """(the wall with the empty band above it filled, how deep that band is at its
+    median). The fill is the median colour of the wall's top surface (a few rows in,
+    past its outline) at SHADE, so it reads as the ceiling in shadow."""
+    a = im.getchannel("A").load()
+    px = im.load()
+    W, H = im.size
+    tops = {}
+    for x in range(W):
+        for y in range(H):
+            if a[x, y] >= 128:
+                tops[x] = y
+                break
+    surface = sorted(
+        (px[x, t + d][:3] for x, t in tops.items() for d in range(6, 30, 4) if t + d < H and a[x, t + d] >= 128),
+        key=lambda c: 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2],
+    )
+    if not surface:
+        return im, 0
+    shade = tuple(round(v * SHADE) for v in surface[len(surface) // 2]) + (255,)
+    out = im.copy()
+    po = out.load()
+    for x, t in tops.items():
+        for y in range(t):
+            po[x, y] = shade
+    depth = sorted(tops.values())[len(tops) // 2]
+    return out, depth
+
+
+def cut_layer(meta: dict) -> tuple:
+    """(the layer, a note on how it was seated on the horizon, or "")."""
     prompt = meta["path"]
     src = source_of(meta)
     layer = meta.get("layer", "")
@@ -159,15 +244,25 @@ def cut_layer(meta: dict) -> Image.Image:
         # Opaque: the sky is the back of the room. Any alpha is flattened onto night.
         flat = Image.new("RGBA", im.size, (10, 13, 21, 255))
         flat.alpha_composite(im.convert("RGBA"))
-        return flat.convert("RGB")
+        return flat.convert("RGB"), ""
 
     im = strip_painted_checkerboard(im)
-    alpha = im.getchannel("A")
-    a = alpha.load()
     W, H = im.size
     horizon = round(H * horizon_of(meta))
-    if alpha.getextrema()[0] > 40:
+    if im.getchannel("A").getextrema()[0] > 40:
         refuse(prompt, f"{src.name} has no transparent pixels; the {layer} layer has to be see-through")
+    edge = edge_row(im.getchannel("A"), foot=layer == "wall")
+    # Too far off to seat, on the side the checks below can't see: a gap the sky shows through.
+    if edge is not None and layer == "wall" and horizon - edge > round(H * SEAT):
+        refuse(prompt, f"{src.name} stops at {edge}px, {horizon - edge}px short of the horizon, so the sky shows under it; the wall must reach {horizon}px")
+    if edge is not None and layer == "floor" and edge - horizon > round(H * SEAT):
+        refuse(prompt, f"{src.name} starts at {edge}px, {edge - horizon}px below the horizon, so the sky shows above it; the floor must start at {horizon}px")
+    im, seated = seat(im, layer, horizon, edge)
+    if layer == "wall":
+        im, depth = close_ceiling(im)
+        if depth:
+            seated = ", ".join(filter(None, [seated, f"ceiling closed over the top {depth}px"]))
+    a = im.getchannel("A").load()
     spill = round(H * SPILL)
     if layer == "wall":
         stray = opaque_share(a, (0, min(H, horizon + spill), W, H))
@@ -177,7 +272,7 @@ def cut_layer(meta: dict) -> Image.Image:
         stray = opaque_share(a, (0, 0, W, max(0, horizon - spill)))
         if stray > STRAY:
             refuse(prompt, f"{src.name} paints {stray:.0%} of the wall above the horizon; the floor must start at {horizon}px")
-    return im
+    return im, seated
 
 
 # ── sheets ───────────────────────────────────────────────────────────────────
@@ -307,11 +402,11 @@ def run_room(room: str, check: bool, manifest: dict) -> list:
             if name not in LAYERS:
                 raise Refused(f"{prompt}: `Layer:` must be one of {', '.join(LAYERS)}")
             variant = meta.get("variant", "").lower()
-            img = cut_layer(meta)
+            img, seated = cut_layer(meta)
             rel = f"{room}/{name}{'-dark' if variant == 'dark' else ''}.webp"
             save(img, OUT / rel, check)
             (dark if variant == "dark" else layers)[name] = rel
-            notes.append(f"  cut {rel}")
+            notes.append(f"  cut {rel}" + (f" ({seated})" if seated else ""))
         elif kind == "sheet":
             img, entry = cut_sheet(meta)
             rel = f"{room}/{prompt.stem}.webp"

@@ -1,4 +1,86 @@
 {
   "version": 1,
-  "themes": {}
+  "themes": {
+    "loft": {
+      "layers": {
+        "floor": "loft/floor.webp",
+        "sky": "loft/sky.webp",
+        "wall": "loft/wall.webp"
+      },
+      "dark": {
+        "floor": "loft/floor-dark.webp",
+        "sky": "loft/sky-dark.webp",
+        "wall": "loft/wall-dark.webp"
+      },
+      "pieces": {
+        "rain": {
+          "src": "loft/rain.webp",
+          "cols": 10,
+          "rows": 1,
+          "w": 148,
+          "h": 343,
+          "fps": 10.0
+        }
+      }
+    },
+    "night": {
+      "layers": {
+        "floor": "night/floor.webp",
+        "sky": "night/sky.webp",
+        "wall": "night/wall.webp"
+      },
+      "pieces": {
+        "rack": {
+          "src": "night/rack.webp",
+          "cols": 10,
+          "rows": 1,
+          "w": 134,
+          "h": 389,
+          "fps": 10.0
+        }
+      }
+    },
+    "paper": {
+      "layers": {
+        "floor": "paper/floor.webp",
+        "sky": "paper/sky.webp",
+        "wall": "paper/wall.webp"
+      },
+      "pieces": {
+        "light": {
+          "src": "paper/light.webp",
+          "cols": 10,
+          "rows": 1,
+          "w": 141,
+          "h": 64,
+          "fps": 10.0
+        }
+      }
+    },
+    "station": {
+      "layers": {
+        "floor": "station/floor.webp",
+        "sky": "station/sky.webp",
+        "wall": "station/wall.webp"
+      },
+      "pieces": {
+        "console": {
+          "src": "station/console.webp",
+          "cols": 10,
+          "rows": 1,
+          "w": 215,
+          "h": 139,
+          "fps": 10.0
+        }
+      }
+    }
+  },
+  "courier": {
+    "src": "shared/courier.webp",
+    "cols": 12,
+    "rows": 1,
+    "w": 122,
+    "h": 197,
+    "fps": 10.0
+  }
 }
