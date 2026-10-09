@@ -130,8 +130,8 @@ _board: dict[str, _Activity] = {}
 #: `{"phase", "deps"}` in the shape `phase_results.handoff.deps` takes once the row is
 #: saved. Kept apart from the board, which only code, QA and security phases open.
 _given: dict[str, dict] = {}
-#: Builds whose last hand-off is kept. The oldest go first; a build working now has
-#: just written its own, so it is never the oldest.
+#: Builds whose last hand-off is kept. The least recently written or read go first;
+#: a build someone is watching is read on every poll, so it stays.
 GIVEN_MAX = 256
 
 
@@ -253,8 +253,11 @@ def given(phase: str, deps: Iterable[dict]) -> None:
 
 def given_for(project_id: str) -> Optional[dict]:
     with _lock:
-        found = _given.get(project_id)
-        return {"phase": found["phase"], "deps": list(found["deps"])} if found else None
+        found = _given.pop(project_id, None)
+        if found is None:
+            return None
+        _given[project_id] = found  # read: the most recently used now
+        return {"phase": found["phase"], "deps": list(found["deps"])}
 
 
 def drop_ended(project_id: str) -> None:

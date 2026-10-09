@@ -85,7 +85,7 @@ function Checks({ row }: { row: PhaseResult }) {
  * the summary did.
  */
 function Context({ row, given }: { row: PhaseResult | undefined; given: Project["given"] }) {
-  const deps = row?.handoff?.deps ?? (given && row && given.phase === row.phase ? given.deps : null);
+  const deps = row?.handoff?.deps ?? (given && row?.status === "running" && given.phase === row.phase ? given.deps : null);
   if (!deps) return <span className="insp-none">—</span>;
   if (!deps.length) return <span className="insp-none">Starts from your idea</span>;
   const whole = deps.filter((d) => d.full === "whole").length;

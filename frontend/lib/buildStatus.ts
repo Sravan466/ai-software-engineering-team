@@ -67,17 +67,28 @@ export function crewHref(project: Project | null | undefined, agentKey?: string)
 // read that list instead of asking again, so both links always open the same build.
 let shared: Project[] | null = null;
 const listeners = new Set<(list: Project[] | null) => void>();
+// Bumped on sign-out: a list fetched before it belongs to the account that left.
+let epoch = 0;
 
-export function publishProjects(list: Project[] | null): void {
+/** Call before fetching the list, and hand the value back with it. */
+export function projectsEpoch(): number {
+  return epoch;
+}
+
+export function publishProjects(list: Project[], fetchedIn: number): void {
+  if (fetchedIn !== epoch) return;
   shared = list;
   listeners.forEach((fn) => fn(list));
 }
 
-// Signed out (by hand or by an expired session): the next account must not see this
-// one's builds, even for the moment before its own list arrives.
-if (typeof window !== "undefined") {
-  window.addEventListener(SIGNED_OUT_EVENT, () => publishProjects(null));
+/** Signed out (by hand or by an expired session): the next account sees none of these. */
+export function forgetProjects(): void {
+  epoch += 1;
+  shared = null;
+  listeners.forEach((fn) => fn(null));
 }
+
+if (typeof window !== "undefined") window.addEventListener(SIGNED_OUT_EVENT, forgetProjects);
 
 export function useSharedProjects(): Project[] | null {
   const [list, setList] = useState<Project[] | null>(shared);

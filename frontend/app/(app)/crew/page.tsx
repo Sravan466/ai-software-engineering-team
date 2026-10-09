@@ -75,6 +75,8 @@ function CrewFloor() {
   const urlAgent = params.get("agent");
   const agentParam = useRef(urlAgent);
   agentParam.current = urlAgent;
+  // A switch made on the page: the URL's `?agent=` belonged to the build before.
+  const skipAgent = useRef(false);
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [listError, setListError] = useState("");
   const [chosen, setChosen] = useState<string | null>(urlProject);
@@ -95,8 +97,15 @@ function CrewFloor() {
     refreshList();
   }, [refreshList]);
 
+  const chosenNow = useRef(chosen);
+  chosenNow.current = chosen;
   useEffect(() => {
-    if (urlProject) setChosen((c) => (c === urlProject ? c : urlProject));
+    // A different build than the one on screen: a link followed, or back/forward.
+    // (The page writing its own choice into the URL lands here with the same id.)
+    if (urlProject && urlProject !== chosenNow.current) {
+      setMissing(false);
+      setChosen(urlProject);
+    }
   }, [urlProject]);
 
   // Without a deep link, the build in hand, or else the latest one.
@@ -123,12 +132,12 @@ function CrewFloor() {
   // A link to a build that can't be loaded and isn't among yours: drop it from the
   // URL and say so, and the floor falls back to your latest build, or the empty state.
   useEffect(() => {
-    if (!chosen || !poll.error || !projects || listError) return;
+    if (!chosen || !poll.notFound || !projects || listError) return;
     if (projects.some((p) => p.id === chosen)) return;
     setMissing(true);
     setChosen(null);
     writeProjectParam(null);
-  }, [chosen, poll.error, projects, listError]);
+  }, [chosen, poll.notFound, projects, listError]);
 
   // A build that finishes or stops should read the same in the switcher.
   const status = project ? statusOf(project) : "";
@@ -139,13 +148,22 @@ function CrewFloor() {
   // ── each agent's record across every build ─────────────────────────────────
   const [record, setRecord] = useState<Record<string, CrewRecord> | null>(null);
   // Again whenever a phase finishes or the build stops, so the work just done counts.
+  // Not on a switch to another build: nothing finished, so nothing to count again.
   const settled = project ? project.phases.filter((r) => r.status !== "running").length : 0;
+  const recordFor = useRef<{ id: string | null; have: boolean }>({ id: null, have: false });
   useEffect(() => {
+    const id = project?.id ?? null;
+    const switched = recordFor.current.id !== id;
+    recordFor.current.id = id;
+    if (switched && recordFor.current.have) return;
     api
       .crewRecord()
-      .then((r) => setRecord(r.phases))
+      .then((r) => {
+        recordFor.current.have = true;
+        setRecord(r.phases);
+      })
       .catch(() => setRecord(null));
-  }, [status, settled]);
+  }, [project?.id, status, settled]);
 
   // ── the room ──────────────────────────────────────────────────────────────
   const look = useFloorTheme();
@@ -294,7 +312,8 @@ function CrewFloor() {
     setReplaying(false);
     setPlaying(false);
     setU(0);
-    const i = agentIndex(agentParam.current);
+    const i = skipAgent.current ? -1 : agentIndex(agentParam.current);
+    skipAgent.current = false;
     if (i >= 0) {
       setSelected(i);
       setPinned(true);
@@ -311,6 +330,7 @@ function CrewFloor() {
   function pickBuild(id: string) {
     if (id === chosen) return;
     setMissing(false);
+    skipAgent.current = true;
     clearTimers();
     setRelay(null);
     setChosen(id);

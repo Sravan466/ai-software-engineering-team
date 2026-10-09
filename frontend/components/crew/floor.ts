@@ -246,8 +246,10 @@ export function handoffLine(project: Project, from: number, to: number, attempt?
   const b = AGENTS[to];
   // The attempt on screen (in a replay, the one being replayed), else the latest.
   const row = attempt ?? latestRow(project, b.key);
-  const deps =
-    row?.handoff?.deps ?? (project.given?.phase === b.key ? project.given.deps : null) ?? [];
+  // What the running phase was handed belongs to the attempt running now, not to an
+  // earlier one being replayed.
+  const running = !!row && row.status === "running" && row === latestRow(project, b.key);
+  const deps = row?.handoff?.deps ?? (running && project.given?.phase === b.key ? project.given.deps : null) ?? [];
   const given = deps
     .map((d) => `${AGENT_BY_KEY[d.phase]?.codename ?? d.phase} ${(HANDOFF_STATE[d.full] ?? HANDOFF_STATE.whole).label.toLowerCase()}`)
     .join(" · ");

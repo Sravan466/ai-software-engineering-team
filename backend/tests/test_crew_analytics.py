@@ -152,14 +152,16 @@ def test_what_a_phase_was_handed_is_bounded_and_goes_with_the_build(two, monkeyp
     assert a.delete(f"/api/projects/{pid}").status_code == 204
     assert activity.given_for(pid) is None
 
-    # Bounded: the oldest builds' records go first, the one writing now stays.
+    # Bounded: the least recently written or read go first. A build that is being
+    # watched (read on every poll) stays, however long its phase runs.
     monkeypatch.setattr(activity, "GIVEN_MAX", 3)
     ids = [f"bounded-{i}" for i in range(5)]
     try:
-        for i in ids:
+        for n, i in enumerate(ids):
             with inflight.building(i):
                 activity.given("system_design", deps)
-        assert [activity.given_for(i) is not None for i in ids] == [False, False, True, True, True]
+            assert activity.given_for(ids[0]) is not None, f"the watched build lost its record at {n}"
+        assert [activity.given_for(i) is not None for i in ids] == [True, False, False, True, True]
     finally:
         for i in ids:
             activity.clear(i)

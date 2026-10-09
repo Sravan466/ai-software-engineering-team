@@ -10,7 +10,16 @@ import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { STATUS_DOT, STATUS_TEXT, crewHref, floorBuild, publishProjects, statusOf } from "@/lib/buildStatus";
+import {
+  STATUS_DOT,
+  STATUS_TEXT,
+  crewHref,
+  floorBuild,
+  forgetProjects,
+  projectsEpoch,
+  publishProjects,
+  statusOf,
+} from "@/lib/buildStatus";
 import { timeAgo } from "@/lib/time";
 
 const API_DOCS_URL =
@@ -55,16 +64,17 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
     } catch {
       // Even if the backend didn't hear it, this browser is done with the session.
     }
-    publishProjects(null);
+    forgetProjects();
     router.replace("/signin");
   }, [router]);
 
   const refresh = useCallback(async () => {
+    const epoch = projectsEpoch();
     try {
       const list = await api.listProjects();
       setProjects(list);
       // The home page's crew links read this list rather than fetching their own.
-      publishProjects(list);
+      publishProjects(list, epoch);
     } catch {
       // Keep the last good list if the backend blips.
       setProjects((p) => p ?? []);

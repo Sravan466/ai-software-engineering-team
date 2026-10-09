@@ -37,7 +37,10 @@ export type ProjectPoll = {
   setProject: React.Dispatch<React.SetStateAction<Project | null>>;
   /** The build's usage summary, when asked for with `analytics: true`. */
   analytics: any;
+  /** The last failure loading *this* build: never one left over from another. */
   error: string;
+  /** That failure was a 404: there is no such build (or it isn't yours). */
+  notFound: boolean;
   setError: (e: string) => void;
   load: () => Promise<void>;
   /**
@@ -55,48 +58,56 @@ export type ProjectPoll = {
  *
  * `id` may change under it (the crew floor switches builds): the old build is
  * dropped at once, and a reply for it that lands late is ignored rather than shown
- * under the new one.
+ * under the new one. Replies for the same build are kept in order too: polls can
+ * overlap on a slow backend, and one older than what is already on screen (a poll,
+ * its error, its analytics, or a control's own answer) is dropped, or the build would
+ * seem to go backwards, which the crew floor would read as work changing hands.
  */
 export function useProject(id: string | null, opts: { analytics?: boolean } = {}): ProjectPoll {
   const withAnalytics = !!opts.analytics;
-  const [project, setProject] = useState<Project | null>(null);
+  const [project, setProjectState] = useState<Project | null>(null);
   const [analytics, setAnalytics] = useState<any>(null);
-  const [error, setError] = useState("");
+  const [failure, setFailure] = useState<{ id: string | null; message: string; status?: number }>({ id: null, message: "" });
   const [loadedAt, setLoadedAt] = useState(0);
   const actionFailed = useRef(false);
   const current = useRef(id);
   current.current = id;
-  // Polls can overlap on a slow backend. A reply older than one already shown is
-  // dropped, or the build would seem to go backwards (and the crew floor would read
-  // that as work changing hands).
   const asked = useRef(0);
   const shown = useRef(0);
+
+  const setError = useCallback((message: string) => setFailure({ id: current.current, message }), []);
+  // A control's answer is newer than any poll already in flight.
+  const setProject = useCallback<React.Dispatch<React.SetStateAction<Project | null>>>((v) => {
+    shown.current = ++asked.current;
+    setProjectState(v);
+  }, []);
 
   const load = useCallback(async () => {
     if (!id) return;
     const n = ++asked.current;
+    const fresh = () => current.current === id && n >= shown.current;
     try {
       const p = await api.getProject(id);
-      if (current.current !== id || n < shown.current) return;
+      if (!fresh()) return;
       shown.current = n;
-      setProject(p);
+      setProjectState(p);
       setLoadedAt(Date.now());
       if (withAnalytics) {
         const a = await api.analytics(id);
-        if (current.current !== id) return;
+        if (!fresh()) return;
         setAnalytics(a);
       }
-      if (!actionFailed.current) setError("");
+      if (!actionFailed.current) setFailure({ id, message: "" });
     } catch (e: any) {
-      if (current.current === id) setError(e.message);
+      if (fresh()) setFailure({ id, message: e.message, status: e.status });
     }
   }, [id, withAnalytics]);
 
   // A different build starts from nothing, not from the last one's numbers.
   useEffect(() => {
-    setProject(null);
+    setProjectState(null);
     setAnalytics(null);
-    setError("");
+    setFailure({ id: null, message: "" });
     actionFailed.current = false;
     load();
   }, [load]);
@@ -108,5 +119,16 @@ export function useProject(id: string | null, opts: { analytics?: boolean } = {}
     return () => clearInterval(t);
   }, [pollMs, load]);
 
-  return { project, setProject, analytics, error, setError, load, actionFailed, loadedAt };
+  const mine = failure.id === id;
+  return {
+    project,
+    setProject,
+    analytics,
+    error: mine ? failure.message : "",
+    notFound: mine && failure.status === 404,
+    setError,
+    load,
+    actionFailed,
+    loadedAt,
+  };
 }
