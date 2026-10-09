@@ -6,22 +6,29 @@ import { AGENTS } from "@/components/agents/personas";
 import { useFloorTheme } from "@/components/agents/themes";
 import Room from "./Room";
 import { handoffLine, liveFloor } from "./floor";
-import { useFloorEvents } from "./useFloorEvents";
+import { useBoardTick, useFloorEvents } from "./useFloorEvents";
 
 export type RelayView = "strip" | "floor";
 
 const VIEW_KEY = "aiteam.relay-view";
 
-/** The Relay card's view, per viewer. The strip until chosen, or when storage is blocked. */
+/** The stored choice. The card only renders once its build has loaded, on the client. */
+function storedView(): RelayView {
+  try {
+    return typeof window !== "undefined" && window.localStorage.getItem(VIEW_KEY) === "floor" ? "floor" : "strip";
+  } catch {
+    // Storage blocked: the strip, quietly.
+    return "strip";
+  }
+}
+
+/**
+ * The Relay card's view, per viewer. The strip until chosen, or when storage is
+ * blocked. Read before the first render, so a restored view simply appears instead
+ * of animating in on every load.
+ */
 export function useRelayView(): [RelayView, (v: RelayView) => void] {
-  const [view, setView] = useState<RelayView>("strip");
-  useEffect(() => {
-    try {
-      if (window.localStorage.getItem(VIEW_KEY) === "floor") setView("floor");
-    } catch {
-      // Storage blocked: the strip, quietly.
-    }
-  }, []);
+  const [view, setView] = useState<RelayView>(storedView);
   const choose = (v: RelayView) => {
     setView(v);
     try {
@@ -57,11 +64,23 @@ export function useHeightSwap(box: RefObject<HTMLElement>, key: string) {
       el.style.height = "";
       last.current = { key, height: el.getBoundingClientRect().height };
     };
+    // Its own height, not a hover or a sprite inside it finishing first.
+    const onEnd = (e: TransitionEvent) => {
+      if (e.target === el && e.propertyName === "height") done();
+    };
     const t = setTimeout(done, 340);
-    el.addEventListener("transitionend", done, { once: true });
+    el.addEventListener("transitionend", onEnd);
     return () => {
       clearTimeout(t);
-      el.removeEventListener("transitionend", done);
+      el.removeEventListener("transitionend", onEnd);
+      if (el.classList.contains("is-swapping")) {
+        // Swapped again mid-way: the next swap starts from where this one got to,
+        // and measures its own content at its natural height.
+        const at = el.getBoundingClientRect().height;
+        el.classList.remove("is-swapping");
+        el.style.height = "";
+        last.current = { key, height: at };
+      }
     };
   }, [box, key]);
   // The content's height moves between swaps too (a line of text, a poll): keep the
@@ -96,15 +115,7 @@ export default function RelayFloor({
   onPick: (phaseKey: string) => void;
 }) {
   const look = useFloorTheme();
-  const running = project.status === "running" && !project.stalled;
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!running) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [running]);
-  const tick = running && loadedAt ? Math.max(0, (now - loadedAt) / 1000) : 0;
-  const floor = liveFloor(project, tick);
+  const floor = liveFloor(project, useBoardTick(project, loadedAt));
   const { log, flight, pokeAgent, pokeOf } = useFloorEvents(floor, project.id);
   const courier = flight
     ? { ...flight, label: handoffLine(project, flight.from, flight.to, floor.stations[flight.to]?.row) }
@@ -112,6 +123,7 @@ export default function RelayFloor({
   return (
     <Room
       compact
+      jump
       floor={floor}
       selected={-1}
       onSelect={(i) => {

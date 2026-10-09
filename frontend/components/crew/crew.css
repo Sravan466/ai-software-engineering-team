@@ -696,8 +696,7 @@
 .relay-open:hover { color: var(--ink); border-color: var(--line-3); }
 .relay-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* The swap opens or folds to its new height rather than jumping (useHeightSwap). */
-.relay-body { overflow: clip; }
-.relay-body.is-swapping { transition: height 280ms cubic-bezier(0.2, 0, 0, 1); }
+.relay-body.is-swapping { overflow: clip; transition: height 280ms cubic-bezier(0.2, 0, 0, 1); }
 .relay-body > .relay-pane { animation: relay-pane-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 @keyframes relay-pane-in {
   from { opacity: 0; transform: translateY(4px); }

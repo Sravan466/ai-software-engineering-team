@@ -14,7 +14,7 @@ import { STATUS_DOT, STATUS_TEXT, floorBuild, isLive, statusOf } from "@/lib/bui
 import Room, { type Courier } from "@/components/crew/Room";
 import Inspector from "@/components/crew/Inspector";
 import { AlsoRunning, BuildSwitcher, ReplayBar, ThemePicker } from "@/components/crew/Controls";
-import { useFloorEvents } from "@/components/crew/useFloorEvents";
+import { useBoardTick, useFloorEvents } from "@/components/crew/useFloorEvents";
 import {
   SCENARIOS,
   emptyFloor,
@@ -167,14 +167,7 @@ function CrewFloor() {
   const look = useFloorTheme();
 
   // The board's clock moves between polls instead of in 2.5s jumps.
-  const [now, setNow] = useState(() => Date.now());
-  const ticking = !!project && status === "running";
-  useEffect(() => {
-    if (!ticking) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [ticking]);
-  const tick = ticking && poll.loadedAt ? Math.max(0, (now - poll.loadedAt) / 1000) : 0;
+  const tick = useBoardTick(project, poll.loadedAt);
 
   // Replay: only once a build is out of anyone's hands.
   const line = useMemo(() => (project ? timeline(project) : null), [project]);

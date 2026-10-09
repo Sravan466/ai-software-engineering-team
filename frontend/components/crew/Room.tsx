@@ -57,6 +57,8 @@ type Props = {
   hint: string;
   /** Inside another card (the build page's Relay): shorter, and no frame of its own. */
   compact?: boolean;
+  /** Stations go to their phase rather than select an agent: links, not toggles. */
+  jump?: boolean;
 };
 
 function Prop({ id, has, children }: { id: PropId; has: Set<string>; children: ReactNode }) {
@@ -112,7 +114,7 @@ function useStage(room: React.RefObject<HTMLDivElement>, on: boolean): CSSProper
   return box;
 }
 
-export default function Room({ floor, selected, onSelect, pokeOf, look, courier, hint, compact = false }: Props) {
+export default function Room({ floor, selected, onSelect, pokeOf, look, courier, hint, compact = false, jump = false }: Props) {
   const { theme, layers, pieces } = look;
   const has = new Set<string>(theme.props.filter((p) => !pieces[p]));
   const room = useRef<HTMLDivElement>(null);
@@ -286,8 +288,9 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
                   zIndex: Math.round((1 - depth) * 40) + 2,
                 } as CSSProperties
               }
-              aria-pressed={i === selected}
-              aria-label={`${a.codename}, ${a.role}: ${s.plate}`}
+              aria-pressed={jump ? undefined : i === selected}
+              aria-current={jump && i === floor.board.active ? "step" : undefined}
+              aria-label={`${a.codename}, ${a.role}: ${s.plate}${jump ? ". Go to this phase." : ""}`}
               onClick={() => onSelect(i)}
             >
               {/* Only whoever is doing something speaks: working, waiting on you,

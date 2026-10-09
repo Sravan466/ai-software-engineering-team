@@ -200,9 +200,18 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   // Returning from the GitHub OAuth round-trip? Land on Deliver, where the ship
   // card lives (it reads ?github= and ?next= itself).
   // From the crew floor (#91): `?phase=` lands on that phase's row.
-  // Either is an instruction, and wins over opening on the preview below.
+  // Either is an instruction, and wins over opening on the preview below. Read per
+  // build: the page can be reused for another one.
   const deepLinked = useRef(false);
+  // A tab you picked yourself wins too, even one picked before the first poll landed.
+  const picked = useRef(false);
+  const pickTab = useCallback((t: Tab) => {
+    picked.current = true;
+    setTab(t);
+  }, []);
   useEffect(() => {
+    deepLinked.current = false;
+    picked.current = false;
     const sp = new URLSearchParams(window.location.search);
     if (sp.get("github") || sp.get("next")) {
       deepLinked.current = true;
@@ -214,23 +223,19 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
       setTab("build");
       setJump({ key: phase });
     }
-  }, []);
+  }, [id]);
 
   // A finished build is its app: open on Preview, the way Lovable and Bolt do, and
   // go there when a build (or a change to it) finishes while you watch. Only on
-  // those two moments: once you pick a tab, the poll never takes you off it.
+  // those two moments: once you pick a tab, the poll never takes you off it. A new
+  // build in the page starts from no status, so its first look counts as an opening.
   const lastStatus = useRef<string | null>(null);
   const currentStatus = project?.status ?? null;
-  // Another build in the same page is a first look again.
   useEffect(() => {
-    lastStatus.current = null;
-  }, [id]);
-  useEffect(() => {
-    if (!currentStatus) return;
     const was = lastStatus.current;
     lastStatus.current = currentStatus;
     if (currentStatus !== "completed" || was === "completed") return;
-    if (was === null ? !deepLinked.current : true) setTab("preview");
+    if (was !== null || (!deepLinked.current && !picked.current)) setTab("preview");
   }, [currentStatus]);
 
   /** Run a control call. Returns whether it landed, so callers can keep the
@@ -324,7 +329,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         : e.key === "End"
           ? tabs.length - 1
           : (at + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-    setTab(tabs[next].key);
+    pickTab(tabs[next].key);
     document.getElementById(`tab-${tabs[next].key}`)?.focus();
   }
 
@@ -438,7 +443,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             aria-controls={`panel-${t.key}`}
             // Roving tabindex: one stop for the whole strip, arrows move within it.
             tabIndex={tab === t.key ? 0 : -1}
-            onClick={() => setTab(t.key)}
+            onClick={() => pickTab(t.key)}
           >
             {t.label}
           </button>

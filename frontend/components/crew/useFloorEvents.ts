@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Project } from "@/lib/api";
+import { statusOf } from "@/lib/buildStatus";
 import { diff, type Floor } from "./floor";
 
 /** Lines kept for the screen reader log. */
@@ -72,4 +74,20 @@ export function useFloorEvents(floor: Floor, viewKey: string, opts: Options = {}
   }, [signature, viewKey, pokeAgent]);
 
   return { log, setLog, flight, pokeAgent, pokeOf, clearPoke };
+}
+
+/**
+ * Seconds since the poll that brought this build, while it runs: the board's clock
+ * moves every second instead of in poll-sized jumps. Zero for anything not running
+ * (a stalled run included).
+ */
+export function useBoardTick(project: Project | null, loadedAt: number): number {
+  const running = !!project && statusOf(project) === "running";
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  return running && loadedAt ? Math.max(0, (now - loadedAt) / 1000) : 0;
 }
