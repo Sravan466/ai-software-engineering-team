@@ -47,7 +47,10 @@ What this fixes or refuses, the same way agent_art.py does for the crew:
      is on the line; a floor that starts above the line is trimmed at it, and one
      that starts below is stretched up to it. Only an edge further off than
      that stops the run.
-  4. A sheet's frames are found by their own pixels, not by slicing in equal
+  4. The model also leaves the canvas above the wall empty, so the sky showed over
+     the room (clouds above the office's drop ceiling). That band is filled with
+     the wall's own top surface in shadow, so every room has a ceiling.
+  5. A sheet's frames are found by their own pixels, not by slicing in equal
      parts, and the count must match the prompt's grid. Each frame is re-anchored
      on its base (unless the prompt says `Anchor: none`), and every frame's base
      is checked against the line before anything is written.
@@ -84,6 +87,8 @@ STRAY = 0.01
 #: How far off the horizon a wall's foot or a floor's far edge may be drawn and
 #: still be seated on it, as a share of the height.
 SEAT = 0.06
+#: How dark the ceiling above a wall is, as a share of the wall's top surface.
+SHADE = 0.5
 #: Margin around a sheet's frames in each output cell, in output pixels.
 PAD = 4
 
@@ -193,6 +198,35 @@ def seat(im: Image.Image, layer: str, horizon: int, edge: Optional[int]) -> tupl
     return out, f"stretched {-off}px up to the horizon"
 
 
+def close_ceiling(im: Image.Image) -> tuple:
+    """(the wall with the empty band above it filled, how deep that band is at its
+    median). The fill is the median colour of the wall's top surface (a few rows in,
+    past its outline) at SHADE, so it reads as the ceiling in shadow."""
+    a = im.getchannel("A").load()
+    px = im.load()
+    W, H = im.size
+    tops = {}
+    for x in range(W):
+        for y in range(H):
+            if a[x, y] >= 128:
+                tops[x] = y
+                break
+    surface = sorted(
+        (px[x, t + d][:3] for x, t in tops.items() for d in range(6, 30, 4) if t + d < H and a[x, t + d] >= 128),
+        key=lambda c: 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2],
+    )
+    if not surface:
+        return im, 0
+    shade = tuple(round(v * SHADE) for v in surface[len(surface) // 2]) + (255,)
+    out = im.copy()
+    po = out.load()
+    for x, t in tops.items():
+        for y in range(t):
+            po[x, y] = shade
+    depth = sorted(tops.values())[len(tops) // 2]
+    return out, depth
+
+
 def cut_layer(meta: dict) -> tuple:
     """(the layer, a note on how it was seated on the horizon, or "")."""
     prompt = meta["path"]
@@ -224,6 +258,10 @@ def cut_layer(meta: dict) -> tuple:
     if edge is not None and layer == "floor" and edge - horizon > round(H * SEAT):
         refuse(prompt, f"{src.name} starts at {edge}px, {edge - horizon}px below the horizon, so the sky shows above it; the floor must start at {horizon}px")
     im, seated = seat(im, layer, horizon, edge)
+    if layer == "wall":
+        im, depth = close_ceiling(im)
+        if depth:
+            seated = ", ".join(filter(None, [seated, f"ceiling closed over the top {depth}px"]))
     a = im.getchannel("A").load()
     spill = round(H * SPILL)
     if layer == "wall":
