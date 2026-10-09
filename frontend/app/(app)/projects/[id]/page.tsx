@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import Link from "next/link";
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
 import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
@@ -41,6 +42,7 @@ import { onOpenFile } from "@/lib/openFile";
 import type { FileFocus } from "@/components/build/FileBrowser";
 
 import { artifactFiles } from "@/components/build/payload";
+import RelayFloor, { useHeightSwap, useRelayView } from "@/components/crew/RelayFloor";
 
 type Tab = "build" | "preview" | "summary";
 
@@ -170,7 +172,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   const { id } = params;
   // The build, kept fresh at the cadence its status calls for (shared with the crew
   // floor, #91).
-  const { project, setProject, analytics, error, setError, load, actionFailed } = useProject(id, {
+  const { project, setProject, analytics, error, setError, load, actionFailed, loadedAt } = useProject(id, {
     analytics: true,
   });
   const [busy, setBusy] = useState(false);
@@ -198,15 +200,38 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
   // Returning from the GitHub OAuth round-trip? Land on Deliver, where the ship
   // card lives (it reads ?github= and ?next= itself).
   // From the crew floor (#91): `?phase=` lands on that phase's row.
+  // Either is an instruction, and wins over opening on the preview below.
+  const deepLinked = useRef(false);
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
-    if (sp.get("github") || sp.get("next")) setTab("summary");
+    if (sp.get("github") || sp.get("next")) {
+      deepLinked.current = true;
+      setTab("summary");
+    }
     const phase = sp.get("phase");
     if (phase) {
+      deepLinked.current = true;
       setTab("build");
       setJump({ key: phase });
     }
   }, []);
+
+  // A finished build is its app: open on Preview, the way Lovable and Bolt do, and
+  // go there when a build (or a change to it) finishes while you watch. Only on
+  // those two moments: once you pick a tab, the poll never takes you off it.
+  const lastStatus = useRef<string | null>(null);
+  const currentStatus = project?.status ?? null;
+  // Another build in the same page is a first look again.
+  useEffect(() => {
+    lastStatus.current = null;
+  }, [id]);
+  useEffect(() => {
+    if (!currentStatus) return;
+    const was = lastStatus.current;
+    lastStatus.current = currentStatus;
+    if (currentStatus !== "completed" || was === "completed") return;
+    if (was === null ? !deepLinked.current : true) setTab("preview");
+  }, [currentStatus]);
 
   /** Run a control call. Returns whether it landed, so callers can keep the
    *  reviewer's typing when it didn't. */
@@ -370,69 +395,21 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {/* The relay: who has the work, who is next — and a way into their work.
-          Every step is a link to its phase in the list below, so clicking the
-          agent you are curious about lands on what they produced. */}
-      <div className="card" style={{ marginTop: 20 }}>
-        <div className="sec-head">
-          <h2 className="label">Relay</h2>
-          <span className="rule" />
-          <span className="label mono">{doneCount}/8</span>
-        </div>
-        {/* Under ~600px the eight names don't fit, so the rail goes compact and
-            this line carries what the names were there to say. */}
-        <p className="relay-active" aria-live="polite">
-          {relaySummary(project, doneCount)}
-        </p>
-        <ol
-          className="relay"
-          aria-label={`Pipeline progress: ${doneCount} of 8 phases complete`}
-        >
-          {PHASES.map((ph, i) => {
-            const ns = nodeStateFor(project, ph.key);
-            const agent = AGENT_BY_KEY[ph.key];
-            const live = ns === "running" || ns === "gate";
-            // A stalled run's row still says `running`. The summary above and the
-            // steps behind it already say otherwise; the step itself has to agree.
-            const what =
-              ns === "pending"
-                ? waitingFor(project, i)
-                : ns === "running" && status === "stalled"
-                  ? "Stopped responding mid-phase"
-                  : NODE_STATUS[ns];
-            return (
-              <li key={ph.key}>
-                <button
-                  className={`relay-step ${ns}`}
-                  style={{ ["--agent" as string]: agent.accent }}
-                  aria-current={live ? "step" : undefined}
-                  // The phase rows only exist while the Build tab is mounted, and
-                  // an aria-controls pointing at an absent id sends assistive tech
-                  // nowhere. The click still works from any tab — it switches first.
-                  aria-controls={tab === "build" ? `phase-${ph.key}` : undefined}
-                  onClick={() => {
-                    setTab("build");
-                    // A fresh object every click, so asking for the same phase
-                    // twice is two instructions rather than one unchanged value.
-                    setJump({ key: ph.key });
-                  }}
-                  title={`${agent.codename} · ${agent.role} — ${what}`}
-                >
-                  <AgentSprite
-                    agent={agent}
-                    size={64}
-                    state={spriteFor(project, ns)}
-                    asleep={atRest}
-                  />
-                  <span className="relay-name">{agent.codename}</span>
-                  <span className="relay-bar" />
-                  <span className="sr-only">{`${agent.role} — ${what}. Go to this phase.`}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ol>
-      </div>
+      {/* The relay: who has the work, who is next — and a way into their work. */}
+      <RelayCard
+        project={project}
+        status={status!}
+        tab={tab}
+        atRest={atRest}
+        doneCount={doneCount}
+        loadedAt={loadedAt}
+        onJump={(key) => {
+          setTab("build");
+          // A fresh object every click, so asking for the same phase twice is two
+          // instructions rather than one unchanged value.
+          setJump({ key });
+        }}
+      />
 
       {error && (
         <div className="notice notice-bad" role="alert" style={{ marginTop: 16 }}>
@@ -500,6 +477,128 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             shipIntent={shipIntent}
             onShipIntentUsed={clearShipIntent}
           />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Relay card ───────────────────────────────────────────────────────────────
+/**
+ * The relay: who has the work, who is next, and a way into their work. Every step
+ * is a link to its phase in the list below, so clicking the agent you are curious
+ * about lands on what they produced.
+ *
+ * Two views of the same thing, switched in the card's header (#91): the strip of
+ * eight, or the crew floor's room for this build, with its bubbles, board and
+ * hand-off courier. The choice is per viewer; the card opens or folds to the new
+ * view's height rather than jumping.
+ */
+function RelayCard({
+  project,
+  status,
+  tab,
+  atRest,
+  doneCount,
+  loadedAt,
+  onJump,
+}: {
+  project: Project;
+  status: string;
+  tab: Tab;
+  atRest: boolean;
+  doneCount: number;
+  loadedAt: number;
+  onJump: (phaseKey: string) => void;
+}) {
+  const [view, setView] = useRelayView();
+  const body = useRef<HTMLDivElement>(null);
+  useHeightSwap(body, view);
+  return (
+    <div className="card" style={{ marginTop: 20 }}>
+      <div className="sec-head">
+        <h2 className="label">Relay</h2>
+        <span className="rule" />
+        <span className="label mono">{doneCount}/8</span>
+        <div className="relay-views" role="group" aria-label="Relay view">
+          <button
+            type="button"
+            className="relay-view-btn"
+            aria-pressed={view === "strip"}
+            onClick={() => setView("strip")}
+          >
+            {Icon.list} Strip
+          </button>
+          <button
+            type="button"
+            className="relay-view-btn"
+            aria-pressed={view === "floor"}
+            onClick={() => setView("floor")}
+          >
+            {Icon.layers} Floor
+          </button>
+        </div>
+        {view === "floor" && (
+          <Link
+            className="relay-open"
+            href={`/crew?project=${project.id}`}
+            title="Open the crew floor: inspector, replay and rooms"
+            aria-label="Open the crew floor for this build"
+          >
+            {Icon.expand}
+          </Link>
+        )}
+      </div>
+      {/* Under ~600px the eight names don't fit, so the rail goes compact and
+          this line carries what the names were there to say. */}
+      <p className="relay-active" aria-live="polite">
+        {relaySummary(project, doneCount)}
+      </p>
+      <div ref={body} className="relay-body">
+        {view === "floor" ? (
+          <div key="floor" className="relay-pane">
+            <RelayFloor project={project} loadedAt={loadedAt} onPick={onJump} />
+          </div>
+        ) : (
+          <ol
+            key="strip"
+            className="relay relay-pane"
+            aria-label={`Pipeline progress: ${doneCount} of 8 phases complete`}
+          >
+            {PHASES.map((ph, i) => {
+              const ns = nodeStateFor(project, ph.key);
+              const agent = AGENT_BY_KEY[ph.key];
+              const live = ns === "running" || ns === "gate";
+              // A stalled run's row still says `running`. The summary above and the
+              // steps behind it already say otherwise; the step itself has to agree.
+              const what =
+                ns === "pending"
+                  ? waitingFor(project, i)
+                  : ns === "running" && status === "stalled"
+                    ? "Stopped responding mid-phase"
+                    : NODE_STATUS[ns];
+              return (
+                <li key={ph.key}>
+                  <button
+                    className={`relay-step ${ns}`}
+                    style={{ ["--agent" as string]: agent.accent }}
+                    aria-current={live ? "step" : undefined}
+                    // The phase rows only exist while the Build tab is mounted, and
+                    // an aria-controls pointing at an absent id sends assistive tech
+                    // nowhere. The click still works from any tab — it switches first.
+                    aria-controls={tab === "build" ? `phase-${ph.key}` : undefined}
+                    onClick={() => onJump(ph.key)}
+                    title={`${agent.codename} · ${agent.role} — ${what}`}
+                  >
+                    <AgentSprite agent={agent} size={64} state={spriteFor(project, ns)} asleep={atRest} />
+                    <span className="relay-name">{agent.codename}</span>
+                    <span className="relay-bar" />
+                    <span className="sr-only">{`${agent.role} — ${what}. Go to this phase.`}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
         )}
       </div>
     </div>

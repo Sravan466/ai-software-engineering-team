@@ -55,6 +55,8 @@ type Props = {
   courier: Courier | null;
   /** The line under the room: the latest thing that happened, or how to use it. */
   hint: string;
+  /** Inside another card (the build page's Relay): shorter, and no frame of its own. */
+  compact?: boolean;
 };
 
 function Prop({ id, has, children }: { id: PropId; has: Set<string>; children: ReactNode }) {
@@ -110,7 +112,7 @@ function useStage(room: React.RefObject<HTMLDivElement>, on: boolean): CSSProper
   return box;
 }
 
-export default function Room({ floor, selected, onSelect, pokeOf, look, courier, hint }: Props) {
+export default function Room({ floor, selected, onSelect, pokeOf, look, courier, hint, compact = false }: Props) {
   const { theme, layers, pieces } = look;
   const has = new Set<string>(theme.props.filter((p) => !pieces[p]));
   const room = useRef<HTMLDivElement>(null);
@@ -132,7 +134,7 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
   return (
     <div
       ref={room}
-      className={"floor" + (layers ? " has-art" : "")}
+      className={"floor" + (layers ? " has-art" : "") + (compact ? " is-compact" : "")}
       data-theme={theme.id}
       style={
         {

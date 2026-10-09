@@ -14,9 +14,9 @@ import { STATUS_DOT, STATUS_TEXT, floorBuild, isLive, statusOf } from "@/lib/bui
 import Room, { type Courier } from "@/components/crew/Room";
 import Inspector from "@/components/crew/Inspector";
 import { AlsoRunning, BuildSwitcher, ReplayBar, ThemePicker } from "@/components/crew/Controls";
+import { useFloorEvents } from "@/components/crew/useFloorEvents";
 import {
   SCENARIOS,
-  diff,
   emptyFloor,
   handoffLine,
   liveFloor,
@@ -39,8 +39,6 @@ import {
 
 /** How long a whole replay takes, end to end. */
 const REPLAY_MS = 8000;
-/** Lines kept for the screen reader log. */
-const LOG_MAX = 6;
 
 /** An agent named by phase key or codename, as `?agent=` gives it. */
 function agentIndex(want: string | null | undefined): number {
@@ -235,15 +233,20 @@ function CrewFloor() {
     if (!empty) floor.board.foot = poll.error ? "BUILD NOT FOUND" : "LOADING";
   }
 
-  // ── selection and pokes ────────────────────────────────────────────────────
+  // ── selection, and what changed: the log, the bow, the courier ─────────────
   const [selected, setSelected] = useState(0);
   // Once you pick someone, the inspector stays on them; until then it follows the work.
   const [pinned, setPinned] = useState(false);
-  const [poke, setPoke] = useState<{ i: number; n: number } | null>(null);
-  // Never reset: a sprite skips a value it has already played.
-  const pokeSeq = useRef(0);
-  const pokeAgent = useCallback((i: number) => setPoke({ i, n: ++pokeSeq.current }), []);
-  const pokeOf = (i: number) => (poke?.i === i ? poke.n : undefined);
+  const viewKey = tour ? "tour" : project ? `${project.id}:${replaying ? "replay" : "live"}` : "none";
+  const { log, setLog, flight, pokeAgent, pokeOf, clearPoke } = useFloorEvents(floor, viewKey, {
+    quiet: tour,
+    onFresh: (next) => {
+      if (!pinned && next.board.active >= 0) setSelected(next.board.active);
+    },
+    onActive: (i) => {
+      if (!pinned) setSelected(i);
+    },
+  });
   // `?agent=` (an agent card on the home page) selects that agent, whether or not
   // there is a build to show.
   useEffect(() => {
@@ -258,51 +261,6 @@ function CrewFloor() {
     setPinned(true);
     pokeAgent(i);
   }
-
-  // ── what changed: the log, the hand-off, the courier ───────────────────────
-  const [log, setLog] = useState<string[]>([]);
-  const [flight, setFlight] = useState<{ from: number; to: number; n: number } | null>(null);
-  const flightSeq = useRef(0);
-  const seen = useRef<{ key: string; floor: Floor } | null>(null);
-  const pendingFrom = useRef(-1);
-  const viewKey = tour ? "tour" : project ? `${project.id}:${replaying ? "replay" : "live"}` : "none";
-  const signature = floor.stations.map((s) => `${s.ns}:${s.state}`).join(",") + "|" + floor.board.status;
-  const floorRef = useRef(floor);
-  floorRef.current = floor;
-
-  useEffect(() => {
-    const next = floorRef.current;
-    const prev = seen.current;
-    seen.current = { key: viewKey, floor: next };
-    if (!prev || prev.key !== viewKey) {
-      // A new build, or a switch between live and replay: what's on screen is the
-      // starting point, not news.
-      pendingFrom.current = -1;
-      setFlight(null);
-      if (!pinned) {
-        const live = next.board.active;
-        if (live >= 0) setSelected(live);
-      }
-      return;
-    }
-    if (tour) return;
-    const ch = diff(prev.floor, next);
-    if (ch.said.length) setLog((l) => [...l, ch.said.join(" ")].slice(-LOG_MAX));
-    if (ch.finished >= 0) pendingFrom.current = ch.finished;
-    if (ch.started >= 0) {
-      const from = pendingFrom.current;
-      pendingFrom.current = -1;
-      if (from >= 0 && ch.started > from) {
-        // The one who finished takes a bow, then the courier carries the work over.
-        pokeAgent(from);
-        setFlight({ from, to: ch.started, n: ++flightSeq.current });
-      }
-      if (!pinned) setSelected(ch.started);
-    } else if (!pinned && next.board.active >= 0 && next.board.active !== prev.floor.board.active) {
-      setSelected(next.board.active);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature, viewKey]);
 
   // A new build starts with a clean slate. Not before one is chosen: `?agent=` is
   // read here once, for the build it came with.
@@ -339,7 +297,7 @@ function CrewFloor() {
 
   function runRelay() {
     clearTimers();
-    setPoke(null);
+    clearPoke();
     const base: SpriteState[] = AGENTS.map(() => "queued");
     setRelay([...base]);
     const STEP = 900;
@@ -497,7 +455,7 @@ function CrewFloor() {
                     aria-pressed={!relay && scenario === i}
                     disabled={!!relay}
                     onClick={() => {
-                      setPoke(null);
+                      clearPoke();
                       setScenario(i);
                     }}
                   >
