@@ -47,12 +47,16 @@ function agentIndex(want: string | null | undefined): number {
   return AGENTS.findIndex((a) => a.key === want || a.codename.toLowerCase() === want.toLowerCase());
 }
 
-/** `?project=` follows the build on the floor, so a refresh or a shared link keeps it. */
-function writeProjectParam(id: string | null) {
+/**
+ * `?project=` follows the build on the floor, so a refresh or a shared link keeps it.
+ * `?agent=` goes with a build picked on the page; it stays when the page picks the
+ * build an agent link didn't name.
+ */
+function writeProjectParam(id: string | null, keepAgent = false) {
   const url = new URL(window.location.href);
   if (id) url.searchParams.set("project", id);
   else url.searchParams.delete("project");
-  url.searchParams.delete("agent");
+  if (!keepAgent) url.searchParams.delete("agent");
   window.history.replaceState(window.history.state, "", url.pathname + url.search);
 }
 
@@ -113,7 +117,7 @@ function CrewFloor() {
     const pick = floorBuild(projects);
     if (pick) {
       setChosen(pick.id);
-      writeProjectParam(pick.id);
+      writeProjectParam(pick.id, true);
     }
   }, [chosen, projects]);
 
@@ -154,14 +158,16 @@ function CrewFloor() {
     const id = project?.id ?? null;
     const switched = recordFor.current.id !== id;
     recordFor.current.id = id;
+    // A switch alone is no news once a record is on its way or shown.
     if (switched && recordFor.current.have) return;
+    recordFor.current.have = true;
     api
       .crewRecord()
-      .then((r) => {
-        recordFor.current.have = true;
-        setRecord(r.phases);
-      })
-      .catch(() => setRecord(null));
+      .then((r) => setRecord(r.phases))
+      .catch(() => {
+        // Keep the figures already shown; the next finished phase asks again.
+        recordFor.current.have = false;
+      });
   }, [project?.id, status, settled]);
 
   // ── the room ──────────────────────────────────────────────────────────────
@@ -176,18 +182,18 @@ function CrewFloor() {
   const [replaying, setReplaying] = useState(false);
   const [u, setU] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const uNow = useRef(u);
+  uNow.current = u;
   useEffect(() => {
     if (!playing) return;
     let raf = 0;
     let last = performance.now();
+    let at = uNow.current;
     const step = (t: number) => {
-      const dt = t - last;
+      at = Math.min(1, at + (t - last) / REPLAY_MS);
       last = t;
-      setU((v) => {
-        const next = Math.min(1, v + dt / REPLAY_MS);
-        if (next >= 1) setPlaying(false);
-        return next;
-      });
+      setU(at);
+      if (at >= 1) return setPlaying(false);
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);

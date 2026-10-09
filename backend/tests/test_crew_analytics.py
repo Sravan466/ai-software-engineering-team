@@ -152,16 +152,55 @@ def test_what_a_phase_was_handed_is_bounded_and_goes_with_the_build(two, monkeyp
     assert a.delete(f"/api/projects/{pid}").status_code == 204
     assert activity.given_for(pid) is None
 
-    # Bounded: the least recently written or read go first. A build that is being
-    # watched (read on every poll) stays, however long its phase runs.
+    # Bounded: the oldest written go first.
     monkeypatch.setattr(activity, "GIVEN_MAX", 3)
     ids = [f"bounded-{i}" for i in range(5)]
     try:
-        for n, i in enumerate(ids):
+        for i in ids:
             with inflight.building(i):
                 activity.given("system_design", deps)
-            assert activity.given_for(ids[0]) is not None, f"the watched build lost its record at {n}"
-        assert [activity.given_for(i) is not None for i in ids] == [True, False, False, True, True]
+        assert [activity.given_for(i) is not None for i in ids] == [False, False, True, True, True]
     finally:
         for i in ids:
             activity.clear(i)
+
+
+def test_the_first_prompt_of_a_phase_run_is_what_it_was_handed():
+    """Repair rounds rebuild the prompt on a smaller budget; the record keeps the first."""
+    from app.orchestration import activity
+    from app.router import inflight
+
+    whole = [{"phase": "product_manager", "digest": True, "full": "whole", "omitted": []}]
+    cut = [{"phase": "product_manager", "digest": True, "full": "digest_only", "omitted": []}]
+    try:
+        with inflight.building("first-wins"):
+            activity.given("system_design", whole)
+            activity.given("system_design", cut)
+        assert activity.given_for("first-wins")["deps"] == whole
+        # A new phase starts clean, and records its own.
+        activity.clear("first-wins")
+        with inflight.building("first-wins"):
+            activity.given("backend_engineer", cut)
+        assert activity.given_for("first-wins") == {"phase": "backend_engineer", "deps": cut}
+    finally:
+        activity.clear("first-wins")
+
+
+def test_the_build_list_leaves_out_what_a_phase_was_handed(two):
+    from app.orchestration import activity
+    from app.router import inflight
+
+    a, a_user, *_ = two
+    with SessionLocal() as db:
+        p = Project(owner_id=a_user.id, idea="A seed swap board", status="running", current_phase="system_design")
+        db.add(p)
+        db.commit()
+        pid = p.id
+    try:
+        with inflight.building(pid):
+            activity.given("system_design", [{"phase": "product_manager", "digest": True, "full": "whole", "omitted": []}])
+        assert a.get(f"/api/projects/{pid}").json()["given"]["phase"] == "system_design"
+        listed = next(x for x in a.get("/api/projects").json() if x["id"] == pid)
+        assert "given" not in listed
+    finally:
+        activity.clear(pid)

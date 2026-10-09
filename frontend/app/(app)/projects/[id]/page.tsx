@@ -222,8 +222,9 @@ function BuildPage({ id }: { id: string }) {
   }, []);
 
   // A finished build is its app: open on Preview, the way Lovable and Bolt do, and
-  // go there when a build (or a change to it) finishes while you watch. Only on
-  // those two moments: once you pick a tab, the poll never takes you off it.
+  // go there when a build (or a change to it) finishes while you watch, whichever
+  // tab you were on. Only at those two moments: between them, the poll never
+  // changes the tab.
   const lastStatus = useRef<string | null>(null);
   const currentStatus = project?.status ?? null;
   useEffect(() => {

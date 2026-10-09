@@ -130,8 +130,8 @@ _board: dict[str, _Activity] = {}
 #: `{"phase", "deps"}` in the shape `phase_results.handoff.deps` takes once the row is
 #: saved. Kept apart from the board, which only code, QA and security phases open.
 _given: dict[str, dict] = {}
-#: Builds whose last hand-off is kept. The least recently written or read go first;
-#: a build someone is watching is read on every poll, so it stays.
+#: Builds whose hand-off is kept; the oldest written go first. Every phase start
+#: clears its own build's entry, so this only bounds builds that stopped mid-phase.
 GIVEN_MAX = 256
 
 
@@ -240,12 +240,17 @@ def clear(project_id: str) -> None:
 
 
 def given(phase: str, deps: Iterable[dict]) -> None:
-    """The phase's prompt was built: record what it was handed, for the crew floor."""
+    """The phase's prompt was built: record what it was handed, for the crew floor.
+
+    The first prompt of a phase run wins. Repair and continuation rounds rebuild the
+    prompt on a smaller budget (and a code phase builds one per file), but what the
+    phase was handed is what its first prompt carried, as its row will record."""
     pid = _project()
     if pid is None:
         return
     with _lock:
-        _given.pop(pid, None)
+        if pid in _given:
+            return
         _given[pid] = {"phase": phase, "deps": [dict(d) for d in deps]}
         while len(_given) > GIVEN_MAX:
             del _given[next(iter(_given))]
@@ -253,11 +258,8 @@ def given(phase: str, deps: Iterable[dict]) -> None:
 
 def given_for(project_id: str) -> Optional[dict]:
     with _lock:
-        found = _given.pop(project_id, None)
-        if found is None:
-            return None
-        _given[project_id] = found  # read: the most recently used now
-        return {"phase": found["phase"], "deps": list(found["deps"])}
+        found = _given.get(project_id)
+        return {"phase": found["phase"], "deps": list(found["deps"])} if found else None
 
 
 def drop_ended(project_id: str) -> None:

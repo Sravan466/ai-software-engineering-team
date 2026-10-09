@@ -37,6 +37,9 @@ const FLOOR_PLAN: { x: number; depth: number }[] = [
   { x: 92, depth: 0.06 }, // LEDGER, nearest, front right
 ];
 
+/** The courier's flight, as `.courier.is-flying` times it in crew.css. */
+const FLIGHT_MS = 1100;
+
 export type Courier = {
   from: number;
   to: number;
@@ -432,12 +435,18 @@ function CourierDrone({
     // the browser has the start position before the transition to the end.
     setPos({ ...from, fly: false, dir: 0 });
     let raf2 = 0;
+    let landed: ReturnType<typeof setTimeout> | undefined;
     const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => setPos({ ...to, fly: true, dir: Math.sign(to.x - from.x) }));
+      raf2 = requestAnimationFrame(() => {
+        setPos({ ...to, fly: true, dir: Math.sign(to.x - from.x) });
+        // Landed: a later resize puts it on its desk without another flight.
+        landed = setTimeout(() => setPos((p) => (p ? { ...p, fly: false } : p)), FLIGHT_MS + 100);
+      });
     });
     return () => {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
+      if (landed) clearTimeout(landed);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [courier?.n, courier?.to]);

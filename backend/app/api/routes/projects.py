@@ -215,7 +215,9 @@ def update_project(
     return project
 
 
-@router.get("", response_model=list[ProjectOut])
+# The list leaves out what each running phase was handed (#91): only the build
+# page and the crew floor read it, from the build itself.
+@router.get("", response_model=list[ProjectOut], response_model_exclude={"__all__": {"given"}})
 def list_projects(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[Project]:
     found = list(
         db.execute(
