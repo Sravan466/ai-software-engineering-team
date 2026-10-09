@@ -172,23 +172,23 @@ def edge_row(alpha: Image.Image, foot: bool) -> Optional[int]:
     return rows[len(rows) // 2]
 
 
-def seat(im: Image.Image, layer: str, horizon: int) -> tuple:
+def seat(im: Image.Image, layer: str, horizon: int, edge: Optional[int]) -> tuple:
     """(the layer seated on the horizon, what was done or ""). Within SEAT of the
     line a wall is moved, a floor drawn too high is trimmed and one drawn too low is
     stretched up; further off, it is left as drawn for the checks to refuse."""
     W, H = im.size
-    edge = edge_row(im.getchannel("A"), foot=layer == "wall")
     if edge is None or edge == horizon or abs(edge - horizon) > round(H * SEAT):
         return im, ""
     off = horizon - edge
-    out = Image.new("RGBA", im.size, (0, 0, 0, 0))
     if layer == "wall":
+        out = Image.new("RGBA", im.size, (0, 0, 0, 0))
         out.paste(im, (0, off))
         return out, f"moved {abs(off)}px {'down' if off > 0 else 'up'} onto the horizon"
     if off > 0:
         out = im.copy()
         out.paste((0, 0, 0, 0), (0, 0, W, horizon))
         return out, f"far edge trimmed {off}px to the horizon"
+    out = Image.new("RGBA", im.size, (0, 0, 0, 0))
     out.paste(im.crop((0, edge, W, H)).resize((W, H - horizon), Image.LANCZOS), (0, horizon))
     return out, f"stretched {-off}px up to the horizon"
 
@@ -217,7 +217,13 @@ def cut_layer(meta: dict) -> tuple:
     horizon = round(H * horizon_of(meta))
     if im.getchannel("A").getextrema()[0] > 40:
         refuse(prompt, f"{src.name} has no transparent pixels; the {layer} layer has to be see-through")
-    im, seated = seat(im, layer, horizon)
+    edge = edge_row(im.getchannel("A"), foot=layer == "wall")
+    # Too far off to seat, on the side the checks below can't see: a gap the sky shows through.
+    if edge is not None and layer == "wall" and horizon - edge > round(H * SEAT):
+        refuse(prompt, f"{src.name} stops at {edge}px, {horizon - edge}px short of the horizon, so the sky shows under it; the wall must reach {horizon}px")
+    if edge is not None and layer == "floor" and edge - horizon > round(H * SEAT):
+        refuse(prompt, f"{src.name} starts at {edge}px, {edge - horizon}px below the horizon, so the sky shows above it; the floor must start at {horizon}px")
+    im, seated = seat(im, layer, horizon, edge)
     a = im.getchannel("A").load()
     spill = round(H * SPILL)
     if layer == "wall":
