@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { api, type CrewRecord, type Project } from "@/lib/api";
 import { AGENTS } from "@/components/agents/personas";
 import type { SpriteState } from "@/components/agents/AgentSprite";
@@ -41,12 +42,6 @@ const REPLAY_MS = 8000;
 /** Lines kept for the screen reader log. */
 const LOG_MAX = 6;
 
-function readParams(): { project: string | null; agent: string | null } {
-  if (typeof window === "undefined") return { project: null, agent: null };
-  const sp = new URLSearchParams(window.location.search);
-  return { project: sp.get("project"), agent: sp.get("agent") };
-}
-
 /** An agent named by phase key or codename, as `?agent=` gives it. */
 function agentIndex(want: string | null | undefined): number {
   if (!want) return -1;
@@ -63,11 +58,28 @@ function writeProjectParam(id: string | null) {
 }
 
 export default function CrewPage() {
+  // useSearchParams needs a boundary to render under on a static page.
+  return (
+    <Suspense fallback={null}>
+      <CrewFloor />
+    </Suspense>
+  );
+}
+
+function CrewFloor() {
   // ── which build ────────────────────────────────────────────────────────────
+  // The URL leads: `?project=` and `?agent=` from a link, and again on a crew link
+  // followed from this page, or back and forward.
+  const params = useSearchParams();
+  const urlProject = params.get("project");
+  const urlAgent = params.get("agent");
+  const agentParam = useRef(urlAgent);
+  agentParam.current = urlAgent;
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [listError, setListError] = useState("");
-  const [chosen, setChosen] = useState<string | null>(null);
-  const asked = useRef<{ project: string | null; agent: string | null } | null>(null);
+  const [chosen, setChosen] = useState<string | null>(urlProject);
+  // A deep link to a build that isn't there any more.
+  const [missing, setMissing] = useState(false);
 
   const refreshList = useCallback(async () => {
     try {
@@ -80,10 +92,12 @@ export default function CrewPage() {
   }, []);
 
   useEffect(() => {
-    asked.current = readParams();
-    if (asked.current.project) setChosen(asked.current.project);
     refreshList();
   }, [refreshList]);
+
+  useEffect(() => {
+    if (urlProject) setChosen((c) => (c === urlProject ? c : urlProject));
+  }, [urlProject]);
 
   // Without a deep link, the build in hand, or else the latest one.
   useEffect(() => {
@@ -106,6 +120,16 @@ export default function CrewPage() {
   const poll = useProject(chosen);
   const project = poll.project && poll.project.id === chosen ? poll.project : null;
 
+  // A link to a build that can't be loaded and isn't among yours: drop it from the
+  // URL and say so, and the floor falls back to your latest build, or the empty state.
+  useEffect(() => {
+    if (!chosen || !poll.error || !projects || listError) return;
+    if (projects.some((p) => p.id === chosen)) return;
+    setMissing(true);
+    setChosen(null);
+    writeProjectParam(null);
+  }, [chosen, poll.error, projects, listError]);
+
   // A build that finishes or stops should read the same in the switcher.
   const status = project ? statusOf(project) : "";
   useEffect(() => {
@@ -114,13 +138,14 @@ export default function CrewPage() {
 
   // ── each agent's record across every build ─────────────────────────────────
   const [record, setRecord] = useState<Record<string, CrewRecord> | null>(null);
+  // Again whenever a phase finishes or the build stops, so the work just done counts.
+  const settled = project ? project.phases.filter((r) => r.status !== "running").length : 0;
   useEffect(() => {
     api
       .crewRecord()
       .then((r) => setRecord(r.phases))
       .catch(() => setRecord(null));
-    // Again when a build finishes, so a phase that just ran counts.
-  }, [status]);
+  }, [status, settled]);
 
   // ── the room ──────────────────────────────────────────────────────────────
   const look = useFloorTheme();
@@ -201,15 +226,15 @@ export default function CrewPage() {
   const pokeSeq = useRef(0);
   const pokeAgent = useCallback((i: number) => setPoke({ i, n: ++pokeSeq.current }), []);
   const pokeOf = (i: number) => (poke?.i === i ? poke.n : undefined);
-  // `?agent=` (an agent card on the home page) selects that agent as the page loads,
-  // whether or not there is a build to show.
+  // `?agent=` (an agent card on the home page) selects that agent, whether or not
+  // there is a build to show.
   useEffect(() => {
-    const i = agentIndex(readParams().agent);
+    const i = agentIndex(urlAgent);
     if (i >= 0) {
       setSelected(i);
       setPinned(true);
     }
-  }, []);
+  }, [urlAgent]);
   function select(i: number) {
     setSelected(i);
     setPinned(true);
@@ -269,21 +294,23 @@ export default function CrewPage() {
     setReplaying(false);
     setPlaying(false);
     setU(0);
-    const i = agentIndex(asked.current?.agent);
+    const i = agentIndex(agentParam.current);
     if (i >= 0) {
       setSelected(i);
       setPinned(true);
     } else {
       setPinned(false);
     }
-    if (asked.current) asked.current.agent = null;
   }, [chosen]);
 
   const courier: Courier | null =
-    flight && project ? { ...flight, label: handoffLine(project, flight.from, flight.to) } : null;
+    flight && project
+      ? { ...flight, label: handoffLine(project, flight.from, flight.to, floor.stations[flight.to]?.row) }
+      : null;
 
   function pickBuild(id: string) {
     if (id === chosen) return;
+    setMissing(false);
     clearTimers();
     setRelay(null);
     setChosen(id);
@@ -361,6 +388,15 @@ export default function CrewPage() {
           <p className="crew-note">
             {Icon.info}
             <span>This is the tour. The office, the build and every number on it are made up.</span>
+          </p>
+        )}
+        {missing && (
+          <p className="crew-note" role="status">
+            {Icon.info}
+            <span>
+              That build isn&apos;t there any more.{" "}
+              {projects?.length ? "The floor is showing your latest one." : "You have no builds yet."}
+            </span>
           </p>
         )}
         {listError && !projects?.length && (

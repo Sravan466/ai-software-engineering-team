@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Project } from "@/lib/api";
+import { SIGNED_OUT_EVENT, type Project } from "@/lib/api";
 
 /**
  * A build's status as a dot and a phrase. One mapping for every list of builds: the
@@ -66,11 +66,17 @@ export function crewHref(project: Project | null | undefined, agentKey?: string)
 // The sidebar already fetches the builds on every page; the home page's crew links
 // read that list instead of asking again, so both links always open the same build.
 let shared: Project[] | null = null;
-const listeners = new Set<(list: Project[]) => void>();
+const listeners = new Set<(list: Project[] | null) => void>();
 
-export function publishProjects(list: Project[]): void {
+export function publishProjects(list: Project[] | null): void {
   shared = list;
   listeners.forEach((fn) => fn(list));
+}
+
+// Signed out (by hand or by an expired session): the next account must not see this
+// one's builds, even for the moment before its own list arrives.
+if (typeof window !== "undefined") {
+  window.addEventListener(SIGNED_OUT_EVENT, () => publishProjects(null));
 }
 
 export function useSharedProjects(): Project[] | null {

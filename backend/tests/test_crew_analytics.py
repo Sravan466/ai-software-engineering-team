@@ -135,7 +135,7 @@ def test_a_deleted_builds_calls_leave_the_record_with_it(two):
     assert prism["avg_latency_ms"] == 1000.0
 
 
-def test_what_a_phase_was_handed_goes_when_the_run_stops_or_the_build_does(two):
+def test_what_a_phase_was_handed_is_bounded_and_goes_with_the_build(two, monkeypatch):
     from app.orchestration import activity
     from app.router import inflight
 
@@ -144,18 +144,22 @@ def test_what_a_phase_was_handed_goes_when_the_run_stops_or_the_build_does(two):
     pid = _build(a_user.id, "A reading list")
     with inflight.building(pid):
         activity.given("system_design", deps)
-        board = activity.begin("system_design")
-    assert activity.given_for(pid)
-    # A live board (a newer run, mid-phase) keeps it.
+    # A run that stops driving leaves it: a planning phase opens no board, so a newer
+    # run mid-phase looks the same from here.
     activity.drop_ended(pid)
     assert activity.given_for(pid)
-    # The run stopped driving: gone.
-    with inflight.building(pid):
-        activity.end(board)
-    activity.drop_ended(pid)
-    assert activity.given_for(pid) is None
-
-    with inflight.building(pid):
-        activity.given("system_design", deps)
+    # Deleting the build takes it.
     assert a.delete(f"/api/projects/{pid}").status_code == 204
     assert activity.given_for(pid) is None
+
+    # Bounded: the oldest builds' records go first, the one writing now stays.
+    monkeypatch.setattr(activity, "GIVEN_MAX", 3)
+    ids = [f"bounded-{i}" for i in range(5)]
+    try:
+        for i in ids:
+            with inflight.building(i):
+                activity.given("system_design", deps)
+        assert [activity.given_for(i) is not None for i in ids] == [False, False, True, True, True]
+    finally:
+        for i in ids:
+            activity.clear(i)

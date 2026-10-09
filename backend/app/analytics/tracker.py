@@ -188,15 +188,17 @@ def crew(db: Session, owner_id: str) -> dict:
             PhaseResult.status,
             PhaseResult.schema_status,
             PhaseResult.build_status,
-            PhaseResult.handoff,
+            # One key of the hand-off record, extracted in the database: the record
+            # carries every earlier phase's digest, and only this is needed here.
+            PhaseResult.handoff["restored_row"].as_string(),
         )
         .join(Project, Project.id == PhaseResult.project_id)
         .where(Project.owner_id == owner_id, PhaseResult.phase.in_(keys))
     ).all()
     touched: dict[str, set] = {k: set() for k in keys}
-    for phase, project_id, status, schema_status, build_status, handoff in rows:
+    for phase, project_id, status, schema_status, build_status, restored in rows:
         # A restored version (#79) copies its rows. The copy is the same work, not more.
-        if isinstance(handoff, dict) and handoff.get("restored_row"):
+        if restored:
             continue
         rec = out[phase]
         touched[phase].add(project_id)

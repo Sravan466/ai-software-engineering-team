@@ -130,6 +130,9 @@ _board: dict[str, _Activity] = {}
 #: `{"phase", "deps"}` in the shape `phase_results.handoff.deps` takes once the row is
 #: saved. Kept apart from the board, which only code, QA and security phases open.
 _given: dict[str, dict] = {}
+#: Builds whose last hand-off is kept. The oldest go first; a build working now has
+#: just written its own, so it is never the oldest.
+GIVEN_MAX = 256
 
 
 def _project() -> Optional[str]:
@@ -242,7 +245,10 @@ def given(phase: str, deps: Iterable[dict]) -> None:
     if pid is None:
         return
     with _lock:
+        _given.pop(pid, None)
         _given[pid] = {"phase": phase, "deps": [dict(d) for d in deps]}
+        while len(_given) > GIVEN_MAX:
+            del _given[next(iter(_given))]
 
 
 def given_for(project_id: str) -> Optional[dict]:
@@ -253,14 +259,14 @@ def given_for(project_id: str) -> Optional[dict]:
 
 def drop_ended(project_id: str) -> None:
     """The run stopped driving: a phase's last word is history now. A live board — a
-    newer run's, mid-phase — is left alone, and so is what its phase was handed."""
+    newer run's, mid-phase — is left alone. What a phase was handed stays too: a
+    planning phase opens no board, so "no board" can't tell a finished run from a
+    newer one mid-phase. `GIVEN_MAX` bounds it instead, and every phase start clears
+    its own build's entry, so a stale one is never shown."""
     with _lock:
         found = _board.get(project_id)
         if found is not None and found.ended:
             del _board[project_id]
-            found = None
-        if found is None:
-            _given.pop(project_id, None)
 
 
 def latest(project_id: str) -> Optional[dict]:

@@ -55,6 +55,7 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
     } catch {
       // Even if the backend didn't hear it, this browser is done with the session.
     }
+    publishProjects(null);
     router.replace("/signin");
   }, [router]);
 

@@ -115,7 +115,7 @@ function stageLine(project: Project): string {
   if (!a) return "WORKING";
   if (a.ended) return "WRAPPING UP";
   const stage = (a.stage || "setting up").toUpperCase();
-  const fileStage = a.stage === "planning" || a.stage === "writing" || a.stage === "fixing";
+  const fileStage = a.stage === "planning" || a.stage === "writing" || a.stage === "fixing" || a.stage === "changing";
   return fileStage && a.total > 0 ? `${stage} · ${Math.min(a.done, a.total)}/${a.total} FILES` : stage;
 }
 
@@ -241,10 +241,11 @@ export function liveFloor(project: Project, tick = 0): Floor {
 }
 
 /** What the phase that just took the work was given, in the hand-off note's words. */
-export function handoffLine(project: Project, from: number, to: number): string {
+export function handoffLine(project: Project, from: number, to: number, attempt?: PhaseResult): string {
   const a = AGENTS[from].codename;
   const b = AGENTS[to];
-  const row = latestRow(project, b.key);
+  // The attempt on screen (in a replay, the one being replayed), else the latest.
+  const row = attempt ?? latestRow(project, b.key);
   const deps =
     row?.handoff?.deps ?? (project.given?.phase === b.key ? project.given.deps : null) ?? [];
   const given = deps
@@ -358,8 +359,8 @@ export function replayFloor(project: Project, line: Timeline, t: number): Floor 
     if (now) {
       if (t < now.end) ns = "running";
       else if (now.row.status === "rejected") ns = "redo";
-      else if (now.row.status === "failed") ns = "failed";
-      else if (now.row.status === "running") ns = "running";
+      // Abandoned: a row still saying `running` past its end stopped there.
+      else if (now.row.status === "failed" || now.row.status === "running") ns = "failed";
       else ns = "done";
     }
     // The attempt before this one was sent back: say so while it's redone.

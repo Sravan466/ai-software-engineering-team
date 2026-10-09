@@ -66,12 +66,19 @@ export function useProject(id: string | null, opts: { analytics?: boolean } = {}
   const actionFailed = useRef(false);
   const current = useRef(id);
   current.current = id;
+  // Polls can overlap on a slow backend. A reply older than one already shown is
+  // dropped, or the build would seem to go backwards (and the crew floor would read
+  // that as work changing hands).
+  const asked = useRef(0);
+  const shown = useRef(0);
 
   const load = useCallback(async () => {
     if (!id) return;
+    const n = ++asked.current;
     try {
       const p = await api.getProject(id);
-      if (current.current !== id) return;
+      if (current.current !== id || n < shown.current) return;
+      shown.current = n;
       setProject(p);
       setLoadedAt(Date.now());
       if (withAnalytics) {
