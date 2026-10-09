@@ -124,7 +124,7 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
   const stations = useRef<(HTMLButtonElement | null)[]>([]);
 
   const stage = useStage(room, !!layers && Object.keys(pieces).length > 0);
-  const placed = (tier: "back" | "mid" | "near") => {
+  const placed = (tier: PiecePlace["tier"]) => {
     const here = Object.entries(theme.pieces).filter(([name, at]) => at.tier === tier && pieces[name]);
     if (!stage || !here.length) return null;
     return (
@@ -158,6 +158,8 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
       <span className="sky" aria-hidden="true" />
       {layers && (
         <>
+          {/* Outside: drawn under the wall art, so only its glass shows it. */}
+          {placed("out")}
           <span className="layer layer-wall" aria-hidden="true" />
           <span className="layer layer-floor" aria-hidden="true" />
         </>

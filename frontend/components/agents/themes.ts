@@ -64,15 +64,17 @@ export type PropId =
 /**
  * Where a set piece stands, in the art's own coordinates: percentages of the
  * 1536×1024 layers, so it stays on its window or its spot on the wall at every
- * room shape. The wall prompts leave these places for them.
+ * room shape. Measured on the cut art (the walls are seated on the horizon by
+ * floor_art.py), so a regenerated wall may need these moved.
  */
 export type PiecePlace = {
   /** Left edge, top edge and width, as % of the art. */
   x: number;
   y: number;
   w: number;
-  /** In front of the wall, between the wall and the crew, or nearest you. */
-  tier: "back" | "mid" | "near";
+  /** Behind the wall, seen only through its glass; in front of the wall; between
+   *  the wall and the crew; or nearest you. */
+  tier: "out" | "back" | "mid" | "near";
 };
 
 /** The size every room layer is generated at (assets/prompts), and the horizon in it. */
@@ -114,7 +116,8 @@ export const THEMES: FloorTheme[] = [
     vignette: true,
     props: ALL_PROPS,
     pieces: {
-      rack: { x: 15, y: 33, w: 6.5, tier: "back" },
+      // In the plain gap between the left window and the pillar, on the skirting.
+      rack: { x: 22.6, y: 34.1, w: 4.6, tier: "back" },
     },
     tokens: {},
   },
@@ -128,7 +131,8 @@ export const THEMES: FloorTheme[] = [
     vignette: true,
     props: ["plant", "cooler", "plant-2", "mug", "crates"],
     pieces: {
-      light: { x: 8, y: 2, w: 16, tier: "back" },
+      // One unlit slot of the drop ceiling, above the left window.
+      light: { x: 11, y: 12.5, w: 7, tier: "back" },
     },
     tokens: {
       "--cabin-back-a": "#6d685c",
@@ -162,7 +166,8 @@ export const THEMES: FloorTheme[] = [
     vignette: false,
     props: ["plant", "plant-2", "cooler", "mug", "monitors"],
     pieces: {
-      rain: { x: 4, y: 8, w: 20, tier: "back" },
+      // Behind the left window, so the wall crops it to the glass (day and dark walls).
+      rain: { x: 4.8, y: 25, w: 20.5, tier: "out" },
     },
     tokens: {
       "--cabin-back-a": "#4f5550",
@@ -196,7 +201,8 @@ export const THEMES: FloorTheme[] = [
     vignette: true,
     props: ["rack", "rack-2", "monitors", "crates", "spool", "mug"],
     pieces: {
-      console: { x: 42, y: 41, w: 16, tier: "back" },
+      // Under the board, its base on the horizon.
+      console: { x: 42, y: 39, w: 16, tier: "back" },
     },
     tokens: {
       "--cabin-back-a": "#26303b",
