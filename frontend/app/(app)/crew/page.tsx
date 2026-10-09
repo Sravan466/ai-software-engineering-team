@@ -14,7 +14,8 @@ import { STATUS_DOT, STATUS_TEXT, floorBuild, isLive, statusOf } from "@/lib/bui
 import Room, { type Courier } from "@/components/crew/Room";
 import Inspector from "@/components/crew/Inspector";
 import { AlsoRunning, BuildSwitcher, ReplayBar, ThemePicker } from "@/components/crew/Controls";
-import { useBoardTick, useFloorEvents } from "@/components/crew/useFloorEvents";
+import { useBoardTick } from "@/components/crew/useBoardTick";
+import { useFloorEvents } from "@/components/crew/useFloorEvents";
 import {
   SCENARIOS,
   emptyFloor,

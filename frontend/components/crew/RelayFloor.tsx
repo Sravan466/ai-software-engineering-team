@@ -6,7 +6,8 @@ import { AGENTS } from "@/components/agents/personas";
 import { useFloorTheme } from "@/components/agents/themes";
 import Room from "./Room";
 import { handoffLine, liveFloor } from "./floor";
-import { useBoardTick, useFloorEvents } from "./useFloorEvents";
+import { useBoardTick } from "./useBoardTick";
+import { useFloorEvents } from "./useFloorEvents";
 
 export type RelayView = "strip" | "floor";
 
@@ -75,7 +76,9 @@ export function useHeightSwap(box: RefObject<HTMLElement>, key: string) {
       el.removeEventListener("transitionend", onEnd);
       if (el.classList.contains("is-swapping")) {
         // Swapped again mid-way: the next swap starts from where this one got to,
-        // and measures its own content at its natural height.
+        // and measures its own content at its natural height. This cleanup and the
+        // next run of the effect always come as a pair (the key changed); on an
+        // unmount the box is going away and what is written here is never read.
         const at = el.getBoundingClientRect().height;
         el.classList.remove("is-swapping");
         el.style.height = "";
