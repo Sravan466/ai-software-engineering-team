@@ -621,6 +621,9 @@
     scrollbar-width: thin;
     scrollbar-color: var(--line-3) transparent;
   }
+  /* A column that scrolls: its parts keep their size instead of being squeezed to
+     fit (the portrait clips its sprite, so it would shrink to a sliver). */
+  .floor-wrap > .inspect > * { flex-shrink: 0; }
 }
 
 /* On generated art the floor can be light, so the text that stands on it gets a
