@@ -68,8 +68,11 @@ function Prop({ id, has, children }: { id: PropId; has: Set<string>; children: R
   return has.has(id) ? <span className={"prop p-" + id}>{children}</span> : null;
 }
 
-/** An animated set piece from the room's art: its frames played the way a sprite's are. */
-function Piece({ name, sheet, at }: { name: string; sheet: PieceSheet; at: PiecePlace }) {
+/** An animated set piece from the room's art: its frames played the way a sprite's are.
+ *  A second copy of the same piece starts part-way through the loop, so two panes
+ *  of rain don't fall in step. */
+function Piece({ name, sheet, at, copy = 0 }: { name: string; sheet: PieceSheet; at: PiecePlace; copy?: number }) {
+  const dur = Math.round((sheet.cols / (sheet.fps || 10)) * 1000);
   return (
     <span
       className={"piece piece-" + name}
@@ -80,10 +83,11 @@ function Piece({ name, sheet, at }: { name: string; sheet: PieceSheet; at: Piece
           top: `${at.y}%`,
           width: `${at.w}%`,
           aspectRatio: `${sheet.w} / ${sheet.h}`,
+          animationDelay: copy ? `-${Math.round(dur * ((copy * 0.37) % 1))}ms` : undefined,
           "--piece": `url(/floor/${sheet.src})`,
           "--cols": sheet.cols,
           "--rows": sheet.rows,
-          "--piece-dur": `${Math.round((sheet.cols / (sheet.fps || 10)) * 1000)}ms`,
+          "--piece-dur": `${dur}ms`,
         } as CSSProperties
       }
     />
@@ -125,12 +129,14 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
 
   const stage = useStage(room, !!layers && Object.keys(pieces).length > 0);
   const placed = (tier: PiecePlace["tier"]) => {
-    const here = Object.entries(theme.pieces).filter(([name, at]) => at.tier === tier && pieces[name]);
+    const here = Object.entries(theme.pieces).flatMap(([name, at]) =>
+      pieces[name] ? [at].flat().map((p, copy) => ({ name, at: p, copy })).filter((p) => p.at.tier === tier) : [],
+    );
     if (!stage || !here.length) return null;
     return (
       <span className="stage" style={stage}>
-        {here.map(([name, at]) => (
-          <Piece key={name} name={name} sheet={pieces[name]} at={at} />
+        {here.map(({ name, at, copy }) => (
+          <Piece key={`${name}-${copy}`} name={name} sheet={pieces[name]} at={at} copy={copy} />
         ))}
       </span>
     );
@@ -346,7 +352,7 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
         })}
       </div>
 
-      <CourierDrone room={room} stations={stations} courier={courier} sheet={look.courier} onPick={onSelect} />
+      <CourierDrone room={room} stations={stations} courier={courier} sheet={look.courier} art={!!layers} onPick={onSelect} />
 
       {/* ── near set: between you and the crew ── */}
       <div className="set set-near" aria-hidden="true">
@@ -385,12 +391,15 @@ function CourierDrone({
   stations,
   courier,
   sheet,
+  art,
   onPick,
 }: {
   room: React.RefObject<HTMLDivElement>;
   stations: React.MutableRefObject<(HTMLButtonElement | null)[]>;
   courier: Courier | null;
   sheet: PieceSheet | null;
+  /** The room has generated art: the crew is drawn bigger and the drone waits elsewhere. */
+  art: boolean;
   onPick: (i: number) => void;
 }) {
   const [pos, setPos] = useState<{ x: number; y: number; fly: boolean; dir: number } | null>(null);
@@ -400,21 +409,31 @@ function CourierDrone({
   // call lands the drone and cuts a flight short.
   const target = useRef<number | null>(courier?.to ?? null);
   target.current = courier?.to ?? null;
+  const hasArt = useRef(art);
+  hasArt.current = art;
 
-  /** Above the right shoulder of a station's cabin, in the room's coordinates. */
+  /** Just off the right edge of a station's cabin, at shoulder height, in the room's
+   *  coordinates. Not above it: the agent that takes the work starts talking, and its
+   *  bubble opens over its head, under a drone parked there. The offsets grow with
+   *  the crew (crew.css `--crew`), as the drone and the cabin do. */
   const deskPoint = useCallback(
     (i: number) => {
-      const r = room.current?.getBoundingClientRect();
+      const el = room.current;
+      const r = el?.getBoundingClientRect();
       const cab = stations.current[i]?.querySelector(".cabin")?.getBoundingClientRect();
-      if (!r || !cab) return null;
-      return { x: cab.right - r.left - 14, y: cab.top - r.top - 30 };
+      if (!el || !r || !cab) return null;
+      const k = parseFloat(getComputedStyle(el).getPropertyValue("--crew")) || 1;
+      return { x: cab.right - r.left + 6 * k, y: cab.top - r.top + 2 * k };
     },
     [room, stations],
   );
 
+  /** Where it waits between hand-offs. In a room with art that is up by the ceiling
+   *  in the right corner: clear of the board, the speech bubbles and the props. */
   const home = useCallback(() => {
     const r = room.current?.getBoundingClientRect();
-    return r ? { x: r.width * 0.86, y: r.height * 0.27 } : null;
+    if (!r) return null;
+    return hasArt.current ? { x: r.width * 0.925, y: r.height * 0.12 } : { x: r.width * 0.86, y: r.height * 0.27 };
   }, [room]);
 
   // Be wherever it should be: first paint, a resize, a new build. A flight under
@@ -461,6 +480,10 @@ function CourierDrone({
     return () => ro.disconnect();
   }, [room, settle]);
 
+  // The art arrives after the first paint and resizes the crew without resizing the
+  // room, so nothing above would move the drone to its new desk point or home.
+  useEffect(() => settle(), [art, settle]);
+
   if (!pos) return null;
   const style = { "--cx": `${pos.x}px`, "--cy": `${pos.y}px`, "--tilt": `${pos.dir * 8}deg` } as CSSProperties;
   const body = sheet ? (
@@ -500,7 +523,8 @@ function CourierDrone({
     >
       <span key={courier.n} className="courier-body">
         {body}
-        <span className="courier-parcel" aria-hidden="true" />
+        {/* The generated drone carries its own parcel; the drawn one gets a coloured box. */}
+        {!sheet && <span className="courier-parcel" aria-hidden="true" />}
       </span>
     </button>
   );
