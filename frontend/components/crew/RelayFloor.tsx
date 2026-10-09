@@ -5,7 +5,7 @@ import type { Project } from "@/lib/api";
 import { AGENTS } from "@/components/agents/personas";
 import { useFloorTheme } from "@/components/agents/themes";
 import Room from "./Room";
-import { handoffLine, liveFloor } from "./floor";
+import { liveFloor } from "./floor";
 import { useBoardTick } from "./useBoardTick";
 import { useFloorEvents } from "./useFloorEvents";
 
@@ -119,10 +119,7 @@ export default function RelayFloor({
 }) {
   const look = useFloorTheme();
   const floor = liveFloor(project, useBoardTick(project, loadedAt));
-  const { log, flight, pokeAgent, pokeOf } = useFloorEvents(floor, project.id);
-  const courier = flight
-    ? { ...flight, label: handoffLine(project, flight.from, flight.to, floor.stations[flight.to]?.row) }
-    : null;
+  const { log, pokeAgent, pokeOf } = useFloorEvents(floor, project.id);
   return (
     <Room
       compact
@@ -135,7 +132,6 @@ export default function RelayFloor({
       }}
       pokeOf={pokeOf}
       look={look}
-      courier={courier}
       hint={log.length ? log[log.length - 1] : "Click an agent to go to their work"}
     />
   );

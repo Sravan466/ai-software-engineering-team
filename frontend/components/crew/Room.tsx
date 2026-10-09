@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { AGENTS, deskPaletteFor } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
 import PixelArt from "@/components/agents/PixelArt";
-import { BOARD_PROP, COOLER, CRATE, DRONE, MONITORS, MUG, PLANT, PROP_PALETTE, RACK, SPOOL } from "@/components/agents/props";
+import { BOARD_PROP, COOLER, CRATE, MONITORS, MUG, PLANT, PROP_PALETTE, RACK, SPOOL } from "@/components/agents/props";
 import { ART_H, ART_W, type FloorThemeState, type PiecePlace, type PieceSheet, type PropId } from "@/components/agents/themes";
 import type { Floor } from "./floor";
 
@@ -21,33 +21,22 @@ import type { Floor } from "./floor";
 
 /**
  * Where each agent actually stands. `x` is across the room, `depth` is how far back
- * (0 = the near edge of the floor, 1 = against the wall). Neither is evenly spaced,
- * deliberately: eight figures at identical distance on a uniform pitch reads as a
- * police lineup, not as a place where people work. So they cluster in pairs the way
- * people at shared desks do, and every one of them is at a different distance.
+ * (0 = the near edge of the floor, 1 = against the wall). Two loose ranks that take
+ * turns: a neighbour is always in the other rank, so neighbours stand one behind
+ * the other rather than elbow to elbow, and the four in a rank are two places apart
+ * with room between their desks. Each depth is a little off its rank's, so it still
+ * reads as a room people work in rather than a lineup.
  */
 const FLOOR_PLAN: { x: number; depth: number }[] = [
-  { x: 7, depth: 0.46 }, // SCOPE
-  { x: 18.5, depth: 0.74 }, // ATLAS, at the back, by the whiteboard
-  { x: 30.5, depth: 0.1 }, // FORGE, nearest, front left
-  { x: 43, depth: 0.38 }, // PRISM
-  { x: 55, depth: 0.62 }, // SIEVE
-  { x: 67, depth: 0.18 }, // WARDEN, front
-  { x: 79.5, depth: 0.54 }, // RELAY
-  { x: 92, depth: 0.06 }, // LEDGER, nearest, front right
+  { x: 9, depth: 0.68 }, // SCOPE, back
+  { x: 20.7, depth: 0.12 }, // ATLAS, front
+  { x: 32.4, depth: 0.62 }, // FORGE, back
+  { x: 44.1, depth: 0.04 }, // PRISM, front
+  { x: 55.9, depth: 0.72 }, // SIEVE, back
+  { x: 67.6, depth: 0.14 }, // WARDEN, front
+  { x: 79.3, depth: 0.64 }, // RELAY, back
+  { x: 90.5, depth: 0.06 }, // LEDGER, front
 ];
-
-/** The courier's flight, as `.courier.is-flying` times it in crew.css. */
-const FLIGHT_MS = 1100;
-
-export type Courier = {
-  from: number;
-  to: number;
-  /** Bumped per hand-off, so the same pair twice is two flights. */
-  n: number;
-  /** "ATLAS → FORGE: ATLAS everything · SCOPE summary only". */
-  label: string;
-};
 
 type Props = {
   floor: Floor;
@@ -55,7 +44,6 @@ type Props = {
   onSelect: (i: number) => void;
   pokeOf: (i: number) => number | undefined;
   look: FloorThemeState;
-  courier: Courier | null;
   /** The line under the room: the latest thing that happened, or how to use it. */
   hint: string;
   /** Inside another card (the build page's Relay): shorter, and no frame of its own. */
@@ -121,11 +109,10 @@ function useStage(room: React.RefObject<HTMLDivElement>, on: boolean): CSSProper
   return box;
 }
 
-export default function Room({ floor, selected, onSelect, pokeOf, look, courier, hint, compact = false, jump = false }: Props) {
+export default function Room({ floor, selected, onSelect, pokeOf, look, hint, compact = false, jump = false }: Props) {
   const { theme, layers, pieces } = look;
   const has = new Set<string>(theme.props.filter((p) => !pieces[p]));
   const room = useRef<HTMLDivElement>(null);
-  const stations = useRef<(HTMLButtonElement | null)[]>([]);
 
   const stage = useStage(room, !!layers && Object.keys(pieces).length > 0);
   const placed = (tier: PiecePlace["tier"]) => {
@@ -285,9 +272,6 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
           return (
             <button
               key={a.key}
-              ref={(el) => {
-                stations.current[i] = el;
-              }}
               className={"station" + (i === selected ? " on" : "")}
               style={
                 {
@@ -352,8 +336,6 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
         })}
       </div>
 
-      <CourierDrone room={room} stations={stations} courier={courier} sheet={look.courier} art={!!layers} onPick={onSelect} />
-
       {/* ── near set: between you and the crew ── */}
       <div className="set set-near" aria-hidden="true">
         <Prop id="spool" has={has}>
@@ -374,158 +356,5 @@ export default function Room({ floor, selected, onSelect, pokeOf, look, courier,
         {hint}
       </p>
     </div>
-  );
-}
-
-/**
- * RELAY's drone, which carries each hand-off from one desk to the next (#91).
- *
- * Before any hand-off it hovers where it always has. On one, it flies from the desk
- * that finished to the desk that took the work, and waits there, so what it carried
- * can still be read (hover or focus) and clicking it opens the agent who got it.
- * Positions are measured from the stations themselves, so the flight lands on the
- * desk at every layout, including the two ranks of a phone.
- */
-function CourierDrone({
-  room,
-  stations,
-  courier,
-  sheet,
-  art,
-  onPick,
-}: {
-  room: React.RefObject<HTMLDivElement>;
-  stations: React.MutableRefObject<(HTMLButtonElement | null)[]>;
-  courier: Courier | null;
-  sheet: PieceSheet | null;
-  /** The room has generated art: the crew is drawn bigger and the drone waits elsewhere. */
-  art: boolean;
-  onPick: (i: number) => void;
-}) {
-  const [pos, setPos] = useState<{ x: number; y: number; fly: boolean; dir: number } | null>(null);
-  const flown = useRef(0);
-  // Where it should be now, read by `settle`. A ref, so `settle` keeps one identity
-  // across renders: a new one would re-subscribe the resize observer, whose first
-  // call lands the drone and cuts a flight short.
-  const target = useRef<number | null>(courier?.to ?? null);
-  target.current = courier?.to ?? null;
-  const hasArt = useRef(art);
-  hasArt.current = art;
-
-  /** Just off the right edge of a station's cabin, at shoulder height, in the room's
-   *  coordinates. Not above it: the agent that takes the work starts talking, and its
-   *  bubble opens over its head, under a drone parked there. The offsets grow with
-   *  the crew (crew.css `--crew`), as the drone and the cabin do. */
-  const deskPoint = useCallback(
-    (i: number) => {
-      const el = room.current;
-      const r = el?.getBoundingClientRect();
-      const cab = stations.current[i]?.querySelector(".cabin")?.getBoundingClientRect();
-      if (!el || !r || !cab) return null;
-      const k = parseFloat(getComputedStyle(el).getPropertyValue("--crew")) || 1;
-      return { x: cab.right - r.left + 6 * k, y: cab.top - r.top + 2 * k };
-    },
-    [room, stations],
-  );
-
-  /** Where it waits between hand-offs. In a room with art that is up by the ceiling
-   *  in the right corner: clear of the board, the speech bubbles and the props. */
-  const home = useCallback(() => {
-    const r = room.current?.getBoundingClientRect();
-    if (!r) return null;
-    return hasArt.current ? { x: r.width * 0.925, y: r.height * 0.12 } : { x: r.width * 0.86, y: r.height * 0.27 };
-  }, [room]);
-
-  // Be wherever it should be: first paint, a resize, a new build. A flight under
-  // way keeps flying toward the new spot rather than being cut short.
-  const settle = useCallback(() => {
-    const at = target.current !== null ? deskPoint(target.current) : home();
-    if (at) setPos((p) => (p && p.x === at.x && p.y === at.y ? p : { ...at, fly: p?.fly ?? false, dir: p?.dir ?? 0 }));
-  }, [deskPoint, home]);
-
-  useLayoutEffect(() => {
-    if (!courier || courier.n === flown.current) {
-      settle();
-      return;
-    }
-    flown.current = courier.n;
-    const from = deskPoint(courier.from);
-    const to = deskPoint(courier.to);
-    if (!from || !to) return settle();
-    // Pick the parcel up at the desk that finished, then fly. Two frames apart, so
-    // the browser has the start position before the transition to the end.
-    setPos({ ...from, fly: false, dir: 0 });
-    let raf2 = 0;
-    let landed: ReturnType<typeof setTimeout> | undefined;
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        setPos({ ...to, fly: true, dir: Math.sign(to.x - from.x) });
-        // Landed: a later resize puts it on its desk without another flight.
-        landed = setTimeout(() => setPos((p) => (p ? { ...p, fly: false } : p)), FLIGHT_MS + 100);
-      });
-    });
-    return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
-      if (landed) clearTimeout(landed);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [courier?.n, courier?.to]);
-
-  useEffect(() => {
-    const el = room.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => settle());
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [room, settle]);
-
-  // The art arrives after the first paint and resizes the crew without resizing the
-  // room, so nothing above would move the drone to its new desk point or home.
-  useEffect(() => settle(), [art, settle]);
-
-  if (!pos) return null;
-  const style = { "--cx": `${pos.x}px`, "--cy": `${pos.y}px`, "--tilt": `${pos.dir * 8}deg` } as CSSProperties;
-  const body = sheet ? (
-    <span
-      className="courier-sheet"
-      style={
-        {
-          aspectRatio: `${sheet.w} / ${sheet.h}`,
-          "--piece": `url(/floor/${sheet.src})`,
-          "--cols": sheet.cols,
-          "--rows": sheet.rows,
-          "--piece-dur": `${Math.round((sheet.cols / (sheet.fps || 10)) * 1000)}ms`,
-        } as CSSProperties
-      }
-    />
-  ) : (
-    <PixelArt grid={DRONE} palette={PROP_PALETTE} width={38} />
-  );
-
-  if (!courier) {
-    return (
-      <span className="courier is-home" style={style} aria-hidden="true">
-        <span className="courier-body">{body}</span>
-      </span>
-    );
-  }
-  const from = AGENTS[courier.from];
-  return (
-    <button
-      type="button"
-      className={"courier" + (pos.fly ? " is-flying" : "")}
-      data-dir={pos.dir < 0 ? "left" : "right"}
-      style={{ ...style, ["--from" as string]: from.accent }}
-      title={courier.label}
-      aria-label={`Hand-off, ${courier.label}. Show ${AGENTS[courier.to].codename}.`}
-      onClick={() => onPick(courier.to)}
-    >
-      <span key={courier.n} className="courier-body">
-        {body}
-        {/* The generated drone carries its own parcel; the drawn one gets a coloured box. */}
-        {!sheet && <span className="courier-parcel" aria-hidden="true" />}
-      </span>
-    </button>
   );
 }

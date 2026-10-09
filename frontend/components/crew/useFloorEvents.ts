@@ -17,20 +17,18 @@ type Options = {
 
 /**
  * What changed on the floor between two looks at the same build (#91): the log line
- * ("PRISM finished. SIEVE is working."), the bow the finishing agent takes, and the
- * courier's flight from their desk to the next. Shared by the crew floor and the
- * build page's Relay card, so both play a hand-off the same way.
+ * ("PRISM finished. SIEVE is working.") and the bow the finishing agent takes as the
+ * next one starts. Shared by the crew floor and the build page's Relay card, so both
+ * play a hand-off the same way.
  *
  * `viewKey` names what is on screen (a build, live or replay). When it changes, the
  * floor is a fresh starting point and nothing is played.
  */
 export function useFloorEvents(floor: Floor, viewKey: string, opts: Options = {}) {
   const [log, setLog] = useState<string[]>([]);
-  const [flight, setFlight] = useState<{ from: number; to: number; n: number } | null>(null);
   const [poke, setPoke] = useState<{ i: number; n: number } | null>(null);
   // Never reset: a sprite skips a value it has already played.
   const pokeSeq = useRef(0);
-  const flightSeq = useRef(0);
   const seen = useRef<{ key: string; floor: Floor } | null>(null);
   // A hand-off can land across two looks: one phase finished, the next not started yet.
   const pendingFrom = useRef(-1);
@@ -49,7 +47,6 @@ export function useFloorEvents(floor: Floor, viewKey: string, opts: Options = {}
     seen.current = { key: viewKey, floor: next };
     if (!prev || prev.key !== viewKey) {
       pendingFrom.current = -1;
-      setFlight(null);
       o.onFresh?.(next);
       return;
     }
@@ -61,9 +58,8 @@ export function useFloorEvents(floor: Floor, viewKey: string, opts: Options = {}
       const from = pendingFrom.current;
       pendingFrom.current = -1;
       if (from >= 0 && ch.started > from) {
-        // The one who finished takes a bow, then the courier carries the work over.
+        // The one who finished takes a bow as the next one starts.
         pokeAgent(from);
-        setFlight({ from, to: ch.started, n: ++flightSeq.current });
       }
       o.onActive?.(ch.started);
     } else if (next.board.active >= 0 && next.board.active !== prev.floor.board.active) {
@@ -71,5 +67,5 @@ export function useFloorEvents(floor: Floor, viewKey: string, opts: Options = {}
     }
   }, [signature, viewKey, pokeAgent]);
 
-  return { log, setLog, flight, pokeAgent, pokeOf, clearPoke };
+  return { log, setLog, pokeAgent, pokeOf, clearPoke };
 }

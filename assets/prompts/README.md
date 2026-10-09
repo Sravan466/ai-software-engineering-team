@@ -29,7 +29,6 @@ The lines at the top of each prompt (`Kind`, `Layer`, `Size`, `Horizon`, `Grid`,
 | | `loft/rain.md` | Rain on the left window, 10 frames |
 | Orbital station | `station/sky.md`, `station/wall.md`, `station/floor.md` | A ring module in low orbit |
 | | `station/console.md` | A console with chasing lights, 10 frames |
-| Every room | `shared/courier.md` | The drone that carries each hand-off, 12 frames |
 
 The crew's own sprite sheets are cut by `frontend/scripts/agent_art.py` from the images in
 `assets/`. It reads how many frames each row has from the sheet, so a crew sheet regenerated

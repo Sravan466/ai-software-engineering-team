@@ -492,8 +492,8 @@ function BuildPage({ id }: { id: string }) {
  * about lands on what they produced.
  *
  * Two views of the same thing, switched in the card's header (#91): the strip of
- * eight, or the crew floor's room for this build, with its bubbles, board and
- * hand-off courier. The choice is per viewer; the card opens or folds to the new
+ * eight, or the crew floor's room for this build, with its bubbles and board.
+ * The choice is per viewer; the card opens or folds to the new
  * view's height rather than jumping.
  */
 function RelayCard({
