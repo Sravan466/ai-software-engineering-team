@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { artFor, type Persona } from "./personas";
+import SHEETS from "./sheets.json";
 
 export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
 
@@ -10,6 +11,62 @@ export type SpriteState = "queued" | "working" | "done" | "rejected" | "gate";
  * instead — one small pre-scaled frame that holds its silhouette at 18px.
  */
 const STILL_MAX = 28;
+
+type SheetRow = "queued" | "working" | "done" | "rejected" | "gate" | "asleep";
+type Sheet = { cols: number; frames: Record<SheetRow, number>; fps?: number };
+const ROW_ORDER: SheetRow[] = ["queued", "working", "done", "rejected", "gate", "asleep"];
+const FALLBACK: Sheet = {
+  cols: 4,
+  frames: { queued: 4, working: 4, done: 4, rejected: 4, gate: 4, asleep: 4 },
+};
+
+/** Where frame `i` of `cols` sits as a background-position-x percentage. */
+const at = (i: number, cols: number) => `${cols > 1 ? (i / (cols - 1)) * 100 : 0}%`;
+
+/**
+ * The sheet's grid as CSS variables (#91). How many frames a row has is read from
+ * the sheet by `scripts/agent_art.py` into sheets.json, never assumed: a sheet
+ * regenerated with 12 frames a row plays at its own count with no code change.
+ *
+ *   --cols / --rows      the grid, for background-size
+ *   --row-y              the row this state plays
+ *   --fn / --fend        its frame count, and where its last frame sits
+ *   --slump-n / -end     rejected stops one frame short of the end: the slump
+ *   --hold-x             the one frame reduced motion holds
+ *   --work-*             the working row, which a poke or a hover plays
+ *   --row-dur            the row's length at the sheet's own frame rate, when the
+ *                        prompt that made it named one; otherwise each state keeps
+ *                        the tempo agents.css gives it
+ */
+function sheetVars(slug: string, row: SheetRow): Record<string, string> {
+  const sheet = ((SHEETS.sheets as Record<string, Sheet | undefined>)[slug]) ?? FALLBACK;
+  const { cols } = sheet;
+  const n = Math.max(1, sheet.frames[row] ?? cols);
+  const work = Math.max(1, sheet.frames.working ?? cols);
+  const rowY = (r: SheetRow) => `${(ROW_ORDER.indexOf(r) / (ROW_ORDER.length - 1)) * 100}%`;
+  // The frame that says the state without moving: the job mid-swing, the slump,
+  // a Z up. On a four-frame row that is frame 2 (working, done) or 3 (slump, sleep).
+  const hold = row === "rejected" || row === "asleep" ? Math.max(0, n - 2) : Math.floor(n / 3);
+  const vars: Record<string, string> = {
+    "--cols": String(cols),
+    "--rows": String(ROW_ORDER.length),
+    "--row-y": rowY(row),
+    "--fn": String(n),
+    "--fend": at(n - 1, cols),
+    "--slump-n": String(Math.max(1, n - 1)),
+    "--slump-end": at(Math.max(0, n - 2), cols),
+    "--hold-x": at(hold, cols),
+    "--work-y": rowY("working"),
+    "--work-n": String(work),
+    "--work-end": at(work - 1, cols),
+    "--work-hold": at(Math.floor(work / 3), cols),
+  };
+  if (sheet.fps && sheet.fps > 0) {
+    vars["--row-dur"] = `${Math.round((n / sheet.fps) * 1000)}ms`;
+    vars["--work-dur"] = `${Math.round((work / sheet.fps) * 1000)}ms`;
+  }
+  return vars;
+}
 
 /**
  * Renders an agent from their sprite sheet.
@@ -104,11 +161,14 @@ export default function AgentSprite({
   return (
     <span
       className={`sprite motion-${agent.motion} is-${state}${asleep && state === "queued" ? " is-asleep" : ""}${acting !== null && sheetOnly ? " is-poked" : ""}${ground ? " grounded" : ""} ${className}`}
-      style={{
-        ["--sprite-size" as string]: `${size}px`,
-        ["--agent" as string]: agent.accent,
-        ["--sheet" as string]: `url(${art.sheet})`,
-      }}
+      style={
+        {
+          "--sprite-size": `${size}px`,
+          "--agent": agent.accent,
+          "--sheet": `url(${art.sheet})`,
+          ...(sheetOnly ? sheetVars(agent.codename.toLowerCase(), asleep && state === "queued" ? "asleep" : state) : {}),
+        } as CSSProperties
+      }
       data-agent={agent.codename}
     >
       {ground && <span className="sprite-ground" aria-hidden="true" />}

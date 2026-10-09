@@ -6,11 +6,12 @@ token usage, estimated $ cost, per-provider/per-model breakdown, fallback rate.
 from __future__ import annotations
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core import identity
-from app.db.models import Project, UsageEvent
+from app.core.constants import PHASE_ORDER, BuildStatus, PhaseStatus, SchemaStatus
+from app.db.models import PhaseResult, Project, UsageEvent
 from app.router.registry import estimate_cost
 from app.schemas.llm import LLMResponse
 
@@ -116,6 +117,111 @@ def summary(db: Session, owner_id: str, project_id: Optional[str] = None) -> dic
         "unpriced_calls": len(unpriced),
         "unpriced_models": sorted({e.model for e in unpriced}),
     }
+
+
+def crew(db: Session, owner_id: str) -> dict:
+    """Each phase's record across one account's builds: what that agent has done for them.
+
+    Two sources, because neither answers alone. The calls (`UsageEvent`, tagged with
+    the phase that made them) say what the work cost; the phase rows say how it went:
+    approved, sent back, repaired, whether its code built. An account with no builds
+    gets every phase at zero rather than an error, and the page shows dashes.
+    """
+    keys = [p.value for p in PHASE_ORDER]
+    out: dict[str, dict] = {
+        k: {
+            "builds": 0,
+            "calls": 0,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "unpriced_calls": 0,
+            "avg_latency_ms": 0.0,
+            "local_calls": 0,
+            # Calls that recorded where they ran; the share is over these, not all calls.
+            "located_calls": 0,
+            "local_share": None,
+            "approved": 0,
+            "rejected": 0,
+            "failed": 0,
+            "schema_repaired": 0,
+            "schema_invalid": 0,
+            "build_ok": 0,
+            "build_failed": 0,
+        }
+        for k in keys
+    }
+
+    # The calls, summed in the database. Only builds that still exist: a deleted
+    # build's calls outlive it (they have no foreign key), its phase rows don't, and
+    # one record must not count two different sets of builds.
+    calls = db.execute(
+        select(
+            UsageEvent.phase,
+            func.count(),
+            func.coalesce(func.sum(UsageEvent.total_tokens), 0),
+            func.coalesce(func.sum(UsageEvent.cost_usd), 0.0),
+            func.coalesce(func.sum(UsageEvent.latency_ms), 0),
+            func.sum(case((UsageEvent.cost_known.is_(False), 1), else_=0)),
+            func.sum(case((UsageEvent.is_local.is_(True), 1), else_=0)),
+            func.count(UsageEvent.is_local),
+        )
+        .join(Project, Project.id == UsageEvent.project_id)
+        .where(UsageEvent.owner_id == owner_id, Project.owner_id == owner_id, UsageEvent.phase.in_(keys))
+        .group_by(UsageEvent.phase)
+    ).all()
+    for phase, n, tokens, cost, latency, unpriced, local, located in calls:
+        rec = out[phase]
+        rec["calls"] = int(n)
+        rec["tokens"] = int(tokens)
+        rec["cost_usd"] = round(float(cost), 6)
+        rec["unpriced_calls"] = int(unpriced or 0)
+        rec["local_calls"] = int(local or 0)
+        rec["located_calls"] = int(located or 0)
+        if n:
+            rec["avg_latency_ms"] = round(float(latency) / n, 1)
+
+    # The phase rows, only the columns that are counted: never the documents.
+    rows = db.execute(
+        select(
+            PhaseResult.phase,
+            PhaseResult.project_id,
+            PhaseResult.status,
+            PhaseResult.schema_status,
+            PhaseResult.build_status,
+            # One key of the hand-off record, extracted in the database: the record
+            # carries every earlier phase's digest, and only this is needed here.
+            PhaseResult.handoff["restored_row"].as_string(),
+        )
+        .join(Project, Project.id == PhaseResult.project_id)
+        .where(Project.owner_id == owner_id, PhaseResult.phase.in_(keys))
+    ).all()
+    touched: dict[str, set] = {k: set() for k in keys}
+    for phase, project_id, status, schema_status, build_status, restored in rows:
+        # A restored version (#79) copies its rows. The copy is the same work, not more.
+        if restored:
+            continue
+        rec = out[phase]
+        touched[phase].add(project_id)
+        if status == PhaseStatus.APPROVED.value:
+            rec["approved"] += 1
+        elif status == PhaseStatus.REJECTED.value:
+            rec["rejected"] += 1
+        elif status == PhaseStatus.FAILED.value:
+            rec["failed"] += 1
+        if schema_status == SchemaStatus.REPAIRED.value:
+            rec["schema_repaired"] += 1
+        elif schema_status == SchemaStatus.INVALID.value:
+            rec["schema_invalid"] += 1
+        if build_status == BuildStatus.OK.value:
+            rec["build_ok"] += 1
+        elif build_status == BuildStatus.FAILED.value:
+            rec["build_failed"] += 1
+
+    for k, rec in out.items():
+        rec["builds"] = len(touched[k])
+        if rec["located_calls"]:
+            rec["local_share"] = round(rec["local_calls"] / rec["located_calls"], 3)
+    return {"phases": out}
 
 
 def project_count(db: Session, owner_id: str) -> int:

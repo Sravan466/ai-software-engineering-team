@@ -1,0 +1,94 @@
+{
+  "cell": 224,
+  "feet": 0.95,
+  "sheets": {
+    "atlas": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    },
+    "forge": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    },
+    "ledger": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    },
+    "prism": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    },
+    "relay": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    },
+    "scope": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    },
+    "sieve": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    },
+    "warden": {
+      "cols": 4,
+      "frames": {
+        "queued": 4,
+        "working": 4,
+        "done": 4,
+        "rejected": 4,
+        "gate": 4,
+        "asleep": 4
+      }
+    }
+  }
+}

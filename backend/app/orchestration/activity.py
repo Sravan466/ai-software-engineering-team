@@ -126,6 +126,13 @@ class _Activity:
 
 _lock = threading.Lock()
 _board: dict[str, _Activity] = {}
+#: What the phase working now was handed by the phases before it (#91), per build:
+#: `{"phase", "deps"}` in the shape `phase_results.handoff.deps` takes once the row is
+#: saved. Kept apart from the board, which only code, QA and security phases open.
+_given: dict[str, dict] = {}
+#: Builds whose hand-off is kept; the oldest written go first. Every phase start
+#: clears its own build's entry, so this only bounds builds that stopped mid-phase.
+GIVEN_MAX = 256
 
 
 def _project() -> Optional[str]:
@@ -229,11 +236,38 @@ def clear(project_id: str) -> None:
     """Forget the project's progress. A new phase starts clean."""
     with _lock:
         _board.pop(project_id, None)
+        _given.pop(project_id, None)
+
+
+def given(phase: str, deps: Iterable[dict]) -> None:
+    """The phase's prompt was built: record what it was handed, for the crew floor.
+
+    The first prompt of a phase run wins. Repair and continuation rounds rebuild the
+    prompt on a smaller budget (and a code phase builds one per file), but what the
+    phase was handed is what its first prompt carried, as its row will record."""
+    pid = _project()
+    if pid is None:
+        return
+    with _lock:
+        if pid in _given:
+            return
+        _given[pid] = {"phase": phase, "deps": [dict(d) for d in deps]}
+        while len(_given) > GIVEN_MAX:
+            del _given[next(iter(_given))]
+
+
+def given_for(project_id: str) -> Optional[dict]:
+    with _lock:
+        found = _given.get(project_id)
+        return {"phase": found["phase"], "deps": list(found["deps"])} if found else None
 
 
 def drop_ended(project_id: str) -> None:
     """The run stopped driving: a phase's last word is history now. A live board — a
-    newer run's, mid-phase — is left alone."""
+    newer run's, mid-phase — is left alone. What a phase was handed stays too: a
+    planning phase opens no board, so "no board" can't tell a finished run from a
+    newer one mid-phase. `GIVEN_MAX` bounds it instead, and every phase start clears
+    its own build's entry, so a stale one is never shown."""
     with _lock:
         found = _board.get(project_id)
         if found is not None and found.ended:

@@ -10,49 +10,17 @@ import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { modelFor, modelName, sourceFor, triedText } from "@/lib/models";
 import { Icon } from "./icons";
 import { Skeleton } from "@/components/ui/Skeleton";
-
-// Status → the leading dot on each recent-build row.
-const DOT: Record<string, string> = {
-  completed: "dot-ok",
-  awaiting_approval: "dot-warn dot-pulse",
-  running: "dot-run dot-pulse",
-  failed: "dot-bad",
-  stalled: "dot-bad",
-  cancelled: "dot-warn",
-  paused: "dot-warn",
-};
-
-const STATUS_TEXT: Record<string, string> = {
-  completed: "Completed",
-  awaiting_approval: "Waiting for your approval",
-  running: "Running",
-  failed: "Failed",
-  cancelled: "Stopped",
-  paused: "Paused, waiting for your computer",
-  stalled: "Stalled, not responding",
-  created: "Not started",
-};
-
-// A build that says `running` with no live runner behind it is stalled, and the
-// rail should say so rather than pulsing at a corpse.
-function rowStatus(p: Project): string {
-  return p.status === "running" && p.stalled ? "stalled" : p.status;
-}
-
-// Compact relative time ("3h", "2d") for the recent-builds list.
-function timeAgo(iso: string): string {
-  const then = +new Date(iso);
-  if (Number.isNaN(then)) return "";
-  const secs = Math.max(0, (Date.now() - then) / 1000);
-  if (secs < 60) return "now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d`;
-  return new Date(then).toLocaleDateString();
-}
+import {
+  STATUS_DOT,
+  STATUS_TEXT,
+  crewHref,
+  floorBuild,
+  forgetProjects,
+  projectsEpoch,
+  publishProjects,
+  statusOf,
+} from "@/lib/buildStatus";
+import { timeAgo } from "@/lib/time";
 
 const API_DOCS_URL =
   (process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000") + "/docs";
@@ -96,12 +64,17 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
     } catch {
       // Even if the backend didn't hear it, this browser is done with the session.
     }
+    forgetProjects();
     router.replace("/signin");
   }, [router]);
 
   const refresh = useCallback(async () => {
+    const epoch = projectsEpoch();
     try {
-      setProjects(await api.listProjects());
+      const list = await api.listProjects();
+      setProjects(list);
+      // The home page's crew links read this list rather than fetching their own.
+      publishProjects(list, epoch);
     } catch {
       // Keep the last good list if the backend blips.
       setProjects((p) => p ?? []);
@@ -211,7 +184,7 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
           projects.map((p) => {
             const active = pathname === `/projects/${p.id}`;
             const title = p.name || p.idea;
-            const state = rowStatus(p);
+            const state = statusOf(p);
 
             if (confirmId === p.id) {
               return (
@@ -253,7 +226,7 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
                   aria-current={active ? "page" : undefined}
                 >
                   <span
-                    className={"dot " + (DOT[state] || "")}
+                    className={"dot " + (STATUS_DOT[state] || "")}
                     title={STATUS_TEXT[state] || state}
                   />
                   <span className="sb-item-title">{title}</span>
@@ -301,14 +274,13 @@ export default function Sidebar({ onClose, account }: { onClose: () => void; acc
           {!ready && <span className="sb-runtime-fix">Fix</span>}
         </Link>
 
+        {/* Opens on the build in hand, or the latest one (#91). */}
         <Link
           className="sb-link"
-          href="/crew"
+          href={crewHref(floorBuild(projects))}
           aria-current={pathname === "/crew" ? "page" : undefined}
         >
           {Icon.sparkle} The crew
-          {/* One rail below a list of real builds, so it says which it is. */}
-          <span className="sb-link-tag">demo</span>
         </Link>
         <Link
           className="sb-link"

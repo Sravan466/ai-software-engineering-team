@@ -34,6 +34,7 @@ from app.core.logging import get_logger
 from app.core.reading import has_content, json_object
 from app.orchestration.charter import Charter
 from app.orchestration.charter import violations as charter_violations
+from app.orchestration import activity
 from app.orchestration.claim import Superseded
 from app.router.model_profile import ModelProfile
 from app.router.base import RequestCancelled
@@ -815,7 +816,7 @@ class BaseAgent:
         budget = self._section_budgets(ctx, profile, reserve, bodies)
         used: list[str] = []
         seen: list[dict] = []
-        return Prompt(
+        prompt = Prompt(
             messages=[
                 ChatMessage(role="system", content=self.system_prompt(ctx.charter, self._registry(ctx))),
                 ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies, used, seen)),
@@ -823,6 +824,10 @@ class BaseAgent:
             skills_used=used,
             deps=seen,
         )
+        # What it is being handed, readable while it works (#91): the crew floor shows
+        # the hand-off as it happens, not only once the row is saved.
+        activity.given(self.key, seen)
+        return prompt
 
     def _prepare_deps(self, ctx: AgentContext, profile: Optional[ModelProfile]) -> _Deps:
         """Every dependency's digest, fitted to its share of the window, and its want.

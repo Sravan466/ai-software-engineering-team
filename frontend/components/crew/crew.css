@@ -1,0 +1,712 @@
+/* ===========================================================================
+   crew.css: the crew floor wired to your builds (#91).
+
+   The room itself is in agents.css. This file holds what a real build added to
+   it: the board's fourth row, bubbles with a file and a note, the courier, the
+   art layers and set pieces a room theme brings, the inspector's record, and the
+   window's controls (build switcher, theme picker, replay scrubber).
+   Square corners and hard 1–2px edges, like the rest of the room.
+   =========================================================================== */
+
+/* ── header note (the tour says it is made up) ── */
+.crew-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  max-width: 68ch;
+  margin: 14px 0 0;
+  padding: 10px 13px;
+  border-radius: var(--r);
+  border: 1px solid var(--line-2);
+  background: var(--bg-panel);
+  font-size: var(--t-sm);
+  color: var(--ink-2);
+  line-height: 1.55;
+}
+.crew-note > svg { width: 16px; height: 16px; flex: none; margin-top: 1px; color: var(--ink-3); }
+
+/* ── window chrome ── */
+.win-bar,
+.win-foot { position: relative; z-index: 6; }
+.win-bar .win-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.win-bar .win-meta { flex: none; white-space: nowrap; }
+.win-tag {
+  margin-right: 8px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--line-2);
+  color: var(--ink-2);
+  font-weight: 400;
+  letter-spacing: 0.1em;
+}
+
+/* ── the board's fourth row: the live step and its clock ── */
+.board-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-row > span:last-child { flex: none; }
+.board-row-foot {
+  min-height: 11px;
+  padding-top: 5px;
+  border-top: 1px solid #151d2b;
+  color: color-mix(in srgb, var(--run) 72%, var(--ink-2));
+}
+.board-foot {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── nameplates carry the live line, so they can run long ── */
+.station .plate-state {
+  max-width: 118px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── bubbles: the step, the file it's on, and a reviewer's note ── */
+.bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 212px;
+  text-align: left;
+}
+.bubble-head {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble-path {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: color-mix(in srgb, var(--agent) 55%, var(--ink));
+}
+.bubble-note {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  min-width: 150px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+.bubble-note b {
+  margin-right: 5px;
+  font-weight: 600;
+  color: var(--bad);
+}
+/* The stations at the walls speak inward, so a long line isn't cut by the frame. */
+.bubble-l,
+.bubble-r { transform: none; animation-name: bubble-in-edge; }
+.bubble-l { left: 4px; }
+.bubble-r { left: auto; right: 4px; }
+.bubble-l i { left: 30px; }
+.bubble-r i { left: auto; right: 26px; }
+@keyframes bubble-in-edge {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ── a room's art: three generated layers, placed on the room's horizon ──
+   Every layer is the size of the whole room with its horizon at the same height
+   as --horizon, so `cover` anchored at that height keeps them lined up with the
+   wall, the board and the floor plane at any room shape. */
+.floor.has-art .sky {
+  background: var(--layer-sky) 50% calc(100% - var(--horizon)) / cover no-repeat, #0a0d15;
+}
+.layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-position: 50% calc(100% - var(--horizon));
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+.layer-wall { background-image: var(--layer-wall); }
+.layer-floor { background-image: var(--layer-floor); }
+.floor.has-art .wall::after { display: none; }
+
+/* ── animated set pieces: a sheet of frames, one loop per row ── */
+.piece,
+.courier-sheet {
+  position: absolute;
+  display: block;
+  background-image: var(--piece);
+  background-size: calc(var(--cols, 1) * 100%) calc(var(--rows, 1) * 100%);
+  background-repeat: no-repeat;
+  background-position: 0% 0%;
+  animation: piece-loop var(--piece-dur, 1s) steps(var(--cols, 1), jump-none) infinite;
+  pointer-events: none;
+}
+.set-back .piece { filter: brightness(var(--prop-dim, 0.66)) saturate(0.68); }
+.set-mid .piece { filter: brightness(0.82) saturate(0.84); }
+.courier-sheet { position: relative; width: 38px; }
+@keyframes piece-loop {
+  from { background-position-x: 0%; }
+  to   { background-position-x: 100%; }
+}
+
+/* ── the courier ──
+   RELAY's drone carries each hand-off from the desk that finished to the one that
+   took the work, then waits there with the parcel (in the sender's colour) until
+   the next one. Placed by transform from measured desk positions, so it lands on
+   the desk at every layout. */
+.courier {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  display: block;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  line-height: 0;
+  cursor: pointer;
+  transform: translate(calc(var(--cx) - 23px), calc(var(--cy) - 16px));
+  filter: brightness(1.05) drop-shadow(0 8px 12px rgba(0, 0, 0, 0.75));
+}
+.courier.is-home { pointer-events: none; }
+.courier.is-flying { transition: transform 1100ms cubic-bezier(0.45, 0, 0.2, 1); }
+.courier-body {
+  position: relative;
+  display: block;
+  animation: courier-hover 5.5s ease-in-out infinite;
+}
+.courier.is-flying .courier-body {
+  animation:
+    courier-hop 1100ms cubic-bezier(0.3, 0, 0.3, 1) 1,
+    courier-hover 5.5s ease-in-out 1100ms infinite;
+}
+@keyframes courier-hover {
+  0%, 100% { transform: translate(0, 0); }
+  30%      { transform: translate(-5px, -3px); }
+  62%      { transform: translate(4px, 2px); }
+}
+/* The arc and the lean into the flight: up and over, not along a rail. */
+@keyframes courier-hop {
+  0%   { transform: translateY(0) rotate(0deg); }
+  38%  { transform: translateY(-36px) rotate(var(--tilt, 0deg)); }
+  100% { transform: translateY(0) rotate(0deg); }
+}
+.courier-parcel {
+  position: absolute;
+  left: 50%;
+  top: calc(100% - 2px);
+  width: 11px;
+  height: 8px;
+  margin-left: -5px;
+  background: var(--from, var(--run));
+  box-shadow:
+    0 0 0 1px #05070c,
+    inset 0 2px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.3);
+}
+.courier:focus-visible {
+  outline: 2px solid var(--run);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+/* ── inspector: the agent's record ── */
+.insp-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line-2);
+}
+.insp-h {
+  margin: 0;
+  font-family: var(--pixel);
+  font-size: 8px;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.insp-sum {
+  margin: 0;
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.insp-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  overflow-wrap: anywhere;
+}
+.insp-where {
+  padding: 0 5px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--ink-2);
+}
+.insp-where.local {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.insp-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.insp-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.insp-chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.insp-chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.insp-chip.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.insp-none { color: var(--ink-3); }
+.insp-skills { overflow-wrap: anywhere; }
+.insp-fallback {
+  margin: 0;
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  color: var(--warn);
+}
+/* What it was handed: one cell per earlier phase, filled by how much fit. */
+.insp-gauge { display: flex; flex-direction: column; gap: 5px; }
+.insp-gauge-bar { display: flex; gap: 3px; }
+.insp-gauge-bar i {
+  position: relative;
+  width: 20px;
+  height: 8px;
+  overflow: hidden;
+  background: #0f1622;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+.insp-gauge-bar i::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--fill, 100%);
+  background: var(--agent, var(--ok));
+}
+.insp-gauge-bar .g-whole { --fill: 100%; }
+.insp-gauge-bar .g-cut { --fill: 50%; }
+.insp-gauge-bar .g-digest_only { --fill: 18%; }
+.insp-gauge-text { font-size: var(--t-xs); color: var(--ink-2); }
+.insp-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  font-size: var(--t-sm);
+}
+.insp-link svg,
+.insp-go svg { width: 14px; height: 14px; }
+.insp-go { align-self: flex-start; }
+
+/* Career: a compact row of figures, tabular so they line up. */
+.insp-figs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 8px;
+  margin: 0;
+}
+.insp-fig { min-width: 0; }
+.insp-fig dt {
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.insp-fig dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.insp-fig dd.is-empty { color: var(--ink-3); }
+.insp-persona {
+  padding-top: 6px;
+  border-top: 1px solid var(--line-2);
+}
+
+/* ── window foot: which build, what else runs, replay ── */
+.crew-switch { position: relative; min-width: 0; flex: 0 1 auto; }
+.crew-switch-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 380px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--bg-panel);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition: border-color var(--tr), background var(--tr);
+}
+.crew-switch-btn:hover { border-color: var(--line-3); }
+.crew-switch-btn[aria-expanded="true"] { border-color: var(--accent-line); }
+.crew-switch-btn .dot { flex: none; }
+.crew-switch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.crew-switch-state { flex: none; font-size: var(--t-xs); color: var(--ink-3); }
+.crew-switch-chev { display: inline-flex; flex: none; color: var(--ink-3); }
+.crew-switch-chev svg { width: 14px; height: 14px; transform: rotate(-90deg); transition: transform var(--tr); }
+.crew-switch-btn[aria-expanded="true"] .crew-switch-chev svg { transform: rotate(90deg); }
+.crew-theme-btn .crew-switch-chev svg { transform: rotate(90deg); }
+.crew-theme-btn[aria-expanded="true"] .crew-switch-chev svg { transform: rotate(-90deg); }
+
+/* The menus open inside the window, which clips: up from the foot, down from the bar. */
+.crew-menu {
+  position: absolute;
+  z-index: 30;
+  width: max-content;
+  min-width: 260px;
+  max-width: min(420px, calc(100vw - 32px));
+  max-height: min(320px, 60vh);
+  margin: 0;
+  padding: 4px;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-3);
+  outline: none;
+  animation: menu-in 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.crew-menu:focus-visible { box-shadow: var(--shadow-3), 0 0 0 2px var(--accent-line); }
+.crew-menu-up { bottom: calc(100% + 6px); left: 0; transform-origin: 0 100%; }
+.crew-menu-down { top: calc(100% + 6px); right: 0; transform-origin: 100% 0; }
+@keyframes menu-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+.crew-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.crew-opt.is-at { background: var(--bg-panel); color: var(--ink); }
+.crew-opt[aria-selected="true"] { box-shadow: inset 2px 0 0 var(--accent); color: var(--ink); }
+.crew-opt .dot { flex: none; }
+.crew-opt-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.crew-opt-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--t-sm);
+}
+.crew-opt-sub { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.4; }
+.crew-opt-time { flex: none; font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+.crew-also { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.crew-also-label {
+  font-family: var(--pixel);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.crew-also-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink-2);
+  font-size: var(--t-xs);
+  cursor: pointer;
+  transition: border-color var(--tr), color var(--tr);
+}
+.crew-also-btn:hover { color: var(--ink); border-color: var(--line-3); }
+.crew-also-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crew-replay-start { margin-left: auto; }
+.crew-foot-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.crew-foot-empty { margin-left: 0; }
+
+/* ── the theme picker, in the window bar ── */
+.crew-theme { position: relative; flex: none; }
+.crew-theme-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--ink-2);
+  font-family: var(--pixel);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: border-color var(--tr), color var(--tr);
+}
+.crew-theme-btn:hover { color: var(--ink); border-color: var(--line-3); }
+.crew-swatch {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  background: linear-gradient(to bottom, var(--s1) 0 55%, var(--s2) 55% 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 0 0 1px #05070c;
+}
+.crew-swatch::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  width: 4px;
+  height: 4px;
+  background: var(--s3);
+}
+.crew-menu-down .crew-swatch { width: 22px; height: 22px; }
+
+/* ── replay: play, the scrubber over the run's own timeline, and the way back ── */
+.crew-replay { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; }
+.crew-replay-play { flex: none; width: 36px; padding: 0; justify-content: center; }
+.crew-replay-play svg { width: 15px; height: 15px; }
+.crew-scrub { position: relative; flex: 1 1 200px; min-width: 0; height: 32px; }
+.crew-scrub-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 12px;
+  transform: translateY(-50%);
+  background: #04070d;
+  box-shadow: 0 0 0 1px var(--line-2), inset 0 2px 0 rgba(0, 0, 0, 0.7);
+}
+.crew-scrub-seg {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: color-mix(in srgb, var(--agent) 62%, #0b1220);
+}
+.crew-scrub-seg.is-back {
+  background: repeating-linear-gradient(135deg, var(--agent) 0 3px, color-mix(in srgb, var(--agent) 22%, #0b1220) 3px 6px);
+}
+.crew-scrub-seg.is-failed { background: color-mix(in srgb, var(--bad) 55%, #0b1220); }
+.crew-scrub-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(233, 236, 242, 0.08);
+  pointer-events: none;
+}
+.crew-scrub-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.crew-scrub-input::-webkit-slider-runnable-track { height: 100%; background: transparent; }
+.crew-scrub-input::-moz-range-track { height: 100%; background: transparent; }
+.crew-scrub-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 8px;
+  height: 26px;
+  margin-top: 3px;
+  border: 2px solid var(--bg);
+  background: var(--ink);
+  box-shadow: 0 0 0 1px var(--line-3), 0 2px 6px rgba(0, 0, 0, 0.6);
+  cursor: grab;
+}
+.crew-scrub-input::-moz-range-thumb {
+  width: 6px;
+  height: 22px;
+  border: 2px solid var(--bg);
+  border-radius: 0;
+  background: var(--ink);
+  cursor: grab;
+}
+.crew-scrub-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.crew-replay-time { flex: none; font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+@media (pointer: coarse) {
+  .crew-switch-btn,
+  .crew-opt { min-height: 44px; }
+  .crew-also-btn,
+  .crew-theme-btn { min-height: 36px; }
+}
+
+/* On a phone the stations stand in two ranks of four: the outer columns speak inward. */
+@media (max-width: 860px) {
+  .station .plate-state { max-width: 100%; }
+  .station:nth-child(4n + 1) .bubble,
+  .station:nth-child(4n) .bubble { transform: none; animation-name: bubble-in-edge; }
+  .station:nth-child(4n + 1) .bubble { left: 2px; right: auto; }
+  .station:nth-child(4n + 1) .bubble i { left: 24px; right: auto; }
+  .station:nth-child(4n) .bubble { left: auto; right: 2px; }
+  .station:nth-child(4n) .bubble i { left: auto; right: 22px; }
+  .station:not(:nth-child(4n + 1)):not(:nth-child(4n)) .bubble { left: 50%; right: auto; transform: translateX(-50%); animation-name: bubble-in; }
+  .station:not(:nth-child(4n + 1)):not(:nth-child(4n)) .bubble i { left: 50%; right: auto; }
+}
+@media (max-width: 640px) {
+  .crew-switch { flex: 1 1 auto; }
+  .crew-switch-btn { max-width: 100%; }
+  .crew-switch-state,
+  .crew-theme-name,
+  .win-bar .win-meta { display: none; }
+  .crew-replay-start { margin-left: 0; }
+  .bubble { max-width: 150px; }
+  .bubble-note { min-width: 120px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .courier,
+  .courier.is-flying { transition: none; }
+  .courier-body,
+  .courier.is-flying .courier-body,
+  .piece,
+  .courier-sheet,
+  .crew-menu { animation: none; }
+  .bubble-l,
+  .bubble-r { animation: none; }
+}
+
+/* The art's own box, for set pieces placed in its coordinates. */
+.stage { position: absolute; display: block; pointer-events: none; }
+/* The courier art faces right; flying left, it turns round. */
+.courier[data-dir="left"] .courier-sheet { transform: scaleX(-1); }
+
+/* Beside the room, the inspector scrolls inside the room's height instead of
+   setting it: otherwise every agent you pick (and every hand-off the inspector
+   follows) would make the whole room jump taller or shorter. */
+@media (min-width: 1081px) {
+  .floor-wrap > .floor { min-height: 600px; }
+  .floor-wrap > .inspect {
+    contain: size;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-3) transparent;
+  }
+  /* A column that scrolls: its parts keep their size instead of being squeezed to
+     fit (the portrait clips its sprite, so it would shrink to a sliver). */
+  .floor-wrap > .inspect > * { flex-shrink: 0; }
+}
+
+/* On generated art the floor can be light, so the text that stands on it gets a
+   backing of its own: codenames and the line under the room keep 4.5:1 on any
+   backdrop. (Nameplate pills, bubbles and the board are opaque already.) */
+.floor.has-art .station .plate,
+.floor.has-art .floor-hint {
+  justify-self: center;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: var(--plate-bg, rgba(6, 8, 14, 0.85));
+  text-shadow: none;
+}
+.floor.has-art .floor-hint { width: fit-content; margin-left: auto; margin-right: auto; }
+
+/* ── the room inside the build page's Relay card ──
+   Shorter, framed by the card's own inset rather than by a window. */
+.floor.is-compact {
+  height: auto;
+  min-height: 470px;
+  margin-top: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+}
+@media (max-width: 860px) {
+  .floor.is-compact { min-height: 0; height: 440px; }
+}
+
+/* The Relay card's view switch: the strip of eight, or the room. */
+.relay-views {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+}
+.relay-view-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink-3);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--tr), color var(--tr);
+}
+.relay-view-btn svg { width: 13px; height: 13px; }
+.relay-view-btn:hover { color: var(--ink); }
+.relay-view-btn[aria-pressed="true"] { background: var(--bg-raised); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-3); }
+.relay-view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.relay-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  color: var(--ink-3);
+  transition: color var(--tr), border-color var(--tr);
+}
+.relay-open svg { width: 14px; height: 14px; }
+.relay-open:hover { color: var(--ink); border-color: var(--line-3); }
+.relay-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The swap opens or folds to its new height rather than jumping (useHeightSwap). */
+.relay-body.is-swapping { overflow: clip; transition: height 280ms cubic-bezier(0.2, 0, 0, 1); }
+.relay-body > .relay-pane { animation: relay-pane-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@keyframes relay-pane-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (pointer: coarse) {
+  .relay-view-btn { min-height: 36px; }
+  .relay-open { width: 40px; height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .relay-body.is-swapping { transition: none; }
+  .relay-body > .relay-pane { animation: none; }
+}

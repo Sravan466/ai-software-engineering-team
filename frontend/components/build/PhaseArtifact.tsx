@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { HandoffDep, PhaseResult } from "@/lib/api";
+import type { PhaseResult } from "@/lib/api";
+import { HANDOFF_STATE } from "@/components/agents/phaseState";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import Markdown from "@/components/ui/Markdown";
 import { Icon } from "@/components/shell/icons";
@@ -232,11 +233,6 @@ function omittedText(omitted: string[]): string {
     .join(", ");
 }
 
-const STATE: Record<HandoffDep["full"], { label: string; tone: string }> = {
-  whole: { label: "Everything", tone: "ok" },
-  cut: { label: "Cut to fit", tone: "warn" },
-  digest_only: { label: "Summary only", tone: "warn" },
-};
 
 /**
  * What this agent was handed by the phases before it (#80).
@@ -281,7 +277,7 @@ function WhatItSaw({ row }: { row: PhaseResult }) {
           <ul className="artifact-saw-list">
             {deps.map((d) => {
               const who = AGENT_BY_KEY[d.phase];
-              const state = STATE[d.full] ?? STATE.whole;
+              const state = HANDOFF_STATE[d.full] ?? HANDOFF_STATE.whole;
               return (
                 <li key={d.phase} className="artifact-saw-row">
                   <span className="artifact-saw-who">

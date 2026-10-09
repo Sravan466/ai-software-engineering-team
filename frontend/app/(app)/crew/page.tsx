@@ -1,242 +1,407 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  AGENTS,
-  deskPaletteFor,
-  type Persona,
-} from "@/components/agents/personas";
-import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
-import PixelArt from "@/components/agents/PixelArt";
-import {
-  PLANT,
-  RACK,
-  BOARD_PROP,
-  MONITORS,
-  COOLER,
-  DRONE,
-  CRATE,
-  SPOOL,
-  MUG,
-  PROP_PALETTE,
-} from "@/components/agents/props";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { api, type CrewRecord, type Project } from "@/lib/api";
+import { AGENTS } from "@/components/agents/personas";
+import type { SpriteState } from "@/components/agents/AgentSprite";
+import { useFloorTheme } from "@/components/agents/themes";
+import { useProject } from "@/components/build/useProject";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
+import { STATUS_DOT, STATUS_TEXT, floorBuild, isLive, statusOf } from "@/lib/buildStatus";
+import Room, { type Courier } from "@/components/crew/Room";
+import Inspector from "@/components/crew/Inspector";
+import { AlsoRunning, BuildSwitcher, ReplayBar, ThemePicker } from "@/components/crew/Controls";
+import { useBoardTick } from "@/components/crew/useBoardTick";
+import { useFloorEvents } from "@/components/crew/useFloorEvents";
+import {
+  SCENARIOS,
+  emptyFloor,
+  handoffLine,
+  liveFloor,
+  replayFloor,
+  timeline,
+  tourFloor,
+  type Floor,
+} from "@/components/crew/floor";
 
 /**
- * The crew floor.
+ * The crew floor (#91): your build, as the crew sees it.
  *
- * A control room you can actually poke at: the eight agents stand at their
- * stations, you pick a scenario, and the floor plays it. Click anyone to inspect
- * them. It doubles as the honest way to review this work — every state each
- * character can be in, on one screen, with no waiting on a model.
- *
- * The room is built in depth tiers rather than as a decorated panel, because a
- * flat backdrop with sprites pasted on it never reads as a place:
- *
- *   sky → back wall → floor plane → back set → the crew → foreground set
- *
- * Each tier further from the camera is dimmer and less saturated, each nearer
- * tier is larger and darker in outline, and the crew get contact shadows so
- * they stand on the floor instead of hovering over it.
+ * The room shows a real build: each agent's state comes from that build's phase
+ * rows, the live agent's bubble says the step the Build tab's feed shows, the board
+ * on the back wall reads the real count, and a poll that moves the work from one
+ * phase to the next plays the hand-off. A finished build can be replayed from its
+ * own timestamps. The scripted scenarios survive only as a tour, for an account
+ * with no builds, and the tour says it is made up.
  */
 
-type Scenario = {
-  id: string;
-  label: string;
-  hint: string;
-  /** Resolves each agent's state by index. */
-  state: (i: number) => SpriteState;
-};
+/** How long a whole replay takes, end to end. */
+const REPLAY_MS = 8000;
 
-const SCENARIOS: Scenario[] = [
-  {
-    id: "idle",
-    label: "Before the build",
-    hint: "Nobody has been given anything yet.",
-    state: () => "queued",
-  },
-  {
-    id: "mid",
-    label: "Mid build",
-    hint: "Two phases approved. FORGE is working.",
-    state: (i) => (i < 2 ? "done" : i === 2 ? "working" : "queued"),
-  },
-  {
-    id: "gate",
-    label: "Waiting on you",
-    hint: "PRISM is done and waiting for your approval.",
-    state: (i) => (i < 3 ? "done" : i === 3 ? "gate" : "queued"),
-  },
-  {
-    id: "reject",
-    label: "Sent back",
-    hint: "You sent SIEVE's tests back. It's running again.",
-    state: (i) => (i < 4 ? "done" : i === 4 ? "rejected" : "queued"),
-  },
-  {
-    id: "shipped",
-    label: "Shipped",
-    hint: "All eight phases approved.",
-    state: () => "done",
-  },
-];
+/** An agent named by phase key or codename, as `?agent=` gives it. */
+function agentIndex(want: string | null | undefined): number {
+  if (!want) return -1;
+  return AGENTS.findIndex((a) => a.key === want || a.codename.toLowerCase() === want.toLowerCase());
+}
 
 /**
- * Where each agent actually stands.
- *
- * `x` is across the room, `depth` is how far back (0 = the near edge of the
- * floor, 1 = against the wall). Neither is evenly spaced, deliberately: eight
- * figures at identical distance on a uniform pitch reads as a police lineup,
- * not as a place where people work. So they cluster in pairs the way people
- * standing at shared desks do, and every one of them is at a different distance
- * from you.
- *
- * Depth then pays for itself three ways, which is what sells it: further back
- * is smaller, dimmer, and behind — the nearer figure occludes the further one,
- * and occlusion is the strongest depth cue there is.
+ * `?project=` follows the build on the floor, so a refresh or a shared link keeps it.
+ * `?agent=` goes with a build picked on the page; it stays when the page picks the
+ * build an agent link didn't name.
  */
-const FLOOR_PLAN: { x: number; depth: number }[] = [
-  { x: 7,    depth: 0.46 }, // SCOPE
-  { x: 18.5, depth: 0.74 }, // ATLAS  — back, at the whiteboard
-  { x: 30.5, depth: 0.10 }, // FORGE  — nearest, front left
-  { x: 43,   depth: 0.38 }, // PRISM
-  { x: 55,   depth: 0.62 }, // SIEVE
-  { x: 67,   depth: 0.18 }, // WARDEN — front
-  { x: 79.5, depth: 0.54 }, // RELAY
-  { x: 92,   depth: 0.06 }, // LEDGER — nearest, front right
-];
-
-const VOICE_FOR: Record<SpriteState, keyof Persona["lines"]> = {
-  queued: "queued",
-  working: "working",
-  gate: "done",
-  done: "done",
-  rejected: "rejected",
-};
-
-const STATE_LABEL: Record<SpriteState, string> = {
-  queued: "idle",
-  working: "working",
-  gate: "needs you",
-  done: "done",
-  rejected: "re-running",
-};
-
-const MOTION_NOTE: Record<Persona["motion"], string> = {
-  nod: "Considers, then commits",
-  drift: "Thinks in space",
-  thrum: "Steady machine rhythm",
-  flicker: "Restless, never settles",
-  scan: "Sweeps for defects",
-  guard: "Braced and watchful",
-  launch: "Coils, then goes",
-  tally: "Counts, flips, counts",
-};
+function writeProjectParam(id: string | null, keepAgent = false) {
+  const url = new URL(window.location.href);
+  if (id) url.searchParams.set("project", id);
+  else url.searchParams.delete("project");
+  if (!keepAgent) url.searchParams.delete("agent");
+  window.history.replaceState(window.history.state, "", url.pathname + url.search);
+}
 
 export default function CrewPage() {
-  // Sitting under a rail of real builds, a scripted floor reads as one of them.
-  // The top bar says otherwise before the room is even on screen.
-  useChrome(
-    {
-      sub: "Crew floor",
-      badge: (
-        <span className="badge">
-          <span className="dot" aria-hidden="true" />
-          Demo
-        </span>
-      ),
-    },
-    [],
+  // useSearchParams needs a boundary to render under on a static page.
+  return (
+    <Suspense fallback={null}>
+      <CrewFloor />
+    </Suspense>
   );
+}
 
+function CrewFloor() {
+  // ── which build ────────────────────────────────────────────────────────────
+  // The URL leads: `?project=` and `?agent=` from a link, and again on a crew link
+  // followed from this page, or back and forward.
+  const params = useSearchParams();
+  const urlProject = params.get("project");
+  const urlAgent = params.get("agent");
+  const agentParam = useRef(urlAgent);
+  agentParam.current = urlAgent;
+  // A switch made on the page: the URL's `?agent=` belonged to the build before.
+  const skipAgent = useRef(false);
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [listError, setListError] = useState("");
+  const [chosen, setChosen] = useState<string | null>(urlProject);
+  // A deep link to a build that isn't there any more.
+  const [missing, setMissing] = useState(false);
+
+  const refreshList = useCallback(async () => {
+    try {
+      setProjects(await api.listProjects());
+      setListError("");
+    } catch (e: any) {
+      setListError(e.message);
+      setProjects((p) => p ?? []);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshList();
+  }, [refreshList]);
+
+  const chosenNow = useRef(chosen);
+  chosenNow.current = chosen;
+  useEffect(() => {
+    // A different build than the one on screen: a link followed, or back/forward.
+    // (The page writing its own choice into the URL lands here with the same id.)
+    if (urlProject && urlProject !== chosenNow.current) {
+      setMissing(false);
+      setChosen(urlProject);
+    }
+  }, [urlProject]);
+
+  // Without a deep link, the build in hand, or else the latest one.
+  useEffect(() => {
+    if (chosen || !projects) return;
+    const pick = floorBuild(projects);
+    if (pick) {
+      setChosen(pick.id);
+      writeProjectParam(pick.id, true);
+    }
+  }, [chosen, projects]);
+
+  // The switcher's dots and the "also running" strip stay current while anything runs.
+  const anyLive = !!projects?.some(isLive);
+  useEffect(() => {
+    if (!anyLive) return;
+    const t = setInterval(refreshList, 10000);
+    return () => clearInterval(t);
+  }, [anyLive, refreshList]);
+
+  const poll = useProject(chosen);
+  const project = poll.project && poll.project.id === chosen ? poll.project : null;
+
+  // A link to a build that can't be loaded and isn't among yours: drop it from the
+  // URL and say so, and the floor falls back to your latest build, or the empty state.
+  useEffect(() => {
+    if (!chosen || !poll.notFound || !projects || listError) return;
+    if (projects.some((p) => p.id === chosen)) return;
+    setMissing(true);
+    setChosen(null);
+    writeProjectParam(null);
+  }, [chosen, poll.notFound, projects, listError]);
+
+  // A build that finishes or stops should read the same in the switcher.
+  const status = project ? statusOf(project) : "";
+  useEffect(() => {
+    if (status) refreshList();
+  }, [status, refreshList]);
+
+  // ── each agent's record across every build ─────────────────────────────────
+  const [record, setRecord] = useState<Record<string, CrewRecord> | null>(null);
+  // Again whenever a phase finishes or the build stops, so the work just done counts.
+  // Not on a switch to another build: nothing finished, so nothing to count again.
+  const settled = project ? project.phases.filter((r) => r.status !== "running").length : 0;
+  const recordFor = useRef<{ id: string | null; have: boolean }>({ id: null, have: false });
+  useEffect(() => {
+    const id = project?.id ?? null;
+    const switched = recordFor.current.id !== id;
+    recordFor.current.id = id;
+    // A switch alone is no news once a record is on its way or shown.
+    if (switched && recordFor.current.have) return;
+    recordFor.current.have = true;
+    api
+      .crewRecord()
+      .then((r) => setRecord(r.phases))
+      .catch(() => {
+        // Keep the figures already shown; the next finished phase asks again.
+        recordFor.current.have = false;
+      });
+  }, [project?.id, status, settled]);
+
+  // ── the room ──────────────────────────────────────────────────────────────
+  const look = useFloorTheme();
+
+  // The board's clock moves between polls instead of in 2.5s jumps.
+  const tick = useBoardTick(project, poll.loadedAt);
+
+  // Replay: only once a build is out of anyone's hands.
+  const line = useMemo(() => (project ? timeline(project) : null), [project]);
+  const canReplay = !!project && !isLive(project) && !!line;
+  const [replaying, setReplaying] = useState(false);
+  const [u, setU] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const uNow = useRef(u);
+  uNow.current = u;
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    let last = performance.now();
+    let at = uNow.current;
+    const step = (t: number) => {
+      at = Math.min(1, at + (t - last) / REPLAY_MS);
+      last = t;
+      setU(at);
+      if (at >= 1) return setPlaying(false);
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
+  useEffect(() => {
+    if (!canReplay) {
+      setReplaying(false);
+      setPlaying(false);
+    }
+  }, [canReplay]);
+
+  // The tour: today's five scenarios and the scripted relay, for an empty account.
+  const [touring, setTouring] = useState(false);
   const [scenario, setScenario] = useState(1);
-  const [selected, setSelected] = useState(2);
-  // Clicking an agent pokes them: one pass of their job and their signature
-  // (AgentSprite plays it). Only the clicked agent's
-  // sprites see it, so nobody else re-renders into a replay.
-  const [poke, setPoke] = useState<{ i: number; n: number } | null>(null);
-  // Never reset with `poke`: a sprite skips a value it has already played, so
-  // a count that restarted after the relay would make the next click a no-op.
-  const pokeSeq = useRef(0);
-  function pokeAgent(i: number) {
-    setSelected(i);
-    setPoke({ i, n: ++pokeSeq.current });
-  }
-  const pokeOf = (i: number) => (poke?.i === i ? poke.n : undefined);
-  const [relay, setRelay] = useState<Record<string, SpriteState> | null>(null);
+  const [relay, setRelay] = useState<SpriteState[] | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
-
   const clearTimers = useCallback(() => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
   }, []);
   useEffect(() => clearTimers, [clearTimers]);
 
-  /** Play a full pass: each agent works, hands off, the next wakes. */
+  // Only an answer of "none" is empty: a list that failed to load says so instead.
+  const empty = projects !== null && projects.length === 0 && !chosen && !listError;
+  const tour = empty && touring;
+
+  let floor: Floor;
+  if (tour) {
+    floor = tourFloor(relay ?? AGENTS.map((_, i) => SCENARIOS[scenario].state(i)), relay ? "The relay" : SCENARIOS[scenario].label, !!relay);
+  } else if (project && replaying && line) {
+    floor = replayFloor(project, line, line.at(u));
+  } else if (project) {
+    floor = liveFloor(project, tick);
+  } else {
+    floor = emptyFloor();
+    if (!empty) floor.board.foot = poll.error ? "BUILD NOT FOUND" : "LOADING";
+  }
+
+  // ── selection, and what changed: the log, the bow, the courier ─────────────
+  const [selected, setSelected] = useState(0);
+  // Once you pick someone, the inspector stays on them; until then it follows the work.
+  const [pinned, setPinned] = useState(false);
+  const viewKey = tour ? "tour" : project ? `${project.id}:${replaying ? "replay" : "live"}` : "none";
+  const { log, setLog, flight, pokeAgent, pokeOf, clearPoke } = useFloorEvents(floor, viewKey, {
+    quiet: tour,
+    onFresh: (next) => {
+      if (!pinned && next.board.active >= 0) setSelected(next.board.active);
+    },
+    onActive: (i) => {
+      if (!pinned) setSelected(i);
+    },
+  });
+  // `?agent=` (an agent card on the home page) selects that agent, whether or not
+  // there is a build to show.
+  useEffect(() => {
+    const i = agentIndex(urlAgent);
+    if (i >= 0) {
+      setSelected(i);
+      setPinned(true);
+    }
+  }, [urlAgent]);
+  function select(i: number) {
+    setSelected(i);
+    setPinned(true);
+    pokeAgent(i);
+  }
+
+  // A new build starts with a clean slate. Not before one is chosen: `?agent=` is
+  // read here once, for the build it came with.
+  useEffect(() => {
+    if (!chosen) return;
+    setLog([]);
+    setReplaying(false);
+    setPlaying(false);
+    setU(0);
+    const i = skipAgent.current ? -1 : agentIndex(agentParam.current);
+    skipAgent.current = false;
+    if (i >= 0) {
+      setSelected(i);
+      setPinned(true);
+    } else {
+      setPinned(false);
+    }
+  }, [chosen]);
+
+  const courier: Courier | null =
+    flight && project
+      ? { ...flight, label: handoffLine(project, flight.from, flight.to, floor.stations[flight.to]?.row) }
+      : null;
+
+  function pickBuild(id: string) {
+    if (id === chosen) return;
+    setMissing(false);
+    skipAgent.current = true;
+    clearTimers();
+    setRelay(null);
+    setChosen(id);
+    writeProjectParam(id);
+  }
+
   function runRelay() {
     clearTimers();
-    setPoke(null);
-    const base: Record<string, SpriteState> = {};
-    AGENTS.forEach((a) => (base[a.key] = "queued"));
-    setRelay({ ...base });
-
+    clearPoke();
+    const base: SpriteState[] = AGENTS.map(() => "queued");
+    setRelay([...base]);
     const STEP = 900;
-    AGENTS.forEach((a, i) => {
+    AGENTS.forEach((_, i) => {
       timers.current.push(
         setTimeout(() => {
-          setRelay((p) => ({ ...(p ?? base), [a.key]: "working" }));
-          setSelected(i); // the inspector follows the work
+          setRelay((p) => (p ?? base).map((s, j) => (j === i ? "working" : s)));
+          setSelected(i);
         }, i * STEP),
       );
       timers.current.push(
-        setTimeout(
-          () => setRelay((p) => ({ ...(p ?? base), [a.key]: "done" })),
-          i * STEP + STEP - 120,
-        ),
+        setTimeout(() => setRelay((p) => (p ?? base).map((s, j) => (j === i ? "done" : s))), i * STEP + STEP - 120),
       );
     });
     timers.current.push(setTimeout(() => setRelay(null), AGENTS.length * STEP + 1800));
   }
 
-  function stopRelay() {
+  function stopTour() {
     clearTimers();
     setRelay(null);
+    setTouring(false);
   }
 
-  const stateOf = (i: number): SpriteState =>
-    relay ? (relay[AGENTS[i].key] ?? "queued") : SCENARIOS[scenario].state(i);
-
-  const agent = AGENTS[selected];
-  const agentState = stateOf(selected);
-  const activeIndex = AGENTS.findIndex(
-    (_, i) => stateOf(i) === "working" || stateOf(i) === "gate",
+  // ── chrome ────────────────────────────────────────────────────────────────
+  const title = project ? project.name || project.idea : null;
+  useChrome(
+    tour
+      ? {
+          sub: "Crew floor",
+          badge: (
+            <span className="badge">
+              <span className="dot" aria-hidden="true" />
+              Tour
+            </span>
+          ),
+        }
+      : project
+        ? {
+            sub: "Crew floor",
+            badge: (
+              <span className="badge">
+                <span className={"dot " + (STATUS_DOT[status] ?? "")} aria-hidden="true" />
+                {STATUS_TEXT[status] ?? status}
+              </span>
+            ),
+          }
+        : { sub: "Crew floor" },
+    [tour, title, status],
   );
-  const doneCount = AGENTS.filter((_, i) => stateOf(i) === "done").length;
-  // The floor is at rest when nobody holds or is redoing work and the relay
-  // isn't driving it — then whoever is waiting dozes. Mid-build they wait awake.
-  const atRest =
-    !relay && AGENTS.every((_, i) => stateOf(i) === "queued" || stateOf(i) === "done");
+
+  const station = floor.stations[selected] ?? floor.stations[0];
+  const live = floor.board.active >= 0 ? AGENTS[floor.board.active].codename : null;
+  const hint = log.length && !tour ? log[log.length - 1] : "Click an agent to see their work";
 
   return (
     <div className="crew-page">
       <div className="crew-head">
-        <div>
-          <h1 className="crew-h1">The crew floor</h1>
-          <p className="prose-lede" style={{ marginTop: 8 }}>
-            Pick a scenario, run the relay to watch the work change hands, or click an agent to
-            see what they do.
+        <h1 className="crew-h1">The crew floor</h1>
+        <p className="prose-lede" style={{ marginTop: 8 }}>
+          {empty
+            ? "No builds yet, so the crew is asleep. Start one and it shows up here as it runs."
+            : "What the crew is doing on your build, as it happens. Click an agent to see their work on this build and across all your builds."}
+        </p>
+        {tour && (
+          // The tour is made up, and says so where your eye lands after the lede.
+          <p className="crew-note">
+            {Icon.info}
+            <span>This is the tour. The office, the build and every number on it are made up.</span>
           </p>
-          {/* Every number on this page is scripted. Saying so once, plainly, and
-              in the same place your eye lands after the lede, is the difference
-              between a reference and a lie. */}
-          <p className="crew-demo">
+        )}
+        {missing && (
+          <p className="crew-note" role="status">
             {Icon.info}
             <span>
-              This is a demo. Your real builds are under Recent builds, each with its own relay.
+              That build isn&apos;t there any more.{" "}
+              {projects?.length ? "The floor is showing your latest one." : "You have no builds yet."}
             </span>
           </p>
-        </div>
+        )}
+        {listError && !projects?.length && (
+          <div className="notice notice-bad" role="alert" style={{ marginTop: 14 }}>
+            {Icon.alert}
+            <div className="notice-body">
+              <span className="notice-title">Couldn&apos;t load your builds</span>
+              <span className="notice-text">{listError}</span>
+            </div>
+          </div>
+        )}
+        {poll.error && chosen && (
+          <div className="notice notice-bad" role="alert" style={{ marginTop: 14 }}>
+            {Icon.alert}
+            <div className="notice-body">
+              <span className="notice-title">Couldn&apos;t load that build</span>
+              <span className="notice-text">{poll.error}</span>
+              {projects && projects.some((p) => p.id !== chosen) && (
+                <div className="notice-actions">
+                  <button className="btn btn-sm" onClick={() => pickBuild(floorBuild(projects.filter((p) => p.id !== chosen))!.id)}>
+                    Show my latest build
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── the console window ── */}
@@ -247,302 +412,127 @@ export default function CrewPage() {
             <i />
             <i />
           </span>
-          <span className="win-title">CREW FLOOR · 8 STATIONS</span>
-          {/* "2/8 DONE · FORGE ACTIVE" is exactly the shape of live telemetry, so
-              the count never appears without the word that makes it scripted. */}
+          <span className="win-title">
+            CREW FLOOR · {tour ? "TOUR" : title ? title.toUpperCase() : "8 STATIONS"}
+          </span>
+          <ThemePicker themes={look.available} current={look.theme} onPick={look.choose} />
           <span className="win-meta">
-            <b className="win-demo">DEMO</b>
-            {doneCount}/8 DONE
-            {activeIndex >= 0 && ` · ${AGENTS[activeIndex].codename} ACTIVE`}
+            {tour && <b className="win-tag">TOUR</b>}
+            {replaying && <b className="win-tag">REPLAY</b>}
+            {floor.board.done}/8 DONE
+            {live && ` · ${live} ACTIVE`}
           </span>
         </div>
 
         <div className="floor-wrap">
-          {/* The room, built back to front. */}
-          <div className="floor">
-            {/* ── far: night sky through the glazing ── */}
-            <span className="sky" aria-hidden="true" />
-
-            {/* ── mid: the back wall ── */}
-            <div className="wall" aria-hidden="true">
-              <span className="wall-panels" />
-              <span className="wall-glow" />
-              <span className="window w-left" />
-              <span className="window w-right" />
-              <span className="pipes" />
-              <span className="vent v-left" />
-              <span className="vent v-right" />
-              <span className="tray" />
-              <span className="gantry" />
-              <span className="hazard" />
-              <span className="bay bay-left">
-                <i />
-                BAY A · BUILD
-              </span>
-              <span className="bay bay-right">
-                <i />
-                BAY B · REVIEW
-              </span>
-
-              {/* The board the whole room reads. */}
-              <div className="board">
-                <span className="board-row">
-                  <b>AI SWE TEAM</b>
-                  <span>{SCENARIOS[scenario].label.toUpperCase()}</span>
-                </span>
-                {/* One cell per phase. State classes are `is-*` on purpose: a bare
-                    `working` here picks up the build view's global .working panel
-                    (padding, radius) and the cell balloons into a pill. */}
-                <span
-                  className="board-bar"
-                  role="progressbar"
-                  aria-label="Phases approved"
-                  aria-valuemin={0}
-                  aria-valuemax={AGENTS.length}
-                  aria-valuenow={doneCount}
-                  aria-valuetext={`${doneCount} of ${AGENTS.length} approved${
-                    activeIndex >= 0 ? `, ${AGENTS[activeIndex].codename} on deck` : ""
-                  }`}
-                >
-                  {AGENTS.map((a, i) => (
-                    <i key={a.key} className={"board-tick is-" + stateOf(i)} />
-                  ))}
-                </span>
-                <span className="board-row board-row-dim">
-                  <span>{doneCount} OF 8 APPROVED</span>
-                  <span>
-                    {activeIndex >= 0 ? `${AGENTS[activeIndex].codename} ON DECK` : "ALL HANDS"}
-                  </span>
-                </span>
-              </div>
-              <span className="cables" />
-            </div>
-
-            {/* ── the ground ──
-                The plane deliberately overshoots the horizon and `.ground`
-                crops it there, which is what stops a black band opening up
-                between the wall and the floor at any room height. */}
-            <span className="ground" aria-hidden="true">
-              <span className="floor-plane" />
-              <span className="floor-marks" />
-              <span className="floor-haze" />
-            </span>
-
-            {/* ── back set: stands against the wall, dimmed by distance ── */}
-            <div className="set set-back" aria-hidden="true">
-              <span className="prop p-board">
-                <PixelArt grid={BOARD_PROP} palette={PROP_PALETTE} width={72} />
-              </span>
-              <span className="prop p-rack">
-                <PixelArt grid={RACK} palette={PROP_PALETTE} width={34} />
-              </span>
-              <span className="prop p-monitors">
-                <PixelArt grid={MONITORS} palette={PROP_PALETTE} width={62} />
-              </span>
-              <span className="prop p-rack-2">
-                <PixelArt grid={RACK} palette={PROP_PALETTE} width={30} />
-              </span>
-              <span className="prop p-crates">
-                <PixelArt grid={CRATE} palette={PROP_PALETTE} width={38} />
-              </span>
-              <span className="prop p-plant">
-                <PixelArt grid={PLANT} palette={PROP_PALETTE} width={42} />
-              </span>
-            </div>
-
-            {/* ── mid tier: the band of floor between the wall and the crew,
-                which is otherwise the one place in the room where nothing
-                happens ── */}
-            <div className="set set-mid" aria-hidden="true">
-              <span className="prop p-cooler">
-                <PixelArt grid={COOLER} palette={PROP_PALETTE} width={30} />
-              </span>
-              <span className="prop p-plant-2">
-                <PixelArt grid={PLANT} palette={PROP_PALETTE} width={46} />
-              </span>
-            </div>
-
-            {/* ── mid air: RELAY's courier, permanently mid-errand ── */}
-            <span className="prop p-drone" aria-hidden="true">
-              <PixelArt grid={DRONE} palette={PROP_PALETTE} width={38} />
-            </span>
-
-            <div className="floor-plan">
-              {AGENTS.map((a, i) => {
-                const st = stateOf(i);
-                const live = st === "working" || st === "gate" || st === "rejected";
-                const { x, depth } = FLOOR_PLAN[i];
-                return (
-                  <button
-                    key={a.key}
-                    className={"station" + (i === selected ? " on" : "")}
-                    style={{
-                      ["--agent" as string]: a.accent,
-                      ["--x" as string]: `${x}%`,
-                      ["--depth" as string]: depth,
-                      // Nearer stands in front of further. Occlusion does more
-                      // for depth here than the scale or the dimming do.
-                      zIndex: Math.round((1 - depth) * 40) + 2,
-                    }}
-                    aria-pressed={i === selected}
-                    aria-label={`${a.codename}, ${a.role} — ${STATE_LABEL[st]}`}
-                    onClick={() => pokeAgent(i)}
-                  >
-                    {/* Only whoever is actually doing something speaks — including
-                        an agent that was sent back and is running again. */}
-                    {live && (
-                      <span className="bubble">
-                        {a.lines[VOICE_FOR[st]]}
-                        <i aria-hidden="true" />
-                      </span>
-                    )}
-                    <span className="figure">
-                      {/* Each agent gets a cabin: a partition behind them with
-                          their colour on the rail, a pinned card, a monitor,
-                          and a desk in front. Eight people on open floor is a
-                          group photo; eight people at their own stations is a
-                          place of work. */}
-                      <span className="cabin" aria-hidden="true">
-                        <span className="cabin-side cabin-side-l" />
-                        <span className="cabin-side cabin-side-r" />
-                        <span className="cabin-back">
-                          <span className="cabin-cap" />
-                          <span className="cabin-pin" />
-                          <span className="cabin-screen" />
-                          <span className="cabin-prop">
-                            <PixelArt
-                              grid={a.deskProp}
-                              palette={deskPaletteFor(a)}
-                              width={26}
-                            />
-                          </span>
-                        </span>
-                      </span>
-                      <AgentSprite
-                        agent={a}
-                        size={72}
-                        state={st}
-                        asleep={atRest}
-                        poke={pokeOf(i)}
-                        ground
-                      />
-                      <span className="desk" aria-hidden="true">
-                        <span className="desk-screen" />
-                        <span className="desk-spill" />
-                      </span>
-                    </span>
-                    <span className="plate">{a.codename}</span>
-                    <span className={"plate-state s-" + st}>{STATE_LABEL[st]}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* ── near set: between you and the crew ── */}
-            <div className="set set-near" aria-hidden="true">
-              <span className="prop p-spool">
-                <PixelArt grid={SPOOL} palette={PROP_PALETTE} width={76} />
-              </span>
-              <span className="prop p-crate">
-                <PixelArt grid={CRATE} palette={PROP_PALETTE} width={78} />
-              </span>
-              <span className="prop p-mug">
-                <PixelArt grid={MUG} palette={PROP_PALETTE} width={24} />
-              </span>
-            </div>
-
-            <span className="scanlines" aria-hidden="true" />
-            <span className="vignette" aria-hidden="true" />
-            <p className="floor-hint">Click an agent to inspect them</p>
-          </div>
-
-          {/* ── inspector ── */}
-          <aside className="inspect" style={{ ["--agent" as string]: agent.accent }}>
-            <div className="inspect-head">
-              <span className="win-title">STATION {agent.n}</span>
-              <span className={"plate-state s-" + agentState}>{STATE_LABEL[agentState]}</span>
-            </div>
-
-            <div className="inspect-portrait">
-              <AgentSprite
-                agent={agent}
-                size={104}
-                state={agentState}
-                asleep={atRest}
-                poke={pokeOf(selected)}
-              />
-            </div>
-
-            <h2 className="inspect-name">{agent.codename}</h2>
-            <p className="inspect-role">{agent.role}</p>
-
-            <dl className="rows">
-              <div className="row">
-                <dt>Owns</dt>
-                <dd>{agent.discipline}</dd>
-              </div>
-              <div className="row">
-                <dt>Ships</dt>
-                <dd className="mono">{agent.deliver}</dd>
-              </div>
-              <div className="row">
-                <dt>Trait</dt>
-                <dd style={{ color: "var(--agent)" }}>{agent.trait}</dd>
-              </div>
-              <div className="row">
-                <dt>Spot by</dt>
-                <dd>{agent.silhouette}</dd>
-              </div>
-              <div className="row">
-                <dt>Moves</dt>
-                <dd>{MOTION_NOTE[agent.motion]}</dd>
-              </div>
-              <div className="row">
-                <dt>Now</dt>
-                <dd className={"agent-say" + (agentState === "working" ? " live" : "")}>
-                  {agent.lines[VOICE_FOR[agentState]]}
-                </dd>
-              </div>
-            </dl>
-
-            <p className="inspect-tagline">{agent.tagline}</p>
-
-          </aside>
+          <Room
+            floor={floor}
+            selected={selected}
+            onSelect={select}
+            pokeOf={pokeOf}
+            look={look}
+            courier={tour || !project ? null : courier}
+            hint={hint}
+          />
+          <Inspector
+            station={station}
+            project={tour ? null : project}
+            record={record?.[station.agent.key]}
+            asleep={floor.asleep}
+            poke={pokeOf(selected)}
+            showRecord={!tour && !empty}
+          />
         </div>
 
-        {/* ── scenario bar ── */}
         <div className="win-foot">
-          <div className="scenarios" role="group" aria-label="Scenario">
-            {SCENARIOS.map((s, i) => (
-              <button
-                key={s.id}
-                className="scenario"
-                aria-pressed={!relay && scenario === i}
-                disabled={!!relay}
-                onClick={() => {
-                  setPoke(null);
-                  setScenario(i);
-                }}
-              >
-                {s.label}
+          {tour ? (
+            <>
+              <div className="scenarios" role="group" aria-label="Tour scenario">
+                {SCENARIOS.map((s, i) => (
+                  <button
+                    key={s.id}
+                    className="scenario"
+                    aria-pressed={!relay && scenario === i}
+                    disabled={!!relay}
+                    onClick={() => {
+                      clearPoke();
+                      setScenario(i);
+                    }}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <div className="crew-foot-actions">
+                {relay ? (
+                  <button className="btn btn-sm" onClick={() => (clearTimers(), setRelay(null))}>
+                    Stop the relay
+                  </button>
+                ) : (
+                  <button className="btn btn-sm" onClick={runRelay}>
+                    {Icon.play} Run the relay
+                  </button>
+                )}
+                <button className="btn btn-sm" onClick={stopTour}>
+                  End the tour
+                </button>
+              </div>
+            </>
+          ) : empty ? (
+            <div className="crew-foot-actions crew-foot-empty">
+              <Link className="btn btn-sm btn-primary" href="/">
+                Start a build {Icon.arrowRight}
+              </Link>
+              <button className="btn btn-sm" aria-pressed={false} onClick={() => setTouring(true)}>
+                {Icon.sparkle} Take the tour
               </button>
-            ))}
-          </div>
-          {relay ? (
-            <button className="btn btn-sm" onClick={stopRelay}>
-              Stop relay
-            </button>
+            </div>
+          ) : replaying && line ? (
+            <ReplayBar
+              line={line}
+              u={u}
+              playing={playing}
+              onPlay={() => {
+                if (u >= 1) setU(0);
+                setPlaying(true);
+              }}
+              onPause={() => setPlaying(false)}
+              onSeek={(v) => {
+                setPlaying(false);
+                setU(v);
+              }}
+              onExit={() => {
+                setPlaying(false);
+                setReplaying(false);
+              }}
+            />
           ) : (
-            <button className="btn btn-sm btn-primary" onClick={runRelay}>
-              {Icon.sparkle} Run the relay
-            </button>
+            <>
+              <BuildSwitcher projects={projects ?? []} current={project} onPick={pickBuild} />
+              <AlsoRunning projects={projects ?? []} current={project} onPick={pickBuild} />
+              {canReplay && (
+                <button
+                  className="btn btn-sm crew-replay-start"
+                  onClick={() => {
+                    setU(0);
+                    setReplaying(true);
+                    setPlaying(true);
+                  }}
+                >
+                  {Icon.play} Replay
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
 
-      <p className="field-hint" style={{ marginTop: 12 }} aria-live="polite">
-        {relay ? "Relay running." : SCENARIOS[scenario].hint}
-      </p>
+      {/* What changed, for a screen reader. The line under the room shows the latest. */}
+      <div className="sr-only" role="log" aria-live="polite" aria-label="Crew floor activity">
+        {log.map((l, i) => (
+          <p key={`${i}:${l}`}>{l}</p>
+        ))}
+      </div>
     </div>
   );
 }

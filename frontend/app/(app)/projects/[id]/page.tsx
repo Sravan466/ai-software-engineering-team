@@ -1,11 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import Link from "next/link";
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
 import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
 import { AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
-import AgentSprite, { type SpriteState } from "@/components/agents/AgentSprite";
+import AgentSprite from "@/components/agents/AgentSprite";
+import {
+  NODE_STATUS,
+  VOICE_FOR,
+  crewAtRest,
+  effectiveStatus,
+  latestRow,
+  nodeStateFor,
+  spriteFor,
+  type NodeState,
+} from "@/components/agents/phaseState";
+import { useProject } from "@/components/build/useProject";
 import { useChrome } from "@/components/shell/ShellChrome";
 import { Icon } from "@/components/shell/icons";
 import { Skeleton, SkeletonLines } from "@/components/ui/Skeleton";
@@ -29,10 +41,10 @@ import PhaseSteps from "@/components/build/PhaseSteps";
 import { onOpenFile } from "@/lib/openFile";
 import type { FileFocus } from "@/components/build/FileBrowser";
 
-import { artifactFiles, latestRow as rowFor } from "@/components/build/payload";
+import { artifactFiles } from "@/components/build/payload";
+import RelayFloor, { useHeightSwap, useRelayView } from "@/components/crew/RelayFloor";
 
 type Tab = "build" | "preview" | "summary";
-type NodeState = "done" | "running" | "gate" | "redo" | "failed" | "pending";
 
 // ── status → presentation ────────────────────────────────────────────────────
 const STATUS_LABEL: Record<string, string> = {
@@ -52,11 +64,6 @@ function badgeClass(status: string): string {
   if (status === "running") return "badge-run";
   if (status === "failed" || status === "stalled") return "badge-bad";
   return "";
-}
-
-/** A stalled run says `running` in the database and is not running. Say the truth. */
-function effectiveStatus(project: Project): string {
-  return project.status === "running" && project.stalled ? "stalled" : project.status;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -80,65 +87,6 @@ function StatusBadge({ status }: { status: string }) {
     </span>
   );
 }
-
-// Latest row produced for a phase (phases re-run when sent back). One definition,
-// shared with the decision panel — two answers to "which attempt is current" would
-// let the badge on a phase and the artifact under review disagree.
-const latestRow = (project: Project, key: string) => rowFor(project.phases, key);
-
-/**
- * What a phase is doing, read from the phase's own row first.
- *
- * This used to be inferred from the *project* status plus `current_phase`, and both
- * of those only moved once an agent had finished — so a phase mid-generation was
- * indistinguishable from one that had never started. A row now exists from the moment
- * generation begins, and it carries its own status, which makes this a lookup instead
- * of a guess.
- */
-function nodeStateFor(project: Project, key: string): NodeState {
-  const row = latestRow(project, key);
-  if (!row) return "pending";
-  if (row.status === "running") return "running";
-  if (row.status === "approved") return "done";
-  if (row.status === "rejected") return "redo";
-  if (row.status === "failed") return "failed";
-  if (row.status === "pending_approval") {
-    const waiting =
-      project.status === "awaiting_approval" && project.current_phase === key;
-    return waiting ? "gate" : "done";
-  }
-  return "done";
-}
-
-// Which of an agent's voice lines fits the state it's in. A phase waiting at a
-// gate has finished its work, so it speaks its "done" line.
-const VOICE_FOR: Record<NodeState, keyof Persona["lines"]> = {
-  pending: "queued",
-  running: "working",
-  gate: "done",
-  done: "done",
-  redo: "rejected",
-  failed: "rejected",
-};
-
-// The build view and the sprite share one idea of what an agent is doing.
-const SPRITE_STATE: Record<NodeState, SpriteState> = {
-  done: "done",
-  running: "working",
-  gate: "gate",
-  redo: "rejected",
-  failed: "rejected",
-  pending: "queued",
-};
-
-const NODE_STATUS: Record<NodeState, string> = {
-  pending: "Queued",
-  running: "Running",
-  redo: "Rejected, re-running",
-  failed: "Stopped mid-phase",
-  gate: "Needs your approval",
-  done: "Done",
-};
 
 /**
  * What a queued phase is actually waiting for.
@@ -221,11 +169,18 @@ function formatCost(usd: unknown): string {
 
 // ── page ─────────────────────────────────────────────────────────────────────
 export default function ProjectPage({ params }: { params: { id: string } }) {
-  const { id } = params;
-  const [project, setProject] = useState<Project | null>(null);
-  const [analytics, setAnalytics] = useState<any>(null);
+  // Keyed by build: everything the page holds (its tab, a pending jump, the first
+  // look that opens a finished build on Preview) starts over for another build.
+  return <BuildPage key={params.id} id={params.id} />;
+}
+
+function BuildPage({ id }: { id: string }) {
+  // The build, kept fresh at the cadence its status calls for (shared with the crew
+  // floor, #91).
+  const { project, setProject, analytics, error, setError, load, actionFailed, loadedAt } = useProject(id, {
+    analytics: true,
+  });
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [tab, setTab] = useState<Tab>("build");
   // "Deploy it" / "Connect to GitHub" from the completion banner: open Deliver on
   // that flow. Cleared once the card has taken it, so a tab switch doesn't re-open it.
@@ -247,74 +202,38 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
       }),
     [],
   );
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Whether the error on screen is a control's refusal, which the status poll must
-  // leave alone — it is cleared by the next action, not by the next reload.
-  const actionFailed = useRef(false);
-
-  const load = useCallback(async () => {
-    try {
-      const p = await api.getProject(id);
-      setProject(p);
-      setAnalytics(await api.analytics(id));
-      if (!actionFailed.current) setError("");
-    } catch (e: any) {
-      setError(e.message);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
   // Returning from the GitHub OAuth round-trip? Land on Deliver, where the ship
   // card lives (it reads ?github= and ?next= itself).
+  // From the crew floor (#91): `?phase=` lands on that phase's row.
+  // Either is an instruction, and wins over opening on the preview below.
+  const deepLinked = useRef(false);
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
-    if (sp.get("github") || sp.get("next")) setTab("summary");
+    if (sp.get("github") || sp.get("next")) {
+      deepLinked.current = true;
+      setTab("summary");
+    }
+    const phase = sp.get("phase");
+    if (phase) {
+      deepLinked.current = true;
+      setTab("build");
+      setJump({ key: phase });
+    }
   }, []);
 
-  // Poll while anything can still change under us — at a cadence matched to how
-  // fast it can change.
-  //
-  // A live `running` build is the only thing worth a tight loop. A *stalled* one is
-  // not running at all, and hammering it every 2.5s forever is precisely the old
-  // behaviour this issue is about. `awaiting_approval` looks static but isn't:
-  // another tab can approve, stop or reject it, and a tab showing a gate that no
-  // longer exists is how one click's worth of intent used to advance two phases.
-  // Stopped, a run still has someone finishing the call Stop can't interrupt — its
-  // row says `running` until that call returns — and the row's steps say "stopping
-  // once this step finishes" (#86). Keep watching until it has.
-  // A stopped run whose process died before its call returned never will: `stalled`.
-  const finishing =
-    project?.status === "cancelled" &&
-    !project.stalled &&
-    !!project.current_phase &&
-    latestRow(project, project.current_phase)?.status === "running";
-  const pollMs = !project
-    ? 0
-    : (project.status === "running" && !project.stalled) || finishing
-      ? 2500
-      : project.status === "running" || project.status === "awaiting_approval"
-        ? 10000
-        : // Paused for the user's computer: it resumes by itself when the connector
-          // is back, so keep watching — slowly — to show that happening.
-          project.status === "paused"
-          ? 5000
-          : 0;
-
+  // A finished build is its app: open on Preview, the way Lovable and Bolt do, and
+  // go there when a build (or a change to it) finishes while you watch, whichever
+  // tab you were on. Only at those two moments: between them, the poll never
+  // changes the tab.
+  const lastStatus = useRef<string | null>(null);
+  const currentStatus = project?.status ?? null;
   useEffect(() => {
-    if (pollMs > 0) {
-      pollRef.current = setInterval(load, pollMs);
-    } else if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [pollMs, load]);
+    if (!currentStatus) return;
+    const was = lastStatus.current;
+    lastStatus.current = currentStatus;
+    if (currentStatus !== "completed" || was === "completed") return;
+    if (was !== null || !deepLinked.current) setTab("preview");
+  }, [currentStatus]);
 
   /** Run a control call. Returns whether it landed, so callers can keep the
    *  reviewer's typing when it didn't. */
@@ -478,69 +397,21 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {/* The relay: who has the work, who is next — and a way into their work.
-          Every step is a link to its phase in the list below, so clicking the
-          agent you are curious about lands on what they produced. */}
-      <div className="card" style={{ marginTop: 20 }}>
-        <div className="sec-head">
-          <h2 className="label">Relay</h2>
-          <span className="rule" />
-          <span className="label mono">{doneCount}/8</span>
-        </div>
-        {/* Under ~600px the eight names don't fit, so the rail goes compact and
-            this line carries what the names were there to say. */}
-        <p className="relay-active" aria-live="polite">
-          {relaySummary(project, doneCount)}
-        </p>
-        <ol
-          className="relay"
-          aria-label={`Pipeline progress: ${doneCount} of 8 phases complete`}
-        >
-          {PHASES.map((ph, i) => {
-            const ns = nodeStateFor(project, ph.key);
-            const agent = AGENT_BY_KEY[ph.key];
-            const live = ns === "running" || ns === "gate";
-            // A stalled run's row still says `running`. The summary above and the
-            // steps behind it already say otherwise; the step itself has to agree.
-            const what =
-              ns === "pending"
-                ? waitingFor(project, i)
-                : ns === "running" && status === "stalled"
-                  ? "Stopped responding mid-phase"
-                  : NODE_STATUS[ns];
-            return (
-              <li key={ph.key}>
-                <button
-                  className={`relay-step ${ns}`}
-                  style={{ ["--agent" as string]: agent.accent }}
-                  aria-current={live ? "step" : undefined}
-                  // The phase rows only exist while the Build tab is mounted, and
-                  // an aria-controls pointing at an absent id sends assistive tech
-                  // nowhere. The click still works from any tab — it switches first.
-                  aria-controls={tab === "build" ? `phase-${ph.key}` : undefined}
-                  onClick={() => {
-                    setTab("build");
-                    // A fresh object every click, so asking for the same phase
-                    // twice is two instructions rather than one unchanged value.
-                    setJump({ key: ph.key });
-                  }}
-                  title={`${agent.codename} · ${agent.role} — ${what}`}
-                >
-                  <AgentSprite
-                    agent={agent}
-                    size={64}
-                    state={spriteFor(project, ns)}
-                    asleep={atRest}
-                  />
-                  <span className="relay-name">{agent.codename}</span>
-                  <span className="relay-bar" />
-                  <span className="sr-only">{`${agent.role} — ${what}. Go to this phase.`}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ol>
-      </div>
+      {/* The relay: who has the work, who is next — and a way into their work. */}
+      <RelayCard
+        project={project}
+        status={status!}
+        tab={tab}
+        atRest={atRest}
+        doneCount={doneCount}
+        loadedAt={loadedAt}
+        onJump={(key) => {
+          setTab("build");
+          // A fresh object every click, so asking for the same phase twice is two
+          // instructions rather than one unchanged value.
+          setJump({ key });
+        }}
+      />
 
       {error && (
         <div className="notice notice-bad" role="alert" style={{ marginTop: 16 }}>
@@ -608,6 +479,128 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
             shipIntent={shipIntent}
             onShipIntentUsed={clearShipIntent}
           />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Relay card ───────────────────────────────────────────────────────────────
+/**
+ * The relay: who has the work, who is next, and a way into their work. Every step
+ * is a link to its phase in the list below, so clicking the agent you are curious
+ * about lands on what they produced.
+ *
+ * Two views of the same thing, switched in the card's header (#91): the strip of
+ * eight, or the crew floor's room for this build, with its bubbles, board and
+ * hand-off courier. The choice is per viewer; the card opens or folds to the new
+ * view's height rather than jumping.
+ */
+function RelayCard({
+  project,
+  status,
+  tab,
+  atRest,
+  doneCount,
+  loadedAt,
+  onJump,
+}: {
+  project: Project;
+  status: string;
+  tab: Tab;
+  atRest: boolean;
+  doneCount: number;
+  loadedAt: number;
+  onJump: (phaseKey: string) => void;
+}) {
+  const [view, setView] = useRelayView();
+  const body = useRef<HTMLDivElement>(null);
+  useHeightSwap(body, view);
+  return (
+    <div className="card" style={{ marginTop: 20 }}>
+      <div className="sec-head">
+        <h2 className="label">Relay</h2>
+        <span className="rule" />
+        <span className="label mono">{doneCount}/8</span>
+        <div className="relay-views" role="group" aria-label="Relay view">
+          <button
+            type="button"
+            className="relay-view-btn"
+            aria-pressed={view === "strip"}
+            onClick={() => setView("strip")}
+          >
+            {Icon.list} Strip
+          </button>
+          <button
+            type="button"
+            className="relay-view-btn"
+            aria-pressed={view === "floor"}
+            onClick={() => setView("floor")}
+          >
+            {Icon.layers} Floor
+          </button>
+        </div>
+        {view === "floor" && (
+          <Link
+            className="relay-open"
+            href={`/crew?project=${project.id}`}
+            title="Open the crew floor: inspector, replay and rooms"
+            aria-label="Open the crew floor for this build"
+          >
+            {Icon.expand}
+          </Link>
+        )}
+      </div>
+      {/* Under ~600px the eight names don't fit, so the rail goes compact and
+          this line carries what the names were there to say. */}
+      <p className="relay-active" aria-live="polite">
+        {relaySummary(project, doneCount)}
+      </p>
+      <div ref={body} className="relay-body">
+        {view === "floor" ? (
+          <div key="floor" className="relay-pane">
+            <RelayFloor project={project} loadedAt={loadedAt} onPick={onJump} />
+          </div>
+        ) : (
+          <ol
+            key="strip"
+            className="relay relay-pane"
+            aria-label={`Pipeline progress: ${doneCount} of 8 phases complete`}
+          >
+            {PHASES.map((ph, i) => {
+              const ns = nodeStateFor(project, ph.key);
+              const agent = AGENT_BY_KEY[ph.key];
+              const live = ns === "running" || ns === "gate";
+              // A stalled run's row still says `running`. The summary above and the
+              // steps behind it already say otherwise; the step itself has to agree.
+              const what =
+                ns === "pending"
+                  ? waitingFor(project, i)
+                  : ns === "running" && status === "stalled"
+                    ? "Stopped responding mid-phase"
+                    : NODE_STATUS[ns];
+              return (
+                <li key={ph.key}>
+                  <button
+                    className={`relay-step ${ns}`}
+                    style={{ ["--agent" as string]: agent.accent }}
+                    aria-current={live ? "step" : undefined}
+                    // The phase rows only exist while the Build tab is mounted, and
+                    // an aria-controls pointing at an absent id sends assistive tech
+                    // nowhere. The click still works from any tab — it switches first.
+                    aria-controls={tab === "build" ? `phase-${ph.key}` : undefined}
+                    onClick={() => onJump(ph.key)}
+                    title={`${agent.codename} · ${agent.role} — ${what}`}
+                  >
+                    <AgentSprite agent={agent} size={64} state={spriteFor(project, ns)} asleep={atRest} />
+                    <span className="relay-name">{agent.codename}</span>
+                    <span className="relay-bar" />
+                    <span className="sr-only">{`${agent.role} — ${what}. Go to this phase.`}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
         )}
       </div>
     </div>
@@ -1123,26 +1116,6 @@ function producedByPhase(art: Artifacts): Map<string, number> {
 }
 
 /** A run that can still produce something hasn't finished failing to. */
-/**
- * Whether the crew is off duty: nobody holds the work, so whoever waits dozes.
- * Only a running build or one waiting on your approval is on duty — a build
- * that hasn't started is at rest (as on the crew floor's "Before the build"),
- * and so is a stalled one: it stopped responding, and the crew says so.
- */
-function crewAtRest(project: Project): boolean {
-  const s = effectiveStatus(project);
-  return s !== "running" && s !== "awaiting_approval";
-}
-
-/**
- * The sprite for a phase. On a stalled run the phase that stopped responding
- * still reads `running`; it dozes with everyone else instead of looping its
- * work beside a sleeping crew.
- */
-function spriteFor(project: Project, ns: NodeState): SpriteState {
-  return ns === "running" && effectiveStatus(project) === "stalled" ? "queued" : SPRITE_STATE[ns];
-}
-
 function stillRunning(status: string): boolean {
   return status === "created" || status === "running" || status === "awaiting_approval";
 }

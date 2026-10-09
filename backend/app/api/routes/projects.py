@@ -215,7 +215,9 @@ def update_project(
     return project
 
 
-@router.get("", response_model=list[ProjectOut])
+# The list leaves out what each running phase was handed (#91): only the build
+# page and the crew floor read it, from the build itself.
+@router.get("", response_model=list[ProjectOut], response_model_exclude={"__all__": {"given"}})
 def list_projects(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[Project]:
     found = list(
         db.execute(
@@ -250,6 +252,10 @@ def delete_project(project: Project = Depends(get_project), db: Session = Depend
     db.commit()
     # The database credentials go with it: nothing is left for a project that isn't.
     project_secrets.remove_project(owner_id, project_id)
+    # And its live progress, which would otherwise sit in memory until a restart.
+    from app.orchestration import activity
+
+    activity.clear(project_id)
 
 
 # ── Generated-project artifacts (preview + download) ─────────────────────────

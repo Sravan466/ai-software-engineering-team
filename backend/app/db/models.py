@@ -338,6 +338,20 @@ class Project(Base):
         return found
 
     @property
+    def given(self) -> Optional[dict]:
+        """What the phase running now was handed by the ones before it (#91), as
+        `{phase, deps}` in the shape its row's `handoff.deps` takes once it is saved.
+        None outside a run, and for a phase whose prompt hasn't been built yet."""
+        if self.status not in ("running", "cancelled"):
+            return None
+        from app.orchestration import activity
+
+        found = activity.given_for(self.id)
+        if found is None or found.get("phase") != self.current_phase:
+            return None
+        return found
+
+    @property
     def current_version(self) -> Optional[dict]:
         """`{number, label, kind, created_at}` of the version the build is at (#79)."""
         from app.orchestration import versions

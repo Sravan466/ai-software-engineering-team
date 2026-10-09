@@ -42,8 +42,10 @@
 }
 
 /* ── the sheet ──
-   4 frames across, 6 rows down: queued, working, done, rejected, gate, and
-   asleep (queued while no build is running). The
+   One row per state: queued, working, done, rejected, gate, and asleep
+   (queued while no build is running). How many frames a row has comes from
+   the sheet itself (sheets.json, written by scripts/agent_art.py) as CSS
+   variables AgentSprite sets: --cols, --row-y, --fn, --fend and friends. The
    row is picked with background-position-y and frames are stepped with
    background-position-x, so changing state never reloads anything — one
    image per agent, already decoded.
@@ -61,10 +63,11 @@
 .sprite-sheet,
 .sprite-poke {
   background-image: var(--sheet);
-  background-size: 400% 600%;
+  background-size: calc(var(--cols, 4) * 100%) calc(var(--rows, 6) * 100%);
   background-repeat: no-repeat;
   background-position: 0% 0%;
 }
+.sprite-sheet { background-position-y: var(--row-y, 0%); }
 .sprite-still {
   display: block;
   max-width: none;
@@ -72,14 +75,9 @@
   user-select: none;
 }
 
-.sprite.is-working .sprite-sheet  { background-position-y: 20%; }
-.sprite.is-done .sprite-sheet     { background-position-y: 40%; }
-.sprite.is-rejected .sprite-sheet { background-position-y: 60%; }
-.sprite.is-gate .sprite-sheet     { background-position-y: 80%; }
-.sprite.is-queued.is-asleep .sprite-sheet { background-position-y: 100%; }
-
-/* jump-none puts all four frames on screen for a quarter of the cycle each:
-   0, 33.3, 66.7, 100% is frame 1 to 4 of a 400%-wide sheet.
+/* jump-none puts every frame on screen for an equal share of the cycle: on a
+   four-frame row 0, 33.3, 66.7, 100% is frame 1 to 4. --fend is where the
+   row's last frame sits, which is 100% unless the row is shorter than the sheet.
 
    The loop, the gate loop and the one-shot are the same motion under three
    names on purpose. A browser only restarts an animation when its name
@@ -88,26 +86,29 @@
    760ms pass — and jump straight to the last frame without celebrating. */
 @keyframes sheet-loop {
   from { background-position-x: 0%; }
-  to   { background-position-x: 100%; }
+  to   { background-position-x: var(--fend, 100%); }
 }
 @keyframes sheet-await {
   from { background-position-x: 0%; }
-  to   { background-position-x: 100%; }
+  to   { background-position-x: var(--fend, 100%); }
 }
 @keyframes sheet-once {
   from { background-position-x: 0%; }
-  to   { background-position-x: 100%; }
+  to   { background-position-x: var(--fend, 100%); }
 }
 
-/* Rejected stops on frame 3 — the slump — and holds it. Frame 4 is the
-   recovery, and a rejected agent hasn't recovered. */
+/* Rejected stops one frame short of the end (the slump) and holds it. The last
+   frame is the recovery, and a rejected agent hasn't recovered. */
 @keyframes sheet-to-slump {
   from { background-position-x: 0%; }
-  to   { background-position-x: 66.667%; }
+  to   { background-position-x: var(--slump-end, 66.667%); }
 }
 
-/* Working: the job, looped, at the character's own tempo. */
-.sprite.is-working .sprite-sheet { animation: sheet-loop var(--frames, 720ms) steps(4, jump-none) infinite; }
+/* Working: the job, looped, at the character's own tempo (or at the sheet's own
+   frame rate, when its prompt named one). */
+.sprite.is-working .sprite-sheet {
+  animation: sheet-loop var(--row-dur, var(--frames, 720ms)) steps(var(--fn, 4), jump-none) infinite;
+}
 .sprite.is-working.motion-nod     { --frames: 880ms; }
 .sprite.is-working.motion-drift   { --frames: 1040ms; }
 .sprite.is-working.motion-thrum   { --frames: 600ms; }
@@ -120,21 +121,23 @@
 /* Gate: the "!" is lit on frames 1–2 and dark on 3–4 — a blink slow enough to
    read as "waiting on you", not as an alarm. Its own name so the blink starts
    fresh when the gate opens, in step with the board's gate cell. */
-.sprite.is-gate .sprite-sheet { animation: sheet-await 1.4s steps(4, jump-none) infinite; }
+.sprite.is-gate .sprite-sheet { animation: sheet-await var(--row-dur, 1.4s) steps(var(--fn, 4), jump-none) infinite; }
 
 /* Done plays once and ends back at rest; rejected plays into the slump. */
-.sprite.is-done .sprite-sheet { animation: sheet-once 760ms steps(4, jump-none) 1 both; }
-.sprite.is-rejected .sprite-sheet { animation: sheet-to-slump 600ms steps(3, jump-none) 1 both; }
+.sprite.is-done .sprite-sheet { animation: sheet-once var(--row-dur, 760ms) steps(var(--fn, 4), jump-none) 1 both; }
+.sprite.is-rejected .sprite-sheet {
+  animation: sheet-to-slump var(--row-dur, 600ms) steps(var(--slump-n, 3), jump-none) 1 both;
+}
 
 /* Asleep: a slow breath with the Zs rising — frame 1 none, then small,
    medium, large. Slow on purpose: it is the one loop that may run while
    nothing is happening, so it should read as calm, not as activity. */
 @keyframes sheet-sleep {
   from { background-position-x: 0%; }
-  to   { background-position-x: 100%; }
+  to   { background-position-x: var(--fend, 100%); }
 }
 .sprite.is-queued.is-asleep .sprite-sheet {
-  animation: sheet-sleep 3.2s steps(4, jump-none) infinite;
+  animation: sheet-sleep var(--row-dur, 3.2s) steps(var(--fn, 4), jump-none) infinite;
 }
 
 /* Queued crew are dimmed and desaturated — present, not yet involved. */
@@ -286,13 +289,13 @@
   filter: brightness(calc(1 - var(--depth, 0) * 0.34)) saturate(calc(1 - var(--depth, 0) * 0.26));
 }
 @keyframes sheet-poke-row {
-  from { background-position: 0% 20%; }
-  to   { background-position: 100% 20%; }
+  from { background-position: 0% var(--work-y, 20%); }
+  to   { background-position: var(--work-end, 100%) var(--work-y, 20%); }
 }
 .sprite-poke {
   transform-origin: 50% 95%;
-  background-position: 0% 20%;
-  --poke-row: sheet-poke-row 800ms steps(4, jump-none) 2;
+  background-position: 0% var(--work-y, 20%);
+  --poke-row: sheet-poke-row var(--work-dur, 800ms) steps(var(--work-n, 4), jump-none) 2;
 }
 .sprite.motion-nod     .sprite-poke { animation: var(--poke-row), sig-nod 1.6s steps(3, end) 1; }
 .sprite.motion-drift   .sprite-poke { animation: var(--poke-row), sig-drift 1.4s steps(4, end) 1; }
@@ -313,26 +316,29 @@
    figure returns to its own pose, and the own animation keeps its name in
    the list — so leaving the card doesn't replay the fist pump or the slump. */
 @keyframes sheet-hover-row {
-  from { background-position: 0% 20%; }
-  to   { background-position: 100% 20%; }
+  from { background-position: 0% var(--work-y, 20%); }
+  to   { background-position: var(--work-end, 100%) var(--work-y, 20%); }
+}
+.agent-card:hover .sprite {
+  --hover-row: sheet-hover-row var(--work-dur, 800ms) steps(var(--work-n, 4), jump-none) 1;
 }
 .agent-card:hover .sprite.is-queued .sprite-sheet {
-  animation: sheet-hover-row 800ms steps(4, jump-none) 1;
+  animation: var(--hover-row);
 }
 .agent-card:hover .sprite.is-queued.is-asleep .sprite-sheet {
   animation:
-    sheet-sleep 3.2s steps(4, jump-none) infinite,
-    sheet-hover-row 800ms steps(4, jump-none) 1;
+    sheet-sleep var(--row-dur, 3.2s) steps(var(--fn, 4), jump-none) infinite,
+    var(--hover-row);
 }
 .agent-card:hover .sprite.is-done .sprite-sheet {
   animation:
-    sheet-once 760ms steps(4, jump-none) 1 both,
-    sheet-hover-row 800ms steps(4, jump-none) 1;
+    sheet-once var(--row-dur, 760ms) steps(var(--fn, 4), jump-none) 1 both,
+    var(--hover-row);
 }
 .agent-card:hover .sprite.is-rejected .sprite-sheet {
   animation:
-    sheet-to-slump 600ms steps(3, jump-none) 1 both,
-    sheet-hover-row 800ms steps(4, jump-none) 1;
+    sheet-to-slump var(--row-dur, 600ms) steps(var(--slump-n, 3), jump-none) 1 both,
+    var(--hover-row);
 }
 
 /* ===========================================================================
@@ -577,11 +583,12 @@
 .phase.done .phase-deliver { color: var(--agent); }
 
 /* ===========================================================================
-   CREW FLOOR — a console window you can poke at
+   CREW FLOOR — a console window onto your build
 
    Structure borrowed from the arcade-console idiom: a chunky bordered window
    with a title bar, a lit room inside it, an inspector down the right, and a
-   scenario bar along the bottom. Square corners and hard 2px borders — the
+   bar along the bottom (which build, replay, or the tour). What a real build
+   added to the room (#91) is in components/crew/crew.css. Square corners and hard 2px borders — the
    pixel world doesn't do soft radii.
    =========================================================================== */
 .crew-page { max-width: 1180px; margin: 0 auto; padding: 24px 24px 72px; }
@@ -594,34 +601,6 @@
   letter-spacing: 0.01em;
   text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.55);
 }
-/* Every number on this page is scripted. This says so once, in prose, where the
-   eye lands after the lede — the floor is a reference, and a reference that can
-   be mistaken for telemetry is worse than no reference. */
-.crew-demo {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  max-width: 68ch;
-  margin: 14px 0 0;
-  padding: 10px 13px;
-  border-radius: var(--r);
-  border: 1px solid var(--line-2);
-  background: var(--bg-panel);
-  font-size: var(--t-sm);
-  color: var(--ink-2);
-  line-height: 1.55;
-}
-.crew-demo > svg { width: 16px; height: 16px; flex: none; margin-top: 1px; color: var(--ink-3); }
-/* In the window bar, where "2/8 DONE" would otherwise read as a live count. */
-.win-demo {
-  margin-right: 8px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: var(--line-2);
-  color: var(--ink-2);
-  letter-spacing: 0.1em;
-}
-
 /* ── window chrome ── */
 .win {
   border: 2px solid var(--line-3);
@@ -701,7 +680,7 @@
 .wall-glow {
   position: absolute;
   inset: 0;
-  background: radial-gradient(64% 120% at 50% 108%, rgba(96, 130, 186, 0.22), transparent 68%);
+  background: radial-gradient(64% 120% at 50% 108%, var(--room-glow, rgba(96, 130, 186, 0.22)), transparent 68%);
 }
 /* Skirting. The one line that tells you the wall stops and the floor starts. */
 .wall::after {
@@ -1094,7 +1073,7 @@
    gains a shadow, and is deliberately cropped by the frame. */
 .set { position: absolute; inset: 0; pointer-events: none; }
 .prop { position: absolute; display: block; line-height: 0; }
-.set-back .prop { filter: brightness(0.66) saturate(0.68) contrast(0.96); }
+.set-back .prop { filter: brightness(var(--prop-dim, 0.66)) saturate(0.68) contrast(0.96); }
 .set-back .prop::after,
 .set-near .prop::after {
   content: "";
@@ -1138,21 +1117,6 @@
 .p-crate { left: -20px; bottom: 2px; }
 .p-spool { right: -18px; bottom: -6px; }
 .p-mug   { left: 6px;   bottom: 65px; }
-
-/* RELAY's courier drone: the one thing in the room that is not standing still,
-   and the only reason to look up. */
-.p-drone {
-  right: 12%;
-  top: 27%;
-  z-index: 2;
-  filter: brightness(1.05) drop-shadow(0 8px 12px rgba(0, 0, 0, 0.75));
-  animation: drone-hover 5.5s ease-in-out infinite;
-}
-@keyframes drone-hover {
-  0%, 100% { transform: translate(0, 0); }
-  30%      { transform: translate(-7px, -4px); }
-  62%      { transform: translate(5px, 3px); }
-}
 
 /* ── the crew ──
    A plan, not a rank. Each station is placed by (--x, --depth) from the page,
@@ -1236,11 +1200,11 @@
   bottom: 0;
   background: linear-gradient(
     to bottom,
-    color-mix(in srgb, var(--agent) 9%, #202a38) 0%,
-    #18202d 54%,
-    #0f1621 100%
+    color-mix(in srgb, var(--agent) 9%, var(--cabin-back-a, #202a38)) 0%,
+    var(--cabin-back-b, #18202d) 54%,
+    var(--cabin-back-c, #0f1621) 100%
   );
-  box-shadow: inset 0 0 0 1px #05070c;
+  box-shadow: inset 0 0 0 1px var(--room-outline, #05070c);
 }
 /* upholstery, not paint */
 .cabin-back::after {
@@ -1249,7 +1213,7 @@
   inset: 7px 1px 1px 1px;
   background: repeating-linear-gradient(
     to bottom,
-    rgba(190, 214, 255, 0.04) 0 1px,
+    var(--cabin-weave, rgba(190, 214, 255, 0.04)) 0 1px,
     transparent 1px 3px
   );
 }
@@ -1264,9 +1228,9 @@
   background: linear-gradient(
     to bottom,
     color-mix(in srgb, var(--agent) 70%, #4d5a74) 0 2px,
-    #46536c 2px 4px,
-    #2a3446 4px 6px,
-    #05070c 6px
+    var(--cabin-cap-b, #46536c) 2px 4px,
+    var(--cabin-cap-c, #2a3446) 4px 6px,
+    var(--room-outline, #05070c) 6px
   );
 }
 
@@ -1280,12 +1244,12 @@
 .cabin-side-l {
   left: 0;
   clip-path: polygon(100% 0, 100% 76%, 0 100%, 0 24%);
-  background: linear-gradient(to right, #313d53, #212b3c);
+  background: linear-gradient(to right, var(--cabin-side-l, #313d53), var(--cabin-side-l2, #212b3c));
 }
 .cabin-side-r {
   right: 0;
   clip-path: polygon(0 0, 0 76%, 100% 100%, 100% 24%);
-  background: linear-gradient(to left, #10161f, #171f2e);
+  background: linear-gradient(to left, var(--cabin-side-r, #10161f), var(--cabin-side-r2, #171f2e));
 }
 /* their leading edges catch the cap light */
 .cabin-side-l::before,
@@ -1375,8 +1339,13 @@
   width: 78px;
   height: 14px;
   margin-top: 0;
-  background: linear-gradient(to bottom, #1b2434 0 1px, #131b28 1px, #0b111a 100%);
-  box-shadow: inset 0 0 0 1px #05070c, 0 10px 16px -8px rgba(0, 0, 0, 0.95);
+  background: linear-gradient(
+    to bottom,
+    var(--desk-top-b, #1b2434) 0 1px,
+    var(--desk-face-a, #131b28) 1px,
+    var(--desk-face-b, #0b111a) 100%
+  );
+  box-shadow: inset 0 0 0 1px var(--room-outline, #05070c), 0 10px 16px -8px rgba(0, 0, 0, 0.95);
 }
 /* The desktop: the face the ceiling light actually hits, splayed wider at the
    front edge so it lies down rather than standing up. */
@@ -1388,7 +1357,7 @@
   bottom: 100%;
   height: 7px;
   clip-path: polygon(4% 0, 96% 0, 100% 100%, 0 100%);
-  background: linear-gradient(to bottom, #4d5a74, #2b3548);
+  background: linear-gradient(to bottom, var(--desk-top-a, #4d5a74), var(--desk-top-b, #2b3548));
 }
 /* Desk legs, so it stands on the floor rather than hovering over it. */
 .desk::after {
@@ -1456,7 +1425,7 @@
   padding: 1px 6px;
   border: 1px solid var(--line-2);
   border-radius: 2px;
-  background: rgba(6, 8, 14, 0.72);
+  background: var(--plate-bg, rgba(6, 8, 14, 0.72));
   font-family: var(--pixel);
   font-size: 7px;
   letter-spacing: 0.08em;
@@ -1530,7 +1499,7 @@
   font-family: var(--pixel);
   font-size: 9px;
   letter-spacing: 0.12em;
-  color: var(--ink-2);
+  color: var(--hint-ink, var(--ink-2));
   text-align: center;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
 }
@@ -1713,12 +1682,16 @@
      mid-swing, the fist pump, the slump, the "!" lit. */
   .sprite .sprite-sheet { animation: none !important; }
   .sprite.is-working .sprite-sheet,
-  .sprite.is-done .sprite-sheet { background-position-x: 33.333%; }
-  .sprite.is-rejected .sprite-sheet { background-position-x: 66.667%; }
+  .sprite.is-done .sprite-sheet,
+  .sprite.is-rejected .sprite-sheet { background-position-x: var(--hold-x, 33.333%); }
   /* A poke still answers, without moving: the job frame while it lasts. */
-  .sprite .sprite-poke { animation: none !important; background-position: 33.333% 20%; transform: none; }
+  .sprite .sprite-poke {
+    animation: none !important;
+    background-position: var(--work-hold, 33.333%) var(--work-y, 20%);
+    transform: none;
+  }
   /* Asleep holds a frame with a Z up, so it still reads as asleep. */
-  .sprite.is-queued.is-asleep .sprite-sheet { background-position-x: 66.667%; }
+  .sprite.is-queued.is-asleep .sprite-sheet { background-position-x: var(--hold-x, 66.667%); }
   /* The board holds still: the running light parks mid-cell, the gate cell
      stays lit. The outline and caret still say which phase has the work. */
   .board-tick.is-working { animation: none; background-position: 50% 0; }
@@ -1731,7 +1704,6 @@
   .sprite.is-gate { outline: 2px dashed var(--agent); outline-offset: 2px; }
   .sprite.grounded.is-working .sprite-ground,
   .sprite.grounded.is-gate .sprite-ground { transform: none; }
-  .p-drone { animation: none; }
   .relay-step.running .relay-bar::after { animation: none; width: 100%; }
   .relay-step.gate .relay-bar::after { animation: none; }
   /* The landing mark still has to identify the row the relay sent you to, so it
