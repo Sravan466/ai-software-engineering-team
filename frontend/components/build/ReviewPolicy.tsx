@@ -66,6 +66,15 @@ export default function ReviewPolicy({
   }, [open]);
 
   const current = APPROVAL_BY_ID[project.approval_mode] ?? APPROVAL_MODES[0];
+  // A choice made while another save is in flight is shown at once and saved when
+  // that one lands, rather than dropped.
+  const [queued, setQueued] = useState<ApprovalMode | null>(null);
+  useEffect(() => {
+    if (busy || queued === null) return;
+    setQueued(null);
+    if (queued !== project.approval_mode) save({ approval_mode: queued });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, queued]);
   const settled =
     project.status === "completed" ||
     project.status === "failed" ||
@@ -122,11 +131,12 @@ export default function ReviewPolicy({
             <ChoiceRows
               name="policy"
               legend="When this build checks with you"
-              value={current.id}
+              value={queued ?? current.id}
               // Not disabled while saving: a disabled radio drops the keyboard focus
               // an arrow key just moved onto it. A change during a save waits for it.
               onChange={(id) => {
-                if (!busy) save({ approval_mode: id as ApprovalMode });
+                if (busy) setQueued(id as ApprovalMode);
+                else save({ approval_mode: id as ApprovalMode });
               }}
               choices={APPROVAL_MODES.map((m) => ({ value: m.id, label: m.label, description: m.hint }))}
             />

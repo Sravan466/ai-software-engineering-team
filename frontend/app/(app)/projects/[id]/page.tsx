@@ -161,23 +161,28 @@ function localPct(project: Project): number | null {
   return Math.round((local / known.length) * 100);
 }
 
-// Cost is only meaningful once something has actually cost money.
 /**
  * Which model builds it, in the composer's words (#96): "Auto", "Local · qwen2.5:7b",
  * or the model picked. Never the stored value (`auto`, `local_only`, `source:model`).
- * A Local build's model is the one its first phase actually ran on, else the one it
- * started on; the build doesn't store the default it was created under.
+ * A Local build's model is the one most of its phases ran on (an agent pointed at
+ * its own model in Settings doesn't speak for the build), else the one they started
+ * on; the build doesn't store the default it was created under.
  */
 function routingBadge(project: Project): string {
   if (project.routing_mode === "auto") return "Auto";
   if (project.routing_mode === "manual") return modelName(project.preferred_model) || "Pick a model";
-  const first = [...project.phases].sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
-  const ran =
-    first.find((p) => p.model_used && p.is_local !== false)?.model_used ??
-    modelName(first.find((p) => p.model_pick?.model)?.model_pick?.model);
-  return ran ? `Local · ${ran}` : "Local model";
+  const counts = new Map<string, number>();
+  for (const phase of project.phases) {
+    const ran = phase.is_local !== false ? phase.model_used : null;
+    const name = ran || modelName(phase.model_pick?.model);
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  let most = "";
+  for (const [name, n] of counts) if (n > (counts.get(most) ?? 0)) most = name;
+  return most ? `Local · ${most}` : "Local model";
 }
 
+// Cost is only meaningful once something has actually cost money.
 function formatCost(usd: unknown): string {
   const n = Number(usd || 0);
   if (!n) return "Free";

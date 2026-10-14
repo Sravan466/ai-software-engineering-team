@@ -198,11 +198,10 @@ export type ModelChoices = {
 };
 
 export function modelChoices(
-  local: LocalStatus | null,
-  models: RouterStatus | null,
+  options: ModelOption[],
   auto: AutoChoice[] | null | undefined,
 ): ModelChoices {
-  const usable = modelOptions(local, models).filter((o) => o.available);
+  const usable = options.filter((o) => o.available);
   // Auto never picks a model on another computer or a hosted one without being
   // asked, so they don't count towards its choice — they do count as usable.
   const autoCount = auto ? auto.length : usable.filter((o) => !o.remote && !o.hosted).length;
@@ -221,7 +220,10 @@ export function modelChoices(
   // Auto first when every model it can pick is free; Local model when a key would
   // be billed, so no build spends on one unless someone chose that.
   let preferred: ModelChoices["preferred"];
-  if (single) {
+  if (usable.length === 0) {
+    // Nothing to build with: Local model, whose blocker says what to start or add.
+    preferred = { routing: ROUTING_BY_BACKEND.local_only, model: "" };
+  } else if (single) {
     preferred =
       single === localDefault
         ? { routing: ROUTING_BY_BACKEND.local_only, model: "" }
@@ -433,7 +435,7 @@ export function runtimeBlocker(
 export function settingsSummary(config: RunConfig, choices: ModelChoices): string {
   const parts: string[] = [];
   if (config.routing.backend === "auto") {
-    parts.push(`Auto · ${choices.autoCount} models`);
+    parts.push(`Auto · ${choices.autoCount} model${choices.autoCount === 1 ? "" : "s"}`);
   } else if (config.routing.backend === "manual") {
     parts.push(config.model ? modelName(config.model) : "Pick a model");
   } else if (choices.localDefault) {
@@ -494,13 +496,14 @@ export default function RunSettings({
 
   // Pick a model with nothing pinned is a dead control, so choosing it pins
   // something the moment it is chosen: the default, else the first model that
-  // works on this machine or a configured cloud. Never, silently, a source on
-  // another computer — prompts sent there leave this one, so that is picked by hand.
+  // works on this machine. Never, silently, a source on another computer, a hosted
+  // model or a cloud key: prompts sent there leave this one, and a key bills
+  // someone, so those are picked by hand from the select.
   useEffect(() => {
     if (!routing.needsModel || model) return;
     const first =
       options.find((o) => o.available && o.isDefault) ??
-      options.find((o) => o.available && !o.remote && !o.hosted);
+      options.find((o) => o.available && !o.remote && !o.hosted && !o.cloud);
     if (first) onChange({ ...config, model: first.value });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routing.needsModel, model, options]);

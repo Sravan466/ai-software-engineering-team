@@ -99,25 +99,34 @@ export default function NewBuildPage() {
   const options = useMemo(() => modelOptions(local, models), [local, models]);
   // Which answers are real ones here (#96). Auto's count is the server's once it has
   // answered: only it knows which models fit this computer.
-  const choices = useMemo(
-    () => modelChoices(local, models, preflight?.auto),
-    [local, models, preflight?.auto],
-  );
+  const choices = useMemo(() => modelChoices(options, preflight?.auto), [options, preflight?.auto]);
 
   // A new build starts on the answer that fits what this account has — Auto when
   // every model it can pick is free, Local model when a cloud key would be billed —
   // until someone chooses. An answer that stops being offered (a model went away)
   // gives way to the one that fits now.
   const [chose, setChose] = useState(false);
+  // Until the first answer is settled the collapsed line says so, rather than
+  // showing Local model and then switching to Auto a moment later.
+  const [settled, setSettled] = useState(false);
   useEffect(() => {
-    if (checking) return;
+    // After the server's own answer: deciding on the page's estimate and then again
+    // on the server's count flipped the choice on load.
+    if (checking || preflighting) return;
     const offered = choices.modes.includes(config.routing);
-    if (chose && (offered || choices.modes.length === 0 && !choices.single)) return;
+    // A choice holds while it is still offered. With one model left there is no
+    // choice to hold: the build runs on that model, and the panel says which.
+    const onlyOne = choices.single !== null;
+    if (chose && offered && !onlyOne) return;
+    if (chose && choices.modes.length === 0 && !onlyOne) return;
     const { routing, model } = choices.preferred;
-    if (routing === config.routing && (!routing.needsModel || config.model || !model)) return;
+    if (routing === config.routing && (!routing.needsModel || config.model || !model)) {
+      setSettled(true);
+      return;
+    }
     setConfig((c) => ({ ...c, routing, model: routing.needsModel ? model || c.model : "" }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [checking, choices, chose]);
+  }, [checking, preflighting, choices, chose]);
   // What the list above left out, so the panel can say so rather than leaving a
   // model visible in Settings and missing here with no explanation anywhere.
   const omitted = useMemo(() => modelsThatCannotBuild(local), [local]);
@@ -203,7 +212,9 @@ export default function NewBuildPage() {
             <span className={"phase-chev" + (advanced ? " open" : "")} aria-hidden="true">
               {Icon.chevron}
             </span>
-            <span className="run-settings-summary">{settingsSummary(config, choices)}</span>
+            <span className="run-settings-summary">
+              {settled || chose ? settingsSummary(config, choices) : "Checking your models…"}
+            </span>
             <span className="run-settings-more">{advanced ? "Hide" : "Advanced"}</span>
           </button>
 

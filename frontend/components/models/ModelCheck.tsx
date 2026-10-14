@@ -268,6 +268,14 @@ export function PreStartCheck({
   );
 }
 
+/** " Both fit this computer." — said of the local models only; a cloud one isn't checked. */
+function fitsLine(local: string[], everyModel: boolean): string {
+  if (local.length === 0) return "";
+  if (!everyModel) return ` ${listOf(local)} ${local.length === 1 ? "fits" : "fit"} this computer.`;
+  const subject = local.length === 1 ? "It fits" : local.length === 2 ? "Both fit" : "All fit";
+  return ` ${subject} this computer.`;
+}
+
 /**
  * What Auto will do, said before Start (#96): which model each agent gets, from the
  * server's own picks, never guessed here. One sentence, grouped by model, that opens
@@ -299,15 +307,7 @@ function AutoPicks({
         ? `${group.length} agents`
         : listOf(group.map((p) => AGENT_BY_KEY[p.role]?.codename ?? p.role));
 
-  const fits = !allFit || local.length === 0
-    ? ""
-    : local.length === groups.length
-      ? local.length === 1
-        ? " It fits this computer."
-        : local.length === 2
-          ? " Both fit this computer."
-          : " All fit this computer."
-      : ` ${listOf(local)} ${local.length === 1 ? "fits" : "fit"} this computer.`;
+  const fits = allFit ? fitsLine(local, local.length === groups.length) : "";
 
   return (
     <div className="precheck" aria-live="polite">

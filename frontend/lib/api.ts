@@ -1761,8 +1761,9 @@ export type Preflight = {
   checks?: PreflightCheck[];
   /** Each role's model and why (#96) — the backend's answer, never guessed here. */
   picks?: ModelPick[];
-  /** Every model Auto may choose from right now, whatever is selected. */
-  auto?: AutoChoice[];
+  /** Every model Auto may choose from right now, whatever is selected. Null when the
+   *  server couldn't say — the page then counts for itself rather than reading "none". */
+  auto?: AutoChoice[] | null;
 };
 
 /** How a role's model was arrived at. */
