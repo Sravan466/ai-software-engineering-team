@@ -30,7 +30,7 @@ SCAN_ROWS = 4000
 #: What a failed row says when the model never delivered. A row failed for any other
 #: reason (a Stop, a computer that went away, a key or a bill) says nothing about the
 #: model.
-MODEL_FAILURES = ("The model provider failed", "The agent produced no output")
+MODEL_FAILURES = ("The model provider failed",)
 
 #: The most accounts kept at once; the least recently read goes first.
 MAX_ACCOUNTS = 256
@@ -95,7 +95,8 @@ def summarise(rows: list[dict]) -> dict[str, dict[str, Record]]:
     for row in rows:
         for outcome in outcomes(row):
             per_model = runs.setdefault(row["phase"], {})
-            kept = per_model.setdefault(outcome.model, [])
+            # One model, one record, however a row spelled it (`name` / `name:latest`).
+            kept = per_model.setdefault(_norm(outcome.model), [])
             if len(kept) < track_record.WINDOW:
                 kept.append(outcome)
     return {
@@ -120,6 +121,12 @@ def outcomes(row: dict) -> list[Outcome]:
     served = f"{provider}:{model}" if provider and model else None
 
     if row.get("status") == PhaseStatus.FAILED.value:
+        failed_on = pick.get("failed_on")
+        if isinstance(failed_on, list):
+            # The models the phase's call was sent to and failed on, as the router
+            # said — none when nothing was the model's doing.
+            return [Outcome(model=m, failed=True) for m in failed_on if isinstance(m, str)] + _failed_before(pick)
+        # A row from before that was recorded: its note, and the model it started on.
         note = row.get("feedback") or ""
         who = picked or served
         if who and note.startswith(MODEL_FAILURES):
@@ -161,10 +168,11 @@ def _failed_before(pick: dict) -> list[Outcome]:
 
 def same_model(a: str, b: str) -> bool:
     """Whether two specs name one model: runtimes answer to `name` and `name:latest` alike."""
-    def norm(spec: str) -> str:
-        return spec[: -len(":latest")] if spec.endswith(":latest") else spec
+    return _norm(a) == _norm(b)
 
-    return norm(a) == norm(b)
+
+def _norm(spec: str) -> str:
+    return spec[: -len(":latest")] if spec.endswith(":latest") else spec
 
 
 def _built(row: dict) -> Optional[bool]:

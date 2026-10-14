@@ -52,7 +52,7 @@ not hiccups.
 from __future__ import annotations
 import threading
 from dataclasses import dataclass, field, replace
-from typing import Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from tenacity import (
     RetryCallState,
@@ -183,7 +183,7 @@ class ModelRouter:
         self._embedding_pin: Optional[tuple[tuple[str, str], str]] = None
         #: Auto's candidates per difficulty, kept a few seconds (#96): every call
         #: resolves its chain, and assessing every local model each time is waste.
-        self._prior_cache: dict[str, tuple[float, list[tuple[tuple[str, str], str]]]] = {}
+        self._prior_cache: dict[str, tuple[float, Any]] = {}
         # Apply any keys/models saved at runtime via the Settings UI (overrides .env).
         self._load_persisted()
 
@@ -1591,15 +1591,20 @@ class ModelRouter:
                 if pname in CLOUD_PROVIDERS:
                     self._note_failure(pname, model, e)
 
+        # The models that were sent the call and failed at it for a reason about the
+        # model — what a failed phase is put down to in Auto's record (#96). A runtime
+        # that wasn't running, a key, a bill or a rate limit names none.
+        tried = [f"{a['provider']}:{a['model']}" for a in attempts if a.get("tried")]
         if len(chain) == 1 and last_error is not None:
             # One model was ever in play: its own words are the whole story, and
             # "all providers failed" would only bury them.
+            last_error.tried = tried  # type: ignore[attr-defined]
             raise last_error
         # Every model failed: name each one's reason in plain words, and carry the
         # first cloud refusal's kind so the page can offer its fix.
         # A refusal that needs the person (no credit, expired) beats a rate limit.
         first = next((a for a in attempts if a.get("kind") in keyerrors.BLOCKING), None)
-        raise ProviderError(
+        error = ProviderError(
             "No model in this build's chain could answer. "
             + "; ".join(
                 f"{_label(a['provider'])} ({a['model']}): {a.get('why') or a['error']}" for a in attempts
@@ -1609,6 +1614,8 @@ class ModelRouter:
             kind=first["kind"] if first else None,
             provider=first["provider"] if first else None,
         )
+        error.tried = tried  # type: ignore[attr-defined]
+        raise error
 
     def _skipped(self, pname: str, model: str, refused: Optional[KeyCheck]) -> dict:
         """An attempt not made, and why — "openai:gpt-x → out of credit", not "unavailable"."""
@@ -1927,6 +1934,19 @@ class ModelRouter:
         self._prior_cache[complexity] = (now, prior)
         return prior
 
+    def _cached_local(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """`_local_candidates`, kept as long as the candidate lists: it is the costly
+        part, and it doesn't depend on how hard the step is."""
+        import time as _time
+
+        now = _time.monotonic()
+        hit = self._prior_cache.get("_local")
+        if hit is not None and now - hit[0] < self._PRIOR_TTL_SECONDS:
+            return hit[1]
+        found = self._local_candidates()
+        self._prior_cache["_local"] = (now, found)
+        return found
+
     def _auto_prior(self, complexity: str) -> list[tuple[tuple[str, str], str]]:
         """Every model Auto may choose, best first by what the router knows, with why.
 
@@ -1964,7 +1984,7 @@ class ModelRouter:
         if complexity == "high":
             for index, pair in enumerate(cloud):
                 add(pair, "the strongest cloud model for a hard step" if index == 0 else "a cloud model you have a key for")
-        fitting, caveats = self._local_candidates()
+        fitting, caveats = self._cached_local()
         for index, pair in enumerate(fitting):
             add(
                 pair,

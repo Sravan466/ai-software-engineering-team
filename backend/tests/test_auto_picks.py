@@ -148,8 +148,14 @@ def test_a_failed_phase_counts_only_when_the_model_failed():
     failed = _row(status="failed", provider_used=None, model_used=None, model_pick=pick)
     (one,) = history.outcomes({**failed, "feedback": "The model provider failed during this phase."})
     assert one.model == "ollama:big" and one.failed
-    assert history.outcomes({**failed, "feedback": "The agent produced no output."})[0].failed
+    # Nothing ran wrong for the model when the graph produced nothing.
+    assert history.outcomes({**failed, "feedback": "The agent produced no output."}) == []
     assert history.outcomes({**failed, "feedback": "Stopped before this phase finished."}) == []
+    # Since failures name their models: exactly those, and none when none failed.
+    named = {**failed, "feedback": "The model provider failed during this phase."}
+    assert history.outcomes({**named, "model_pick": {**pick, "failed_on": []}}) == []
+    (small,) = history.outcomes({**named, "model_pick": {**pick, "failed_on": ["ollama:small"]}})
+    assert small.model == "ollama:small" and small.failed
     assert history.outcomes({**failed, "feedback": "Paused: the computer running this model disconnected."}) == []
     assert history.outcomes({**failed, "model_pick": None, "feedback": "The agent produced no output."}) == []
 
@@ -497,9 +503,12 @@ def test_a_retried_phase_keeps_the_failure_of_the_attempt_it_clears(stub_router)
                            model_pick={"model": "ollama:big", "failed_before": ["ollama:older"]}))
         db.add(PhaseResult(project_id=project.id, phase="product_manager", agent="Scope", status="failed",
                            feedback="Stopped before this phase finished.", model_pick={"model": "ollama:stopped"}))
+        db.add(PhaseResult(project_id=project.id, phase="product_manager", agent="Scope", status="failed",
+                           feedback="The model provider failed during this phase.",
+                           model_pick={"model": "ollama:picked", "failed_on": ["ollama:fallback"]}))
         db.commit()
         row = runner._begin_phase(db, project, "product_manager")
-        assert row.model_pick["failed_before"] == ["ollama:big", "ollama:older"]
+        assert sorted(row.model_pick["failed_before"]) == ["ollama:big", "ollama:fallback", "ollama:older"]
         db.delete(project)
         db.commit()
 
@@ -576,3 +585,31 @@ def test_a_model_that_runs_with_caveats_is_a_candidate_but_never_leads_a_cold_st
     model_router = auto_router(_source("ollama", [BIG, SMALL]), chosen="ollama:qwen2.5:7b",
                                caveats={"qwen3:1.7b"}, records=records)
     assert model_router._auto_pick("medium", "product_manager") == ("ollama", "qwen3:1.7b")
+
+
+def test_a_failed_call_names_only_the_models_that_failed_at_it(auto_router):
+    from app.router.base import ProviderError
+
+    class Broken(FakeAdapter):
+        def chat(self, request):
+            raise ProviderError("model crashed", retryable=False)
+
+    down = _source("ollama", [BIG])
+    down.adapter.up = False
+    model_router = auto_router(down, chosen="ollama:qwen2.5:7b")
+    with pytest.raises(ProviderError) as stopped:
+        model_router.complete([ChatMessage(role="user", content="hi")])
+    assert stopped.value.tried == [], "a runtime that isn't running is nobody's failure"
+
+    broken = SourceProvider(Source(id="ollama", label="Ollama", base_url="http://127.0.0.1:11434",
+                                   runtime="openai-compatible", origin="detected"), Broken([BIG]))
+    model_router = auto_router(broken, chosen="ollama:qwen2.5:7b")
+    with pytest.raises(ProviderError) as crashed:
+        model_router.complete([ChatMessage(role="user", content="hi")])
+    assert crashed.value.tried == ["ollama:qwen2.5:7b"]
+
+
+def test_one_model_under_two_spellings_has_one_record():
+    rows = _record("devops_engineer", "ollama:qwen3", 2) + _record("devops_engineer", "ollama:qwen3:latest", 2)
+    found = history.summarise(rows)["devops_engineer"]
+    assert list(found) == ["ollama:qwen3"] and found["ollama:qwen3"].sample == 4
