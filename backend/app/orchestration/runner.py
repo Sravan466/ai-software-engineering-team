@@ -65,11 +65,15 @@ from app.orchestration.graph import connectors_note, graph, gather_skills
 from app.orchestration.state import PipelineState
 from app.preview import service as mockup
 from app.preview.jobs import jobs as mockup_jobs
-from app.router import inflight
+from app.router import history as model_history, inflight
 from app.router.base import ComputerDisconnected, ProviderError, RequestCancelled
 from app.schemas.llm import LLMResponse, Usage
 
 log = get_logger(__name__)
+
+#: What a phase row stopped by Stop says — apart from a provider failure, which is
+#: the model's (#96).
+_STOPPED = "Stopped before this phase finished."
 
 # ── one lock per build, not one for the whole process ────────────────────────
 #
@@ -1731,7 +1735,11 @@ class PipelineRunner:
                 )
             else:
                 self._abandon_row(
-                    db, row, "The model provider failed while regenerating."
+                    db,
+                    row,
+                    _STOPPED
+                    if isinstance(e, RequestCancelled)
+                    else "The model provider failed while regenerating.",
                 )
             if isinstance(e, RequestCancelled) or self._cancel_requested(db, project):
                 self._settle_cancelled(db, project)
@@ -1979,6 +1987,11 @@ class PipelineRunner:
             # start, when the computer is back.
             self._abandon_row(db, row, "Paused: the computer running this model disconnected.")
             raise
+        except RequestCancelled:
+            # Said apart from a provider failure: a Stop is not the model's doing, and
+            # Auto's record of the model reads this note (#96).
+            self._abandon_row(db, row, _STOPPED)
+            raise
         except ProviderError:
             self._abandon_row(db, row, "The model provider failed during this phase.")
             raise
@@ -2057,11 +2070,35 @@ class PipelineRunner:
             output={},
             content_md="",
             started_at=now,
+            model_pick=self._model_pick(project, phase_key),
         )
         db.add(row)
         db.commit()
         db.refresh(row)
         return row
+
+    @staticmethod
+    def _model_pick(project: Project, phase_key: str) -> Optional[dict]:
+        """Which model this phase starts on, and why (#96): `{mode, model, reason,
+        sample, basis}`, as the account's router resolves it. Bookkeeping, so never
+        the reason a phase doesn't start."""
+        if not project.owner_id:
+            return None
+        try:
+            from app.router.router import routers
+
+            found = routers.for_user(project.owner_id).explain_pick(
+                RoutingMode(project.routing_mode or RoutingMode.LOCAL_ONLY.value),
+                project.preferred_model,
+                get_agent(phase_key).complexity,
+                phase_key,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Couldn't record which model %s starts on: %s", phase_key, e)
+            return None
+        if not found:
+            return None
+        return {key: found[key] for key in ("mode", "model", "reason", "sample", "basis")}
 
     def _complete_row(
         self, db: Session, project: Project, row: PhaseResult, lr: dict
@@ -2099,6 +2136,14 @@ class PipelineRunner:
         # written before skills existed", and the review panel says which.
         row.skills_used = lr.get("skills_used") if "skills_used" in lr else None
         row.handoff = lr.get("handoff") or None
+        if isinstance(row.model_pick, dict):
+            # Whether any of the phase's calls had to leave the model it started on —
+            # the one fact about that model only the calls know (#96).
+            calls = lr["calls"] if isinstance(lr.get("calls"), list) else [lr]
+            row.model_pick = {
+                **row.model_pick,
+                "fell_back": any(bool(call.get("fallback_used")) for call in calls),
+            }
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
         # One transaction for the row and the calls that produced it, so a driver
@@ -2106,6 +2151,8 @@ class PipelineRunner:
         # the same output, records them exactly once.
         self._record_usage(db, project, lr)
         db.commit()
+        # Auto chooses the next phase with this one counted.
+        model_history.changed()
         if row.phase == Phase.SECURITY_ENGINEER.value:
             # Every audit, including the re-audit after a fix — which is the one that
             # decides whether the fix took. Here rather than in `_run_phase` because a
@@ -2287,6 +2334,7 @@ class PipelineRunner:
         row.feedback = reason
         row.completed_at = _now()
         db.commit()
+        model_history.changed()
 
     # ── graph position ────────────────────────────────────────────────────────
     @staticmethod

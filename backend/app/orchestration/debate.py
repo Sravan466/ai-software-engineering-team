@@ -40,6 +40,8 @@ _SYSTEM = (
 #: The role this call routes by and bills to, so the moderator can be pointed at a
 #: cheaper model than the ones writing code.
 ROLE = "debate"
+#: How hard the debate is, for routing: one place, read by the check before Start too.
+COMPLEXITY = "medium"
 
 #: The question the pipeline always puts to the debate. Named here because two places
 #: need it to be the same string: the node that runs it and the record it writes.
@@ -58,7 +60,7 @@ def conduct_debate(
     # thing with nothing in it. Subtracting a hand-counted `len(_SYSTEM) + len(topic)`
     # misses the headings and the closing line wrapped around them, which is how a
     # budget computed here overruns the window it was computed from.
-    profile = router.profile_for(mode, preferred_model, complexity="medium", role=ROLE)
+    profile = router.profile_for(mode, preferred_model, complexity=COMPLEXITY, role=ROLE)
 
     def assemble(quoted: str) -> str:
         return (
@@ -74,7 +76,7 @@ def conduct_debate(
         mode=mode,
         preferred_model=preferred_model,
         options=GenerationOptions(json_mode=True),
-        complexity="medium",
+        complexity=COMPLEXITY,
         role=ROLE,
     )
     record = _parse(resp.text, topic)

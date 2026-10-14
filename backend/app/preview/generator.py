@@ -54,6 +54,8 @@ log = get_logger(__name__)
 #: and is its own line in Settings, so it can be pointed at a smaller or faster model
 #: than the code phases without touching them.
 ROLE = "preview"
+#: How hard drawing the mockup is, for routing: one place, read by the check before Start too.
+COMPLEXITY = "high"
 
 __all__ = [
     "ROLE",
@@ -111,7 +113,7 @@ class _Calls:
     def profile(self) -> ModelProfile:
         if self._profile is None:
             self._profile = router.profile_for(
-                self.mode, self.preferred_model, complexity="high", role=ROLE
+                self.mode, self.preferred_model, complexity=COMPLEXITY, role=ROLE
             )
         return self._profile
 
@@ -129,7 +131,7 @@ class _Calls:
             mode=self.mode,
             preferred_model=self.preferred_model,
             options=options,
-            complexity="high",
+            complexity=COMPLEXITY,
             role=ROLE,
         )
         self.responses.append(resp)

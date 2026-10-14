@@ -51,7 +51,7 @@ not hiccups.
 """
 from __future__ import annotations
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Iterator, Optional
 
 from tenacity import (
@@ -66,7 +66,7 @@ from app.core import identity, keyerrors, model_roles, model_settings, secrets_s
 from app.core.config import settings
 from app.core.constants import RoutingMode
 from app.core.logging import get_logger
-from app.router import compat, keycheck
+from app.router import compat, history, keycheck, track_record
 from app.router.keycheck import KeyCheck
 from app.connector.remote import ConnectorProvider, DeviceSources, looks_like_device_source
 from app.router.base import CLOUD_PROVIDERS, ComputerDisconnected, LLMProvider, ProviderError, RequestCancelled
@@ -121,6 +121,9 @@ class Readiness:
     #: The compatibility check of every local model the run will use — each with its
     #: verdict (fits, degraded, blocked, unknown), reasons, and the roles using it.
     checks: tuple[dict, ...] = field(default_factory=tuple)
+    #: Each role's model and why (`explain_pick`), so the page names Auto's choice
+    #: per agent rather than guessing it. Filled when the run can start.
+    picks: tuple[dict, ...] = field(default_factory=tuple)
 
 
 class ModelRouter:
@@ -1199,14 +1202,22 @@ class ModelRouter:
         users: dict[tuple[str, str], list[str]] = {}
         #: Cloud models the run leads with.
         cloud_heads: dict[tuple[str, str], str] = {}
+        picks: list[dict] = []
         for role in [*(roles or ()), None]:
+            # Each role at the difficulty its own calls declare: Auto picks per role
+            # and per difficulty, and a check at any other one checks another model.
+            complexity = complexity_of(role)
             try:
-                chain = self._resolve_chain(mode, preferred_model, "medium", role)
+                chain = self._resolve_chain(mode, preferred_model, complexity, role)
             except UnresolvedModel as e:
                 return Readiness(ok=False, reason=str(e))
             if not chain:
                 return self._nothing_local()
             head = chain[0]
+            if role:
+                found = self.explain_pick(mode, preferred_model, complexity, role, chain)
+                if found is not None:
+                    picks.append({"role": role, **found})
             if head[0] in CLOUD_PROVIDERS:
                 cloud_heads.setdefault(head, role or "the rest of the run")
             else:
@@ -1231,7 +1242,7 @@ class ModelRouter:
                 )
 
         if not wanted:
-            return Readiness(ok=True)
+            return Readiness(ok=True, picks=tuple(picks))
 
         by_source: dict[str, list[tuple[str, str]]] = {}
         for (source_id, model), role in wanted.items():
@@ -1273,7 +1284,7 @@ class ModelRouter:
         able = self._able_to_write(mode, by_source)
         if not able.ok:
             return able
-        return self._compatible(by_source, users)
+        return replace(self._compatible(by_source, users), picks=tuple(picks))
 
     def _compatible(
         self, by_source: dict[str, list[tuple[str, str]]], users: dict[tuple[str, str], list[str]]
@@ -1835,7 +1846,7 @@ class ModelRouter:
             if pair not in chain:
                 chain.append(pair)
         elif mode == RoutingMode.AUTO:
-            pair = self._auto_pick(complexity)
+            pair = self._auto_pick(complexity, role)
             if pair and pair not in chain:
                 chain.append(pair)
 
@@ -1844,37 +1855,204 @@ class ModelRouter:
                 chain.append(pair)
         return chain
 
-    def _auto_pick(self, complexity: str) -> Optional[tuple[str, str]]:
-        """Heuristic primary choice for Auto mode.
+    # ── Auto: each agent on the model its own record favours (#96) ──────────
+    def _auto_pick(self, complexity: str, role: Optional[str] = None) -> Optional[tuple[str, str]]:
+        """The model Auto starts `role`'s call on. One answer for `complete`,
+        `profile_for`, `strongest_for` and the check before Start, because all four
+        resolve their chain through here: a prompt sized for one model and sent to
+        another is the failure that sharing it prevents."""
+        choice = self._auto_choice(complexity, role)
+        return choice[0] if choice else None
 
-        - High complexity + a cloud key available -> strongest configured cloud model.
-        - Otherwise prefer the free local default when its source is answering.
+    def _auto_choice(
+        self, complexity: str, role: Optional[str]
+    ) -> Optional[tuple[tuple[str, str], track_record.Pick]]:
+        """(the model, and why) — the candidates, ranked by this account's record of
+        each one for this agent, with the router's own order standing in where a
+        model has too few runs to judge. Deterministic: the same history and the
+        same models always give the same answer."""
+        prior = self._auto_prior(complexity)
+        if not prior:
+            return None
+        pairs = {self._spec(pair): pair for pair, _ in prior}
+        pick = track_record.choose(
+            [(self._spec(pair), why) for pair, why in prior], self._records_for(role, pairs)
+        )
+        return (pairs[pick.model], pick) if pick else None
+
+    def _auto_prior(self, complexity: str) -> list[tuple[tuple[str, str], str]]:
+        """Every model Auto may choose, best first by what the router knows, with why.
+
+        A hard step goes to a working cloud key first, in the router's own
+        reasoning-strength order. Otherwise the largest model this computer runs
+        well leads, then the default, then the cloud. Never, unasked, a model on
+        another computer or one its runtime sends to a hosted service: where a
+        prompt goes is the person's decision. The default is the exception — it is
+        that decision, already made.
         """
+        default = self.local_default()
+        default_source = self.sources.get(default[0]) if default else None
+        default_up = bool(default_source is not None and default_source.available())
         cloud = [
-            name
+            (name, self._default_model[name])
             for name in CLOUD_PROVIDERS
-            if self._cloud[name].available() and not self._refuses(name, self._default_model.get(name) or "")
+            if self._default_model.get(name)
+            and self._cloud[name].available()
+            and not self._refuses(name, self._default_model[name])
         ]
-        local = self.local_default()
-        local_source = self.sources.get(local[0]) if local else None
-        local_up = bool(local_source is not None and local_source.available())
+        prior: list[tuple[tuple[str, str], str]] = []
 
-        if complexity == "high" and cloud:
-            # Preference order by reasoning strength.
-            for pname in CLOUD_PROVIDERS:
-                if pname in cloud:
-                    return (pname, self._default_model[pname])
+        def add(pair: tuple[str, str], why: str) -> None:
+            if all(pair != have for have, _ in prior):
+                prior.append((pair, why))
 
-        if local_up:
-            return local
+        if complexity == "high":
+            for index, pair in enumerate(cloud):
+                add(pair, "the strongest cloud model for a hard step" if index == 0 else "a cloud model you have a key for")
+        for index, pair in enumerate(self._fitting_local()):
+            add(
+                pair,
+                "your default"
+                if pair == default
+                else "the largest model that fits this computer"
+                if index == 0
+                else "a model that fits this computer",
+            )
+        if default and default_up:
+            add(default, "your default")
+        for pair in cloud:
+            add(pair, "a cloud model you have a key for")
+        if default and not default_up:
+            # Nothing is up to choose from: the default still leads, so the error
+            # names the model this run would have used.
+            add(default, "your default")
+        return prior
 
-        if cloud:
-            pname = cloud[0]
-            return (pname, self._default_model[pname])
+    def _fitting_local(self) -> list[tuple[str, str]]:
+        """Models on this computer that write and that it runs well, largest first.
 
-        # Nothing configured and no local source up — still return local so the error
-        # names the model the run would have used.
-        return local
+        The same tests `strongest_for` holds a stronger model to: it writes, it is
+        not an embedding or base model, and the compatibility check says it fits —
+        a model the check would block fails to load, and the call falls back with a
+        prompt sized for the model it couldn't reach.
+        """
+        found: list[tuple[int, tuple[str, str], SourceProvider]] = []
+        for prov in self.sources.providers():
+            if not prov.source.same_machine or not prov.available():
+                continue
+            for entry in prov.entries():
+                if not entry.is_local or (entry.kind or "chat") in ("embedding", "base"):
+                    continue
+                if prov.writes(entry.name) is False:
+                    continue
+                found.append((entry.size_bytes or 0, (prov.name, entry.name), prov))
+        found.sort(key=lambda item: item[0], reverse=True)
+        fitting: list[tuple[str, str]] = []
+        for _size, pair, prov in found:
+            try:
+                if prov.compatibility(pair[1]).level == compat.FITS:
+                    fitting.append(pair)
+            except Exception:  # noqa: BLE001 - an unanswerable check is a no
+                continue
+        return fitting
+
+    def _records_for(self, role: Optional[str], pairs: dict[str, tuple[str, str]]) -> dict[str, track_record.Record]:
+        """This account's record for `role` on each candidate, keyed by its spec.
+
+        A row names a model the way the call reported it; a runtime may spell the
+        same model another way (`qwen3` and `qwen3:latest`), so each is matched to
+        a candidate by its source's rule, and the larger record wins a collision.
+        """
+        if not role:
+            return {}
+        found = history.records(self.user_id).get(role) or {}
+        out: dict[str, track_record.Record] = {}
+        for spec, record in found.items():
+            target = spec if spec in pairs else None
+            if target is None:
+                source, _, model = spec.partition(":")
+                prov = self.sources.get(source)
+                if prov is not None:
+                    target = next(
+                        (s for s, (p, m) in pairs.items() if p == source and prov.resolves(model, [m])), None
+                    )
+            if target is None:
+                continue
+            have = out.get(target)
+            if have is None or record.sample > have.sample:
+                out[target] = (
+                    record if record.model == target else track_record.Record(
+                        model=target, sample=record.sample, score=record.score,
+                        latency_ms=record.latency_ms, reason=record.reason,
+                    )
+                )
+        return out
+
+    def explain_pick(
+        self,
+        mode: RoutingMode,
+        preferred_model: Optional[str],
+        complexity: str,
+        role: Optional[str],
+        chain: Optional[list[tuple[str, str]]] = None,
+    ) -> Optional[dict]:
+        """Which model `role`'s calls start on, and why, read off the chain they resolve.
+
+        What the check before Start lists for each agent, and what a phase row
+        records when it starts (`phase_results.model_pick`): `{mode, model, name,
+        where, local, reason, sample, basis}`. None when nothing resolves. `chain`
+        is that chain when the caller has just resolved it.
+        """
+        if chain is None:
+            try:
+                chain = self._resolve_chain(mode, preferred_model, complexity, role)
+            except UnresolvedModel:
+                return None
+        if not chain:
+            return None
+        head = chain[0]
+        reason, sample, basis = "your default", 0, "default"
+        role_spec = self._roles.get(role)
+        if role_spec and self._saved_pair(role_spec) == head:
+            reason, basis = "set for this agent in Settings", "settings"
+        elif mode == RoutingMode.MANUAL and preferred_model and self._saved_pair(preferred_model) == head:
+            reason, basis = "the model you picked for this build", "chosen"
+        elif mode == RoutingMode.AUTO:
+            choice = self._auto_choice(complexity, role)
+            if choice is not None and choice[0] == head:
+                reason, sample, basis = choice[1].reason, choice[1].sample, choice[1].basis
+        local = head[0] not in CLOUD_PROVIDERS
+        prov = self.sources.get(head[0]) if local else None
+        return {
+            "mode": mode.value,
+            "model": self._spec(head),
+            "name": head[1],
+            "where": prov.source.label if prov is not None else _label(head[0]),
+            "local": local,
+            "reason": reason,
+            "sample": sample,
+            "basis": basis,
+        }
+
+    def auto_choices(self) -> list[dict]:
+        """What Auto can choose from on this account right now, for the composer to
+        say before anyone picks it: `[{model, name, where, local}]`."""
+        self.sources.ensure()
+        out = []
+        for pair, _why in self._auto_prior("high"):
+            local = pair[0] not in CLOUD_PROVIDERS
+            prov = self.sources.get(pair[0]) if local else None
+            if local and (prov is None or not prov.available()):
+                continue
+            out.append(
+                {
+                    "model": self._spec(pair),
+                    "name": pair[1],
+                    "where": prov.source.label if prov is not None else _label(pair[0]),
+                    "local": local,
+                }
+            )
+        return out
 
 
 #: Word fragments that suggest a model was trained for code. Matched against the list
@@ -1892,6 +2070,31 @@ def _short(kind: Optional[str]) -> Optional[str]:
 
 def _label(provider: str) -> str:
     return keyerrors.LABELS.get(provider, provider)
+
+
+def complexity_of(role: Optional[str]) -> str:
+    """How hard `role`'s calls are, as the code making them declares it (#96).
+
+    Read from each caller rather than listed here, so the check before Start
+    resolves every role exactly as its calls will.
+    """
+    if not role:
+        return "medium"
+    try:
+        from app.agents import AGENTS
+        from app.agents.change_planner import ChangePlannerAgent
+        from app.orchestration import debate
+        from app.preview import generator
+
+        declared = {
+            **{key: agent.complexity for key, agent in AGENTS.items()},
+            ChangePlannerAgent.key: ChangePlannerAgent.complexity,
+            debate.ROLE: debate.COMPLEXITY,
+            generator.ROLE: generator.COMPLEXITY,
+        }
+    except Exception:  # noqa: BLE001 - an unreadable declaration is the medium default
+        return "medium"
+    return declared.get(role, "medium")
 
 
 def _looks_like_a_coder(model: str) -> bool:
