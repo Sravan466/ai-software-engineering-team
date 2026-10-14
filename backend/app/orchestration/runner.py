@@ -77,6 +77,27 @@ _STOPPED = "Stopped before this phase finished."
 _PAUSED = "Paused: the computer running this model disconnected."
 
 
+#: A phase that failed on a key, a bill, a rate limit or an outage — not the model's
+#: doing, and said apart so Auto's record doesn't count it (#96).
+_ACCOUNT_STOP = "The provider stopped this phase over a key, credit or rate limit."
+
+
+def _not_the_models_fault(error: BaseException) -> bool:
+    from app.core import keyerrors
+
+    return getattr(error, "kind", None) in (keyerrors.BLOCKING | keyerrors.RETRYABLE)
+
+
+def _attempted(row: PhaseResult) -> Optional[str]:
+    """The model a dead row is put down to: the one it started on, else the one
+    that served it (rows from before picks were recorded)."""
+    if _picked(row):
+        return _picked(row)
+    if row.provider_used and row.model_used:
+        return f"{row.provider_used}:{row.model_used}"
+    return None
+
+
 def _picked(row: PhaseResult) -> Optional[str]:
     """The model a phase row started on (#96)."""
     pick = row.model_pick if isinstance(row.model_pick, dict) else {}
@@ -1743,10 +1764,12 @@ class PipelineRunner:
                 # the phase with two live `pending_approval` rows for one piece of
                 # work, doubling its history and the progress count drawn from it.
                 # It produced nothing; `project.last_error` carries why.
-                if not isinstance(e, (RequestCancelled, ComputerDisconnected)):
+                carried = list((row.model_pick or {}).get("failed_before") or [])
+                if not isinstance(e, (RequestCancelled, ComputerDisconnected)) and not _not_the_models_fault(e):
                     # The failure is the model's, and the row that says so is about to
                     # go: the restored attempt carries it, so Auto's record keeps it.
-                    superseded.model_pick = _with_failures(superseded.model_pick, _picked(row))
+                    carried.append(_picked(row))
+                superseded.model_pick = _with_failures(superseded.model_pick, *carried)
                 self._delete_rows(db, project, [row])
                 db.commit()
                 log.info(
@@ -1763,6 +1786,8 @@ class PipelineRunner:
                     if isinstance(e, RequestCancelled)
                     else _PAUSED
                     if isinstance(e, ComputerDisconnected)
+                    else _ACCOUNT_STOP
+                    if _not_the_models_fault(e)
                     else "The model provider failed while regenerating.",
                 )
             if isinstance(e, RequestCancelled) or self._cancel_requested(db, project):
@@ -1992,7 +2017,11 @@ class PipelineRunner:
     # ── one phase ─────────────────────────────────────────────────────────────
     def _run_phase(self, db: Session, project: Project, phase_key: str) -> None:
         """Announce a phase, run exactly that phase, then record what it produced."""
-        row = self._begin_phase(db, project, phase_key, escalated=phase_key in self._escalating(project.id))
+        row = self._begin_phase(db, project, phase_key)
+        if phase_key in self._escalating(project.id):
+            # Read after the phase is marked started: the graph's state is behind the
+            # checkpoint lock, and another driver may hold it for a whole model call.
+            self._repick(db, project, row, escalated=True)
         started, _ = self._graph_position(project.id)
 
         try:
@@ -2016,8 +2045,10 @@ class PipelineRunner:
             # Auto's record of the model reads this note (#96).
             self._abandon_row(db, row, _STOPPED)
             raise
-        except ProviderError:
-            self._abandon_row(db, row, "The model provider failed during this phase.")
+        except ProviderError as e:
+            self._abandon_row(
+                db, row, _ACCOUNT_STOP if _not_the_models_fault(e) else "The model provider failed during this phase."
+            )
             raise
 
         last_result = state.get("last_result")
@@ -2079,7 +2110,7 @@ class PipelineRunner:
             spec
             for gone in dead
             for spec in (
-                ([_picked(gone)] if (gone.feedback or "").startswith(model_history.MODEL_FAILURES) else [])
+                ([_attempted(gone)] if (gone.feedback or "").startswith(model_history.MODEL_FAILURES) else [])
                 + list(((gone.model_pick or {}).get("failed_before") or []))
             )
             if spec
@@ -2115,6 +2146,14 @@ class PipelineRunner:
         # The agent's calls are held to this same model (`BaseAgent._pin`).
         inflight.hold(project.id, phase_key, (row.model_pick or {}).get("model"))
         return row
+
+    def _repick(self, db: Session, project: Project, row: PhaseResult, *, escalated: bool) -> None:
+        """Record — and hold — the model this phase starts on again, keeping what
+        the row already carries about earlier attempts."""
+        carried = list((row.model_pick or {}).get("failed_before") or [])
+        row.model_pick = _with_failures(self._model_pick(project, row.phase, escalated), *carried)
+        db.commit()
+        inflight.hold(project.id, row.phase, (row.model_pick or {}).get("model"))
 
     @staticmethod
     def _escalating(project_id: str) -> set:

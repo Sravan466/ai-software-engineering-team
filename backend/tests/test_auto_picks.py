@@ -540,3 +540,19 @@ def test_one_model_spelled_two_ways_is_one_candidate(auto_router, monkeypatch):
     assert [c["name"] for c in model_router.auto_choices()] == ["qwen3:latest", "qwen3:1.7b"]
     found = model_router.explain_pick(RoutingMode.AUTO, None, "medium", "product_manager")
     assert found["reason"] == "no record yet, so your default"
+
+
+def test_a_phase_stopped_by_a_key_or_a_bill_is_not_the_models_failure(client, monkeypatch):
+    from app.router.base import ProviderError
+
+    def broke(*_args, **_kwargs):
+        raise ProviderError("Out of credit.", retryable=False, kind="no_credit", provider="openai")
+
+    stub(monkeypatch, "complete", broke)
+    pid = client.post("/api/projects", json={"idea": "Out of credit", "routing_mode": "local_only"}).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    with SessionLocal() as db:
+        rows = db.query(PhaseResult).filter(PhaseResult.project_id == pid, PhaseResult.status == "failed").all()
+    assert rows and all(row.feedback == "The provider stopped this phase over a key, credit or rate limit." for row in rows)
+    assert all(history.outcomes({"phase": r.phase, "status": r.status, "feedback": r.feedback,
+                                 "model_pick": {"model": "openai:gpt-x"}}) == [] for r in rows)

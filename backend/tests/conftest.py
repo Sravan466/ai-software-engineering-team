@@ -260,6 +260,19 @@ def client(stub_router):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_auto_choices():
+    """Auto's candidates and history are cached per router and per account (#96); a
+    test that swaps sources by hand would otherwise be answered from the last one's."""
+    from app.router import history
+    from app.router.router import routers
+
+    for loaded in routers.loaded():
+        loaded._prior_cache.clear()
+    history.forget()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _fresh_key_check_limit():
     """The key-check rate limit is per account, and the whole suite is one account."""
     _keycheck.limiter.reset()

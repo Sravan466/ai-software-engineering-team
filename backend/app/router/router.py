@@ -435,6 +435,8 @@ class ModelRouter:
             prov.set_api_key(api_key)
         if default_model:
             self._default_model[provider] = default_model
+        # Auto's candidates name each cloud provider's model and need its key.
+        self._prior_cache.clear()
 
     def _load_persisted(self) -> None:
         for pname, entry in self._secrets.get_all().items():
@@ -2000,7 +2002,9 @@ class ModelRouter:
                 found.append((entry.size_bytes or 0, (prov.name, entry.name), prov))
         found.sort(key=lambda item: item[0], reverse=True)
         fitting: list[tuple[str, str]] = []
-        for _size, pair, prov in found:
+        # The largest few only: each check may ask the runtime to describe the model,
+        # and a machine with thirty pulled is not asked thirty times a minute.
+        for _size, pair, prov in found[:_MAX_LOCAL_CANDIDATES]:
             try:
                 # Weighed against memory even while loaded: a model that "fits" only
                 # because it is in memory now would lead until the runtime unloads it,
@@ -2110,18 +2114,11 @@ class ModelRouter:
         self.sources.ensure()
         out = []
         for pair, _why in self._cached_prior("high"):
-            local = pair[0] not in CLOUD_PROVIDERS
-            prov = self.sources.get(pair[0]) if local else None
-            if local and (prov is None or not prov.available()):
+            prov = self.sources.get(pair[0]) if pair[0] not in CLOUD_PROVIDERS else None
+            if pair[0] not in CLOUD_PROVIDERS and (prov is None or not prov.available()):
                 continue
-            out.append(
-                {
-                    "model": self._spec(pair),
-                    "name": pair[1],
-                    "where": prov.source.label if prov is not None else _label(pair[0]),
-                    "local": local,
-                }
-            )
+            row = self._pick_row(RoutingMode.AUTO, pair, "", 0, "")
+            out.append({key: row[key] for key in ("model", "name", "where", "local")})
         return out
 
 
@@ -2133,6 +2130,9 @@ class ModelRouter:
 #: hardcoded model name back into the routing layer by the back door.
 _CODER_HINTS = ("coder", "code", "codestral", "starcoder", "devstral")
 
+
+#: How many local models Auto weighs, largest first (#96).
+_MAX_LOCAL_CANDIDATES = 8
 
 #: Failures that are about the account or the provider, not the model: a key, a bill,
 #: a rate limit, an outage. A model isn't marked down for them (#96).

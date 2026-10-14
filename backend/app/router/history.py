@@ -28,7 +28,8 @@ TTL_SECONDS = 60.0
 SCAN_ROWS = 4000
 
 #: What a failed row says when the model never delivered. A row failed for any other
-#: reason (a Stop, a computer that went away) says nothing about the model.
+#: reason (a Stop, a computer that went away, a key or a bill) says nothing about the
+#: model.
 MODEL_FAILURES = ("The model provider failed", "The agent produced no output")
 
 #: The most accounts kept at once; the least recently read goes first.

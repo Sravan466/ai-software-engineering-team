@@ -547,13 +547,6 @@ class BaseAgent:
         """
         if ctx.pin_model is not None:
             return
-        if ctx.escalate or ctx.routing_mode == RoutingMode.AUTO:
-            # The model the runner recorded this phase starting on, when it is one:
-            # one decision for the row and the calls, not two made a moment apart.
-            held = inflight.held(self.key)
-            if held:
-                ctx.pin_model = held
-                return
         if ctx.escalate:
             try:
                 ctx.pin_model = router.strongest_for(
@@ -565,6 +558,12 @@ class BaseAgent:
                 log.info("%s: last fix round runs on %s", self.title, ctx.pin_model)
                 return
         if ctx.routing_mode == RoutingMode.AUTO:
+            # The model the runner recorded this phase starting on: one decision for
+            # the row and the calls, not two made a moment apart.
+            held = inflight.held(self.key)
+            if held:
+                ctx.pin_model = held
+                return
             try:
                 found = router.explain_pick(ctx.routing_mode, ctx.preferred_model, self._complexity(ctx), self.key)
             except Exception as e:  # noqa: BLE001 - the chain still resolves call by call
