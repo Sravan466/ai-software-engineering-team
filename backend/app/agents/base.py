@@ -538,8 +538,16 @@ class BaseAgent:
         return None
 
     def _pin(self, ctx: AgentContext) -> None:
-        """The fix loop's last round: pin this call to the strongest model, once."""
-        if ctx.escalate and ctx.pin_model is None:
+        """Hold this phase's calls to one model, once.
+
+        The fix loop's last round: the strongest model. An Auto phase: the model Auto
+        chose when the phase started (#96). Auto chooses from the account's record,
+        and a phase finishing in another build can change that record mid-phase; a
+        prompt sized for one model and sent to another is what holding it prevents.
+        """
+        if ctx.pin_model is not None:
+            return
+        if ctx.escalate:
             try:
                 ctx.pin_model = router.strongest_for(
                     ctx.routing_mode, ctx.preferred_model, role=self.key
@@ -548,6 +556,15 @@ class BaseAgent:
                 log.warning("%s: no stronger model could be chosen: %s", self.title, e)
             if ctx.pin_model:
                 log.info("%s: last fix round runs on %s", self.title, ctx.pin_model)
+                return
+        if ctx.routing_mode == RoutingMode.AUTO:
+            try:
+                found = router.explain_pick(ctx.routing_mode, ctx.preferred_model, self._complexity(ctx), self.key)
+            except Exception as e:  # noqa: BLE001 - the chain still resolves call by call
+                log.warning("%s: Auto's choice couldn't be held for the phase: %s", self.title, e)
+                found = None
+            if found:
+                ctx.pin_model = found["model"]
 
     def _missing(self, fields: dict) -> list[str]:
 

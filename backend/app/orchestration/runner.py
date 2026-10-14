@@ -74,6 +74,7 @@ log = get_logger(__name__)
 #: What a phase row stopped by Stop says — apart from a provider failure, which is
 #: the model's (#96).
 _STOPPED = "Stopped before this phase finished."
+_PAUSED = "Paused: the computer running this model disconnected."
 
 # ── one lock per build, not one for the whole process ────────────────────────
 #
@@ -1552,7 +1553,7 @@ class PipelineRunner:
         # attempt back and drop the reason it was sent back in the first place.
         was_feedback = superseded.feedback if superseded is not None else None
         self._mark_phase(db, project, phase_key, PhaseStatus.REJECTED.value, feedback=feedback)
-        row = self._begin_phase(db, project, phase_key)
+        row = self._begin_phase(db, project, phase_key, escalated=phase_key in escalate)
 
         try:
             with _heartbeat(project.id):
@@ -1739,6 +1740,8 @@ class PipelineRunner:
                     row,
                     _STOPPED
                     if isinstance(e, RequestCancelled)
+                    else _PAUSED
+                    if isinstance(e, ComputerDisconnected)
                     else "The model provider failed while regenerating.",
                 )
             if isinstance(e, RequestCancelled) or self._cancel_requested(db, project):
@@ -1968,7 +1971,7 @@ class PipelineRunner:
     # ── one phase ─────────────────────────────────────────────────────────────
     def _run_phase(self, db: Session, project: Project, phase_key: str) -> None:
         """Announce a phase, run exactly that phase, then record what it produced."""
-        row = self._begin_phase(db, project, phase_key)
+        row = self._begin_phase(db, project, phase_key, escalated=phase_key in self._escalating(project.id))
         started, _ = self._graph_position(project.id)
 
         try:
@@ -1985,7 +1988,7 @@ class PipelineRunner:
         except ComputerDisconnected:
             # Dropped rather than kept as failed: the phase runs again, from the
             # start, when the computer is back.
-            self._abandon_row(db, row, "Paused: the computer running this model disconnected.")
+            self._abandon_row(db, row, _PAUSED)
             raise
         except RequestCancelled:
             # Said apart from a provider failure: a Stop is not the model's doing, and
@@ -2024,7 +2027,9 @@ class PipelineRunner:
         ):
             self._draw_mockup_later(project.id, row.id)
 
-    def _begin_phase(self, db: Session, project: Project, phase_key: str) -> PhaseResult:
+    def _begin_phase(
+        self, db: Session, project: Project, phase_key: str, *, escalated: bool = False
+    ) -> PhaseResult:
         """Mark a phase as *starting* — before a single token is generated.
 
         This is what makes progress visible: `current_phase` used to be written only
@@ -2070,7 +2075,7 @@ class PipelineRunner:
             output={},
             content_md="",
             started_at=now,
-            model_pick=self._model_pick(project, phase_key),
+            model_pick=self._model_pick(project, phase_key, escalated),
         )
         db.add(row)
         db.commit()
@@ -2078,10 +2083,22 @@ class PipelineRunner:
         return row
 
     @staticmethod
-    def _model_pick(project: Project, phase_key: str) -> Optional[dict]:
+    def _escalating(project_id: str) -> set:
+        """The phases the fix loop's last round runs on the strongest model — the
+        graph's own list, so the pick recorded is the one the agent will make."""
+        try:
+            with _checkpoint_lock(project_id):
+                values = graph.get_state(_config(project_id)).values or {}
+            return set(values.get("escalate") or [])
+        except Exception:  # noqa: BLE001 - bookkeeping only
+            return set()
+
+    @staticmethod
+    def _model_pick(project: Project, phase_key: str, escalated: bool = False) -> Optional[dict]:
         """Which model this phase starts on, and why (#96): `{mode, model, reason,
-        sample, basis}`, as the account's router resolves it. Bookkeeping, so never
-        the reason a phase doesn't start."""
+        sample, basis}`, as the account's router resolves it — the strongest model
+        when it is the fix loop's last round. Bookkeeping, so never the reason a
+        phase doesn't start."""
         if not project.owner_id:
             return None
         try:
@@ -2092,6 +2109,7 @@ class PipelineRunner:
                 project.preferred_model,
                 get_agent(phase_key).complexity,
                 phase_key,
+                escalated=escalated,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("Couldn't record which model %s starts on: %s", phase_key, e)
@@ -2137,12 +2155,16 @@ class PipelineRunner:
         row.skills_used = lr.get("skills_used") if "skills_used" in lr else None
         row.handoff = lr.get("handoff") or None
         if isinstance(row.model_pick, dict):
-            # Whether any of the phase's calls had to leave the model it started on —
-            # the one fact about that model only the calls know (#96).
+            # Which models the phase's calls were sent to and failed on before one
+            # answered — the one fact about them only the calls know (#96).
             calls = lr["calls"] if isinstance(lr.get("calls"), list) else [lr]
+            fell_from = sorted(
+                {m for call in calls for m in (call.get("fell_back_from") or []) if isinstance(m, str)}
+            )
             row.model_pick = {
                 **row.model_pick,
                 "fell_back": any(bool(call.get("fallback_used")) for call in calls),
+                "fell_back_from": fell_from,
             }
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
@@ -2152,7 +2174,7 @@ class PipelineRunner:
         self._record_usage(db, project, lr)
         db.commit()
         # Auto chooses the next phase with this one counted.
-        model_history.changed()
+        model_history.changed(project.owner_id)
         if row.phase == Phase.SECURITY_ENGINEER.value:
             # Every audit, including the re-audit after a fix — which is the one that
             # decides whether the fix took. Here rather than in `_run_phase` because a
@@ -2334,7 +2356,8 @@ class PipelineRunner:
         row.feedback = reason
         row.completed_at = _now()
         db.commit()
-        model_history.changed()
+        project = row.project
+        model_history.changed(project.owner_id if project is not None else None)
 
     # ── graph position ────────────────────────────────────────────────────────
     @staticmethod

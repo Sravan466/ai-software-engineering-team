@@ -181,6 +181,9 @@ class ModelRouter:
         #: vectors of two models in one collection are either an error or, when the
         #: sizes happen to match, search results that are quietly wrong.
         self._embedding_pin: Optional[tuple[tuple[str, str], str]] = None
+        #: Auto's candidates per difficulty, kept a few seconds (#96): every call
+        #: resolves its chain, and assessing every local model each time is waste.
+        self._prior_cache: dict[str, tuple[float, list[tuple[tuple[str, str], str]]]] = {}
         # Apply any keys/models saved at runtime via the Settings UI (overrides .env).
         self._load_persisted()
 
@@ -451,6 +454,8 @@ class ModelRouter:
     def _remember(self, provider: str, found: Optional[KeyCheck], *, persist: bool = False) -> None:
         """Take `found` as this provider's key's standing — routing reads it from here."""
         prov = self._cloud[provider]
+        # Whether Auto may choose this provider is read off the standing.
+        self._prior_cache.clear()
         if found is not None and found.key_id and found.key_id != keycheck.key_id(prov.secret() or ""):
             # About a key that has since been replaced — a re-check that finished after
             # a new key was saved. The new key's standing is not this one's.
@@ -754,6 +759,7 @@ class ModelRouter:
         # Written first, so a choice the file refused is not in use either.
         self._secrets.set_local_default(chosen, CLOUD_PROVIDERS)
         self._chosen_local = chosen
+        self._prior_cache.clear()
         # The window, the parameter count and whether decoding can be schema
         # constrained are all properties of the model, and the model just changed.
         prov.forget()
@@ -847,6 +853,7 @@ class ModelRouter:
         api_key: Optional[str] = None,
         confirm_remote: bool = False,
     ) -> SourceProvider:
+        self._prior_cache.clear()
         return self.sources.add(base_url, label=label, api_key=api_key, confirm_remote=confirm_remote)
 
     def is_shared(self, prov: SourceProvider) -> bool:
@@ -863,6 +870,7 @@ class ModelRouter:
 
     def remove_source(self, source_id: str) -> None:
         self.sources.remove(source_id)
+        self._prior_cache.clear()
 
     def set_source_key(self, source_id: str, api_key: Optional[str]) -> None:
         self.sources.set_key(source_id, api_key)
@@ -872,6 +880,7 @@ class ModelRouter:
         self.sources.ensure(max_age=0, wait=True)
         for prov in self.sources.providers():
             prov.invalidate()
+        self._prior_cache.clear()
 
     def pull(self, source_id: str, model: str) -> Iterator[dict]:
         """Ask a source to download a model, where its runtime can."""
@@ -1208,14 +1217,15 @@ class ModelRouter:
             # and per difficulty, and a check at any other one checks another model.
             complexity = complexity_of(role)
             try:
-                chain = self._resolve_chain(mode, preferred_model, complexity, role)
+                resolved = self._resolve(mode, preferred_model, complexity, role)
             except UnresolvedModel as e:
                 return Readiness(ok=False, reason=str(e))
+            chain = resolved[0]
             if not chain:
                 return self._nothing_local()
             head = chain[0]
             if role:
-                found = self.explain_pick(mode, preferred_model, complexity, role, chain)
+                found = self.explain_pick(mode, preferred_model, complexity, role, resolved)
                 if found is not None:
                     picks.append({"role": role, **found})
             if head[0] in CLOUD_PROVIDERS:
@@ -1568,6 +1578,9 @@ class ModelRouter:
                 attempts.append({
                     "provider": pname, "model": model, "error": str(e),
                     "kind": getattr(e, "kind", None), "why": _short(getattr(e, "kind", None)),
+                    # Sent, and it failed — not skipped as unavailable. What Auto's record
+                    # of the model holds against it (#96).
+                    "tried": True,
                 })
                 last_error = e
                 if pname in CLOUD_PROVIDERS:
@@ -1811,6 +1824,17 @@ class ModelRouter:
         complexity: str,
         role: Optional[str] = None,
     ) -> list[tuple[str, str]]:
+        return self._resolve(mode, preferred_model, complexity, role)[0]
+
+    def _resolve(
+        self,
+        mode: RoutingMode,
+        preferred_model: Optional[str],
+        complexity: str,
+        role: Optional[str] = None,
+    ) -> tuple[list[tuple[str, str]], Optional[track_record.Pick]]:
+        """(the chain, and Auto's choice when it chose) — one resolution, so whatever
+        explains a chain explains the one that was resolved, not a second one."""
         # Cheap when fresh: a clock read. What makes a source started a moment ago —
         # or configured, before anything else asked — part of the very first chain.
         self.sources.ensure()
@@ -1831,9 +1855,10 @@ class ModelRouter:
                 )
                 role_pair = None
             pick = role_pair or self.local_default()
-            return [pick] if pick else []
+            return ([pick] if pick else []), None
 
         chain: list[tuple[str, str]] = []
+        choice: Optional[track_record.Pick] = None
 
         # The role's own model leads: it is the most specific thing anyone said about
         # this particular call. Manual's project-wide choice comes next, then Auto's.
@@ -1846,14 +1871,16 @@ class ModelRouter:
             if pair not in chain:
                 chain.append(pair)
         elif mode == RoutingMode.AUTO:
-            pair = self._auto_pick(complexity, role)
-            if pair and pair not in chain:
-                chain.append(pair)
+            found = self._auto_choice(complexity, role)
+            if found is not None:
+                choice = found[1]
+                if found[0] not in chain:
+                    chain.append(found[0])
 
         for pair in self._chain_tail():
             if pair not in chain:
                 chain.append(pair)
-        return chain
+        return chain, choice
 
     # ── Auto: each agent on the model its own record favours (#96) ──────────
     def _auto_pick(self, complexity: str, role: Optional[str] = None) -> Optional[tuple[str, str]]:
@@ -1871,7 +1898,7 @@ class ModelRouter:
         each one for this agent, with the router's own order standing in where a
         model has too few runs to judge. Deterministic: the same history and the
         same models always give the same answer."""
-        prior = self._auto_prior(complexity)
+        prior = self._cached_prior(complexity)
         if not prior:
             return None
         pairs = {self._spec(pair): pair for pair, _ in prior}
@@ -1879,6 +1906,21 @@ class ModelRouter:
             [(self._spec(pair), why) for pair, why in prior], self._records_for(role, pairs)
         )
         return (pairs[pick.model], pick) if pick else None
+
+    #: How long Auto's candidate list stands. Short: it is a cache for a burst of
+    #: calls, and a key verdict or a source change clears it at once.
+    _PRIOR_TTL_SECONDS = 5.0
+
+    def _cached_prior(self, complexity: str) -> list[tuple[tuple[str, str], str]]:
+        import time as _time
+
+        now = _time.monotonic()
+        hit = self._prior_cache.get(complexity)
+        if hit is not None and now - hit[0] < self._PRIOR_TTL_SECONDS:
+            return hit[1]
+        prior = self._auto_prior(complexity)
+        self._prior_cache[complexity] = (now, prior)
+        return prior
 
     def _auto_prior(self, complexity: str) -> list[tuple[tuple[str, str], str]]:
         """Every model Auto may choose, best first by what the router knows, with why.
@@ -1950,7 +1992,10 @@ class ModelRouter:
         fitting: list[tuple[str, str]] = []
         for _size, pair, prov in found:
             try:
-                if prov.compatibility(pair[1]).level == compat.FITS:
+                # Weighed against memory even while loaded: a model that "fits" only
+                # because it is in memory now would lead until the runtime unloads it,
+                # and Auto's choice would flip with it.
+                if prov.compatibility(pair[1], ignore_loaded=True).level == compat.FITS:
                     fitting.append(pair)
             except Exception:  # noqa: BLE001 - an unanswerable check is a no
                 continue
@@ -1994,33 +2039,48 @@ class ModelRouter:
         preferred_model: Optional[str],
         complexity: str,
         role: Optional[str],
-        chain: Optional[list[tuple[str, str]]] = None,
+        resolved: Optional[tuple[list[tuple[str, str]], Optional[track_record.Pick]]] = None,
+        *,
+        escalated: bool = False,
     ) -> Optional[dict]:
         """Which model `role`'s calls start on, and why, read off the chain they resolve.
 
-        What the check before Start lists for each agent, and what a phase row
-        records when it starts (`phase_results.model_pick`): `{mode, model, name,
-        where, local, reason, sample, basis}`. None when nothing resolves. `chain`
-        is that chain when the caller has just resolved it.
+        What the check before Start lists for each agent, what a phase row records
+        when it starts (`phase_results.model_pick`), and what an Auto phase holds
+        its calls to: `{mode, model, name, where, local, reason, sample, basis}`.
+        None when nothing resolves. `resolved` is `_resolve`'s answer when the
+        caller has it; `escalated` is the fix loop's last round, which starts on
+        the strongest model it can reach (`strongest_for`).
         """
-        if chain is None:
+        if escalated:
+            pin = self.strongest_for(mode, preferred_model, role)
+            if pin:
+                return self._pick_row(
+                    mode, self._saved_pair(pin), "the strongest model it can reach, for the last fix round", 0, "escalated"
+                )
+            complexity = "high"
+            resolved = None
+        if resolved is None:
             try:
-                chain = self._resolve_chain(mode, preferred_model, complexity, role)
+                resolved = self._resolve(mode, preferred_model, complexity, role)
             except UnresolvedModel:
                 return None
+        chain, choice = resolved
         if not chain:
             return None
         head = chain[0]
-        reason, sample, basis = "your default", 0, "default"
         role_spec = self._roles.get(role)
         if role_spec and self._saved_pair(role_spec) == head:
-            reason, basis = "set for this agent in Settings", "settings"
-        elif mode == RoutingMode.MANUAL and preferred_model and self._saved_pair(preferred_model) == head:
-            reason, basis = "the model you picked for this build", "chosen"
-        elif mode == RoutingMode.AUTO:
-            choice = self._auto_choice(complexity, role)
-            if choice is not None and choice[0] == head:
-                reason, sample, basis = choice[1].reason, choice[1].sample, choice[1].basis
+            return self._pick_row(mode, head, "set for this agent in Settings", 0, "settings")
+        if mode == RoutingMode.MANUAL and preferred_model and self._saved_pair(preferred_model) == head:
+            return self._pick_row(mode, head, "the model you picked for this build", 0, "chosen")
+        if choice is not None and choice.model == self._spec(head):
+            return self._pick_row(mode, head, choice.reason, choice.sample, choice.basis)
+        if head == self.local_default():
+            return self._pick_row(mode, head, "your default", 0, "default")
+        return self._pick_row(mode, head, "the first model in the fallback chain", 0, "fallback")
+
+    def _pick_row(self, mode: RoutingMode, head: tuple[str, str], reason: str, sample: int, basis: str) -> dict:
         local = head[0] not in CLOUD_PROVIDERS
         prov = self.sources.get(head[0]) if local else None
         return {
@@ -2039,7 +2099,7 @@ class ModelRouter:
         say before anyone picks it: `[{model, name, where, local}]`."""
         self.sources.ensure()
         out = []
-        for pair, _why in self._auto_prior("high"):
+        for pair, _why in self._cached_prior("high"):
             local = pair[0] not in CLOUD_PROVIDERS
             prov = self.sources.get(pair[0]) if local else None
             if local and (prov is None or not prov.available()):

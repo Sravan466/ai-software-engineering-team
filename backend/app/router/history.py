@@ -31,17 +31,27 @@ SCAN_ROWS = 4000
 #: reason (a Stop, a computer that went away) says nothing about the model.
 _MODEL_FAILURES = ("The model provider failed", "The agent produced no output")
 
+#: The most accounts kept at once; the least recently read goes first.
+MAX_ACCOUNTS = 256
+
 _lock = threading.Lock()
-_generation = 0
-#: account -> (read at, generation, {role: {model: Record}})
-_cache: dict[str, tuple[float, int, dict[str, dict[str, Record]]]] = {}
+#: Bumped for every account at once (`changed()` with no account).
+_everyone = 0
+#: account -> how many of its phases have finished since this process started.
+_generation: dict[str, int] = {}
+#: account -> (read at, (everyone, account) generations, {role: {model: Record}})
+_cache: dict[str, tuple[float, tuple[int, int], dict[str, dict[str, Record]]]] = {}
 
 
-def changed() -> None:
-    """A phase finished: every account's next read is fresh. Cheap — a counter."""
-    global _generation
+def changed(user_id: Optional[str] = None) -> None:
+    """A phase of `user_id`'s finished: that account's next read is fresh. Cheap —
+    a counter. No account: every account's."""
+    global _everyone
     with _lock:
-        _generation += 1
+        if user_id is None:
+            _everyone += 1
+        else:
+            _generation[user_id] = _generation.get(user_id, 0) + 1
 
 
 def records(user_id: Optional[str]) -> dict[str, dict[str, Record]]:
@@ -51,7 +61,7 @@ def records(user_id: Optional[str]) -> dict[str, dict[str, Record]]:
         return {}
     now = time.monotonic()
     with _lock:
-        generation = _generation
+        generation = (_everyone, _generation.get(user_id, 0))
         hit = _cache.get(user_id)
         if hit is not None and hit[1] == generation and now - hit[0] < TTL_SECONDS:
             return hit[2]
@@ -62,8 +72,11 @@ def records(user_id: Optional[str]) -> dict[str, dict[str, Record]]:
         return {}
     with _lock:
         # A phase that finished during the read leaves this one stale: not kept.
-        if _generation == generation:
+        if (_everyone, _generation.get(user_id, 0)) == generation:
+            _cache.pop(user_id, None)
             _cache[user_id] = (now, generation, found)
+            while len(_cache) > MAX_ACCOUNTS:
+                _cache.pop(min(_cache, key=lambda uid: _cache[uid][0]))
     return found
 
 
@@ -93,12 +106,14 @@ def summarise(rows: list[dict]) -> dict[str, dict[str, Record]]:
 def outcomes(row: dict) -> list[Outcome]:
     """What one finished phase row says about the model, or models, behind it.
 
-    A row normally speaks for the model that served it. Two cases need the model the
-    phase *started* on, which only `model_pick` (written when it starts) records:
-    a phase that failed before anything was served, and one whose chain fell back —
-    there the picked model didn't answer, and the one that did is not to blame.
+    A row normally speaks for the model that served it. A fallback is put down to
+    the models the calls actually fell back from (`model_pick.fell_back_from`,
+    recorded call by call when the phase finishes), never to whichever model
+    answered. A phase that failed before anything was served can only be put down
+    to the model it started on (`model_pick.model`, written when it starts).
     """
-    pick = row.get("model_pick") if isinstance(row.get("model_pick"), dict) else {}
+    found = row.get("model_pick")
+    pick: dict = found if isinstance(found, dict) else {}
     picked = pick.get("model") if isinstance(pick.get("model"), str) else None
     provider, model = row.get("provider_used"), row.get("model_used")
     served = f"{provider}:{model}" if provider and model else None
@@ -112,7 +127,9 @@ def outcomes(row: dict) -> list[Outcome]:
     if not served:
         return []
 
-    fell_back = pick.get("fell_back") if isinstance(pick.get("fell_back"), bool) else None
+    raw = pick.get("fell_back_from")
+    # None: a row from before calls recorded what they fell back from — unknown.
+    fell_from = {m for m in raw if isinstance(m, str)} if isinstance(raw, list) else None
     out = [
         Outcome(
             model=served,
@@ -120,15 +137,23 @@ def outcomes(row: dict) -> list[Outcome]:
             built=_built(row),
             tested=_status(row.get("test_status"), TestStatus.OK.value, TestStatus.FAILED.value),
             cut_off=_cut_off(row.get("truncated")),
-            # The served model is only answerable for a fallback when it was the one
-            # picked: after one, it is the model that answered.
-            fell_back=fell_back if served == picked else None,
+            fell_back=None if fell_from is None else any(same_model(m, served) for m in fell_from),
             latency_ms=int(row.get("latency_ms") or 0),
         )
     ]
-    if fell_back and picked and picked != served:
-        out.append(Outcome(model=picked, failed=True))
+    for other in sorted(fell_from or ()):
+        if not same_model(other, served):
+            # It was sent this phase's work and didn't answer.
+            out.append(Outcome(model=other, failed=True))
     return out
+
+
+def same_model(a: str, b: str) -> bool:
+    """Whether two specs name one model: runtimes answer to `name` and `name:latest` alike."""
+    def norm(spec: str) -> str:
+        return spec[: -len(":latest")] if spec.endswith(":latest") else spec
+
+    return norm(a) == norm(b)
 
 
 def _built(row: dict) -> Optional[bool]:

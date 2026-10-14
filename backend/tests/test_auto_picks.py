@@ -75,6 +75,23 @@ def test_the_routers_first_choice_runs_until_it_has_a_record():
     assert pick.model == "ollama:big" and pick.reason == "2 runs on record, too few to judge, so your default"
 
 
+def test_a_poor_best_record_gives_an_untried_candidate_a_turn():
+    prior = [("ollama:big", "the largest model that fits this computer"), ("ollama:small", "your default"),
+             ("ollama:tiny", "a model that fits this computer")]
+    big = track_record.judge("ollama:big", _runs("ollama:big", 5, schema="invalid"))
+    pick = track_record.choose(prior, {"ollama:big": big})
+    assert (pick.model, pick.basis) == ("ollama:small", "prior")
+    assert pick.reason == "big did poorly here (valid first try in 0 of 5 runs), so this one gets a turn"
+    # Once every candidate has a record, the best of them is kept.
+    small = track_record.judge("ollama:small", _runs("ollama:small", 3, schema="repaired"))
+    tiny = track_record.judge("ollama:tiny", _runs("ollama:tiny", 3, schema="invalid"))
+    pick = track_record.choose(prior, {"ollama:big": big, "ollama:small": small, "ollama:tiny": tiny})
+    assert (pick.model, pick.basis) == ("ollama:small", "record")
+    # A good record is kept, untried candidates or not.
+    good = track_record.judge("ollama:big", _runs("ollama:big", 5, schema="valid"))
+    assert track_record.choose(prior, {"ollama:big": good}).model == "ollama:big"
+
+
 def test_with_records_the_better_one_wins_and_speed_only_breaks_ties():
     prior = [("ollama:big", "your default"), ("ollama:small", "a model that fits this computer")]
     big = track_record.judge("ollama:big", _runs("ollama:big", 5, schema="invalid", latency_ms=500))
@@ -108,13 +125,22 @@ def test_a_row_speaks_for_the_model_that_served_it():
     assert qa.tested is False
 
 
-def test_a_fallback_is_put_down_to_the_model_that_did_not_answer():
-    pick = {"model": "ollama:big", "fell_back": True}
-    served, picked = history.outcomes(_row(model_used="small", model_pick=pick))
-    assert served.model == "ollama:small" and served.fell_back is None
-    assert picked.model == "ollama:big" and picked.failed
-    (same,) = history.outcomes(_row(model_pick=pick))
+def test_a_fallback_is_put_down_to_the_model_the_call_fell_back_from():
+    pick = {"model": "ollama:big", "fell_back": True, "fell_back_from": ["ollama:big"]}
+    served, failed = history.outcomes(_row(model_used="small", model_pick=pick))
+    assert served.model == "ollama:small" and served.fell_back is False
+    assert failed.model == "ollama:big" and failed.failed
+    # Fell back off itself on one call and answered the rest: one mishap, not two.
+    (same,) = history.outcomes(_row(model_pick={**pick, "fell_back_from": ["ollama:big:latest"]}))
     assert same.model == "ollama:big" and same.fell_back is True
+    # The fix loop's pin failed and the call landed on the pick: the pin is blamed.
+    escalated = {"model": "ollama:big", "fell_back": True, "fell_back_from": ["anthropic:claude-x"]}
+    served, pin = history.outcomes(_row(model_pick=escalated))
+    assert served.model == "ollama:big" and served.fell_back is False
+    assert pin.model == "anthropic:claude-x" and pin.failed
+    # A row from before calls recorded it can't say.
+    (old,) = history.outcomes(_row(model_pick={"model": "ollama:big", "fell_back": True}))
+    assert old.fell_back is None
 
 
 def test_a_failed_phase_counts_only_when_the_model_failed():
@@ -183,12 +209,14 @@ def test_records_are_read_per_account_with_the_json_facts(clean_history):
     assert set(history.records(other)["backend_engineer"]) == {"ollama:small"}
 
 
-def test_a_finished_phase_makes_the_next_read_fresh(clean_history):
+def test_a_finished_phase_makes_that_accounts_next_read_fresh(clean_history):
     _finished(TEST_USER_ID, "devops_engineer", "ollama:big", 3)
     assert history.records(TEST_USER_ID)["devops_engineer"]["ollama:big"].sample == 3
     _finished(TEST_USER_ID, "devops_engineer", "ollama:big", 1)
     assert history.records(TEST_USER_ID)["devops_engineer"]["ollama:big"].sample == 3, "cached"
-    history.changed()
+    history.changed("someone-else")
+    assert history.records(TEST_USER_ID)["devops_engineer"]["ollama:big"].sample == 3, "another account's phase"
+    history.changed(TEST_USER_ID)
     assert history.records(TEST_USER_ID)["devops_engineer"]["ollama:big"].sample == 4
 
 
@@ -209,7 +237,7 @@ def auto_router(monkeypatch):
     blocked: set[str] = set()
     recorded: dict[str, dict] = {}
 
-    def compatibility(self, model):
+    def compatibility(self, model, **_kw):
         level = "blocked" if model in blocked else "fits"
         return SimpleNamespace(
             level=level,
@@ -225,6 +253,7 @@ def auto_router(monkeypatch):
         monkeypatch.setattr(model_router.sources, "_detected_at", time.monotonic() + 3600)
         monkeypatch.setattr(model_router, "_chosen_local", chosen)
         monkeypatch.setattr(model_router, "_roles", roles or _NoRoles())
+        monkeypatch.setattr(model_router, "_prior_cache", {})
         monkeypatch.setattr(model_router, "tuning", model_settings)
         monkeypatch.setattr(model_router.sources, "_store", secrets_store)
         recorded.clear()
@@ -342,7 +371,7 @@ def test_the_preflight_names_each_agents_model_and_what_auto_can_choose(client, 
 def test_every_phase_row_records_its_pick(client, monkeypatch):
     from app.router.router import ModelRouter
 
-    def explain(self, mode, preferred_model, complexity, role, chain=None):
+    def explain(self, mode, preferred_model, complexity, role, resolved=None, *, escalated=False):
         return {"mode": mode.value, "model": "ollama:qwen2.5:7b", "name": "qwen2.5:7b", "where": "Ollama",
                 "local": True, "reason": f"no record yet, so your default ({complexity})", "sample": 0, "basis": "prior"}
 
@@ -356,7 +385,7 @@ def test_every_phase_row_records_its_pick(client, monkeypatch):
     picks = {p["phase"]: p["model_pick"] for p in project["phases"]}
     assert len(picks) == 8 and all(picks.values())
     assert picks["system_design"]["reason"].endswith("(high)") and picks["product_manager"]["reason"].endswith("(medium)")
-    assert all(p["mode"] == "auto" and p["fell_back"] is False for p in picks.values())
+    assert all(p["mode"] == "auto" and p["fell_back"] is False and p["fell_back_from"] == [] for p in picks.values())
 
 
 def test_a_stop_is_not_put_down_to_the_model(client, monkeypatch):
@@ -388,3 +417,55 @@ def test_the_column_is_added_to_an_existing_database(tmp_path):
     assert run_migrations(engine) == []
     with engine.connect() as conn:
         assert conn.execute(text("SELECT phase, model_pick FROM phase_results")).fetchall() == [("product_manager", None)]
+
+
+def test_the_fix_loops_last_round_records_the_model_it_starts_on(auto_router, monkeypatch):
+    from app.router.router import ModelRouter
+
+    model_router = auto_router(_source("ollama", [BIG, SMALL]), chosen="ollama:qwen3:1.7b")
+    monkeypatch.setattr(ModelRouter, "strongest_for", lambda self, *a, **k: "ollama:qwen2.5:7b")
+    found = model_router.explain_pick(RoutingMode.AUTO, None, "medium", "backend_engineer", escalated=True)
+    assert (found["name"], found["basis"]) == ("qwen2.5:7b", "escalated")
+    assert found["reason"] == "the strongest model it can reach, for the last fix round"
+    # Nothing stronger: the round runs at the hard-step difficulty, and says why.
+    monkeypatch.setattr(ModelRouter, "strongest_for", lambda self, *a, **k: None)
+    found = model_router.explain_pick(RoutingMode.AUTO, None, "medium", "backend_engineer", escalated=True)
+    assert found["model"] == model_router.explain_pick(RoutingMode.AUTO, None, "high", "backend_engineer")["model"]
+
+
+def test_a_head_from_the_fallback_chain_is_not_called_the_default(auto_router, monkeypatch):
+    from app.router import router as router_module
+    from app.router.router import ModelRouter
+
+    model_router = auto_router(_source("ollama", [BIG]), chosen="ollama:qwen2.5:7b")
+    monkeypatch.setattr(ModelRouter, "_auto_choice", lambda self, complexity, role: None)
+    monkeypatch.setattr(type(router_module.settings), "fallback_pairs", property(lambda self: [("openai", "gpt-x")]))
+    found = model_router.explain_pick(RoutingMode.AUTO, None, "medium", "product_manager")
+    assert (found["model"], found["basis"]) == ("openai:gpt-x", "fallback")
+    assert found["reason"] == "the first model in the fallback chain"
+
+
+def test_an_auto_phase_holds_its_calls_to_one_model(client, monkeypatch):
+    """Auto's choice can change while a phase runs (another build's phase finishing
+    changes the record); every call of the phase, sizing included, keeps to one."""
+    from app.router.router import ModelRouter
+    from tests.conftest import _fake_complete
+
+    pins: list = []
+
+    def complete(messages, **kwargs):
+        pins.append(kwargs.get("pin"))
+        return _fake_complete(messages, **kwargs)
+
+    def explain(self, mode, preferred_model, complexity, role, resolved=None, *, escalated=False):
+        return {"mode": mode.value, "model": f"ollama:held-{role}", "name": f"held-{role}", "where": "Ollama",
+                "local": True, "reason": "held", "sample": 0, "basis": "prior"}
+
+    stub(monkeypatch, "complete", complete)
+    monkeypatch.setattr(ModelRouter, "explain_pick", explain)
+    pid = client.post("/api/projects", json={"idea": "Held to one model", "routing_mode": "auto",
+                                             "require_approval": False}).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    through_database_gate(client, pid)
+    held = [p for p in pins if p and p.startswith("ollama:held-")]
+    assert held and {"ollama:held-product_manager", "ollama:held-backend_engineer"} <= set(held)

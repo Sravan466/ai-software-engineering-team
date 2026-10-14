@@ -24,6 +24,10 @@ MIN_SAMPLE = 3
 #: Only the most recent runs count, so a model is judged on how it does now.
 WINDOW = 20
 
+#: Below this, the best record isn't good enough to keep to while a candidate is
+#: still untried: that one gets its runs instead, in the router's order.
+POOR_SCORE = 0.5
+
 #: What a schema outcome is worth: matched first time, matched after being sent back
 #: with the errors, still didn't match.
 _SCHEMA = {"valid": 1.0, "repaired": 0.5, "invalid": 0.0}
@@ -160,6 +164,10 @@ def choose(prior: Sequence[tuple[str, str]], records: Mapping[str, Record]) -> O
       build, to find out.
     - Otherwise the best record among the candidates that have one wins. Speed
       breaks a tie and nothing else; the router's order breaks what is left.
+    - Unless even the best record is poor and a candidate is still untried: the
+      first of those, in the router's order, gets its runs. Still deterministic —
+      the same history always gives the same answer — and it ends once every
+      candidate has a record and the best of them is kept.
     """
     if not prior:
         return None
@@ -178,4 +186,21 @@ def choose(prior: Sequence[tuple[str, str]], records: Mapping[str, Record]) -> O
         # An unknown time loses a tie rather than winning it.
         key=lambda item: (-round(item[1].score, 3), item[1].latency_ms or float("inf"), item[0]),
     )
+    if best.score < POOR_SCORE:
+        known = {record.model for _, record in judged}
+        untried = next(((model, why) for model, why in prior if model not in known), None)
+        if untried is not None:
+            model, _why = untried
+            n = records[model].sample if model in records else 0
+            return Pick(
+                model=model,
+                reason=f"{_name(best.model)} did poorly here ({best.reason}), so this one gets a turn",
+                sample=n,
+                basis=BASIS_PRIOR,
+            )
     return Pick(model=best.model, reason=best.reason, sample=best.sample, basis=BASIS_RECORD)
+
+
+def _name(spec: str) -> str:
+    """The model half of `source:model`."""
+    return spec.partition(":")[2] or spec
