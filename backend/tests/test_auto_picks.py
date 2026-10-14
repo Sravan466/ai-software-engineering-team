@@ -469,3 +469,74 @@ def test_an_auto_phase_holds_its_calls_to_one_model(client, monkeypatch):
     through_database_gate(client, pid)
     held = [p for p in pins if p and p.startswith("ollama:held-")]
     assert held and {"ollama:held-product_manager", "ollama:held-backend_engineer"} <= set(held)
+
+
+def test_a_kept_attempt_and_carried_failures_are_read_right():
+    # Re-checked without a model call (#76): nothing to say about the model.
+    assert history.outcomes(_row(phase="qa_engineer", test_status="failed", model_pick={"calls": 0})) == []
+    # A retried phase's dead attempts are carried on the row that replaced them.
+    carried = history.outcomes(_row(model_pick={"model": "ollama:big", "calls": 2, "fell_back_from": [],
+                                                "failed_before": ["ollama:big", "ollama:small"]}))
+    assert [(o.model, o.failed) for o in carried] == [
+        ("ollama:big", False), ("ollama:big", True), ("ollama:small", True)]
+
+
+def test_a_retried_phase_keeps_the_failure_of_the_attempt_it_clears(stub_router):
+    from app.orchestration.runner import runner
+
+    with SessionLocal() as db:
+        project = Project(idea="history", owner_id=TEST_USER_ID, status="failed", routing_mode="auto")
+        db.add(project)
+        db.flush()
+        db.add(PhaseResult(project_id=project.id, phase="product_manager", agent="Scope", status="failed",
+                           feedback="The model provider failed during this phase.",
+                           model_pick={"model": "ollama:big", "failed_before": ["ollama:older"]}))
+        db.add(PhaseResult(project_id=project.id, phase="product_manager", agent="Scope", status="failed",
+                           feedback="Stopped before this phase finished.", model_pick={"model": "ollama:stopped"}))
+        db.commit()
+        row = runner._begin_phase(db, project, "product_manager")
+        assert row.model_pick["failed_before"] == ["ollama:big", "ollama:older"]
+        db.delete(project)
+        db.commit()
+
+
+def test_an_account_or_provider_problem_is_not_held_against_the_model(auto_router):
+    from app.router.base import ProviderError
+
+    class Refusing(FakeAdapter):
+        def __init__(self, models, kind):
+            super().__init__(models)
+            self.kind = kind
+
+        def chat(self, request):
+            raise ProviderError("refused", retryable=False, kind=self.kind)
+
+    for kind, tried in (("no_credit", False), (None, True)):
+        first = SourceProvider(Source(id="first", label="First", base_url="http://127.0.0.1:1111",
+                                      runtime="openai-compatible", origin="detected"), Refusing([SMALL], kind))
+        second = _source("ollama", [BIG])
+        model_router = auto_router(first, second, chosen="ollama:qwen2.5:7b")
+        resp = model_router.complete([ChatMessage(role="user", content="hi")], mode=RoutingMode.MANUAL,
+                                     preferred_model="first:qwen3:1.7b")
+        assert resp.fallback_used and resp.attempts[0]["tried"] is tried
+
+
+def test_a_refused_run_still_names_each_agents_model(auto_router):
+    hosted = ModelEntry(name="giant:480b-cloud", kind="chat", is_local=False)
+    model_router = auto_router(_source("ollama", [hosted]), chosen="ollama:giant:480b-cloud")
+    ready = model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=["product_manager"])
+    assert not ready.ok and [p["name"] for p in ready.picks] == ["giant:480b-cloud"]
+
+
+def test_one_model_spelled_two_ways_is_one_candidate(auto_router, monkeypatch):
+    def resolves(self, model, names=None):
+        names = self.list_models() if names is None else names
+        bare = model[: -len(":latest")] if model.endswith(":latest") else model
+        return any(n in (bare, f"{bare}:latest") for n in names)
+
+    monkeypatch.setattr(SourceProvider, "resolves", resolves)
+    latest = ModelEntry(name="qwen3:latest", kind="chat", size_bytes=2 * GB)
+    model_router = auto_router(_source("ollama", [latest, SMALL]), chosen="ollama:qwen3")
+    assert [c["name"] for c in model_router.auto_choices()] == ["qwen3:latest", "qwen3:1.7b"]
+    found = model_router.explain_pick(RoutingMode.AUTO, None, "medium", "product_manager")
+    assert found["reason"] == "no record yet, so your default"

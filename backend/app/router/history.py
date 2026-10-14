@@ -29,7 +29,7 @@ SCAN_ROWS = 4000
 
 #: What a failed row says when the model never delivered. A row failed for any other
 #: reason (a Stop, a computer that went away) says nothing about the model.
-_MODEL_FAILURES = ("The model provider failed", "The agent produced no output")
+MODEL_FAILURES = ("The model provider failed", "The agent produced no output")
 
 #: The most accounts kept at once; the least recently read goes first.
 MAX_ACCOUNTS = 256
@@ -121,11 +121,12 @@ def outcomes(row: dict) -> list[Outcome]:
     if row.get("status") == PhaseStatus.FAILED.value:
         note = row.get("feedback") or ""
         who = picked or served
-        if who and note.startswith(_MODEL_FAILURES):
-            return [Outcome(model=who, failed=True)]
-        return []
-    if not served:
-        return []
+        if who and note.startswith(MODEL_FAILURES):
+            return [Outcome(model=who, failed=True)] + _failed_before(pick)
+        return _failed_before(pick)
+    if not served or pick.get("calls") == 0:
+        # A kept attempt re-checked without a model call (#76) says nothing about one.
+        return _failed_before(pick)
 
     raw = pick.get("fell_back_from")
     # None: a row from before calls recorded what they fell back from — unknown.
@@ -145,7 +146,16 @@ def outcomes(row: dict) -> list[Outcome]:
         if not same_model(other, served):
             # It was sent this phase's work and didn't answer.
             out.append(Outcome(model=other, failed=True))
-    return out
+    return out + _failed_before(pick)
+
+
+def _failed_before(pick: dict) -> list[Outcome]:
+    """Attempts at this phase that failed on a model and were then deleted (a retry
+    clears dead rows), carried on the row that replaced them so the failure counts."""
+    raw = pick.get("failed_before")
+    if not isinstance(raw, list):
+        return []
+    return [Outcome(model=m, failed=True) for m in raw if isinstance(m, str)]
 
 
 def same_model(a: str, b: str) -> bool:

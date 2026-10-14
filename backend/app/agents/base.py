@@ -547,6 +547,13 @@ class BaseAgent:
         """
         if ctx.pin_model is not None:
             return
+        if ctx.escalate or ctx.routing_mode == RoutingMode.AUTO:
+            # The model the runner recorded this phase starting on, when it is one:
+            # one decision for the row and the calls, not two made a moment apart.
+            held = inflight.held(self.key)
+            if held:
+                ctx.pin_model = held
+                return
         if ctx.escalate:
             try:
                 ctx.pin_model = router.strongest_for(

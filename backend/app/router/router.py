@@ -1290,10 +1290,12 @@ class ModelRouter:
                 if not prov.resolves(model, names):
                     missing.append({"role": role, "model": model, "source": source_id})
         if missing:
-            return self._missing(missing)
+            return replace(self._missing(missing), picks=tuple(picks))
         able = self._able_to_write(mode, by_source)
         if not able.ok:
-            return able
+            # Said with each agent's model: the refusal names one, and the page can
+            # show which agents would have run on it.
+            return replace(able, picks=tuple(picks))
         return replace(self._compatible(by_source, users), picks=tuple(picks))
 
     def _compatible(
@@ -1578,9 +1580,10 @@ class ModelRouter:
                 attempts.append({
                     "provider": pname, "model": model, "error": str(e),
                     "kind": getattr(e, "kind", None), "why": _short(getattr(e, "kind", None)),
-                    # Sent, and it failed — not skipped as unavailable. What Auto's record
-                    # of the model holds against it (#96).
-                    "tried": True,
+                    # Sent, and it failed for a reason that is about the model — not a key,
+                    # a bill, a rate limit or a provider outage, which say nothing about
+                    # how it does the work. What Auto's record holds against it (#96).
+                    "tried": getattr(e, "kind", None) not in _NOT_THE_MODELS_FAULT,
                 })
                 last_error = e
                 if pname in CLOUD_PROVIDERS:
@@ -1909,7 +1912,7 @@ class ModelRouter:
 
     #: How long Auto's candidate list stands. Short: it is a cache for a burst of
     #: calls, and a key verdict or a source change clears it at once.
-    _PRIOR_TTL_SECONDS = 5.0
+    _PRIOR_TTL_SECONDS = 30.0
 
     def _cached_prior(self, complexity: str) -> list[tuple[tuple[str, str], str]]:
         import time as _time
@@ -1944,8 +1947,15 @@ class ModelRouter:
         ]
         prior: list[tuple[tuple[str, str], str]] = []
 
+        def same(a: tuple[str, str], b: tuple[str, str]) -> bool:
+            if a == b:
+                return True
+            prov = self.sources.get(a[0]) if a[0] == b[0] else None
+            return bool(prov is not None and prov.resolves(a[1], [b[1]]))
+
         def add(pair: tuple[str, str], why: str) -> None:
-            if all(pair != have for have, _ in prior):
+            # One model, however the default and the runtime's list spell it.
+            if not any(same(pair, have) for have, _ in prior):
                 prior.append((pair, why))
 
         if complexity == "high":
@@ -1955,7 +1965,7 @@ class ModelRouter:
             add(
                 pair,
                 "your default"
-                if pair == default
+                if default is not None and same(pair, default)
                 else "the largest model that fits this computer"
                 if index == 0
                 else "a model that fits this computer",
@@ -2122,6 +2132,11 @@ class ModelRouter:
 #: models is a table that is wrong the week after it is written, and would put a
 #: hardcoded model name back into the routing layer by the back door.
 _CODER_HINTS = ("coder", "code", "codestral", "starcoder", "devstral")
+
+
+#: Failures that are about the account or the provider, not the model: a key, a bill,
+#: a rate limit, an outage. A model isn't marked down for them (#96).
+_NOT_THE_MODELS_FAULT = keyerrors.BLOCKING | keyerrors.RETRYABLE
 
 
 def _short(kind: Optional[str]) -> Optional[str]:

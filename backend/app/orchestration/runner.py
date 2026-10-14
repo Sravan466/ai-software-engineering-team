@@ -76,6 +76,23 @@ log = get_logger(__name__)
 _STOPPED = "Stopped before this phase finished."
 _PAUSED = "Paused: the computer running this model disconnected."
 
+
+def _picked(row: PhaseResult) -> Optional[str]:
+    """The model a phase row started on (#96)."""
+    pick = row.model_pick if isinstance(row.model_pick, dict) else {}
+    found = pick.get("model")
+    return found if isinstance(found, str) else None
+
+
+def _with_failures(pick: Optional[dict], *models: Optional[str]) -> Optional[dict]:
+    """`pick` carrying failures of earlier attempts whose rows are going away."""
+    failed = [m for m in models if m]
+    if not failed:
+        return pick
+    base = dict(pick) if isinstance(pick, dict) else {}
+    base["failed_before"] = [*(base.get("failed_before") or []), *failed]
+    return base
+
 # ── one lock per build, not one for the whole process ────────────────────────
 #
 # This used to be a single `threading.Lock()` held around `graph.invoke` — which is
@@ -1726,6 +1743,10 @@ class PipelineRunner:
                 # the phase with two live `pending_approval` rows for one piece of
                 # work, doubling its history and the progress count drawn from it.
                 # It produced nothing; `project.last_error` carries why.
+                if not isinstance(e, (RequestCancelled, ComputerDisconnected)):
+                    # The failure is the model's, and the row that says so is about to
+                    # go: the restored attempt carries it, so Auto's record keeps it.
+                    superseded.model_pick = _with_failures(superseded.model_pick, _picked(row))
                 self._delete_rows(db, project, [row])
                 db.commit()
                 log.info(
@@ -2042,17 +2063,28 @@ class PipelineRunner:
         # stack identical dead rows every time someone resumes. A *rejected* attempt
         # is different — that one generated real output the reviewer turned down, and
         # that history is worth keeping.
-        self._delete_rows(
-            db,
-            project,
+        dead = (
             db.query(PhaseResult)
             .filter(
                 PhaseResult.project_id == project.id,
                 PhaseResult.phase == phase_key,
                 PhaseResult.status == PhaseStatus.FAILED.value,
             )
-            .all(),
+            .all()
         )
+        # What those attempts said about the models they failed on, before they go:
+        # carried on the new row, so a phase that fails and is retried still counts
+        # against the model in Auto's record (#96).
+        failed_before = [
+            spec
+            for gone in dead
+            for spec in (
+                ([_picked(gone)] if (gone.feedback or "").startswith(model_history.MODEL_FAILURES) else [])
+                + list(((gone.model_pick or {}).get("failed_before") or []))
+            )
+            if spec
+        ]
+        self._delete_rows(db, project, dead)
 
         project.current_phase = phase_key
         project.phase_started_at = now
@@ -2075,11 +2107,13 @@ class PipelineRunner:
             output={},
             content_md="",
             started_at=now,
-            model_pick=self._model_pick(project, phase_key, escalated),
+            model_pick=_with_failures(self._model_pick(project, phase_key, escalated), *failed_before),
         )
         db.add(row)
         db.commit()
         db.refresh(row)
+        # The agent's calls are held to this same model (`BaseAgent._pin`).
+        inflight.hold(project.id, phase_key, (row.model_pick or {}).get("model"))
         return row
 
     @staticmethod
@@ -2163,8 +2197,10 @@ class PipelineRunner:
             )
             row.model_pick = {
                 **row.model_pick,
-                "fell_back": any(bool(call.get("fallback_used")) for call in calls),
-                "fell_back_from": fell_from,
+                # None, not "no": a kept attempt made no call that could say (#76).
+                "calls": len(calls),
+                "fell_back": any(bool(call.get("fallback_used")) for call in calls) if calls else None,
+                "fell_back_from": fell_from if calls else None,
             }
         row.completed_at = _now()
         project.heartbeat_at = row.completed_at
@@ -2175,6 +2211,7 @@ class PipelineRunner:
         db.commit()
         # Auto chooses the next phase with this one counted.
         model_history.changed(project.owner_id)
+        inflight.release(project.id, row.phase)
         if row.phase == Phase.SECURITY_ENGINEER.value:
             # Every audit, including the re-audit after a fix — which is the one that
             # decides whether the fix took. Here rather than in `_run_phase` because a
@@ -2358,6 +2395,7 @@ class PipelineRunner:
         db.commit()
         project = row.project
         model_history.changed(project.owner_id if project is not None else None)
+        inflight.release(row.project_id, row.phase)
 
     # ── graph position ────────────────────────────────────────────────────────
     @staticmethod
