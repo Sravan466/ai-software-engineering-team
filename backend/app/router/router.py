@@ -1860,9 +1860,9 @@ class ModelRouter:
             # local default and says which choice it could not use.
             if role_pair and role_pair[0] in CLOUD_PROVIDERS:
                 log.warning(
-                    "Role '%s' is set to %s, but this build runs Local-Only, so it will "
-                    "use the local default instead. Switch the build to Auto or Manual "
-                    "routing to use a cloud model for this role.",
+                    "Role '%s' is set to %s, but this build uses Local model, so it will "
+                    "use the local default instead. Switch the build to Auto or Pick a "
+                    "model to use a cloud model for this role.",
                     role,
                     self._spec(role_pair),
                 )

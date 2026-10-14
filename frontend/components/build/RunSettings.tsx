@@ -249,6 +249,7 @@ export function modelChoices(
 /** "on this computer", or the runtime on another computer it runs on. */
 function whereItRuns(option: ModelOption): string {
   if (option.cloud) return `through your ${option.where} key`;
+  if (option.hosted) return `on a hosted service, through ${option.where}`;
   return option.remote ? `on ${option.where}` : "on this computer";
 }
 
@@ -472,7 +473,8 @@ export default function RunSettings({
   idea = "",
 }: {
   config: RunConfig;
-  onChange: (next: RunConfig) => void;
+  /** `byUser` is false for a change the panel made itself (pinning a model). */
+  onChange: (next: RunConfig, byUser?: boolean) => void;
   options: ModelOption[];
   /** Which answers are real ones on this account (`modelChoices`). */
   choices: ModelChoices;
@@ -512,7 +514,7 @@ export default function RunSettings({
     const first =
       options.find((o) => o.available && o.isDefault) ??
       options.find((o) => o.available && !o.remote && !o.hosted && !o.cloud);
-    if (first) onChange({ ...config, model: first.value });
+    if (first) onChange({ ...config, model: first.value }, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routing.needsModel, model, options]);
 

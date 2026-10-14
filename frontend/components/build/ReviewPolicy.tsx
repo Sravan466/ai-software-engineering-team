@@ -66,28 +66,30 @@ export default function ReviewPolicy({
   }, [open]);
 
   const current = APPROVAL_BY_ID[project.approval_mode] ?? APPROVAL_MODES[0];
-  // The answer chosen, shown at once and saved — after the save in flight, if one is
-  // — rather than snapping back until the build reloads, or being dropped.
+  // The answer chosen is shown at once, and the last one chosen is the one saved:
+  // choices made while a save is in flight wait for it, then the latest is sent.
+  // Once nothing is pending the radios read the build again, so they can't drift
+  // from what it holds.
   const [wanted, setWanted] = useState<ApprovalMode | null>(null);
-  const sent = useRef<ApprovalMode | null>(null);
-  useEffect(() => {
-    if (wanted === null) return;
-    if (wanted === project.approval_mode) {
-      setWanted(null);
-      sent.current = null;
-      return;
+  const latest = useRef<ApprovalMode | null>(null);
+  const saving = useRef(false);
+  async function choose(mode: ApprovalMode) {
+    setWanted(mode);
+    latest.current = mode;
+    if (saving.current) return;
+    saving.current = true;
+    let sent: ApprovalMode | null = null;
+    while (latest.current !== null && latest.current !== sent) {
+      sent = latest.current;
+      const ok = await save({ approval_mode: sent });
+      // A failed save stops here unless something newer was chosen meanwhile; the
+      // error line says what went wrong.
+      if (!ok && latest.current === sent) break;
     }
-    if (busy || sent.current === wanted) return;
-    sent.current = wanted;
-    save({ approval_mode: wanted }).then((ok) => {
-      if (!ok) {
-        // Said in the error line; the radios go back to what the build has.
-        setWanted(null);
-        sent.current = null;
-      }
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, wanted, project.approval_mode]);
+    saving.current = false;
+    latest.current = null;
+    setWanted(null);
+  }
   const settled =
     project.status === "completed" ||
     project.status === "failed" ||
@@ -149,7 +151,7 @@ export default function ReviewPolicy({
               value={wanted ?? current.id}
               // Not disabled while saving: a disabled radio drops the keyboard focus
               // an arrow key just moved onto it. A change during a save waits for it.
-              onChange={(id) => setWanted(id as ApprovalMode)}
+              onChange={(id) => choose(id as ApprovalMode)}
               choices={APPROVAL_MODES.map((m) => ({ value: m.id, label: m.label, description: m.hint }))}
             />
           </div>

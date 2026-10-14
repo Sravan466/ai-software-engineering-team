@@ -172,18 +172,13 @@ function routingBadge(project: Project): string {
   if (project.routing_mode === "auto") return "Auto";
   // A manual build with nothing pinned runs on Auto's chain, so that's what it says.
   if (project.routing_mode === "manual") return modelName(project.preferred_model) || "Auto";
-  // Each phase's current attempt only: a retry or a rejected attempt is not another
-  // phase on that model.
-  const current = new Map<string, (typeof project.phases)[number]>();
-  for (const phase of project.phases) {
-    if (phase.status === "rejected" || phase.status === "failed") continue;
-    const seen = current.get(phase.phase);
-    if (!seen || seen.created_at < phase.created_at) current.set(phase.phase, phase);
-  }
+  // Each phase's current attempt only (the runner's own rule, `latestRow`): a retry
+  // is not another phase on that model. One that ran hosted isn't Local's model.
   const counts = new Map<string, number>();
-  for (const phase of current.values()) {
-    const ran = phase.is_local !== false ? phase.model_used : null;
-    const name = ran || modelName(phase.model_pick?.model);
+  for (const key of new Set(project.phases.map((p) => p.phase))) {
+    const phase = latestRow(project, key);
+    if (!phase || phase.is_local === false) continue;
+    const name = phase.model_used || modelName(phase.model_pick?.model);
     if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   let most = "";

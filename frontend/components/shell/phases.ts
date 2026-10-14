@@ -113,7 +113,7 @@ export const APPROVAL_MODES: ApprovalModeMeta[] = [
   {
     id: "every_phase",
     label: "After each agent",
-    hint: "You review each of the 8 agents' work before the next one starts.",
+    hint: `You review each of the ${AGENTS.length} agents' work before the next one starts.`,
     summary: "Checks after each agent",
     running: "Checks with you after each agent.",
   },

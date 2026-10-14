@@ -54,14 +54,12 @@ export default function NewBuildPage() {
 
   const probe = useCallback(async () => {
     setChecking(true);
-    const [localStatus, routerStatus, roleSettings] = await Promise.all([
+    const [localStatus, routerStatus] = await Promise.all([
       api.getLocalModel().catch(() => null),
       api.routerStatus().catch(() => null),
-      api.getRoles().catch(() => null),
     ]);
     setLocal(localStatus);
     setModels(routerStatus);
-    setRoles(roleSettings?.roles ?? null);
     setChecking(false);
   }, []);
 
@@ -95,6 +93,20 @@ export default function NewBuildPage() {
       live = false;
     };
   }, [checking, config.routing.backend, config.model, local, models]);
+
+  // Each agent's own model from Settings is only said in the open panel, so it is
+  // asked for when the panel opens, not on every visit before Start is enabled.
+  useEffect(() => {
+    if (!advanced || roles !== null) return;
+    let live = true;
+    api
+      .getRoles()
+      .then((found) => live && setRoles(found.roles))
+      .catch(() => live && setRoles([]));
+    return () => {
+      live = false;
+    };
+  }, [advanced, roles]);
 
   const options = useMemo(() => modelOptions(local, models), [local, models]);
   // Which answers are real ones here (#96). Auto's count is the server's once it has
@@ -265,8 +277,8 @@ export default function NewBuildPage() {
           <div id="run-settings" className="run-settings">
             <RunSettings
               config={config}
-              onChange={(next) => {
-                if (next.routing !== config.routing || next.model !== config.model) setChose(true);
+              onChange={(next, byUser = true) => {
+                if (byUser && (next.routing !== config.routing || next.model !== config.model)) setChose(true);
                 setConfig(next);
               }}
               options={options}
