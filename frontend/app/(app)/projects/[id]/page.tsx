@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject, type R
 import Link from "next/link";
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
+import { modelName } from "@/lib/models";
 import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
 import { AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
@@ -158,6 +159,31 @@ function localPct(project: Project): number | null {
   if (known.length === 0) return null;
   const local = known.filter((p) => p.is_local).length;
   return Math.round((local / known.length) * 100);
+}
+
+/**
+ * Which model builds it, in the composer's words (#96): "Auto", "Local · qwen2.5:7b",
+ * or the model picked. Never the stored value (`auto`, `local_only`, `source:model`).
+ * A Local build's model is the one most of its phases ran on (an agent pointed at
+ * its own model in Settings doesn't speak for the build), else the one they started
+ * on; the build doesn't store the default it was created under.
+ */
+function routingBadge(project: Project): string {
+  if (project.routing_mode === "auto") return "Auto";
+  // A manual build with nothing pinned runs on Auto's chain, so that's what it says.
+  if (project.routing_mode === "manual") return modelName(project.preferred_model) || "Auto";
+  // Each phase's current attempt only (the runner's own rule, `latestRow`): a retry
+  // is not another phase on that model. One that ran hosted isn't Local's model.
+  const counts = new Map<string, number>();
+  for (const key of new Set(project.phases.map((p) => p.phase))) {
+    const phase = latestRow(project, key);
+    if (!phase || phase.is_local === false) continue;
+    const name = phase.model_used || modelName(phase.model_pick?.model);
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  let most = "";
+  for (const [name, n] of counts) if (n > (counts.get(most) ?? 0)) most = name;
+  return most ? `Local · ${most}` : "Local model";
 }
 
 // Cost is only meaningful once something has actually cost money.
@@ -337,11 +363,7 @@ function BuildPage({ id }: { id: string }) {
         <div style={{ minWidth: 0 }}>
           <h1>{project.name || project.idea}</h1>
           <div className="build-meta">
-            <span className="badge">
-              {project.routing_mode === "local_only"
-                ? "Local models"
-                : project.preferred_model || project.routing_mode}
-            </span>
+            <span className="badge">{routingBadge(project)}</span>
             <ReviewPolicy project={project} id={id} onChanged={load} />
             {(project.deploy_url || project.github_repo) && (
               <span className="ship-badges">

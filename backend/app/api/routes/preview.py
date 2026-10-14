@@ -82,11 +82,11 @@ def _provider_hint() -> str:
     """
     default = model_router.local_default()
     if default is None:
-        return " If you're running Local-Only, start a local runtime and choose a model in Settings."
+        return " If this build uses Local model, start a local runtime and choose a model in Settings."
     source = model_router.source(default[0])
     where = source.source.label if source is not None else default[0]
     return (
-        f" If you're running Local-Only, make sure {where} is running and has "
+        f" If this build uses Local model, make sure {where} is running and has "
         f"'{default[1]}'."
     )
 

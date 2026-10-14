@@ -221,7 +221,60 @@ button.verdict[aria-expanded="true"] { background: var(--bg-raised); }
 .precheck-model { font-size: var(--t-sm); color: var(--ink); overflow-wrap: anywhere; }
 .precheck-where { font-size: var(--t-sm); color: var(--ink-3); }
 
+/* ── Auto's choice per agent, said before Start (#96) ──────────────────────
+   One sentence by default; "Why each one" opens a row per agent in place — who,
+   the model and where it runs, and the reason in the record's own words. */
+.auto-why-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.auto-picks-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--tr-slow);
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+.auto-picks-wrap[data-open] { grid-template-rows: 1fr; }
+.auto-picks {
+  min-height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  transition: visibility 0s linear 240ms;
+}
+.auto-picks-wrap[data-open] .auto-picks { visibility: visible; transition-delay: 0s; }
+.auto-pick {
+  display: grid;
+  grid-template-columns: minmax(118px, 0.8fr) minmax(150px, 1fr) minmax(0, 2fr);
+  gap: 2px 14px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--t-xs);
+}
+.auto-pick:first-child { margin-top: 10px; }
+.auto-pick-who { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.auto-pick-name { font-family: var(--pixel); font-size: 12px; letter-spacing: 0.02em; color: var(--agent, var(--ink)); }
+.auto-pick-role { color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auto-pick-model { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.auto-pick-model .mono { color: var(--ink); overflow-wrap: anywhere; }
+.auto-pick-where { color: var(--ink-3); }
+.auto-pick-why { color: var(--ink-2); line-height: 1.45; }
+.precheck .auto-picks-wrap + .precheck-rows { margin-top: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .auto-picks-wrap,
+  .auto-picks { transition: none; }
+}
+
 @media (max-width: 620px) {
+  .auto-pick { grid-template-columns: minmax(0, 1fr); gap: 3px; padding: 8px 0; }
   .model-item .model-row-name { flex-basis: 100%; }
   .tune { padding: 14px; }
   .tune-field[data-wide] { grid-column: 1 / -1; }

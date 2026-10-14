@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, type LocalStatus, type Preflight, type RouterStatus } from "@/lib/api";
+import { api, type LocalStatus, type Preflight, type RoleRow, type RouterStatus } from "@/lib/api";
 import { crewHref, floorBuild, useSharedProjects } from "@/lib/buildStatus";
 import { EXAMPLES } from "@/components/shell/phases";
 import { AGENTS } from "@/components/agents/personas";
@@ -15,6 +15,7 @@ import BuildChips, { NO_CHOICE, type ConnectorChoice } from "@/components/connec
 import RunSettings, {
   type RunConfig,
   DEFAULT_RUN_CONFIG,
+  modelChoices,
   modelOptions,
   modelsThatCannotBuild,
   runtimeBlocker,
@@ -48,6 +49,7 @@ export default function NewBuildPage() {
   // knew the answer; the composer never asked. Now it asks first.
   const [local, setLocal] = useState<LocalStatus | null>(null);
   const [models, setModels] = useState<RouterStatus | null>(null);
+  const [roles, setRoles] = useState<RoleRow[] | null>(null);
   const [checking, setChecking] = useState(true);
 
   const probe = useCallback(async () => {
@@ -92,7 +94,54 @@ export default function NewBuildPage() {
     };
   }, [checking, config.routing.backend, config.model, local, models]);
 
+  // Each agent's own model from Settings is only said in the open panel, so it is
+  // asked for when the panel opens, not on every visit before Start is enabled.
+  useEffect(() => {
+    if (!advanced || roles !== null) return;
+    let live = true;
+    api
+      .getRoles()
+      .then((found) => live && setRoles(found.roles))
+      .catch(() => live && setRoles([]));
+    return () => {
+      live = false;
+    };
+  }, [advanced, roles]);
+
   const options = useMemo(() => modelOptions(local, models), [local, models]);
+  // Which answers are real ones here (#96). Auto's count is the server's once it has
+  // answered: only it knows which models fit this computer.
+  const choices = useMemo(() => modelChoices(options, preflight?.auto), [options, preflight?.auto]);
+
+  // A new build starts on the answer that fits what this account has — Auto when
+  // every model it can pick is free, Local model when a cloud key would be billed —
+  // until someone chooses. An answer that stops being offered (a model went away)
+  // gives way to the one that fits now.
+  const [chose, setChose] = useState(false);
+  // Until the first answer is settled the collapsed line says so, rather than
+  // showing Local model and then switching to Auto a moment later.
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    // After the server's own answer: deciding on the page's estimate and then again
+    // on the server's count flipped the choice on load.
+    if (checking || preflighting) return;
+    const offered = choices.modes.includes(config.routing);
+    // A choice holds while it is still offered. With one model left there is no
+    // choice to hold: the build runs on that model, and the panel says which.
+    const onlyOne = choices.single !== null;
+    if (chose && offered && !onlyOne) return;
+    if (chose && choices.modes.length === 0 && !onlyOne) return;
+    const { routing, model } = choices.preferred;
+    if (routing === config.routing && (!routing.needsModel || config.model || !model)) {
+      setSettled(true);
+      return;
+    }
+    setConfig((c) => ({ ...c, routing, model: routing.needsModel ? model || c.model : "" }));
+    // Pick a model with nothing it could pin by itself: the select is where the
+    // answer is, so it is shown rather than left behind a closed panel.
+    if (routing.needsModel && !model) setAdvanced(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checking, preflighting, choices, chose]);
   // What the list above left out, so the panel can say so rather than leaving a
   // model visible in Settings and missing here with no explanation anywhere.
   const omitted = useMemo(() => modelsThatCannotBuild(local), [local]);
@@ -109,7 +158,7 @@ export default function NewBuildPage() {
 
   async function start() {
     const trimmed = idea.trim();
-    if (!trimmed || busy || blocker) return;
+    if (!trimmed || busy || blocker || checking || preflighting || !(settled || chose)) return;
     setBusy(true);
     setError("");
     setCreatedId("");
@@ -178,7 +227,9 @@ export default function NewBuildPage() {
             <span className={"phase-chev" + (advanced ? " open" : "")} aria-hidden="true">
               {Icon.chevron}
             </span>
-            <span className="run-settings-summary">{settingsSummary(config)}</span>
+            <span className="run-settings-summary">
+              {settled || chose ? settingsSummary(config, choices) : "Checking your models…"}
+            </span>
             <span className="run-settings-more">{advanced ? "Hide" : "Advanced"}</span>
           </button>
 
@@ -194,7 +245,7 @@ export default function NewBuildPage() {
             ) : (
               <button
                 className="btn btn-primary"
-                disabled={!idea.trim() || busy || checking || preflighting}
+                disabled={!idea.trim() || busy || checking || preflighting || !(settled || chose)}
                 onClick={start}
               >
                 {busy && <span className="btn-spinner" aria-hidden="true" />}
@@ -214,6 +265,7 @@ export default function NewBuildPage() {
           checks={preflight?.checks}
           checking={checking || preflighting}
           allAgents={AGENTS.length}
+          auto={config.routing.backend === "auto" && preflight?.ok ? preflight.picks : undefined}
           refused={
             preflight?.ok === false
               ? preflight.checks?.find((c) => c.level === "blocked")?.spec
@@ -225,8 +277,14 @@ export default function NewBuildPage() {
           <div id="run-settings" className="run-settings">
             <RunSettings
               config={config}
-              onChange={setConfig}
+              onChange={(next, byUser = true) => {
+                if (byUser && (next.routing !== config.routing || next.model !== config.model)) setChose(true);
+                setConfig(next);
+              }}
               options={options}
+              choices={choices}
+              roles={roles}
+              local={local}
               omitted={omitted}
               disabled={busy}
               idea={idea}

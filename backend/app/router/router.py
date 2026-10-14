@@ -1245,10 +1245,10 @@ class ModelRouter:
                 return Readiness(
                     ok=False,
                     reason=(
-                        f"{pname}:{model} is set for {who}, but {found.message} Choose a model this key "
+                        f"{model} ({_label(pname)}) is set for {who}, but {found.message} Choose a model this key "
                         "can use (Settings → Cloud API keys lists them)."
                         if found.status == keycheck.MODEL_UNAVAILABLE
-                        else f"{pname}:{model} is set for {who}, but the {keycheck.LABEL.get(pname, pname)} key "
+                        else f"{model} ({_label(pname)}) is set for {who}, but the {keycheck.LABEL.get(pname, pname)} key "
                         f"isn't working: {found.message} Fix it in Settings → Cloud API keys, or choose another model."
                     ),
                 )
@@ -1502,9 +1502,9 @@ class ModelRouter:
             return Readiness(
                 ok=False,
                 reason=(
-                    f"This build runs Local-Only, but {listed} is served by a local runtime "
+                    f"This build uses Local model, but {listed} is served by a local runtime "
                     "that sends it to a hosted service to run. Choose a model that runs on "
-                    "your own hardware, or switch the build to Auto or Manual."
+                    "your own hardware, or switch the build to Auto or Pick a model."
                 ),
             )
         return Readiness(ok=True)
@@ -1797,7 +1797,8 @@ class ModelRouter:
                 "available": prov.available(),
                 "is_local": False,
                 "default_model": self._default_model.get(name),
-                "label": name,
+                # The provider as people name it ("Anthropic"), for the model pickers (#96).
+                "label": _label(name),
             }
             for name, prov in self._cloud.items()
         }
@@ -1859,9 +1860,9 @@ class ModelRouter:
             # local default and says which choice it could not use.
             if role_pair and role_pair[0] in CLOUD_PROVIDERS:
                 log.warning(
-                    "Role '%s' is set to %s, but this build runs Local-Only, so it will "
-                    "use the local default instead. Switch the build to Auto or Manual "
-                    "routing to use a cloud model for this role.",
+                    "Role '%s' is set to %s, but this build uses Local model, so it will "
+                    "use the local default instead. Switch the build to Auto or Pick a "
+                    "model to use a cloud model for this role.",
                     role,
                     self._spec(role_pair),
                 )

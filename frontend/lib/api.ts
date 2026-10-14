@@ -88,6 +88,18 @@ export type PhaseResult = {
    * written before hand-offs were recorded — the UI then says nothing.
    */
   handoff?: Handoff | null;
+  /**
+   * Which model this phase started on and why (#96). `null` on rows from before
+   * picks were recorded.
+   */
+  model_pick?: {
+    mode: string;
+    model: string;
+    reason: string;
+    sample: number;
+    basis: PickBasis;
+    fell_back?: boolean;
+  } | null;
 };
 
 export type HandoffDep = {
@@ -1747,7 +1759,35 @@ export type Preflight = {
   unreachable: boolean;
   /** The pre-Start check of every local model this build would use. */
   checks?: PreflightCheck[];
+  /** Each role's model and why (#96) — the backend's answer, never guessed here. */
+  picks?: ModelPick[];
+  /** Every model Auto may choose from right now, whatever is selected. Null when the
+   *  server couldn't say — the page then counts for itself rather than reading "none". */
+  auto?: AutoChoice[] | null;
 };
+
+/** How a role's model was arrived at. */
+export type PickBasis = "record" | "prior" | "settings" | "chosen" | "default" | "fallback" | "escalated";
+
+/** Which model a role starts on, and why: "valid first try in 5 of 5 runs". */
+export type ModelPick = {
+  role: string;
+  /** `source:model` */
+  model: string;
+  /** The model's own name, as its runtime or provider spells it. */
+  name: string;
+  /** The runtime's label ("Ollama") or the provider's ("Anthropic"). */
+  where: string;
+  /** Runs on hardware the user controls (a local runtime, here or paired). */
+  local: boolean;
+  reason: string;
+  /** How many runs the reason rests on; 0 when it rests on none. */
+  sample: number;
+  basis: PickBasis;
+};
+
+/** One model Auto can choose from. */
+export type AutoChoice = { model: string; name: string; where: string; local: boolean };
 
 /** fits · degraded (runs, with a cost) · blocked (won't run) · unknown (not assessed). */
 export type CheckLevel = "fits" | "degraded" | "blocked" | "unknown";

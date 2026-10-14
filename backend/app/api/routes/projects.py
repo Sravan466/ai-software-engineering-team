@@ -573,13 +573,14 @@ def preflight(payload: PreflightRequest) -> dict:
             model_router.parse(payload.preferred_model)
         except ValueError as e:
             # The same refusal creating the project would give, said before it exists.
-            return {"ok": False, "reason": str(e), "unreachable": False, "checks": [], "picks": [], "auto": []}
+            # `auto` is null, not []: no answer, rather than "Auto has nothing to choose".
+            return {"ok": False, "reason": str(e), "unreachable": False, "checks": [], "picks": [], "auto": None}
     ready = _readiness(mode, payload.preferred_model)
     try:
         auto = model_router.auto_choices()
     except Exception as e:  # noqa: BLE001 - the composer then says less, never refuses
         log.warning("Couldn't list what Auto can choose from: %s", e)
-        auto = []
+        auto = None
     return {
         "ok": ready.ok,
         "reason": ready.reason,

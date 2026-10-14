@@ -42,51 +42,60 @@ export const EXAMPLES = [
   "An invoicing tool for freelancers with Stripe payouts",
 ];
 
-// The composer's routing control. `label` is what a person reads, `backend` is
-// what the API expects, and `hint` explains the trade-off in one line so the
-// choice isn't three unexplained words.
+// The composer's model control (#96). `label` is what a person reads, `backend` is
+// what the API expects. What each one runs is said with the real model names, so
+// the description is built where those are known (`RunSettings`); `hint` is the
+// line used when they aren't.
 export type RoutingModeMeta = {
   id: string;
   label: string;
   backend: string;
   hint: string;
-  /** Manual is only a real choice once a model is pinned to the run — without one
-   *  the router falls straight through to the auto chain, and the control does
+  /** Pick a model is only a real choice once a model is pinned to the run — without
+   *  one the router falls straight through to the auto chain, and the control does
    *  nothing at all. */
   needsModel?: boolean;
 };
 
 export const ROUTING_MODES: RoutingModeMeta[] = [
   {
-    id: "local",
-    label: "Local",
-    backend: "local_only",
-    hint: "Your own models. Free and private, but slower.",
-  },
-  {
     id: "auto",
     label: "Auto",
     backend: "auto",
-    hint: "The best model for each phase. Local when there's no cloud key.",
+    hint: "Picks each agent's model by how each one did in your past builds.",
+  },
+  {
+    id: "local",
+    label: "Local model",
+    backend: "local_only",
+    hint: "Every agent uses your default model on this computer. Free, and nothing leaves your machine.",
   },
   {
     id: "manual",
-    label: "Manual",
+    label: "Pick a model",
     backend: "manual",
-    hint: "One model you pick, for every phase.",
+    hint: "Every agent uses the model you choose.",
     needsModel: true,
   },
 ];
 
-// ── how often the run stops for you ─────────────────────────────────────────
-// Gating every handoff identically is what turned review into a rubber stamp:
-// the same card and the same two buttons whether an agent renamed a field or
-// wrote the whole backend. The default gates on consequence instead.
+export const ROUTING_BY_BACKEND: Record<string, RoutingModeMeta> = Object.fromEntries(
+  ROUTING_MODES.map((m) => [m.backend, m]),
+);
+
+// ── when the run checks with you ─────────────────────────────────────────────
+// One copy for the composer and the build page's popover, so the two can't drift.
+// Every description has to be true of what the runner does (`decide_gate`,
+// `gate_for`): the database and connector questions are asked in every mode, and a
+// build that contradicts its stack, doesn't build, fails its tests or needs help
+// stops even when nobody asked it to.
 export type ApprovalModeMeta = {
   id: ApprovalMode;
   label: string;
-  /** The one line under the control. */
+  /** The line under the option. */
   hint: string;
+  /** The short form in the composer's collapsed line. */
+  summary: string;
   /** What the build view says is coming next, once the run is going. */
   running: string;
 };
@@ -94,23 +103,41 @@ export type ApprovalModeMeta = {
 export const APPROVAL_MODES: ApprovalModeMeta[] = [
   {
     id: "checkpoints",
-    label: "Two checkpoints",
-    hint: "Stops on the plan and the finished build, and for serious security or cost issues.",
-    running: "Stops on the plan and the finished build.",
+    label: "At the plan and the end",
+    hint:
+      "You approve the plan before any code is written, and the finished app before it ships. " +
+      "It also asks when a security finding or the hosting cost needs your call.",
+    summary: "Checks at the plan and the end",
+    running: "Checks with you at the plan and at the end.",
   },
   {
     id: "every_phase",
-    label: "Every phase",
-    hint: "Stops after each of the eight phases.",
-    running: "Stops after each of the eight phases.",
+    label: "After each agent",
+    hint: `You review each of the ${AGENTS.length} agents' work before the next one starts.`,
+    summary: "Checks after each agent",
+    running: "Checks with you after each agent.",
   },
   {
     id: "unattended",
-    label: "Unattended",
-    hint: "Runs all eight phases without stopping.",
-    running: "Runs to the end without stopping.",
+    label: "Only when it's stuck",
+    hint:
+      "Runs to the end on its own. It still stops to ask for what only you can give, like a " +
+      "database or a service's API key. It also stops when it can't fix something itself: code " +
+      "that won't build, failing tests, a part written for a different stack, or a serious " +
+      "security problem.",
+    summary: "Checks only when stuck",
+    running: "Runs to the end unless it gets stuck.",
   },
 ];
+
+/** The cost cap, worded once for both surfaces. */
+export const COST_CAP_COPY = {
+  label: "Ask me if hosting the app would cost more than",
+  suffix: "a month",
+  hint:
+    "Ledger, the budget agent, estimates servers, the database and paid APIs from the plan. " +
+    "This cap doesn't cover what the build spends on AI.",
+};
 
 export const APPROVAL_BY_ID: Record<string, ApprovalModeMeta> = Object.fromEntries(
   APPROVAL_MODES.map((m) => [m.id, m]),
