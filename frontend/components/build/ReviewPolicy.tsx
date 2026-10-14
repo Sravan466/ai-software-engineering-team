@@ -2,11 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, type ApprovalMode, type Project } from "@/lib/api";
-import { APPROVAL_BY_ID, APPROVAL_MODES } from "@/components/shell/phases";
+import { APPROVAL_BY_ID, APPROVAL_MODES, COST_CAP_COPY } from "@/components/shell/phases";
 import { Icon } from "@/components/shell/icons";
+import ChoiceRows from "@/components/build/ChoiceRows";
 
 /**
- * How often this run stops — changeable while it is running.
+ * When this build checks with you — changeable while it is running. The labels,
+ * descriptions and cap wording are the composer's (`APPROVAL_MODES`,
+ * `COST_CAP_COPY`), so the two surfaces can't drift apart (#96).
  *
  * `require_approval` was fixed at create time: a build heading somewhere expensive
  * could not be given a gate, and one you had come to trust could not be let off its
@@ -105,7 +108,7 @@ export default function ReviewPolicy({
         aria-controls="review-policy"
         onClick={() => setOpen((o) => !o)}
         disabled={settled}
-        title={settled ? "This run has finished" : "Change when this build stops for you"}
+        title={settled ? "This run has finished" : "Change when this build checks with you"}
       >
         {current.label}
         <span className={"phase-chev" + (open ? " open" : "")} aria-hidden="true">
@@ -116,30 +119,23 @@ export default function ReviewPolicy({
       {open && (
         <div id="review-policy" className="policy-panel">
           <div className="setting">
-            <span className="label" id="policy-label">
-              When this build stops for you
-            </span>
-            <div className="seg" role="group" aria-labelledby="policy-label">
-              {APPROVAL_MODES.map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  className="seg-btn"
-                  aria-pressed={project.approval_mode === m.id}
-                  disabled={busy}
-                  onClick={() => save({ approval_mode: m.id as ApprovalMode })}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-            <p className="field-hint">{current.hint}</p>
+            <ChoiceRows
+              name="policy"
+              legend="When this build checks with you"
+              value={current.id}
+              // Not disabled while saving: a disabled radio drops the keyboard focus
+              // an arrow key just moved onto it. A change during a save waits for it.
+              onChange={(id) => {
+                if (!busy) save({ approval_mode: id as ApprovalMode });
+              }}
+              choices={APPROVAL_MODES.map((m) => ({ value: m.id, label: m.label, description: m.hint }))}
+            />
           </div>
 
           {project.approval_mode === "checkpoints" && (
             <div className="setting">
               <label className="label" htmlFor="policy-cap">
-                Interrupt over a projected monthly cost
+                {COST_CAP_COPY.label}
               </label>
               <div className="prefixed">
                 <span className="prefixed-mark" aria-hidden="true">
@@ -153,16 +149,20 @@ export default function ReviewPolicy({
                   value={cap}
                   disabled={busy}
                   onChange={(e) => setCap(e.target.value.replace(/[^0-9.]/g, ""))}
+                  aria-describedby="policy-cap-hint"
                   onKeyDown={(e) => {
                     if (e.key === "Enter") saveCap();
                   }}
                 />
-                <span className="prefixed-suffix">/month</span>
+                <span className="prefixed-suffix">{COST_CAP_COPY.suffix}</span>
                 <button className="btn btn-sm" disabled={busy} onClick={saveCap}>
                   {busy && <span className="btn-spinner" aria-hidden="true" />}
                   Save
                 </button>
               </div>
+              <p className="field-hint" id="policy-cap-hint">
+                {COST_CAP_COPY.hint}
+              </p>
             </div>
           )}
 

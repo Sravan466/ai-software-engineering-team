@@ -5,7 +5,9 @@ import Link from "next/link";
 import {
   api,
   type ApprovalMode,
+  type AutoChoice,
   type LocalStatus,
+  type RoleRow,
   type RouterStatus,
   type Skill,
   type SkillOverrides,
@@ -13,25 +15,29 @@ import {
 } from "@/lib/api";
 import {
   APPROVAL_MODES,
+  COST_CAP_COPY,
+  ROUTING_BY_BACKEND,
   ROUTING_MODES,
   type RoutingModeMeta,
 } from "@/components/shell/phases";
 import { canRunABuild, runtimeSays } from "@/lib/capabilities";
 import { hostOf, modelName, sourceFor, splitSpec, triedText } from "@/lib/models";
+import { listOf } from "@/lib/text";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
 import PreviewRows from "@/components/skills/PreviewRows";
 import { byTitle } from "@/components/skills/skills";
+import ChoiceRows from "@/components/build/ChoiceRows";
 
 /**
- * How a run is routed and how often it stops — and whether it can run at all.
+ * Which model builds it and when it checks with you, and whether it can run at all.
  *
- * Three defects met here. Config was asked before intent, so this is a disclosure
- * rather than a gate. Manual routing sent `routing_mode: "manual"` with no model,
- * which the router silently resolved as Auto — so Manual now pins a real model or
- * it isn't Manual. And Start build was primary and enabled with nothing behind it
- * to run on, so the runtime is checked here instead of failing after the project
- * has already been created.
+ * Config is asked after intent, so this is a disclosure rather than a gate. Each
+ * answer is said by what it runs, with the real model names, and an answer that
+ * would run the same thing as another isn't offered (#96). Pick a model pins a real
+ * model or it isn't Pick a model: `routing_mode: "manual"` with nothing pinned is
+ * silently Auto. And Start build is checked against the runtime here instead of
+ * failing after the project has already been created.
  */
 
 export type RunConfig = {
@@ -39,7 +45,7 @@ export type RunConfig = {
   /** `source:model`, empty when nothing is pinned to the run. */
   model: string;
   approval: ApprovalMode;
-  /** Projected monthly run cost above which the build interrupts itself. */
+  /** Projected monthly hosting cost above which the build asks first. */
   costCap: number | null;
   /**
    * Skills this build forces on or off, over what keyword scoring would choose.
@@ -50,7 +56,7 @@ export type RunConfig = {
 };
 
 export const DEFAULT_RUN_CONFIG: RunConfig = {
-  routing: ROUTING_MODES[0],
+  routing: ROUTING_BY_BACKEND.local_only,
   model: "",
   approval: "checkpoints",
   costCap: null,
@@ -59,15 +65,23 @@ export const DEFAULT_RUN_CONFIG: RunConfig = {
 
 export type ModelOption = {
   value: string;
+  /** The row as the select shows it: "claude-opus-4-8 · Anthropic". */
   label: string;
+  /** The model's own name. */
+  name: string;
+  /** "On this computer · Ollama", "On another computer · Desk", "Cloud · uses your API key". */
   group: string;
+  /** The runtime's label, or the provider's. */
+  where: string;
   available: boolean;
-  /** The local default — what picking Manual pins first. */
+  /** The local default — what picking Pick a model pins first. */
   isDefault?: boolean;
   /** Served from another computer; never pinned without the user choosing it. */
   remote?: boolean;
   /** Sent by its runtime to a hosted service to run; never pinned silently either. */
   hosted?: boolean;
+  /** A cloud provider's model, billed to the user's key. */
+  cloud?: boolean;
 };
 
 // ── what can this machine actually run? ──────────────────────────────────────
@@ -97,8 +111,10 @@ export function modelsThatCannotBuild(local: LocalStatus | null): OmittedModel[]
 }
 
 /**
- * Every model the run could be pinned to: each local source's, grouped under the
- * source that serves it, then the cloud.
+ * Every model the run could be pinned to: each local source's, grouped by where it
+ * runs and which runtime serves it, then the cloud. Provider names come from the
+ * backend (`keyerrors.LABELS`), never a table of "pretty" model names kept here —
+ * such a table is out of date within weeks.
  */
 export function modelOptions(
   local: LocalStatus | null,
@@ -110,7 +126,9 @@ export function modelOptions(
   const preferred = local?.default_model;
   for (const source of local?.sources ?? []) {
     if (!source.reachable) continue;
-    const group = source.remote ? `${source.label} · another computer` : source.label;
+    const group = source.remote
+      ? `On another computer · ${source.label}`
+      : `On this computer · ${source.label}`;
     const names = source.models
       .filter((m) => canRunABuild(m.spec, local?.cannot_build))
       .sort((a, b) =>
@@ -122,7 +140,9 @@ export function modelOptions(
         label:
           (m.spec === preferred ? `${m.name} · default` : m.name) +
           (m.is_local ? "" : " · runs on a hosted service"),
+        name: m.name,
         group,
+        where: source.label,
         available: true,
         isDefault: m.spec === preferred,
         remote: source.remote,
@@ -133,23 +153,149 @@ export function modelOptions(
 
   for (const [provider, info] of Object.entries(models?.providers ?? {})) {
     if (info.is_local || !info.default_model) continue;
+    const label = info.label || provider;
     options.push({
       value: `${provider}:${info.default_model}`,
       // Unavailable options stay listed and disabled: "why isn't Claude here?" is a
       // worse question than an option that says it needs a key.
       label: info.available
-        ? `${provider} · ${info.default_model}`
-        : `${provider} · ${info.default_model} — needs an API key`,
-      group: "Cloud",
+        ? `${info.default_model} · ${label}`
+        : `${info.default_model} · ${label} · add a key in Settings`,
+      name: info.default_model,
+      group: "Cloud · uses your API key",
+      where: label,
       available: info.available,
+      cloud: true,
     });
   }
 
   return options;
 }
 
-function cloudAvailable(models: RouterStatus | null): boolean {
-  return Object.values(models?.providers ?? {}).some((p) => p.available && !p.is_local);
+// ── which answers to offer ───────────────────────────────────────────────────
+/**
+ * What this account can build with, and so which answers are real ones.
+ *
+ * Two answers that would run the same thing are never both offered: Auto appears
+ * only when it has two or more models to choose between, and with one usable model
+ * there is no question at all, only a sentence naming it.
+ */
+export type ModelChoices = {
+  /** Every model the account can use: it writes, its source answers, a key isn't refused. */
+  usable: ModelOption[];
+  /** What Auto can choose from. The backend's list once it has answered. */
+  autoCount: number;
+  /** The working cloud providers, by name. */
+  cloudLabels: string[];
+  /** The local default, when it can run a Local build. */
+  localDefault: ModelOption | null;
+  /** The answers offered, in order. Empty with one usable model or none. */
+  modes: RoutingModeMeta[];
+  /** The one model, when there is exactly one. */
+  single: ModelOption | null;
+  /** What a new build starts on, until someone chooses. */
+  preferred: { routing: RoutingModeMeta; model: string };
+};
+
+export function modelChoices(
+  local: LocalStatus | null,
+  models: RouterStatus | null,
+  auto: AutoChoice[] | null | undefined,
+): ModelChoices {
+  const usable = modelOptions(local, models).filter((o) => o.available);
+  // Auto never picks a model on another computer or a hosted one without being
+  // asked, so they don't count towards its choice — they do count as usable.
+  const autoCount = auto ? auto.length : usable.filter((o) => !o.remote && !o.hosted).length;
+  const cloud = usable.filter((o) => o.cloud);
+  const cloudLabels = Array.from(new Set(cloud.map((o) => o.where)));
+  const localDefault = usable.find((o) => o.isDefault && !o.hosted) ?? null;
+  const single = usable.length === 1 ? usable[0] : null;
+
+  const modes: RoutingModeMeta[] = [];
+  if (usable.length > 1) {
+    if (autoCount >= 2) modes.push(ROUTING_BY_BACKEND.auto);
+    if (localDefault) modes.push(ROUTING_BY_BACKEND.local_only);
+    modes.push(ROUTING_BY_BACKEND.manual);
+  }
+
+  // Auto first when every model it can pick is free; Local model when a key would
+  // be billed, so no build spends on one unless someone chose that.
+  let preferred: ModelChoices["preferred"];
+  if (single) {
+    preferred =
+      single === localDefault
+        ? { routing: ROUTING_BY_BACKEND.local_only, model: "" }
+        : { routing: ROUTING_BY_BACKEND.manual, model: single.value };
+  } else if (modes.includes(ROUTING_BY_BACKEND.auto) && !(cloud.length > 0 && localDefault)) {
+    preferred = { routing: ROUTING_BY_BACKEND.auto, model: "" };
+  } else if (localDefault) {
+    preferred = { routing: ROUTING_BY_BACKEND.local_only, model: "" };
+  } else {
+    preferred = { routing: ROUTING_BY_BACKEND.manual, model: "" };
+  }
+  return { usable, autoCount, cloudLabels, localDefault, modes, single, preferred };
+}
+
+/** "on this computer", or the runtime on another computer it runs on. */
+function whereItRuns(option: ModelOption): string {
+  if (option.cloud) return `through your ${option.where} key`;
+  return option.remote ? `on ${option.where}` : "on this computer";
+}
+
+/**
+ * Agents pointed at a local model of their own in Settings, by that model: what a
+ * Local build runs besides the default. A cloud choice isn't listed — a Local build
+ * doesn't use it.
+ */
+function localOverrides(roles: RoleRow[] | null, local: LocalStatus | null): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const row of roles ?? []) {
+    const agent = AGENT_BY_KEY[row.role];
+    if (!agent || !row.assigned || row.assigned === local?.default_model) continue;
+    if (!sourceFor(local, row.assigned)) continue;
+    const name = modelName(row.assigned);
+    out.set(name, [...(out.get(name) ?? []), agent.codename]);
+  }
+  return out;
+}
+
+function describe(
+  mode: RoutingModeMeta,
+  choices: ModelChoices,
+  roles: RoleRow[] | null,
+  local: LocalStatus | null,
+) {
+  if (mode.backend === "auto") {
+    const billed = choices.cloudLabels;
+    return (
+      <>
+        Picks each agent&apos;s model from the {choices.autoCount} you have, by how each one did in
+        your past builds.
+        {billed.length > 0 &&
+          ` ${listOf(billed)} ${billed.length === 1 ? "bills" : "bill"} your key for the agents ${
+            billed.length === 1 ? "it runs" : "they run"
+          }.`}
+      </>
+    );
+  }
+  if (mode.backend === "local_only" && choices.localDefault) {
+    const home = choices.localDefault;
+    const overrides = Array.from(localOverrides(roles, local));
+    return (
+      <>
+        Every agent uses <span className="mono">{home.name}</span> {whereItRuns(home)}.{" "}
+        {home.remote ? "Free, and nothing goes to a cloud service." : "Free, and nothing leaves your machine."}
+        {overrides.map(([name, agents]) => (
+          <span key={name}>
+            {" "}
+            {listOf(agents)} {agents.length === 1 ? "uses" : "use"} <span className="mono">{name}</span>{" "}
+            instead (set in Settings).
+          </span>
+        ))}
+      </>
+    );
+  }
+  return mode.hint;
 }
 
 export type RuntimeBlocker = {
@@ -227,13 +373,13 @@ export function runtimeBlocker(
       // them is a reason to refuse to start.
       if (!local && !models) return null;
       // Something is there, but only models that send prompts off this machine, which
-      // are never pinned for anyone. The picker says "Choose a model…"; so does this.
+      // are never pinned for anyone. The select says "Choose a model…"; so does this.
       if (modelOptions(local, models).some((o) => o.available)) {
         return {
-          title: "Choose the model to pin",
+          title: "Choose a model",
           text:
-            "Manual routing runs every phase on one model. The available models run on " +
-            "another computer or a hosted service, so pick one under “Model for every phase”.",
+            "Pick a model runs every agent on the one you choose. The models available run " +
+            "on another computer or a hosted service, so choose one under “Model”.",
           action: "Review models in Settings",
           href: "/settings",
         };
@@ -243,7 +389,7 @@ export function runtimeBlocker(
       const onlyNonWriting =
         all.length > 0 && !all.some((m) => canRunABuild(m.spec, local?.cannot_build));
       return {
-        title: "No model to pin",
+        title: "No model to build with",
         text: onlyNonWriting
           ? "The local models found can't write, and no cloud key is set."
           : "No local runtime serves a model, and no cloud key is set.",
@@ -257,18 +403,19 @@ export function runtimeBlocker(
       if (!local_source.reachable) {
         return {
           title: `${local_source.label} isn't answering`,
-          text: `This run is pinned to ${modelName(config.model)} on ${local_source.label} at ${hostOf(local_source.base_url)}, which isn't answering.`,
+          text: `This build runs on ${modelName(config.model)} on ${local_source.label} at ${hostOf(local_source.base_url)}, which isn't answering.`,
           action: "Fix it in Settings",
           href: "/settings",
         };
       }
       return null;
     }
-    const available = models?.providers?.[source]?.available ?? true;
-    if (!available) {
+    const provider = models?.providers?.[source];
+    if (provider && !provider.available) {
+      const label = provider.label || source;
       return {
-        title: `${source} isn't available`,
-        text: `This run is pinned to ${config.model}, and ${source} has no working credentials on this machine.`,
+        title: `${label} isn't available`,
+        text: `This build runs on ${modelName(config.model)}, and ${label} has no working key on this machine.`,
         action: "Fix it in Settings",
         href: "/settings",
       };
@@ -277,18 +424,25 @@ export function runtimeBlocker(
   }
 
   // Auto falls back to local, so it needs one or the other.
-  if (!cloudAvailable(models)) return localBlocker(local);
+  const cloud = Object.values(models?.providers ?? {}).some((p) => p.available && !p.is_local);
+  if (!cloud) return localBlocker(local);
   return null;
 }
 
 // ── the one-line version, shown when the panel is closed ─────────────────────
-export function settingsSummary(config: RunConfig): string {
-  const parts = [
-    config.routing.backend === "local_only" ? "Local models" : config.routing.label,
-  ];
-  if (config.routing.needsModel && config.model) parts.push(config.model);
-  parts.push(APPROVAL_MODES.find((m) => m.id === config.approval)?.label ?? config.approval);
-  if (config.costCap) parts.push(`cap $${config.costCap.toLocaleString()}/mo`);
+export function settingsSummary(config: RunConfig, choices: ModelChoices): string {
+  const parts: string[] = [];
+  if (config.routing.backend === "auto") {
+    parts.push(`Auto · ${choices.autoCount} models`);
+  } else if (config.routing.backend === "manual") {
+    parts.push(config.model ? modelName(config.model) : "Pick a model");
+  } else if (choices.localDefault) {
+    parts.push(`${choices.localDefault.name}, ${whereItRuns(choices.localDefault)}`);
+  } else {
+    parts.push(ROUTING_BY_BACKEND.local_only.label);
+  }
+  parts.push(APPROVAL_MODES.find((m) => m.id === config.approval)?.summary ?? config.approval);
+  if (config.costCap) parts.push(`hosting cap $${config.costCap.toLocaleString()}/mo`);
   const { pinned, excluded } = config.skills;
   if (pinned.length) parts.push(`${pinned.length} skill${pinned.length > 1 ? "s" : ""} pinned`);
   if (excluded.length) parts.push(`${excluded.length} off`);
@@ -300,6 +454,9 @@ export default function RunSettings({
   config,
   onChange,
   options,
+  choices,
+  roles = null,
+  local = null,
   omitted = [],
   disabled,
   idea = "",
@@ -307,6 +464,11 @@ export default function RunSettings({
   config: RunConfig;
   onChange: (next: RunConfig) => void;
   options: ModelOption[];
+  /** Which answers are real ones on this account (`modelChoices`). */
+  choices: ModelChoices;
+  /** Each agent's own model from Settings, for what Local model runs besides the default. */
+  roles?: RoleRow[] | null;
+  local?: LocalStatus | null;
   /**
    * Local models deliberately left out of `options` because they cannot
    * complete text. Named under the control rather than dropped in silence — a
@@ -330,8 +492,8 @@ export default function RunSettings({
   // moment it was typed.
   const [capText, setCapText] = useState(costCap === null ? "" : String(costCap));
 
-  // Manual with nothing pinned is the dead control this fixes, so picking Manual
-  // pins something the moment it is picked: the default, else the first model that
+  // Pick a model with nothing pinned is a dead control, so choosing it pins
+  // something the moment it is chosen: the default, else the first model that
   // works on this machine or a configured cloud. Never, silently, a source on
   // another computer — prompts sent there leave this one, so that is picked by hand.
   useEffect(() => {
@@ -345,63 +507,84 @@ export default function RunSettings({
 
   const groups = Array.from(new Set(options.map((o) => o.group)));
 
+  const picker = (
+    <div className="field choice-field">
+      <label htmlFor="pinned-model">Model</label>
+      {options.length > 0 ? (
+        <select
+          id="pinned-model"
+          className="select"
+          value={model}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...config, model: e.target.value })}
+        >
+          {/* Without this, a select with nothing pinned shows its first option as
+              if it were chosen — and choosing that option changes nothing. */}
+          {!model && (
+            <option value="" disabled>
+              Choose a model…
+            </option>
+          )}
+          {groups.map((group) => (
+            <optgroup key={group} label={group}>
+              {options
+                .filter((o) => o.group === group)
+                .map((o) => (
+                  <option key={o.value} value={o.value} disabled={!o.available}>
+                    {o.label}
+                  </option>
+                ))}
+            </optgroup>
+          ))}
+        </select>
+      ) : (
+        <p className="field-hint">
+          {omitted.length > 0 ? "No local model found can write. " : "No models are available yet. "}
+          <Link className="link" href="/settings">
+            Add a local runtime or a key
+          </Link>
+          .
+        </p>
+      )}
+      <OmittedModels models={omitted} />
+    </div>
+  );
+
   return (
     <div className="settings-grid">
       <div className="setting">
-        <span className="label" id="routing-label">
-          Which models run it
-        </span>
-        <div className="seg" role="group" aria-labelledby="routing-label">
-          {ROUTING_MODES.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              className="seg-btn"
-              aria-pressed={routing.id === m.id}
-              onClick={() => onChange({ ...config, routing: m, model: m.needsModel ? model : "" })}
-              disabled={disabled}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        <p className="field-hint">{routing.hint}</p>
-
-        {routing.needsModel && (
-          <div className="field" style={{ marginTop: 4 }}>
-            <label htmlFor="pinned-model">Model for every phase</label>
-            {options.length > 0 ? (
-              <select
-                id="pinned-model"
-                className="select"
-                value={model}
-                disabled={disabled}
-                onChange={(e) => onChange({ ...config, model: e.target.value })}
-              >
-                {/* Without this, a select with nothing pinned shows its first option as
-                    if it were chosen — and choosing that option changes nothing. */}
-                {!model && (
-                  <option value="" disabled>
-                    Choose a model…
-                  </option>
-                )}
-                {groups.map((group) => (
-                  <optgroup key={group} label={group}>
-                    {options
-                      .filter((o) => o.group === group)
-                      .map((o) => (
-                        <option key={o.value} value={o.value} disabled={!o.available}>
-                          {o.label}
-                        </option>
-                      ))}
-                  </optgroup>
-                ))}
-              </select>
+        {choices.modes.length > 0 ? (
+          <ChoiceRows
+            name="routing"
+            legend="Which model builds it"
+            value={routing.id}
+            disabled={disabled}
+            onChange={(id) => {
+              const next = ROUTING_MODES.find((m) => m.id === id);
+              if (next) onChange({ ...config, routing: next, model: next.needsModel ? model : "" });
+            }}
+            choices={choices.modes.map((m) => ({
+              value: m.id,
+              label: m.label,
+              description: describe(m, choices, roles, local),
+              under: m.needsModel ? picker : undefined,
+            }))}
+          />
+        ) : (
+          <>
+            <span className="label">Which model builds it</span>
+            {choices.single ? (
+              <p className="setting-line">
+                Builds with <span className="mono">{choices.single.name}</span>{" "}
+                {whereItRuns(choices.single)}.{" "}
+                <Link className="link" href="/settings">
+                  Add a model or a cloud key in Settings
+                </Link>{" "}
+                to let Auto choose.
+              </p>
             ) : (
               <p className="field-hint">
-                {omitted.length > 0
-                  ? "No local model found can write. "
-                  : "No models are available yet. "}
+                No model can run a build yet.{" "}
                 <Link className="link" href="/settings">
                   Add a local runtime or a key
                 </Link>
@@ -409,64 +592,57 @@ export default function RunSettings({
               </p>
             )}
             <OmittedModels models={omitted} />
-          </div>
+          </>
         )}
       </div>
 
       <div className="setting">
-        <span className="label" id="gates-label">
-          When it stops for you
-        </span>
-        <div className="seg" role="group" aria-labelledby="gates-label">
-          {APPROVAL_MODES.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              className="seg-btn"
-              aria-pressed={approval === m.id}
-              onClick={() => onChange({ ...config, approval: m.id })}
-              disabled={disabled}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        <p className="field-hint">
-          {APPROVAL_MODES.find((m) => m.id === approval)?.hint}
-        </p>
-
-        {approval === "checkpoints" && (
-          <div className="field" style={{ marginTop: 4 }}>
-            <label htmlFor="cost-cap">Stop if the monthly running cost goes over</label>
-            <div className="prefixed">
-              <span className="prefixed-mark" aria-hidden="true">
-                $
-              </span>
-              <input
-                id="cost-cap"
-                className="input input-mono"
-                inputMode="decimal"
-                placeholder="no cap"
-                value={capText}
-                disabled={disabled}
-                onChange={(e) => {
-                  const raw = e.target.value.replace(/[^0-9.]/g, "");
-                  setCapText(raw);
-                  const value = Number(raw);
-                  onChange({
-                    ...config,
-                    // Anything not yet a usable number means "no cap" until it is one.
-                    costCap: raw !== "" && Number.isFinite(value) && value > 0 ? value : null,
-                  });
-                }}
-              />
-              <span className="prefixed-suffix">/month</span>
-            </div>
-            <p className="field-hint">
-              Ledger estimates what the finished app costs to run.
-            </p>
-          </div>
-        )}
+        <ChoiceRows
+          name="checks"
+          legend="When it checks with you"
+          value={approval}
+          disabled={disabled}
+          onChange={(id) => onChange({ ...config, approval: id })}
+          choices={APPROVAL_MODES.map((m) => ({
+            value: m.id,
+            label: m.label,
+            description: m.hint,
+            under:
+              m.id === "checkpoints" ? (
+                <div className="field choice-field">
+                  <label htmlFor="cost-cap">{COST_CAP_COPY.label}</label>
+                  <div className="prefixed">
+                    <span className="prefixed-mark" aria-hidden="true">
+                      $
+                    </span>
+                    <input
+                      id="cost-cap"
+                      className="input input-mono"
+                      inputMode="decimal"
+                      placeholder="no cap"
+                      value={capText}
+                      disabled={disabled}
+                      aria-describedby="cost-cap-hint"
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/[^0-9.]/g, "");
+                        setCapText(raw);
+                        const value = Number(raw);
+                        onChange({
+                          ...config,
+                          // Anything not yet a usable number means "no cap" until it is one.
+                          costCap: raw !== "" && Number.isFinite(value) && value > 0 ? value : null,
+                        });
+                      }}
+                    />
+                    <span className="prefixed-suffix">{COST_CAP_COPY.suffix}</span>
+                  </div>
+                  <p className="field-hint" id="cost-cap-hint">
+                    {COST_CAP_COPY.hint}
+                  </p>
+                </div>
+              ) : undefined,
+          }))}
+        />
       </div>
 
       <SkillPicker

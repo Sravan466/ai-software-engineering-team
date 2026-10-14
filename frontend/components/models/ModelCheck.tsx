@@ -1,7 +1,8 @@
 "use client";
 
-import type { CheckLevel, CheckReason, ModelCheck, PreflightCheck } from "@/lib/api";
-import { AGENT_BY_KEY } from "@/components/agents/personas";
+import { useState } from "react";
+import type { CheckLevel, CheckReason, ModelCheck, ModelPick, PreflightCheck } from "@/lib/api";
+import { AGENTS, AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
 import { listOf } from "@/lib/text";
 
@@ -197,15 +198,22 @@ export function PreStartCheck({
   checking,
   allAgents,
   refused,
+  auto,
 }: {
   checks: PreflightCheck[] | undefined;
   checking: boolean;
   allAgents: number;
   /** The model the refusal below is about; its advice is said there, not twice. */
   refused?: string;
+  /** With Auto chosen: each role's model and why, from the server (#96). */
+  auto?: ModelPick[];
 }) {
   // A new answer is on its way: the old one describes models this build may no
   // longer use, so it is not left standing as if it were current.
+  const agentPicks = (auto ?? []).filter((p) => AGENT_BY_KEY[p.role]);
+  if (!checking && agentPicks.length > 0) {
+    return <AutoPicks picks={agentPicks} checks={checks ?? []} refused={refused} />;
+  }
   if (checking || !checks || checks.length === 0) {
     return checking ? (
       <div className="precheck" aria-live="polite">
@@ -256,6 +264,114 @@ export function PreStartCheck({
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * What Auto will do, said before Start (#96): which model each agent gets, from the
+ * server's own picks, never guessed here. One sentence, grouped by model, that opens
+ * in place into a row per agent with the reason — "valid first try in 5 of 5 runs",
+ * or "no record yet, so your default". Models that don't fit keep their full check.
+ */
+function AutoPicks({
+  picks,
+  checks,
+  refused,
+}: {
+  picks: ModelPick[];
+  checks: PreflightCheck[];
+  refused?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const order = AGENTS.map((a) => a.key);
+  const sorted = [...picks].sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role));
+  const byModel = new Map<string, ModelPick[]>();
+  for (const pick of sorted) byModel.set(pick.model, [...(byModel.get(pick.model) ?? []), pick]);
+  const groups = Array.from(byModel.values()).sort((a, b) => b.length - a.length);
+  const allFit = checks.every((c) => c.level === "fits");
+  const local = groups.filter((g) => g[0].local).map((g) => g[0].name);
+
+  const who = (group: ModelPick[]) =>
+    group.length === picks.length
+      ? "every agent"
+      : group.length >= 3
+        ? `${group.length} agents`
+        : listOf(group.map((p) => AGENT_BY_KEY[p.role]?.codename ?? p.role));
+
+  const fits = !allFit || local.length === 0
+    ? ""
+    : local.length === groups.length
+      ? local.length === 1
+        ? " It fits this computer."
+        : local.length === 2
+          ? " Both fit this computer."
+          : " All fit this computer."
+      : ` ${listOf(local)} ${local.length === 1 ? "fits" : "fit"} this computer.`;
+
+  return (
+    <div className="precheck" aria-live="polite">
+      <p className="precheck-line precheck-quiet">
+        <span className="precheck-ok" aria-hidden="true">
+          {allFit ? Icon.check : Icon.info}
+        </span>
+        <span>
+          Auto will use{" "}
+          {groups.map((group, i) => (
+            <span key={group[0].model}>
+              {i > 0 && (i === groups.length - 1 ? " and " : ", ")}
+              <span className="mono">{group[0].name}</span>
+              {!group[0].local && <> through {group[0].where}</>} for {who(group)}
+            </span>
+          ))}
+          .{fits}{" "}
+          <button
+            type="button"
+            className="link auto-why-toggle"
+            aria-expanded={open}
+            aria-controls="auto-picks"
+            onClick={() => setOpen((o) => !o)}
+          >
+            {open ? "Hide why" : "Why each one"}
+          </button>
+        </span>
+      </p>
+      <div className="auto-picks-wrap" data-open={open || undefined}>
+        <ul className="auto-picks" id="auto-picks">
+          {sorted.map((pick) => {
+            const agent = AGENT_BY_KEY[pick.role];
+            return (
+              <li key={pick.role} className="auto-pick" style={{ ["--agent" as string]: agent?.accent }}>
+                <span className="auto-pick-who">
+                  <span className="auto-pick-name">{agent?.codename ?? pick.role}</span>
+                  <span className="auto-pick-role">{agent?.role}</span>
+                </span>
+                <span className="auto-pick-model">
+                  <span className="mono">{pick.name}</span>
+                  <span className="auto-pick-where">{pick.local ? `on ${pick.where}` : `${pick.where}, your key`}</span>
+                </span>
+                <span className="auto-pick-why">{pick.reason}</span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+      {!allFit && (
+        <ul className="precheck-rows">
+          {checks
+            .filter((c) => c.level !== "fits")
+            .map((c) => (
+              <li key={c.spec} className="precheck-row" data-level={c.level}>
+                <div className="precheck-line">
+                  <VerdictChip check={c} />
+                  <span className="mono precheck-model">{c.model}</span>
+                  <span className="precheck-where">on {c.source_label}</span>
+                </div>
+                <CheckDetail check={c} notes={false} suggestion={c.spec !== refused} />
+              </li>
+            ))}
+        </ul>
+      )}
     </div>
   );
 }

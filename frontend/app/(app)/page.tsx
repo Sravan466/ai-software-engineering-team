@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, type LocalStatus, type Preflight, type RouterStatus } from "@/lib/api";
+import { api, type LocalStatus, type Preflight, type RoleRow, type RouterStatus } from "@/lib/api";
 import { crewHref, floorBuild, useSharedProjects } from "@/lib/buildStatus";
 import { EXAMPLES } from "@/components/shell/phases";
 import { AGENTS } from "@/components/agents/personas";
@@ -15,6 +15,7 @@ import BuildChips, { NO_CHOICE, type ConnectorChoice } from "@/components/connec
 import RunSettings, {
   type RunConfig,
   DEFAULT_RUN_CONFIG,
+  modelChoices,
   modelOptions,
   modelsThatCannotBuild,
   runtimeBlocker,
@@ -48,16 +49,19 @@ export default function NewBuildPage() {
   // knew the answer; the composer never asked. Now it asks first.
   const [local, setLocal] = useState<LocalStatus | null>(null);
   const [models, setModels] = useState<RouterStatus | null>(null);
+  const [roles, setRoles] = useState<RoleRow[] | null>(null);
   const [checking, setChecking] = useState(true);
 
   const probe = useCallback(async () => {
     setChecking(true);
-    const [localStatus, routerStatus] = await Promise.all([
+    const [localStatus, routerStatus, roleSettings] = await Promise.all([
       api.getLocalModel().catch(() => null),
       api.routerStatus().catch(() => null),
+      api.getRoles().catch(() => null),
     ]);
     setLocal(localStatus);
     setModels(routerStatus);
+    setRoles(roleSettings?.roles ?? null);
     setChecking(false);
   }, []);
 
@@ -93,6 +97,27 @@ export default function NewBuildPage() {
   }, [checking, config.routing.backend, config.model, local, models]);
 
   const options = useMemo(() => modelOptions(local, models), [local, models]);
+  // Which answers are real ones here (#96). Auto's count is the server's once it has
+  // answered: only it knows which models fit this computer.
+  const choices = useMemo(
+    () => modelChoices(local, models, preflight?.auto),
+    [local, models, preflight?.auto],
+  );
+
+  // A new build starts on the answer that fits what this account has — Auto when
+  // every model it can pick is free, Local model when a cloud key would be billed —
+  // until someone chooses. An answer that stops being offered (a model went away)
+  // gives way to the one that fits now.
+  const [chose, setChose] = useState(false);
+  useEffect(() => {
+    if (checking) return;
+    const offered = choices.modes.includes(config.routing);
+    if (chose && (offered || choices.modes.length === 0 && !choices.single)) return;
+    const { routing, model } = choices.preferred;
+    if (routing === config.routing && (!routing.needsModel || config.model || !model)) return;
+    setConfig((c) => ({ ...c, routing, model: routing.needsModel ? model || c.model : "" }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checking, choices, chose]);
   // What the list above left out, so the panel can say so rather than leaving a
   // model visible in Settings and missing here with no explanation anywhere.
   const omitted = useMemo(() => modelsThatCannotBuild(local), [local]);
@@ -178,7 +203,7 @@ export default function NewBuildPage() {
             <span className={"phase-chev" + (advanced ? " open" : "")} aria-hidden="true">
               {Icon.chevron}
             </span>
-            <span className="run-settings-summary">{settingsSummary(config)}</span>
+            <span className="run-settings-summary">{settingsSummary(config, choices)}</span>
             <span className="run-settings-more">{advanced ? "Hide" : "Advanced"}</span>
           </button>
 
@@ -214,6 +239,7 @@ export default function NewBuildPage() {
           checks={preflight?.checks}
           checking={checking || preflighting}
           allAgents={AGENTS.length}
+          auto={config.routing.backend === "auto" ? preflight?.picks : undefined}
           refused={
             preflight?.ok === false
               ? preflight.checks?.find((c) => c.level === "blocked")?.spec
@@ -225,8 +251,14 @@ export default function NewBuildPage() {
           <div id="run-settings" className="run-settings">
             <RunSettings
               config={config}
-              onChange={setConfig}
+              onChange={(next) => {
+                if (next.routing !== config.routing) setChose(true);
+                setConfig(next);
+              }}
               options={options}
+              choices={choices}
+              roles={roles}
+              local={local}
               omitted={omitted}
               disabled={busy}
               idea={idea}

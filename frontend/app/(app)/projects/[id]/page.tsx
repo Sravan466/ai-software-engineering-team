@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject, type R
 import Link from "next/link";
 import { api, type Artifacts, type DatabaseState, type Project, type RunResponse } from "@/lib/api";
 import { listOf } from "@/lib/text";
+import { modelName } from "@/lib/models";
 import { APPROVAL_BY_ID, PHASES } from "@/components/shell/phases";
 import { AGENT_BY_KEY, suiteLine, type Persona } from "@/components/agents/personas";
 import AgentSprite from "@/components/agents/AgentSprite";
@@ -161,6 +162,22 @@ function localPct(project: Project): number | null {
 }
 
 // Cost is only meaningful once something has actually cost money.
+/**
+ * Which model builds it, in the composer's words (#96): "Auto", "Local · qwen2.5:7b",
+ * or the model picked. Never the stored value (`auto`, `local_only`, `source:model`).
+ * A Local build's model is the one its first phase actually ran on, else the one it
+ * started on; the build doesn't store the default it was created under.
+ */
+function routingBadge(project: Project): string {
+  if (project.routing_mode === "auto") return "Auto";
+  if (project.routing_mode === "manual") return modelName(project.preferred_model) || "Pick a model";
+  const first = [...project.phases].sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+  const ran =
+    first.find((p) => p.model_used && p.is_local !== false)?.model_used ??
+    modelName(first.find((p) => p.model_pick?.model)?.model_pick?.model);
+  return ran ? `Local · ${ran}` : "Local model";
+}
+
 function formatCost(usd: unknown): string {
   const n = Number(usd || 0);
   if (!n) return "Free";
@@ -337,11 +354,7 @@ function BuildPage({ id }: { id: string }) {
         <div style={{ minWidth: 0 }}>
           <h1>{project.name || project.idea}</h1>
           <div className="build-meta">
-            <span className="badge">
-              {project.routing_mode === "local_only"
-                ? "Local models"
-                : project.preferred_model || project.routing_mode}
-            </span>
+            <span className="badge">{routingBadge(project)}</span>
             <ReviewPolicy project={project} id={id} onChanged={load} />
             {(project.deploy_url || project.github_repo) && (
               <span className="ship-badges">
