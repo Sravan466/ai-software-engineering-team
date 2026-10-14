@@ -125,6 +125,9 @@ export default function NewBuildPage() {
       return;
     }
     setConfig((c) => ({ ...c, routing, model: routing.needsModel ? model || c.model : "" }));
+    // Pick a model with nothing it could pin by itself: the select is where the
+    // answer is, so it is shown rather than left behind a closed panel.
+    if (routing.needsModel && !model) setAdvanced(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [checking, preflighting, choices, chose]);
   // What the list above left out, so the panel can say so rather than leaving a
@@ -143,7 +146,7 @@ export default function NewBuildPage() {
 
   async function start() {
     const trimmed = idea.trim();
-    if (!trimmed || busy || blocker) return;
+    if (!trimmed || busy || blocker || checking || preflighting || !(settled || chose)) return;
     setBusy(true);
     setError("");
     setCreatedId("");
@@ -230,7 +233,7 @@ export default function NewBuildPage() {
             ) : (
               <button
                 className="btn btn-primary"
-                disabled={!idea.trim() || busy || checking || preflighting}
+                disabled={!idea.trim() || busy || checking || preflighting || !(settled || chose)}
                 onClick={start}
               >
                 {busy && <span className="btn-spinner" aria-hidden="true" />}
@@ -250,7 +253,7 @@ export default function NewBuildPage() {
           checks={preflight?.checks}
           checking={checking || preflighting}
           allAgents={AGENTS.length}
-          auto={config.routing.backend === "auto" ? preflight?.picks : undefined}
+          auto={config.routing.backend === "auto" && preflight?.ok ? preflight.picks : undefined}
           refused={
             preflight?.ok === false
               ? preflight.checks?.find((c) => c.level === "blocked")?.spec
@@ -263,7 +266,7 @@ export default function NewBuildPage() {
             <RunSettings
               config={config}
               onChange={(next) => {
-                if (next.routing !== config.routing) setChose(true);
+                if (next.routing !== config.routing || next.model !== config.model) setChose(true);
                 setConfig(next);
               }}
               options={options}

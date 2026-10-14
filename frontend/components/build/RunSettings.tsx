@@ -205,8 +205,14 @@ export function modelChoices(
   // Auto never picks a model on another computer or a hosted one without being
   // asked, so they don't count towards its choice — they do count as usable.
   const autoCount = auto ? auto.length : usable.filter((o) => !o.remote && !o.hosted).length;
-  const cloud = usable.filter((o) => o.cloud);
-  const cloudLabels = Array.from(new Set(cloud.map((o) => o.where)));
+  // Which providers Auto could bill, and whether it has a free model too — from the
+  // server's own list once it has answered, so the sentence and the count agree.
+  const cloudLabels = auto
+    ? Array.from(new Set(auto.filter((a) => !a.local).map((a) => a.where)))
+    : Array.from(new Set(usable.filter((o) => o.cloud).map((o) => o.where)));
+  const autoHasLocal = auto
+    ? auto.some((a) => a.local)
+    : usable.some((o) => !o.cloud && !o.remote && !o.hosted);
   const localDefault = usable.find((o) => o.isDefault && !o.hosted) ?? null;
   const single = usable.length === 1 ? usable[0] : null;
 
@@ -228,7 +234,9 @@ export function modelChoices(
       single === localDefault
         ? { routing: ROUTING_BY_BACKEND.local_only, model: "" }
         : { routing: ROUTING_BY_BACKEND.manual, model: single.value };
-  } else if (modes.includes(ROUTING_BY_BACKEND.auto) && !(cloud.length > 0 && localDefault)) {
+  } else if (modes.includes(ROUTING_BY_BACKEND.auto) && (cloudLabels.length === 0 || !autoHasLocal)) {
+    // Every model Auto can pick is free, or none is (only keys were added): then
+    // Auto. A mix of free and billed: not Auto, so a key bills only when chosen.
     preferred = { routing: ROUTING_BY_BACKEND.auto, model: "" };
   } else if (localDefault) {
     preferred = { routing: ROUTING_BY_BACKEND.local_only, model: "" };
@@ -556,7 +564,14 @@ export default function RunSettings({
   return (
     <div className="settings-grid">
       <div className="setting">
-        {choices.modes.length > 0 ? (
+        {choices.modes.length === 1 && choices.modes[0].needsModel ? (
+          // Only Pick a model is a real answer here (models elsewhere, nothing Auto
+          // or Local model could run): no one-option radio, the select itself.
+          <>
+            <span className="label">Which model builds it</span>
+            {picker}
+          </>
+        ) : choices.modes.length > 0 ? (
           <ChoiceRows
             name="routing"
             legend="Which model builds it"

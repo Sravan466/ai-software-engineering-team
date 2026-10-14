@@ -66,29 +66,44 @@ export default function ReviewPolicy({
   }, [open]);
 
   const current = APPROVAL_BY_ID[project.approval_mode] ?? APPROVAL_MODES[0];
-  // A choice made while another save is in flight is shown at once and saved when
-  // that one lands, rather than dropped.
-  const [queued, setQueued] = useState<ApprovalMode | null>(null);
+  // The answer chosen, shown at once and saved — after the save in flight, if one is
+  // — rather than snapping back until the build reloads, or being dropped.
+  const [wanted, setWanted] = useState<ApprovalMode | null>(null);
+  const sent = useRef<ApprovalMode | null>(null);
   useEffect(() => {
-    if (busy || queued === null) return;
-    setQueued(null);
-    if (queued !== project.approval_mode) save({ approval_mode: queued });
+    if (wanted === null) return;
+    if (wanted === project.approval_mode) {
+      setWanted(null);
+      sent.current = null;
+      return;
+    }
+    if (busy || sent.current === wanted) return;
+    sent.current = wanted;
+    save({ approval_mode: wanted }).then((ok) => {
+      if (!ok) {
+        // Said in the error line; the radios go back to what the build has.
+        setWanted(null);
+        sent.current = null;
+      }
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, queued]);
+  }, [busy, wanted, project.approval_mode]);
   const settled =
     project.status === "completed" ||
     project.status === "failed" ||
     project.status === "cancelled" ||
     project.status === "paused";
 
-  async function save(body: Parameters<typeof api.updateProject>[1]) {
+  async function save(body: Parameters<typeof api.updateProject>[1]): Promise<boolean> {
     setBusy(true);
     setError("");
     try {
       await api.updateProject(id, body);
       await onChanged();
+      return true;
     } catch (e: any) {
       setError(e.message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -131,13 +146,10 @@ export default function ReviewPolicy({
             <ChoiceRows
               name="policy"
               legend="When this build checks with you"
-              value={queued ?? current.id}
+              value={wanted ?? current.id}
               // Not disabled while saving: a disabled radio drops the keyboard focus
               // an arrow key just moved onto it. A change during a save waits for it.
-              onChange={(id) => {
-                if (busy) setQueued(id as ApprovalMode);
-                else save({ approval_mode: id as ApprovalMode });
-              }}
+              onChange={(id) => setWanted(id as ApprovalMode)}
               choices={APPROVAL_MODES.map((m) => ({ value: m.id, label: m.label, description: m.hint }))}
             />
           </div>
