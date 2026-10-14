@@ -1932,7 +1932,8 @@ class ModelRouter:
 
         A hard step goes to a working cloud key first, in the router's own
         reasoning-strength order. Otherwise the largest model this computer runs
-        well leads, then the default, then the cloud. Never, unasked, a model on
+        well leads, then the default, then models it runs with caveats, then the
+        cloud. Never, unasked, a model on
         another computer or one its runtime sends to a hosted service: where a
         prompt goes is the person's decision. The default is the exception — it is
         that decision, already made.
@@ -1963,7 +1964,8 @@ class ModelRouter:
         if complexity == "high":
             for index, pair in enumerate(cloud):
                 add(pair, "the strongest cloud model for a hard step" if index == 0 else "a cloud model you have a key for")
-        for index, pair in enumerate(self._fitting_local()):
+        fitting, caveats = self._local_candidates()
+        for index, pair in enumerate(fitting):
             add(
                 pair,
                 "your default"
@@ -1974,6 +1976,8 @@ class ModelRouter:
             )
         if default and default_up:
             add(default, "your default")
+        for pair in caveats:
+            add(pair, "your default" if default is not None and same(pair, default) else "a model this computer runs with caveats")
         for pair in cloud:
             add(pair, "a cloud model you have a key for")
         if default and not default_up:
@@ -1982,13 +1986,15 @@ class ModelRouter:
             add(default, "your default")
         return prior
 
-    def _fitting_local(self) -> list[tuple[str, str]]:
-        """Models on this computer that write and that it runs well, largest first.
+    def _local_candidates(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """(models this computer runs well, models it runs with caveats), largest first.
 
-        The same tests `strongest_for` holds a stronger model to: it writes, it is
-        not an embedding or base model, and the compatibility check says it fits —
-        a model the check would block fails to load, and the call falls back with a
-        prompt sized for the model it couldn't reach.
+        Each one writes, isn't an embedding or base model, and isn't blocked by the
+        compatibility check — a model the check blocks fails to load, and the call
+        falls back with a prompt sized for the model it couldn't reach. A caveat
+        ("a small model: the content will be thin") is a guess about quality, which
+        is what the account's record measures, so such a model is a candidate too;
+        it just doesn't lead a cold start.
         """
         found: list[tuple[int, tuple[str, str], SourceProvider]] = []
         for prov in self.sources.providers():
@@ -2002,6 +2008,7 @@ class ModelRouter:
                 found.append((entry.size_bytes or 0, (prov.name, entry.name), prov))
         found.sort(key=lambda item: item[0], reverse=True)
         fitting: list[tuple[str, str]] = []
+        caveats: list[tuple[str, str]] = []
         # The largest few only: each check may ask the runtime to describe the model,
         # and a machine with thirty pulled is not asked thirty times a minute.
         for _size, pair, prov in found[:_MAX_LOCAL_CANDIDATES]:
@@ -2009,11 +2016,14 @@ class ModelRouter:
                 # Weighed against memory even while loaded: a model that "fits" only
                 # because it is in memory now would lead until the runtime unloads it,
                 # and Auto's choice would flip with it.
-                if prov.compatibility(pair[1], ignore_loaded=True).level == compat.FITS:
-                    fitting.append(pair)
+                level = prov.compatibility(pair[1], ignore_loaded=True).level
             except Exception:  # noqa: BLE001 - an unanswerable check is a no
                 continue
-        return fitting
+            if level == compat.FITS:
+                fitting.append(pair)
+            elif level != compat.BLOCKED:
+                caveats.append(pair)
+        return fitting, caveats
 
     def _records_for(self, role: Optional[str], pairs: dict[str, tuple[str, str]]) -> dict[str, track_record.Record]:
         """This account's record for `role` on each candidate, keyed by its spec.

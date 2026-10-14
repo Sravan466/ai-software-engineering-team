@@ -235,10 +235,11 @@ def auto_router(monkeypatch):
     from app.router.router import router as model_router
 
     blocked: set[str] = set()
+    caveated: set[str] = set()
     recorded: dict[str, dict] = {}
 
     def compatibility(self, model, **_kw):
-        level = "blocked" if model in blocked else "fits"
+        level = "blocked" if model in blocked else "degraded" if model in caveated else "fits"
         return SimpleNamespace(
             level=level,
             as_dict=lambda: {"spec": f"{self.name}:{model}", "level": level, "summary": "", "reasons": [], "facts": {}},
@@ -247,7 +248,8 @@ def auto_router(monkeypatch):
     monkeypatch.setattr(SourceProvider, "compatibility", compatibility)
     monkeypatch.setattr(history, "records", lambda user_id: recorded)
 
-    def _install(*providers: SourceProvider, chosen: Optional[str] = None, roles=None, records=None, blocks=()):
+    def _install(*providers: SourceProvider, chosen: Optional[str] = None, roles=None, records=None, blocks=(),
+                 caveats=()):
         monkeypatch.setattr(model_router.sources, "_providers", {p.name: p for p in providers})
         monkeypatch.setattr(model_router.sources, "_loaded", True)
         monkeypatch.setattr(model_router.sources, "_detected_at", time.monotonic() + 3600)
@@ -260,6 +262,8 @@ def auto_router(monkeypatch):
         recorded.update(history.summarise(records or []))
         blocked.clear()
         blocked.update(blocks)
+        caveated.clear()
+        caveated.update(caveats)
         return model_router
 
     return _install
@@ -556,3 +560,19 @@ def test_a_phase_stopped_by_a_key_or_a_bill_is_not_the_models_failure(client, mo
     assert rows and all(row.feedback == "The provider stopped this phase over a key, credit or rate limit." for row in rows)
     assert all(history.outcomes({"phase": r.phase, "status": r.status, "feedback": r.feedback,
                                  "model_pick": {"model": "openai:gpt-x"}}) == [] for r in rows)
+
+
+def test_a_model_that_runs_with_caveats_is_a_candidate_but_never_leads_a_cold_start(auto_router):
+    """#96's own case: qwen3:1.7b is "a small model, the content will be thin" — a
+    guess about quality, which the record measures. It is chosen when its record
+    beats the default's, never on no record at all."""
+    model_router = auto_router(_source("ollama", [BIG, SMALL]), chosen="ollama:qwen2.5:7b", caveats={"qwen3:1.7b"})
+    assert [c["name"] for c in model_router.auto_choices()] == ["qwen2.5:7b", "qwen3:1.7b"]
+    assert model_router._auto_pick("medium", "product_manager") == ("ollama", "qwen2.5:7b")
+    records = (
+        _record("product_manager", "ollama:qwen3:1.7b", 4, schema_status="valid", latency_ms=700)
+        + _record("product_manager", "ollama:qwen2.5:7b", 4, schema_status="repaired")
+    )
+    model_router = auto_router(_source("ollama", [BIG, SMALL]), chosen="ollama:qwen2.5:7b",
+                               caveats={"qwen3:1.7b"}, records=records)
+    assert model_router._auto_pick("medium", "product_manager") == ("ollama", "qwen3:1.7b")
