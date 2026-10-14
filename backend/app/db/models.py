@@ -460,6 +460,13 @@ class PhaseResult(Base):
     #: cut off. Null on rows written before hand-offs were recorded.
     handoff: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    #: Which model this phase started on and why (#96), written when it starts:
+    #: `{mode, model, reason, sample, basis}`, plus `fell_back` once it finishes —
+    #: whether any of its calls had to leave that model. Auto's record of a model is
+    #: read from these rows, and a phase that failed before anything answered can
+    #: only be put down to the model it started on. Null on rows from before.
+    model_pick: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="phases")

@@ -573,14 +573,25 @@ def preflight(payload: PreflightRequest) -> dict:
             model_router.parse(payload.preferred_model)
         except ValueError as e:
             # The same refusal creating the project would give, said before it exists.
-            return {"ok": False, "reason": str(e), "unreachable": False, "checks": []}
+            return {"ok": False, "reason": str(e), "unreachable": False, "checks": [], "picks": [], "auto": []}
     ready = _readiness(mode, payload.preferred_model)
+    try:
+        auto = model_router.auto_choices()
+    except Exception as e:  # noqa: BLE001 - the composer then says less, never refuses
+        log.warning("Couldn't list what Auto can choose from: %s", e)
+        auto = []
     return {
         "ok": ready.ok,
         "reason": ready.reason,
         "unreachable": ready.unreachable,
         # What the pre-Start check found for each model this build would use.
         "checks": list(ready.checks),
+        # Each agent's model and why (#96), so the page names Auto's choices
+        # rather than guessing them.
+        "picks": list(ready.picks),
+        # Every model Auto may choose from right now — asked whatever is selected,
+        # so the composer can say what Auto would do before anyone picks it.
+        "auto": auto,
     }
 
 

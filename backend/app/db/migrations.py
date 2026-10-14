@@ -129,6 +129,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
         # Nullable (#80): a phase that ran before hand-offs were recorded cannot say
         # what it was shown, and an empty record would claim it was shown nothing.
         "handoff",
+        # Nullable (#96): a phase that started before picks were recorded can't say
+        # which model it started on, and Auto reads such a row by the model that served it.
+        "model_pick",
         # Nullable: a row written before calls recorded where they ran cannot say,
         # and the API answers for it from the provider's name instead.
         "is_local",

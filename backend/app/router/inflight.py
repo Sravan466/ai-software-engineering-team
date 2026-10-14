@@ -100,3 +100,38 @@ def cancel(project_id: str) -> int:
 def active(project_id: str) -> int:
     with _lock:
         return len(_calls.get(project_id) or {})
+
+
+# ── the model each phase in flight is held to (#96) ─────────────────────────
+#: (project id, phase) -> `source:model`. Set when the runner starts the phase and
+#: records which model it starts on; read by the agent, so the model the row records
+#: and the model its calls are held to are one decision, not two made a moment apart.
+_held: dict[tuple[str, str], str] = {}
+#: Phases outlive nothing here: a driver that dies mid-phase leaves its entry, so the
+#: map is capped rather than trusted to be emptied.
+_HELD_MAX = 512
+
+
+def hold(project_id: str, phase: str, spec: Optional[str]) -> None:
+    with _lock:
+        if spec:
+            _held.pop((project_id, phase), None)
+            _held[(project_id, phase)] = spec
+            while len(_held) > _HELD_MAX:
+                _held.pop(next(iter(_held)))
+        else:
+            _held.pop((project_id, phase), None)
+
+
+def held(phase: str) -> Optional[str]:
+    """The model this build's `phase` is held to, when this work is for a build."""
+    build = _build.get()
+    if build is None:
+        return None
+    with _lock:
+        return _held.get((build["id"], phase))
+
+
+def release(project_id: str, phase: str) -> None:
+    with _lock:
+        _held.pop((project_id, phase), None)

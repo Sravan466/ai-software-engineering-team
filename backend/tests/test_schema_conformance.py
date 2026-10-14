@@ -1519,14 +1519,12 @@ def test_the_docker_compose_backend_declares_its_runtime_on_the_same_host():
     assert '"127.0.0.1:11434:11434"' in ollama
 
 
-@pytest.mark.parametrize("mode", ["auto", "local_only"])
-def test_a_default_that_cannot_write_blocks_even_with_every_agent_pinned(monkeypatch, mode):
+def test_a_default_that_cannot_write_blocks_a_local_run_even_with_every_agent_pinned(monkeypatch):
     """The contract the composer and the Settings notice have to mirror.
 
-    Readiness always resolves "the rest of the run" to the default, and Auto's chain
-    is headed by it whatever cloud keys exist. So neither a cloud key nor pinning
-    every agent gets a run past a default that cannot write — which is why the UI no
-    longer suggests either.
+    A Local run resolves "the rest of the run" to the default, so pinning every agent
+    doesn't get it past a default that cannot write — which is why the UI doesn't
+    suggest it.
     """
     from app.core import model_roles
     from app.core.constants import RoutingMode
@@ -1540,9 +1538,26 @@ def test_a_default_that_cannot_write_blocks_even_with_every_agent_pinned(monkeyp
     roles = ["product_manager", "system_design"]
     monkeypatch.setattr(model_roles, "get", lambda role: "ollama:qwen2.5:7b" if role in roles else None)
 
-    ready = model_router.readiness(RoutingMode(mode), None, roles=roles)
+    ready = model_router.readiness(RoutingMode.LOCAL_ONLY, None, roles=roles)
     assert not ready.ok
     assert [m["role"] for m in ready.incapable] == ["the rest of the run"]
+
+
+def test_auto_starts_on_a_model_that_writes_whatever_the_default_is(monkeypatch):
+    """Since #96 Auto leads with the largest model on this computer that writes and
+    fits, not the default, so a default that cannot write no longer stops it."""
+    from app.core.constants import RoutingMode
+
+    model_router = _stubbed_local(
+        monkeypatch,
+        {"qwen2.5:7b": SHOW, "nomic-embed-text:latest": EMBEDDING_SHOW},
+        tags_report=True,
+    )
+    monkeypatch.setattr(model_router, "_chosen_local", "ollama:nomic-embed-text:latest")
+
+    ready = model_router.readiness(RoutingMode.AUTO, None, roles=["product_manager"])
+    assert ready.ok
+    assert [p["name"] for p in ready.picks] == ["qwen2.5:7b"]
 
 
 def test_an_answer_from_api_show_is_re_read_once_it_is_stale(monkeypatch):

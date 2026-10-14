@@ -369,8 +369,12 @@ class SourceProvider(LLMProvider):
         """Drop the profile only — after the model's settings changed, not its weights."""
         self._profiles.forget_where(lambda key: self.adapter.resolves(model, [key[1]]) or key[1] == model)
 
-    def compatibility(self, model: str) -> compat.Compatibility:
-        """Whether `model` will run a build on this source, and why not if it won't."""
+    def compatibility(self, model: str, *, ignore_loaded: bool = False) -> compat.Compatibility:
+        """Whether `model` will run a build on this source, and why not if it won't.
+
+        `ignore_loaded` weighs the model against memory even while the runtime has it
+        loaded — for a choice that must not flip when the runtime unloads it (#96).
+        """
         from app.router.runtimes import table
 
         profile = self.profile(model)
@@ -388,7 +392,7 @@ class SourceProvider(LLMProvider):
             window_hint=meta.window_hint,
             kv_hint=meta.kv_hint,
             tuning=self.tuning(model),
-            loaded=self._loaded(model),
+            loaded=None if ignore_loaded else self._loaded(model),
         )
 
     def _loaded(self, model: str) -> Optional[bool]:

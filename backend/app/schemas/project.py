@@ -236,6 +236,10 @@ class PhaseResultOut(BaseModel):
     #: `None` on rows written before hand-offs were recorded.
     handoff: Optional[dict] = None
 
+    #: Which model the phase started on and why (#96): `{mode, model, reason, sample,
+    #: basis, fell_back}`. `None` on rows from before picks were recorded.
+    model_pick: Optional[dict] = None
+
     # Timing, so a phase in flight can show elapsed time and a finished one can show
     # what it actually cost in wall-clock and tokens.
     started_at: Optional[UtcDatetime] = None

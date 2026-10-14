@@ -97,6 +97,11 @@ def _serialize_result(phase_key: str, title: str, result) -> dict:
                 "usage": c.usage.model_dump(),
                 "latency_ms": c.latency_ms,
                 "fallback_used": c.fallback_used,
+                # The models this call was sent to and that failed before one answered
+                # — what Auto's record holds against them (#96).
+                "fell_back_from": [
+                    f"{a['provider']}:{a['model']}" for a in (c.attempts or []) if a.get("tried")
+                ],
                 "is_local": c.is_local,
             }
             for c in (result.calls or ([] if getattr(result, "kept", False) else [result.response]))
