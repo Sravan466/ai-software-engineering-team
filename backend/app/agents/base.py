@@ -267,7 +267,9 @@ class BaseAgent:
             ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
         )
         ask = self._build_messages(ctx, profile)
-        options = GenerationOptions(json_mode=True, json_schema=self._schema_for(ctx))
+        # Exact output (#101): sampled low on a local runtime; a model's own setting, a
+        # thinking model's card, or a cloud provider's tuned default still decides.
+        options = GenerationOptions(json_mode=True, json_schema=self._schema_for(ctx), exact=True)
 
         resp = self._complete(ask.messages, ctx, options)
         responses = [resp]

@@ -138,6 +138,34 @@ def _takes_request_id(fn) -> bool:
         return False
 
 
+def _number(value: object) -> Optional[float]:
+    """A sampling value as a number: what a runtime reported may be a string."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def exact_temperature(profile: ModelProfile) -> Optional[float]:
+    """What an agent's JSON or code call is sampled at when nothing is saved for the model
+    (#101) — low, not at a runtime's loose default (Ollama's 0.8 for a model file that
+    sets none).
+
+    A model that can think keeps its card's value instead, in either mode: its model
+    file's temperature when the runtime reported one (Qwen3's says 0.6; its card asks
+    0.6 thinking, 0.7 not, and never greedy), the local default otherwise. A model a
+    local runtime only lists, and sends elsewhere to run, keeps its host's default.
+    """
+    if not profile.is_local:
+        return None
+    if profile.thinking not in (None, THINKS_NONE):
+        card = _number(profile.defaults.get("temperature"))
+        return card if card is not None and card > 0 else settings.local_temperature
+    return settings.agent_temperature
+
+
 class SourceProvider(LLMProvider):
     is_local = True
 
@@ -453,6 +481,9 @@ class SourceProvider(LLMProvider):
                 key: (getattr(settings, f"local_{key}") if self.adapter.fills_sampling_defaults else None)
                 for key in ("temperature", "top_p")
             },
+            #: What an agent's JSON and code calls are sampled at when nothing is saved
+            #: (#101) — the calls a build is made of. None: the runtime's default.
+            "agent_sends": {"temperature": exact_temperature(profile)},
             "fallbacks": {
                 "temperature": settings.local_temperature,
                 "top_p": settings.local_top_p,
@@ -479,13 +510,15 @@ class SourceProvider(LLMProvider):
         values = {key: sampling.get(key) for key in SAMPLING_KEYS if key != "thinking"}
         if values["temperature"] is None:
             values["temperature"] = options.temperature
+        if values["temperature"] is None and options.exact:
+            values["temperature"] = exact_temperature(profile)
         if thinks(profile.thinking_level):
             # A thinking model decoded greedily repeats itself, sometimes forever —
             # whichever runtime serves it, and whoever asked for temperature 0.
             temperature = values["temperature"]
             if temperature is None:
                 temperature = profile.defaults.get("temperature")
-            if isinstance(temperature, (int, float)) and temperature <= 0:
+            if _number(temperature) is not None and _number(temperature) <= 0:
                 log.warning(
                     "%s thinks, and greedy decoding makes thinking models repeat themselves; "
                     "using temperature %s instead of %s.",

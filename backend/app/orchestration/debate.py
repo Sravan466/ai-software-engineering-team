@@ -75,7 +75,8 @@ def conduct_debate(
         [ChatMessage(role="system", content=_SYSTEM), ChatMessage(role="user", content=user)],
         mode=mode,
         preferred_model=preferred_model,
-        options=GenerationOptions(json_mode=True),
+        # A JSON answer like any agent's: exact output (#101).
+        options=GenerationOptions(json_mode=True, exact=True),
         complexity=COMPLEXITY,
         role=ROLE,
     )

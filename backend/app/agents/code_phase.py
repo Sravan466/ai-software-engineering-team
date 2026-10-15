@@ -907,7 +907,8 @@ class _Run:
                 messages,
                 mode=ctx.routing_mode,
                 preferred_model=ctx.preferred_model,
-                options=GenerationOptions(),
+                # Code is exact output too (#101).
+                options=GenerationOptions(exact=True),
                 complexity=agent._complexity(ctx),
                 role=agent.key,
                 pin=ctx.pin_model,

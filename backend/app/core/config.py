@@ -110,6 +110,13 @@ class Settings(BaseSettings):
     #: that no agent asked for. Callers that set their own temperature win.
     local_temperature: BlankTolerantFloat(0.7) = 0.7
     local_top_p: BlankTolerantFloat(0.9) = 0.9
+    #: The temperature a local model samples an agent's JSON and code at (#101): exact
+    #: output, not varied output — a lower temperature invents fewer packages and drifts
+    #: less from a schema. A temperature saved for the model in Settings still wins; a
+    #: thinking model keeps its own card's values (it repeats itself near greedy
+    #: decoding); a cloud model keeps its provider's tuned default — several reject a
+    #: temperature or loop below it.
+    agent_temperature: BlankTolerantFloat(0.2) = 0.2
     #: How hard a thinking model is asked to reason on an agent call, unless it is
     #: set per model in Settings: off, on, low, medium or high. Off by default —
     #: every call is cheaper, and the JSON an agent returns is more reliable when
