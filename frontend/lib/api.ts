@@ -192,7 +192,7 @@ export type ActivityStep = { stage: string; detail: string; done: number; total:
 export type BuildProblem = {
   path: string;
   line: number | null;
-  /** syntax | reference | import | package | type | runtime | build */
+  /** syntax | reference | import | package | type | runtime | build | placeholder | weak_test */
   kind: string;
   message: string;
   /** Set when gathered across phases: the agent that wrote the file. */
@@ -409,6 +409,8 @@ export type AutoFixProblem = {
   kind: "security" | "build" | "stack" | "test";
   /** Which step of a real build found it (#75); absent for the parser's own. */
   step?: BuildStepName | "vercel" | "test";
+  /** Code that parses and isn't finished (#101): a stub, or a test that tests nothing. */
+  problem?: "placeholder" | "weak_test";
   /** A failing test (#76): its name, and what kind of failure it was. */
   test?: string;
   failure?: TestFailure["kind"];

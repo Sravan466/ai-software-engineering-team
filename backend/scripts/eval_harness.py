@@ -32,9 +32,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.agents import base as agent_base  # noqa: E402
 from app.agents import code_phase  # noqa: E402
+from app.core import identity  # noqa: E402
 from app.core.constants import ApprovalMode, PipelineStatus  # noqa: E402
 from app.db.base import SessionLocal, init_db  # noqa: E402
-from app.db.models import PreviewRevision, Project  # noqa: E402
+from app.db.models import PreviewRevision, Project, User  # noqa: E402
 from app.evals.scorecard import score  # noqa: E402
 from app.orchestration.runner import runner  # noqa: E402
 from app.preview.jobs import jobs  # noqa: E402
@@ -67,10 +68,32 @@ def _wait_for_mockup(project_id: str, timeout: float) -> None:
         time.sleep(3)
 
 
-def run_idea(idea: str, mode: str, model: str | None, mockup_timeout: float) -> str:
+def owner_id() -> str:
+    """The account the runs belong to: the install's owner, made here on a fresh database.
+
+    Every build is some account's (#45) — its models, its keys, its runtimes — and a run
+    with none attached stops at the first model call. The owner is the account that
+    reaches the runtimes on this machine, which is what a local eval measures.
+    """
+    db = SessionLocal()
+    try:
+        owner = db.query(User).filter(User.is_owner.is_(True)).first()
+        if owner is None:
+            # No password: the unclaimed owner the accounts migration makes, which the
+            # first person to set up the install still claims as theirs.
+            owner = User(display_name="Eval harness", is_owner=True)
+            db.add(owner)
+            db.commit()
+        return owner.id
+    finally:
+        db.close()
+
+
+def run_idea(idea: str, mode: str, model: str | None, mockup_timeout: float, owner: str) -> str:
     db = SessionLocal()
     try:
         project = Project(
+            owner_id=owner,
             idea=idea,
             routing_mode=mode,
             preferred_model=model,
@@ -104,6 +127,7 @@ def _row(result: dict) -> str:
         f"console {m.get('console_errors', '-')}  names {_p(result.get('names_used_pct'))} "
         f"wired {_p(result.get('endpoints_wired_pct'))} criteria {_p(result.get('criteria_covered_pct'))} "
         f"cut {result.get('truncated_replies', 0)}  "
+        f"stubs {result.get('placeholders', '-')} weak {result.get('weak_tests', '-')}  "
         f"code {'/'.join(sorted(set((result.get('generation_mode') or {}).values()))) or '-'} "
         f"{result.get('files_written', 0)}/{result.get('files_planned', 0)} files"
     )
@@ -119,9 +143,11 @@ def compare(results: list[dict]) -> list[str]:
         written = sum(int(r.get("files_written") or 0) for r in mine)
         cut = sum(int(r.get("truncated_replies") or 0) for r in mine)
         calls = sum(sum((r.get("calls_per_phase") or {}).values()) for r in mine)
+        stubs = sum(int(r.get("placeholders") or 0) for r in mine)
+        weak = sum(int(r.get("weak_tests") or 0) for r in mine)
         lines.append(
             f"{mode:8} compiles {compiled}/{len(mine)}  files {written}/{planned}  "
-            f"truncated {cut}  calls {calls}"
+            f"truncated {cut}  calls {calls}  placeholders {stubs}  weak tests {weak}"
         )
     return lines
 
@@ -178,6 +204,12 @@ def main() -> None:
         print(f"prompt variant: {variant} ({', '.join(tasks)})", flush=True)
 
     init_db()
+    owner = owner_id()
+    with identity.acting_as(owner):
+        _run(args, owner, variant)
+
+
+def _run(args, owner: str, variant: str) -> None:
     if args.score:
         ids = args.score
     else:
@@ -192,7 +224,7 @@ def main() -> None:
             code_phase.MODE_OVERRIDE = gen
             for n, idea in enumerate(ideas, 1):
                 print(f"[{n}/{len(ideas)}]{f' ({gen})' if gen else ''} {idea}", flush=True)
-                ids.append((run_idea(idea, args.mode, args.model, args.mockup_timeout), gen))
+                ids.append((run_idea(idea, args.mode, args.model, args.mockup_timeout, owner), gen))
         code_phase.MODE_OVERRIDE = None
     ids = [item if isinstance(item, tuple) else (item, None) for item in ids]
 

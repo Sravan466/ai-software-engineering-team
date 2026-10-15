@@ -434,7 +434,7 @@ class Crew:
             payload["files"] = [{"path": "app/page.jsx", "purpose": "home"}, {"path": "lib/sum.js", "purpose": "math"}]
             return resp.model_copy(update={"text": json.dumps(payload)})
         fixed = self.fixes and autofix.TEST_NOTE_PREFIX in prompt
-        code = {"app/page.jsx": "export default function Home() { return <main />; }\n",
+        code = {"app/page.jsx": "export default function Home() { return <main>Calculator</main>; }\n",
                 "lib/sum.js": FIXED_SUM if fixed else BROKEN_SUM}
         written = {p: next((c for name, c in code.items() if p.endswith(name)), "// x\n") for p in asked_files(messages)}
         return resp.model_copy(update={"text": fenced(written)})

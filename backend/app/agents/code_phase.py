@@ -49,8 +49,8 @@ from app.agents.base import (
     _merge,
     _pack_skills,
 )
-from app.build import layout
-from app.build.check import BuildCheck, Problem, syntax_problems
+from app.build import layout, placeholders
+from app.build.check import BuildCheck, Problem, file_problems
 from app.core.artifacts import NOTE_KIND
 from app.core.config import settings
 from app.core.constants import BuildStatus, SchemaStatus
@@ -288,6 +288,11 @@ class _Run:
         #: Files a change left as they were: too long to show, or the reply cut off.
         self.too_long: list[str] = []
         self.cut_off: list[str] = []
+        #: ...or every rewrite of it dropped much of the file (#101).
+        self.lost: list[str] = []
+        #: What the change asks, in the person's words: a request to remove code may
+        #: shrink a file as much as it likes.
+        self.asked = ""
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -385,6 +390,13 @@ class _Run:
             # The file as the app preview was built from it — the lines it names are
             # lines of this text (the platform may have added a directive at the top).
             self.written[path].code = ask["content"]
+        # The file as it is, to hold the rewrite to (#101): one element changed is not
+        # half the file gone.
+        self.existing = {path: self.written[path].code}
+        self.changing = {path}
+        self.asked = request
+        # Named again in any repair round, so a fix of the rewrite still makes the change.
+        self.asks[path] = request
         planned = self._entry(path)
         current = self.written[path]
         asked = _Written(path, current.code, current.language, current.purpose, problems=[Problem(path, request, "edit")])
@@ -400,9 +412,15 @@ class _Run:
                     "The crew didn't send the file back in full, so nothing was changed. Try again, or say it differently."
                 )
             self._check([path])
-            if self.written[path].faults():
+            if self.written[path].code == self.existing[path]:
                 raise RevisionRefused(
-                    "The crew's version of the file doesn't parse, so nothing was changed: "
+                    "The crew sent the file back unchanged, so nothing was changed. Try again, or say it differently."
+                )
+            if self.written[path].faults():
+                parses = not any(p.kind == "syntax" for p in self.written[path].problems)
+                raise RevisionRefused(
+                    ("The crew's version of the file isn't finished, so nothing was changed: " if parses
+                     else "The crew's version of the file doesn't parse, so nothing was changed: ")
                     + "; ".join(self.written[path].faults()[:2])
                 )
         except BaseException:
@@ -445,6 +463,7 @@ class _Run:
 
         agent, ctx = self.agent, self.ctx
         self.change_mode = True
+        self.asked = ctx.change
         base = ctx.base_output or {}
         for f in base.get("files") or []:
             if not isinstance(f, dict) or not isinstance(f.get("path"), str) or not f["path"].strip():
@@ -542,6 +561,8 @@ class _Run:
                 too_long.append(e.path)
                 activity.file(e.path, "missing")
             queue = [p for p in queue if p.path not in self.landed and p.path not in self.cut_off]
+        for path in self.lost:
+            activity.file(path, "missing")
 
         result = self._finish()
         changed = sorted(
@@ -560,10 +581,12 @@ class _Run:
                 "deleted": deleted,
                 # Asked for and not changed: the model sent it back as it was, or never.
                 "unchanged": sorted(
-                    p for p in self.changing if p not in changed and p not in too_long and p not in self.cut_off
+                    p for p in self.changing
+                    if p not in changed and p not in too_long and p not in self.cut_off and p not in self.lost
                 ),
                 "too_long": too_long,
                 "cut_off": list(self.cut_off),
+                "lost_code": list(self.lost),
                 "kept": len([p for p in self.existing if p not in changed and p not in deleted]),
             },
         }
@@ -666,7 +689,16 @@ class _Run:
             rounds += 1
             failing = self._repair(failing)
         for path in paths:
-            activity.file(path, "failed" if self.written[path].faults() else "ok")
+            w = self.written[path]
+            if self.change_mode and any(placeholders.is_lost_code(p) for p in w.problems):
+                # Every rewrite dropped much of a file that works (#101): it stays as it
+                # was, as a cut-off one does, and the change's record says why.
+                self.written[path] = _Written(path, self.existing[path], w.language, w.purpose, w.origin)
+                self._judge(self.written[path])
+                if path not in self.lost:
+                    self.lost.append(path)
+                continue
+            activity.file(path, "failed" if w.faults() else "ok")
 
     def _repair(self, failing: list[_Written]) -> list[_Written]:
         """One repair call for `failing`, problems named. Returns what still fails."""
@@ -778,9 +810,14 @@ class _Run:
         self.lengths.append(len(code))
 
     def _judge(self, w: _Written) -> None:
-        w.problems = syntax_problems(w.path, w.code)
-        if not w.complete and not w.problems:
-            w.problems = [Problem(w.path, "was cut off at the model's output limit before it ended", "syntax")]
+        w.problems = file_problems(w.path, w.code)
+        before = self.existing.get(w.path) if w.path in self.changing else None
+        if before is not None and settings.check_placeholders and not any(p.kind == "syntax" for p in w.problems):
+            # An edit answers for what it wrote, not for a TODO the file already had —
+            # and only the person's words excuse lost code, never the plan's (#101).
+            w.problems = placeholders.edited(w.path, before, w.code, self.asked)
+        if not w.complete and not any(p.kind == "syntax" for p in w.problems):
+            w.problems = [Problem(w.path, "was cut off at the model's output limit before it ended", "syntax")] + w.problems
         w.stack = (
             charter_violations(self.ctx.charter, self.agent.key, {"files": [{"path": w.path, "code": w.code}]})
             if settings.enforce_stack_charter
@@ -859,6 +896,12 @@ class _Run:
             log.error("%s: the file list alone does not fit this model's window.", self.agent.title)
         for w in fixing or []:
             room = max(int(left * 0.4) // max(len(fixing), 1) - 200, 0)
+            if w.path in self.existing and any(placeholders.is_lost_code(p) for p in w.problems):
+                # The rewrite lost much of the file (#101): what to start again from is
+                # the file as it was, whole, not the half that came back.
+                was = _Written(w.path, self.existing[w.path], w.language, w.purpose)
+                if put(f"echo:{w.path}", _echo(was, max(len(was.code) + 200, 400), _EDIT_ECHO)):
+                    continue
             put(f"echo:{w.path}", _echo(w, room))
         if editing is not None:
             # The whole file or nothing: a clipped file written back would lose its end.
@@ -970,6 +1013,10 @@ class _Run:
             lines.append(line)
             for fault in (broken[p.path].faults() if p.path in broken else [])[:6]:
                 lines.append(f"  - problem: {fault}")
+            if p.path in broken and p.path in self.changing and self.asks.get(p.path):
+                # A repair of an edit still makes the edit (#101): without this, the file
+                # as it was is a "fix" that drops the change.
+                lines.append(f"  - change: {self.asks[p.path]}")
         if split:
             lines.append(
                 f"Your last reply for `{batch[0].path}` was cut off at this model's output limit. "
