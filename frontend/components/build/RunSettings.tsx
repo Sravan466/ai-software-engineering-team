@@ -270,7 +270,12 @@ function localOverrides(roles: RoleRow[] | null, local: LocalStatus | null): Map
   return out;
 }
 
-function describe(mode: RoutingModeMeta, choices: ModelChoices) {
+function describe(
+  mode: RoutingModeMeta,
+  choices: ModelChoices,
+  roles: RoleRow[] | null,
+  local: LocalStatus | null,
+) {
   if (mode.backend === "auto") {
     const billed = choices.cloudLabels;
     return (
@@ -286,9 +291,19 @@ function describe(mode: RoutingModeMeta, choices: ModelChoices) {
   }
   if (mode.backend === "local_only" && choices.localDefault) {
     const home = choices.localDefault;
+    // "Every agent" is only true without exceptions, and the tile is what the three
+    // answers are compared on, so it says who they are; the strip says which model.
+    const others = Array.from(localOverrides(roles, local).values()).flat();
+    const except =
+      others.length === 0
+        ? ""
+        : others.length <= 2
+          ? `, except ${listOf(others)} (set in Settings)`
+          : `, except ${others.length} agents set in Settings`;
     return (
       <>
-        Every agent uses <span className="mono">{home.name}</span> {whereItRuns(home)}.{" "}
+        Every agent uses <span className="mono">{home.name}</span> {whereItRuns(home)}
+        {except}.{" "}
         {home.remote ? "Free, and nothing goes to a cloud service." : "Free, and nothing leaves your machine."}
       </>
     );
@@ -297,8 +312,8 @@ function describe(mode: RoutingModeMeta, choices: ModelChoices) {
 }
 
 /**
- * What Local model runs besides the default, said once it is chosen: the agents
- * pointed at a local model of their own in Settings. Undefined when there are none.
+ * Which model each of Local model's exceptions runs, said once it is chosen: the
+ * agents pointed at a local model of their own in Settings. Undefined without any.
  */
 function localExceptions(roles: RoleRow[] | null, local: LocalStatus | null) {
   const overrides = Array.from(localOverrides(roles, local));
@@ -309,7 +324,7 @@ function localExceptions(roles: RoleRow[] | null, local: LocalStatus | null) {
         <span key={name}>
           {i > 0 && " "}
           {listOf(agents)} {agents.length === 1 ? "uses" : "use"} <span className="mono">{name}</span>{" "}
-          instead (set in Settings).
+          instead.
         </span>
       ))}
     </>
@@ -593,7 +608,7 @@ export default function RunSettings({
             choices={choices.modes.map((m) => ({
               value: m.id,
               label: m.label,
-              description: describe(m, choices),
+              description: describe(m, choices, roles, local),
               more: m.backend === "local_only" ? localExceptions(roles, local) : undefined,
               under: m.needsModel ? picker : undefined,
             }))}

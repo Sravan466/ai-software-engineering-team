@@ -1,14 +1,6 @@
 "use client";
 
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-  type RefObject,
-} from "react";
+import { useLayoutEffect, useRef, type CSSProperties, type ReactNode, type RefObject } from "react";
 
 /**
  * One question as its answers side by side, and what the chosen one needs under them.
@@ -61,15 +53,14 @@ export default function ChoiceTiles<T extends string>({
   const open = Boolean(chosen && (chosen.more || chosen.under));
 
   // While the strip folds it keeps what it showed, rather than folding up empty.
-  const [shown, setShown] = useState<T | null>(open ? value : null);
-  useEffect(() => {
-    if (open) setShown(value);
-  }, [open, value]);
-  const at = open ? on : choices.findIndex((c) => c.value === shown);
+  const shown = useRef<T | null>(null);
+  if (open) shown.current = value;
+  const at = open ? on : choices.findIndex((c) => c.value === shown.current);
   const detail = at >= 0 ? choices[at] : undefined;
 
+  const strip = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
-  const height = useHeight(inner, detail?.value ?? "");
+  useStripHeight(strip, inner, open, detail?.value ?? "");
   const moreId = `${name}-more`;
 
   return (
@@ -108,13 +99,8 @@ export default function ChoiceTiles<T extends string>({
           );
         })}
 
-        <div
-          className="tiles-detail"
-          data-open={open || undefined}
-          // Its content's own height while open, so a swap between two answers that
-          // both have something to say slides between their heights too.
-          style={{ height: open ? (height ?? undefined) : 0 }}
-        >
+        {/* Its height is written by `useStripHeight`, never by React. */}
+        <div ref={strip} className="tiles-detail" data-open={open || undefined}>
           <div ref={inner} className="tiles-detail-inner">
             {detail && (detail.more || detail.under) && (
               <div key={detail.value} className="tiles-detail-body">
@@ -134,26 +120,33 @@ export default function ChoiceTiles<T extends string>({
 }
 
 /**
- * An element's laid-out height, kept current as its content changes. Null where it
- * can't be watched, which leaves the strip at its natural height, unanimated.
+ * The strip's height: its content's while open, so a swap between two answers that
+ * both have something to say slides between their heights too; 0 while folded.
  *
- * Measured before paint whenever `content` changes, so the strip's first frame
- * already heads for the new height instead of the old one; and on every reflow after
- * that (the window narrows, a note appears under the select). Unrounded: the strip
- * clips at this height, and a whole-pixel `offsetHeight` can shave its last pixel.
+ * Written to the element directly rather than through state. A layout effect sets
+ * it before paint whenever the strip opens, folds or changes content, so the first
+ * frame already heads for the new height; a ResizeObserver keeps it current on
+ * reflows (the window narrows, a note appears under the select), and its callback
+ * also runs before paint, where a state update would land a frame late and clip
+ * the content in between. Unrounded: a whole-pixel height can shave the last pixel.
  */
-function useHeight(ref: RefObject<HTMLElement>, content: string): number | null {
-  const [height, setHeight] = useState<number | null>(null);
-  const watchable = typeof ResizeObserver !== "undefined";
+function useStripHeight(
+  strip: RefObject<HTMLElement>,
+  inner: RefObject<HTMLElement>,
+  open: boolean,
+  content: string,
+) {
   useLayoutEffect(() => {
-    if (watchable && ref.current) setHeight(ref.current.getBoundingClientRect().height);
-  }, [ref, content, watchable]);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el || !watchable) return;
-    const ro = new ResizeObserver(() => setHeight(el.getBoundingClientRect().height));
-    ro.observe(el);
+    const outer = strip.current;
+    const body = inner.current;
+    if (!outer || !body) return;
+    const fit = () => {
+      outer.style.height = open ? `${body.getBoundingClientRect().height}px` : "0px";
+    };
+    fit();
+    if (!open || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(body);
     return () => ro.disconnect();
-  }, [ref, watchable]);
-  return height;
+  }, [strip, inner, open, content]);
 }

@@ -694,8 +694,10 @@
   transform: scale(0);
   transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.choice[data-on] .choice-dot { border-color: var(--accent); }
-.choice[data-on] .choice-dot::after { transform: scale(1); }
+.choice[data-on] .choice-dot,
+.tile[data-on] .choice-dot { border-color: var(--accent); }
+.choice[data-on] .choice-dot::after,
+.tile[data-on] .choice-dot::after { transform: scale(1); }
 .choice-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .choice-label { font-size: var(--t-sm); font-weight: 600; color: var(--ink); line-height: 1.35; }
 .choice-what { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.5; text-wrap: pretty; }
@@ -722,6 +724,9 @@
 .tiles-legend { padding: 0; margin-bottom: 8px; color: var(--ink-2); }
 .tiles-tray {
   --gap: 4px;
+  --tile-x: 12px;
+  --notch: 10px;
+  --notch-y: 9px; /* where the strip's body starts, under the room the notch takes */
   --strip: color-mix(in srgb, var(--accent) 5%, var(--bg-raised));
   display: grid;
   grid-template-columns: repeat(var(--count), minmax(0, 1fr));
@@ -737,7 +742,7 @@
   flex-direction: column;
   gap: 5px;
   min-width: 0;
-  padding: 11px 12px 12px;
+  padding: 11px var(--tile-x) 12px;
   border-radius: var(--r);
   cursor: pointer;
   transition: background var(--tr), box-shadow var(--tr);
@@ -751,8 +756,6 @@
 .tile:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
 .tile-head { display: flex; align-items: flex-start; gap: 8px; }
 .tile-head .choice-dot { flex: none; }
-.tile[data-on] .choice-dot { border-color: var(--accent); }
-.tile[data-on] .choice-dot::after { transform: scale(1); }
 .tile-label { font-size: var(--t-sm); font-weight: 600; color: var(--ink); line-height: 1.35; }
 /* Lined up under the answer's name, past the dot. */
 .tile-what {
@@ -765,7 +768,8 @@
 .tile[data-on] .tile-what { color: var(--ink-2); }
 .tile-what .mono { color: var(--ink-2); font-size: 0.95em; overflow-wrap: anywhere; }
 .tile[data-on] .tile-what .mono { color: var(--ink); }
-.tiles:disabled .tile { cursor: not-allowed; opacity: 0.6; }
+.tiles:disabled .tile,
+.tiles:disabled .tiles-detail-body { cursor: not-allowed; opacity: 0.6; }
 
 .tiles-detail {
   grid-column: 1 / -1;
@@ -778,29 +782,31 @@
    until it opens, then hidden again once it has finished folding. */
 .tiles-detail-inner {
   position: relative;
-  padding-top: 9px;
+  padding-top: var(--notch-y);
   visibility: hidden;
   transition: visibility 0s linear 240ms;
 }
 .tiles-detail[data-open] .tiles-detail-inner { visibility: visible; transition-delay: 0s; }
-/* The notch, under the chosen tile's dot. A tile's left edge is `i × (row + gap) / n`. */
+/* The notch, centred under the chosen tile's dot (16px, `.choice-dot`). A tile's left
+   edge is `i × (row + gap) / n`; its dot starts `--tile-x` in. */
 .tiles-detail-inner::before {
+  --to-dot: calc(var(--tile-x) + 8px - var(--notch) / 2);
   content: "";
   position: absolute;
   z-index: 1;
-  top: 4px;
-  left: calc(var(--at) * (100% + var(--gap)) / var(--count) + 15px);
-  width: 10px;
-  height: 10px;
+  top: calc(var(--notch-y) - var(--notch) / 2);
+  left: calc(var(--at) * (100% + var(--gap)) / var(--count) + var(--to-dot));
+  width: var(--notch);
+  height: var(--notch);
   border-top: 1px solid var(--line-2);
   border-left: 1px solid var(--line-2);
   border-top-left-radius: 2px;
   background: var(--strip);
   transform: rotate(45deg);
   opacity: 0;
-  transition:
-    left var(--tr-slow) cubic-bezier(0.16, 1, 0.3, 1),
-    opacity var(--tr);
+  /* Not `var(--tr-slow)` + a curve: that token carries a curve of its own, and two
+     curves in one transition drop the whole declaration. */
+  transition: left 240ms cubic-bezier(0.16, 1, 0.3, 1), opacity var(--tr);
 }
 .tiles-detail[data-open] .tiles-detail-inner::before { opacity: 1; }
 .tiles-detail-body {
@@ -846,7 +852,7 @@
   .tile { order: calc(var(--i) * 2); }
   .tile + .tile { margin-top: var(--gap); }
   .tiles-detail { order: calc(var(--at) * 2 + 1); }
-  .tiles-detail-inner::before { left: 15px; }
+  .tiles-detail-inner::before { left: var(--to-dot); }
   .tiles-field .select { max-width: none; }
 }
 /* The one-model case: no question to ask, one sentence that names the model. */
