@@ -21,11 +21,11 @@ from app.evals.scorecard import score
 from app.orchestration import autofix
 from app.orchestration.approval import build_note
 from tests.conftest import _fake_complete, asked_files, fenced, stub, through_question_gates
-from tests.test_changes import BACKEND, Script, _code, _finished, _zip, script  # noqa: F401 - fixture by name
+from tests.test_changes import _code, _finished, _zip, script  # noqa: F401 - the fixture is used by name
 
 
-def _found(path: str, code: str) -> list[tuple[str, int, str]]:
-    return [(p.kind, p.line, p.message) for p in ph.file_placeholders(path, code)]
+def _found(path: str, code: str, cap=ph._PER_FILE) -> list[tuple[str, int, str]]:
+    return [(p.kind, p.line, p.message) for p in ph.file_placeholders(path, code, cap)]
 
 
 def _kinds(path: str, code: str) -> list[str]:
@@ -168,11 +168,7 @@ def test_python_tests_that_assert_nothing_or_nothing_real_are_weak():
         "@pytest.mark.skip(reason='later')\ndef test_later():\n    assert 1 == 2\n\n"
         "class TestThing:\n    def test_a(self):\n        self.assertEqual(1, 1)\n"
     )
-    ph._PER_FILE, before = 99, ph._PER_FILE
-    try:
-        found = _found("backend/tests/test_api.py", code)
-    finally:
-        ph._PER_FILE = before
+    found = _found("backend/tests/test_api.py", code, cap=None)
     assert [(k, line) for k, line, _ in found] == [
         ("weak_test", 11), ("weak_test", 21), ("weak_test", 25), ("weak_test", 29),
     ]
@@ -199,11 +195,7 @@ def test_javascript_tests_that_assert_nothing_or_nothing_real_are_weak():
         "test('real', () => { expect(getTodos()).toEqual([]); });\n"
         "it.todo('handles errors');\n"
     )
-    ph._PER_FILE, before = 99, ph._PER_FILE
-    try:
-        found = _found("frontend/src/__tests__/api.test.ts", code)
-    finally:
-        ph._PER_FILE = before
+    found = _found("frontend/src/__tests__/api.test.ts", code, cap=None)
     assert [line for _, line, _ in found] == [2, 3, 6, 8]
     assert "mocks `../api`, the module it tests" in found[0][2]
     assert "test “loads todos” asserts nothing" in found[1][2]
@@ -406,3 +398,98 @@ def test_a_change_whose_rewrite_drops_most_of_a_file_keeps_the_file(client, scri
     repairs = [c for c in script.calls[mark:] if c["role"] == "backend_engineer" and "dropped 18" in c["messages"][-1].content]
     assert repairs and "def f9(x):" in repairs[0]["messages"][-1].content
 
+
+
+# ── edits answer for what they wrote (review of #104) ────────────────────────
+HERO = (
+    "export function Hero() {\n  return <h1>Welcome</h1>;\n}\n\n"
+    + "".join(f"export function part{i}() {{\n  return {i};\n}}\n\n" for i in range(6))
+)
+
+
+def _edit(monkeypatch, replies: list[str], code: str = HERO):
+    """One "change this element" on Hero.tsx, the model answering `replies` in turn."""
+    from app.agents.base import AgentContext
+    from app.agents.code_phase import _Run
+    from app.agents.frontend_engineer import FrontendEngineerAgent
+    from app.schemas.llm import LLMResponse, Usage
+
+    asked: list[str] = []
+
+    def complete(messages, **kwargs):
+        asked.append(messages[-1].content)
+        return LLMResponse(text=replies[min(len(asked), len(replies)) - 1], provider="mock", model="mock-model",
+                           usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2), latency_ms=1)
+
+    stub(monkeypatch, "complete", complete)
+    output = {"files": [{"path": "frontend/components/Hero.tsx", "language": "typescript", "code": code}]}
+    ask = {"path": "frontend/components/Hero.tsx", "lines": [2, 2], "what": "the heading", "instruction": "Make the heading warmer"}
+    run = _Run(FrontendEngineerAgent(), AgentContext(idea="A landing page"))
+    return run.edit(output, ask), asked
+
+
+def test_a_repair_of_an_edit_that_lost_code_still_makes_the_change(monkeypatch, stub_router):
+    warm = HERO.replace("Welcome", "Welcome, friend")
+    (out, _calls), asked = _edit(monkeypatch, [fenced({"frontend/components/Hero.tsx": warm.split("\n\n")[0]}),
+                                              fenced({"frontend/components/Hero.tsx": warm})])
+    assert len(asked) == 2
+    # The repair names the change as well as the lost code, and shows the file as it was.
+    assert "dropped" in asked[1] and "- change: In line 2 (the heading): Make the heading warmer" in asked[1]
+    assert "export function part5()" in asked[1]
+    assert out["files"][0]["code"] == warm
+
+
+def test_an_edit_that_comes_back_unchanged_is_refused_not_kept(monkeypatch, stub_router):
+    from app.agents.base import RevisionRefused
+
+    with pytest.raises(RevisionRefused, match="unchanged"):
+        _edit(monkeypatch, [fenced({"frontend/components/Hero.tsx": HERO})])
+
+
+def test_an_edit_isnt_refused_for_a_todo_the_file_already_had(monkeypatch, stub_router):
+    old = HERO.replace("export function Hero() {\n", "export function Hero() {\n  // TODO: wire search\n")
+    warm = old.replace("Welcome", "Welcome, friend")
+    (out, _calls), asked = _edit(monkeypatch, [fenced({"frontend/components/Hero.tsx": warm})], code=old)
+    assert len(asked) == 1 and out["files"][0]["code"] == warm
+
+
+def test_a_change_answers_only_for_the_files_and_placeholders_it_wrote():
+    base = {"files": [
+        {"path": "app/kept.py", "code": "def track():\n    pass\n"},
+        {"path": "app/changed.py", "code": "def a():\n    # TODO: cache\n    return 1\n"},
+        {"path": "app/worse.py", "code": "def b():\n    return 2\n"},
+    ]}
+    now = {"files": [
+        base["files"][0],
+        {"path": "app/changed.py", "code": "def a():\n    # TODO: cache\n    return 10\n"},
+        {"path": "app/worse.py", "code": "def b():\n    pass\n"},
+    ]}
+    check = check_phase({}, "backend_engineer", now, None, previous={"output": base, "asked": "make a return 10"})
+    assert [(p.path, p.kind) for p in check.problems] == [("backend/app/worse.py", "placeholder")]
+
+
+def test_a_code_phase_leaves_lost_code_to_its_own_per_file_judgement():
+    base = {"files": [{"path": "app/util.py", "code": LONG}]}
+    now = {"files": [{"path": "app/util.py", "code": "def f0(x):\n    return x\n"}]}
+    asked = "make f0 return x"
+    judged = check_phase({}, "backend_engineer", now, None, previous={"output": base, "asked": asked})
+    assert any(ph.is_lost_code(p) for p in judged.problems)
+    left = check_phase({}, "backend_engineer", now, None, previous={"output": base, "asked": asked, "lost_code": False})
+    assert left.status == "ok"
+    from app.agents.backend_engineer import BackendEngineerAgent
+    from app.agents.qa_engineer import QAEngineerAgent
+
+    assert BackendEngineerAgent.lost_code_at_gate is False and QAEngineerAgent.lost_code_at_gate is True
+
+
+def test_review_cases_for_the_patterns():
+    # Ordinary comments and words that only look like the patterns.
+    assert _found("backend/app/x.py", "def f(t):\n    # keep going if the total is unchanged\n    return t\n") == []
+    assert _found("frontend/src/App.tsx", "export default function App() {\n  return <p>Add your first task here</p>;\n}\n") == []
+    assert _found("backend/tests/conftest.py", "") == []
+    assert ph.lost_code("backend/app/util.py", LONG, "def f0(x):\n    return x\n", "Add a dropdown to pick a category")
+    assert ph.lost_code("backend/app/util.py", LONG, "def f0(x):\n    return x\n", "Add Stripe checkout")
+    # The scorecard counts every one; the gate's list stops at three a file.
+    many = "".join(f"def test_{i}():\n    print({i})\n\n" for i in range(8))
+    assert len(ph.placeholder_problems({"backend/tests/test_a.py": many}, ["backend/tests/test_a.py"])) == 3
+    assert len(ph.placeholder_problems({"backend/tests/test_a.py": many}, ["backend/tests/test_a.py"], cap=None)) == 8

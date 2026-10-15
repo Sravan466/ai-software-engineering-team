@@ -561,8 +561,10 @@ def phase_tree(
 def check_phase(
     prior_outputs: dict, phase_key: str, output: dict, charter=None, previous: Optional[dict] = None
 ) -> BuildCheck:
-    """`previous` (#101): the phase's deliverable before a change request edited it —
-    a file the edit rewrote and lost much of is a problem, unless `asked` for that."""
+    """`previous` (#101): the phase's deliverable before a change request edited it. A
+    change answers for what it wrote: files it kept, and placeholders a file already
+    had, aren't its problems. A file it rewrote and lost much of is, unless `asked` for
+    that (and unless `lost_code` is false: a code phase judges that per file)."""
     files, mine = phase_tree(prior_outputs, phase_key, output, charter)
     # Platform-owned files an agent wrote anyway are replaced, not checked.
     from app.build.scaffold import platform_owned
@@ -575,14 +577,20 @@ def check_phase(
         # its calls are read again once it does.
         out.problems = (out.problems + names)[:_TOTAL]
         out.status = BuildStatus.FAILED.value
-    stubs = [p for path in targets for p in unfinished(path, files[path])]
+    before: Optional[dict[str, str]] = None
     if previous and settings.check_placeholders:
         before, _ = phase_tree(prior_outputs, phase_key, previous.get("output") or {}, charter)
-        for path in targets:
-            if path in before and before[path] != files[path]:
+    stubs: list[Problem] = []
+    for path in targets:
+        found = unfinished(path, files[path])
+        if before is not None and path in before:
+            if before[path] == files[path]:
+                continue  # kept as it was
+            found = placeholders.new_in(found, unfinished(path, before[path]))
+            if previous.get("lost_code", True):
                 lost = placeholders.lost_code(path, before[path], files[path], str(previous.get("asked") or ""))
-                if lost is not None:
-                    stubs.append(lost)
+                found += [lost] if lost is not None else []
+        stubs += found
     if stubs:
         # An empty file or a refusal replaces its own parse error, ahead of everything
         # else in it; other placeholders wait behind the compile problems, and not at

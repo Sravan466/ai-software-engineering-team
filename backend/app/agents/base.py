@@ -247,6 +247,8 @@ class BaseAgent:
     output_model: type[BaseModel] = GenericOutput
     #: Which prior phase outputs to inline as context (by phase key).
     depends_on: tuple[str, ...] = ()
+    #: Whether the compile gate judges an edit's rewritten files for lost code (#101).
+    lost_code_at_gate: bool = True
 
     # ── the declared shape, three ways ──────────────────────────────────────
     @property
@@ -669,7 +671,11 @@ class BaseAgent:
             return None
         # A change request (#79) is held to the files as they were: a rewrite that lost
         # much of one is sent back like a stub (#101).
-        previous = {"output": ctx.base_output, "asked": ctx.change} if ctx.editing else None
+        previous = (
+            {"output": ctx.base_output, "asked": ctx.change, "lost_code": self.lost_code_at_gate}
+            if ctx.editing
+            else None
+        )
         try:
             return check_phase(ctx.prior_outputs, self.key, output, ctx.charter, previous=previous)
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure

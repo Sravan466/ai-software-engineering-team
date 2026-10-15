@@ -50,7 +50,7 @@ from app.agents.base import (
     _pack_skills,
 )
 from app.build import layout, placeholders
-from app.build.check import BuildCheck, Problem, file_problems
+from app.build.check import BuildCheck, Problem, file_problems, unfinished
 from app.core.artifacts import NOTE_KIND
 from app.core.config import settings
 from app.core.constants import BuildStatus, SchemaStatus
@@ -190,6 +190,10 @@ class _EditPlanner(_Planner):
 
 class CodePhaseAgent(BaseAgent):
     """A phase that writes code: planned first, then written in batches (see module)."""
+
+    #: A change's rewrite that lost much of a file is judged per file as it lands, with
+    #: that file's own ask, and kept as it was if it still loses it (#101).
+    lost_code_at_gate = False
 
     #: The plan's shape: the deliverable's, with `files` as a list of planned files.
     plan_model: type[BaseModel] = BaseModel
@@ -395,6 +399,8 @@ class _Run:
         self.existing = {path: self.written[path].code}
         self.changing = {path}
         self.asked = request
+        # Named again in any repair round, so a fix of the rewrite still makes the change.
+        self.asks[path] = request
         planned = self._entry(path)
         current = self.written[path]
         asked = _Written(path, current.code, current.language, current.purpose, problems=[Problem(path, request, "edit")])
@@ -410,6 +416,10 @@ class _Run:
                     "The crew didn't send the file back in full, so nothing was changed. Try again, or say it differently."
                 )
             self._check([path])
+            if self.written[path].code == self.existing[path]:
+                raise RevisionRefused(
+                    "The crew sent the file back unchanged, so nothing was changed. Try again, or say it differently."
+                )
             if self.written[path].faults():
                 parses = not any(p.kind == "syntax" for p in self.written[path].problems)
                 raise RevisionRefused(
@@ -808,8 +818,15 @@ class _Run:
         if not w.complete and not w.problems:
             w.problems = [Problem(w.path, "was cut off at the model's output limit before it ended", "syntax")]
         before = self.existing.get(w.path) if w.path in self.changing else None
-        if before is not None and w.code != before and settings.check_placeholders:
-            lost = placeholders.lost_code(w.path, before, w.code, f"{self.asks.get(w.path, '')}\n{self.asked}")
+        if before is not None and settings.check_placeholders:
+            # An edit answers for what it wrote, not for a TODO the file already had.
+            mine = [p for p in w.problems if p.kind in placeholders.KINDS]
+            w.problems = [p for p in w.problems if p not in mine] + placeholders.new_in(mine, unfinished(w.path, before))
+            lost = (
+                placeholders.lost_code(w.path, before, w.code, f"{self.asks.get(w.path, '')}\n{self.asked}")
+                if w.code != before
+                else None
+            )
             if lost is not None:
                 w.problems = w.problems + [lost]
         w.stack = (
@@ -1007,6 +1024,10 @@ class _Run:
             lines.append(line)
             for fault in (broken[p.path].faults() if p.path in broken else [])[:6]:
                 lines.append(f"  - problem: {fault}")
+            if p.path in broken and p.path in self.changing and self.asks.get(p.path):
+                # A repair of an edit still makes the edit (#101): without this, the file
+                # as it was is a "fix" that drops the change.
+                lines.append(f"  - change: {self.asks[p.path]}")
         if split:
             lines.append(
                 f"Your last reply for `{batch[0].path}` was cut off at this model's output limit. "

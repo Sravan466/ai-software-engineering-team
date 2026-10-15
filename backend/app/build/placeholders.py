@@ -48,7 +48,7 @@ _PER_FILE = 3
 _JS_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 _CSS_EXT = (".css", ".scss")
 #: Files that are meant to be empty.
-_EMPTY_OK = frozenset({"__init__.py", ".gitkeep", ".keep", "py.typed", ".nojekyll"})
+_EMPTY_OK = frozenset({"__init__.py", "conftest.py", ".gitkeep", ".keep", "py.typed", ".nojekyll"})
 #: Prose, data and configuration: no function bodies, no comments that stand in for
 #: code — and "Here is" is a fine way to start a README.
 _SKIP_EXT = (".md", ".mdx", ".txt", ".json", ".lock", ".svg", ".env", ".example", ".ini", ".cfg", ".toml")
@@ -58,10 +58,13 @@ _SKIP_EXT = (".md", ".mdx", ".txt", ".json", ".lock", ".svg", ".env", ".example"
 #: Aider's lazy-comment test, widened to `//` and `/* */`: a comment whose text starts
 #: with an ellipsis is code left out (`# ... existing code ...`, `{/* ... */}`).
 _ELLIPSIS = re.compile(r"^\s*(?:\.\.\.|…)(?:\s|$)")
+#: Each says code was left out, about the code itself — "the total is unchanged" is a
+#: comment about a value, and stays.
 _LAZY = re.compile(
     r"\brest of (?:the |this |your )?(?:code|file|function|component|implementation|logic|methods|routes)\b"
-    r"|\b(?:remains?|stays?|is) (?:the same|unchanged)\b"
-    r"|\bexisting code\b"
+    r"|\b(?:the rest|everything else|rest of (?:it|this)|(?:the )?(?:code|implementation|logic|function|component"
+    r"|file|methods?|imports?)(?: below| above| here)?)\s+(?:remains?|stays?|is|are) (?:the same|unchanged)\b"
+    r"|^\W*(?:keep(?:ing)? |\(?)?(?:the )?existing code\b\W*(?:here|goes here|unchanged|remains|stays|\.\.\.|…)?\W*$"
     r"|\bomitted for brevity\b"
     r"|\bsame as (?:before|above)\b"
     r"|\b(?:other|more|remaining|additional)\s+(?:code|methods|routes|fields|functions|components|handlers|logic"
@@ -84,7 +87,7 @@ _PLACEHOLDER_ATTR = re.compile(r"""\bplaceholder\s*[=:]\s*$""", re.IGNORECASE)
 _JSX_FILLER = re.compile(
     r"^(?:placeholder(?: (?:text|content|page|component|section))?"
     r"|(?:(?:your|the|page|main|some) )?(?:content|text|component|page|section|form|chart|table|list|image) (?:goes )?here"
-    r"|(?:insert|add) [^<>{}]{1,40} here"
+    r"|insert [^<>{}]{1,40} here"
     r"|not (?:yet )?implemented(?: yet)?)[.!…]*$",
     re.IGNORECASE,
 )
@@ -115,18 +118,29 @@ def _is_test(path: str) -> bool:
 
 
 # ── the checks ───────────────────────────────────────────────────────────────
-def placeholder_problems(files: dict[str, str], targets: Iterable[str]) -> list[Problem]:
-    """Every placeholder and weak test in `targets` (placed paths), at most a few a file."""
+def placeholder_problems(
+    files: dict[str, str], targets: Iterable[str], cap: Optional[int] = _PER_FILE
+) -> list[Problem]:
+    """Every placeholder and weak test in `targets` (placed paths), at most `cap` a file
+    (None: all of them, for a count rather than a repair prompt)."""
     out: list[Problem] = []
     for path in dict.fromkeys(targets):
         content = files.get(path)
         if isinstance(content, str):
-            out += file_placeholders(path, content)
+            out += file_placeholders(path, content, cap)
     return out
 
 
-def file_placeholders(path: str, content: str) -> list[Problem]:
-    """One file's placeholders and weak tests, worst first and capped."""
+def new_in(problems: list[Problem], before: list[Problem]) -> list[Problem]:
+    """Of a rewritten file's problems, the ones its previous version didn't have (#79
+    edits): a change is answerable for what it wrote, not for an old TODO it kept.
+    Matched by message, since the line a problem is on moves with every edit."""
+    old = {p.message for p in before}
+    return [p for p in problems if p.message not in old]
+
+
+def file_placeholders(path: str, content: str, cap: Optional[int] = _PER_FILE) -> list[Problem]:
+    """One file's placeholders and weak tests, worst first, at most `cap` of them."""
     name = _base(path)
     low = name.lower()
     if low.endswith(_SKIP_EXT) or low.startswith(".env") or low.endswith(".d.ts") or low.endswith(".pyi"):
@@ -154,7 +168,7 @@ def file_placeholders(path: str, content: str) -> list[Problem]:
             continue
         seen.add(p.message)
         out.append(p)
-    return out[:_PER_FILE]
+    return out if cap is None else out[:cap]
 
 
 def is_whole_file(problem: Problem) -> bool:
@@ -854,8 +868,12 @@ def _dash_comments(content: str) -> list[tuple[int, str]]:
 
 # ── edit mode: a rewrite that lost the file ──────────────────────────────────
 #: A change that asks for code to go may shrink the file as much as it likes.
+#: Whole words in their own forms, so "dropdown", "Stripe" and "cutoff" are not asks.
 _REMOVAL = re.compile(
-    r"\b(?:remov|delet|drop|strip|get rid of|take out|cut|simplif|shorten|trim|clean ?up|refactor|split|extract|move|merg)\w*",
+    r"\b(?:remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|drop(?:s|ped|ping)?|strip(?:s|ped|ping)?|get rid of|take out"
+    r"|cut(?:s|ting)? (?:out|down|back)|simplif(?:y|ies|ied|ying)|shorten(?:s|ed|ing)?|trim(?:s|med|ming)?"
+    r"|clean(?:s|ed|ing)?[- ]?up|refactor(?:s|ed|ing)?|split(?:s|ting)?|extract(?:s|ed|ing)?|mov(?:e|es|ed|ing)"
+    r"|merg(?:e|es|ed|ing))\b",
     re.IGNORECASE,
 )
 #: Below this, a file is too small for a share of it to mean anything.

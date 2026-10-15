@@ -171,7 +171,7 @@ def score(db: Session, project: Project) -> dict:
         "compile_problems": len(check.problems),
         "compile_unchecked": len(check.unchecked),
         # Uncapped, unlike the gate's list: a count, not a repair prompt.
-        **placeholders.counts(placeholders.placeholder_problems(tree, code_paths)),
+        **placeholders.counts(placeholders.placeholder_problems(tree, code_paths, cap=None)),
         "mockup": _mockup(db, project),
         "tokens": sum(ph.total_tokens or 0 for ph in phases),
         "names_used_pct": names_used(outputs, agent_tree),

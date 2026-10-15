@@ -79,7 +79,9 @@ def owner_id() -> str:
     try:
         owner = db.query(User).filter(User.is_owner.is_(True)).first()
         if owner is None:
-            owner = User(email="eval@localhost", display_name="Eval harness", is_owner=True)
+            # No password: the unclaimed owner the accounts migration makes, which the
+            # first person to set up the install still claims as theirs.
+            owner = User(display_name="Eval harness", is_owner=True)
             db.add(owner)
             db.commit()
         return owner.id
