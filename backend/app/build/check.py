@@ -561,10 +561,10 @@ def phase_tree(
 def check_phase(
     prior_outputs: dict, phase_key: str, output: dict, charter=None, previous: Optional[dict] = None
 ) -> BuildCheck:
-    """`previous` (#101): the phase's deliverable before a change request edited it. A
-    change answers for what it wrote: files it kept, and placeholders a file already
-    had, aren't its problems. A file it rewrote and lost much of is, unless `asked` for
-    that (and unless `lost_code` is false: a code phase judges that per file)."""
+    """`previous` (#101): the deliverable before an edit — `{output, asked, placeholders}`.
+    An edit answers for what it wrote (`placeholders.edited`): files it kept, and
+    placeholders a file already had, aren't its problems; code it lost is, unless
+    `asked` for that. `placeholders: False` is a person's own edit, never judged."""
     files, mine = phase_tree(prior_outputs, phase_key, output, charter)
     # Platform-owned files an agent wrote anyway are replaced, not checked.
     from app.build.scaffold import platform_owned
@@ -578,19 +578,15 @@ def check_phase(
         out.problems = (out.problems + names)[:_TOTAL]
         out.status = BuildStatus.FAILED.value
     before: Optional[dict[str, str]] = None
-    if previous and settings.check_placeholders:
+    judged = settings.check_placeholders and (previous is None or previous.get("placeholders", True))
+    if previous is not None and judged:
         before, _ = phase_tree(prior_outputs, phase_key, previous.get("output") or {}, charter)
     stubs: list[Problem] = []
-    for path in targets:
-        found = unfinished(path, files[path])
+    for path in targets if judged else []:
         if before is not None and path in before:
-            if before[path] == files[path]:
-                continue  # kept as it was
-            found = placeholders.new_in(found, unfinished(path, before[path]))
-            if previous.get("lost_code", True):
-                lost = placeholders.lost_code(path, before[path], files[path], str(previous.get("asked") or ""))
-                found += [lost] if lost is not None else []
-        stubs += found
+            stubs += placeholders.edited(path, before[path], files[path], str(previous.get("asked") or ""))
+        else:
+            stubs += unfinished(path, files[path])
     if stubs:
         # An empty file or a refusal replaces its own parse error, ahead of everything
         # else in it; other placeholders wait behind the compile problems, and not at

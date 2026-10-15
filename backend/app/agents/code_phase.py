@@ -50,7 +50,7 @@ from app.agents.base import (
     _pack_skills,
 )
 from app.build import layout, placeholders
-from app.build.check import BuildCheck, Problem, file_problems, unfinished
+from app.build.check import BuildCheck, Problem, file_problems
 from app.core.artifacts import NOTE_KIND
 from app.core.config import settings
 from app.core.constants import BuildStatus, SchemaStatus
@@ -190,10 +190,6 @@ class _EditPlanner(_Planner):
 
 class CodePhaseAgent(BaseAgent):
     """A phase that writes code: planned first, then written in batches (see module)."""
-
-    #: A change's rewrite that lost much of a file is judged per file as it lands, with
-    #: that file's own ask, and kept as it was if it still loses it (#101).
-    lost_code_at_gate = False
 
     #: The plan's shape: the deliverable's, with `files` as a list of planned files.
     plan_model: type[BaseModel] = BaseModel
@@ -815,20 +811,13 @@ class _Run:
 
     def _judge(self, w: _Written) -> None:
         w.problems = file_problems(w.path, w.code)
-        if not w.complete and not w.problems:
-            w.problems = [Problem(w.path, "was cut off at the model's output limit before it ended", "syntax")]
         before = self.existing.get(w.path) if w.path in self.changing else None
-        if before is not None and settings.check_placeholders:
-            # An edit answers for what it wrote, not for a TODO the file already had.
-            mine = [p for p in w.problems if p.kind in placeholders.KINDS]
-            w.problems = [p for p in w.problems if p not in mine] + placeholders.new_in(mine, unfinished(w.path, before))
-            lost = (
-                placeholders.lost_code(w.path, before, w.code, f"{self.asks.get(w.path, '')}\n{self.asked}")
-                if w.code != before
-                else None
-            )
-            if lost is not None:
-                w.problems = w.problems + [lost]
+        if before is not None and settings.check_placeholders and not any(p.kind == "syntax" for p in w.problems):
+            # An edit answers for what it wrote, not for a TODO the file already had —
+            # and only the person's words excuse lost code, never the plan's (#101).
+            w.problems = placeholders.edited(w.path, before, w.code, self.asked)
+        if not w.complete and not any(p.kind == "syntax" for p in w.problems):
+            w.problems = [Problem(w.path, "was cut off at the model's output limit before it ended", "syntax")] + w.problems
         w.stack = (
             charter_violations(self.ctx.charter, self.agent.key, {"files": [{"path": w.path, "code": w.code}]})
             if settings.enforce_stack_charter

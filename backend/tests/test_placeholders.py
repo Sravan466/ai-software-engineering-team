@@ -178,7 +178,7 @@ def test_python_tests_that_assert_nothing_or_nothing_real_are_weak():
 
 
 def test_a_test_that_mocks_the_module_it_tests_is_weak():
-    py = "from unittest.mock import patch\n\n@patch('app.api')\ndef test_get(m):\n    assert m.called\n"
+    py = "from unittest.mock import patch\nfrom app import api\n\n@patch('app.api')\ndef test_get(m):\n    assert m.called\n"
     [(kind, _, message)] = _found("backend/tests/test_api.py", py)
     assert kind == "weak_test" and "mocks `app.api`, the module it tests" in message
     # Mocking what it depends on is how a unit is tested.
@@ -468,18 +468,17 @@ def test_a_change_answers_only_for_the_files_and_placeholders_it_wrote():
     assert [(p.path, p.kind) for p in check.problems] == [("backend/app/worse.py", "placeholder")]
 
 
-def test_a_code_phase_leaves_lost_code_to_its_own_per_file_judgement():
+def test_the_gate_and_the_per_file_pass_judge_lost_code_by_the_persons_words():
     base = {"files": [{"path": "app/util.py", "code": LONG}]}
     now = {"files": [{"path": "app/util.py", "code": "def f0(x):\n    return x\n"}]}
-    asked = "make f0 return x"
-    judged = check_phase({}, "backend_engineer", now, None, previous={"output": base, "asked": asked})
+    judged = check_phase({}, "backend_engineer", now, None, previous={"output": base, "asked": "make f0 return x"})
     assert any(ph.is_lost_code(p) for p in judged.problems)
-    left = check_phase({}, "backend_engineer", now, None, previous={"output": base, "asked": asked, "lost_code": False})
-    assert left.status == "ok"
-    from app.agents.backend_engineer import BackendEngineerAgent
-    from app.agents.qa_engineer import QAEngineerAgent
-
-    assert BackendEngineerAgent.lost_code_at_gate is False and QAEngineerAgent.lost_code_at_gate is True
+    asked = check_phase({}, "backend_engineer", now, None, previous={"output": base, "asked": "replace the helpers with f0"})
+    assert asked.status == "ok"
+    # A person's own edit on the preview is never judged.
+    typed = {"files": [{"path": "app/util.py", "code": "def f0(x):\n    # TODO: mine\n    return x\n"}]}
+    assert check_phase({}, "backend_engineer", typed, None,
+                       previous={"output": base, "asked": "", "placeholders": False}).status == "ok"
 
 
 def test_review_cases_for_the_patterns():
@@ -493,3 +492,53 @@ def test_review_cases_for_the_patterns():
     many = "".join(f"def test_{i}():\n    print({i})\n\n" for i in range(8))
     assert len(ph.placeholder_problems({"backend/tests/test_a.py": many}, ["backend/tests/test_a.py"])) == 3
     assert len(ph.placeholder_problems({"backend/tests/test_a.py": many}, ["backend/tests/test_a.py"], cap=None)) == 8
+
+
+def test_second_review_cases():
+    # An object type in a return annotation is not the body.
+    code = "export async function load(): Promise<{}> {\n  const r = await fetch('/x');\n  return r.json();\n}\n"
+    assert _found("frontend/src/api.ts", code) == []
+    assert _found("frontend/src/a.ts", "export function f(): { a: string } {\n  return { a: 'x' };\n}\n") == []
+    assert _kinds("frontend/src/a.ts", "export function f(): { a: string } {}\n") == ["placeholder"]
+    assert _kinds("frontend/src/a.ts", "export const f = (): Promise<{}> => {};\n") == ["placeholder"]
+    # Patching a same-named dependency the test doesn't import isolates the unit.
+    dep = (
+        "from unittest.mock import patch\nfrom app.routes.users import list_users\n\n"
+        "@patch('app.services.users')\ndef test_list(m):\n    assert list_users() == []\n"
+    )
+    assert _found("backend/tests/test_users.py", dep) == []
+    # Empty files that are fine empty.
+    for path in ("frontend/app/page.module.css", "frontend/.gitignore", "backend/Dockerfile"):
+        assert _found(path, "") == [], path
+    # An edit is answerable only for the TODOs it added, counted past the per-file cap.
+    before = "".join(f"# TODO: item {i}\n" for i in range(5)) + "x = 1\n"
+    after = "".join(f"# TODO: item {i}\n" for i in range(1, 5)) + "x = 2\n"
+    assert ph.edited("backend/app/x.py", before, after) == []
+    assert [p.line for p in ph.edited("backend/app/x.py", before, after + "# TODO: new one\n")] == [6]
+
+
+def test_a_cut_off_file_is_named_as_cut_off_even_with_a_todo_in_it(monkeypatch, stub_router):
+    from app.agents.base import AgentContext
+    from app.agents.code_phase import _Run, _Written
+    from app.agents.backend_engineer import BackendEngineerAgent
+
+    run = _Run(BackendEngineerAgent(), AgentContext(idea="x"))
+    w = _Written("backend/app/x.py", "def a():\n    # TODO: more\n    return 1\n", "python", "", complete=False)
+    run._judge(w)
+    assert w.problems[0].message.startswith("was cut off")
+
+
+def test_a_preview_change_isnt_refused_for_a_todo_in_another_file(client, monkeypatch, stub_router):
+    """An attempt from before #101 with a TODO in one file: a typed edit and an undo of
+    another file go through; the old TODO isn't this change's problem."""
+    from app.agents.base import AgentContext
+    from app.agents.frontend_engineer import FrontendEngineerAgent
+
+    agent = FrontendEngineerAgent()
+    output = {"files": [
+        {"path": "app/layout.jsx", "code": "export default function L({ children }) {\n  // TODO: add nav\n  return <div>{children}</div>;\n}\n"},
+        {"path": "app/page.jsx", "code": "export default function P() {\n  return <h1>Hi</h1>;\n}\n"},
+    ]}
+    spec = {"output": output, "build_status": "ok", "files": {"app/page.jsx": "export default function P() {\n  return <h1>Hello</h1>;\n}\n"}}
+    result = agent.revise(AgentContext(idea="x", revising=True), spec)
+    assert result.build_status != "failed", result.build_problems

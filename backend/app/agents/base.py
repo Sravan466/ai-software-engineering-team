@@ -247,8 +247,6 @@ class BaseAgent:
     output_model: type[BaseModel] = GenericOutput
     #: Which prior phase outputs to inline as context (by phase key).
     depends_on: tuple[str, ...] = ()
-    #: Whether the compile gate judges an edit's rewritten files for lost code (#101).
-    lost_code_at_gate: bool = True
 
     # ── the declared shape, three ways ──────────────────────────────────────
     @property
@@ -497,7 +495,11 @@ class BaseAgent:
         stack_errors = (
             charter_violations(ctx.charter, self.key, output) if settings.enforce_stack_charter else []
         )
-        build = self._build_check(ctx, output)
+        # Held to the attempt it changes (#101): a TODO an older build left in another
+        # file is not this change's problem, and what a person typed is never judged.
+        ask = spec.get("ask") if isinstance(spec.get("ask"), dict) else {}
+        baseline = {"output": spec.get("output") or {}, "asked": str(ask.get("instruction") or ""), "placeholders": bool(calls)}
+        build = self._build_check(ctx, output, previous=baseline)
         before_ok = spec.get("build_status") != BuildStatus.FAILED.value
         if build is not None and build.status == BuildStatus.FAILED.value and before_ok:
             raise RevisionRefused("That change doesn't compile: " + "; ".join(build.messages()[:2]))
@@ -659,7 +661,7 @@ class BaseAgent:
             errors = errors + build.messages()
         return output, errors
 
-    def _build_check(self, ctx: AgentContext, output: dict) -> Optional[BuildCheck]:
+    def _build_check(self, ctx: AgentContext, output: dict, previous: Optional[dict] = None) -> Optional[BuildCheck]:
         """Compile what this phase wrote, in the build it is joining. None if not code.
 
         Best effort by construction: a checker that crashes must not fail a phase that
@@ -671,11 +673,8 @@ class BaseAgent:
             return None
         # A change request (#79) is held to the files as they were: a rewrite that lost
         # much of one is sent back like a stub (#101).
-        previous = (
-            {"output": ctx.base_output, "asked": ctx.change, "lost_code": self.lost_code_at_gate}
-            if ctx.editing
-            else None
-        )
+        if previous is None and ctx.editing:
+            previous = {"output": ctx.base_output, "asked": ctx.change}
         try:
             return check_phase(ctx.prior_outputs, self.key, output, ctx.charter, previous=previous)
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure

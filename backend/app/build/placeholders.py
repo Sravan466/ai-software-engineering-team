@@ -188,7 +188,9 @@ _NOT_CODE = " instead of code. Return only the file."
 def _whole_file(path: str, content: str) -> Optional[Problem]:
     name = _base(path)
     if not content.strip():
-        if name in _EMPTY_OK:
+        # Only a module is wrong for being empty: a CSS module, a `.gitignore` or a
+        # Dockerfile with nothing in it yet is a fine file.
+        if name in _EMPTY_OK or not name.lower().endswith((".py", *_JS_EXT)):
             return None
         return Problem(path, _EMPTY_FILE, PLACEHOLDER)
     first = next((line.strip() for line in content.splitlines() if line.strip()), "")
@@ -492,12 +494,20 @@ def _py_mocks_subject(path: str, tree: ast.Module) -> list[Problem]:
     subject = _subject(path)
     if not subject or subject in ("tests", "test"):
         return []
+    # The module under test is one this file imports: patching a same-named dependency
+    # (`app.services.users` beside `app.routes.users`) is how a unit is isolated.
+    imported: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            imported |= {a.name for a in n.names}
+        elif isinstance(n, ast.ImportFrom) and n.module:
+            imported |= {n.module, *(f"{n.module}.{a.name}" for a in n.names)}
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call) or _dotted(n.func).split(".")[-1] != "patch" or not n.args:
             continue
         target = n.args[0]
         if isinstance(target, ast.Constant) and isinstance(target.value, str):
-            if target.value.split(".")[-1] == subject:
+            if target.value.split(".")[-1] == subject and target.value in imported:
                 return [
                     Problem(
                         path,
@@ -668,9 +678,28 @@ def _js_body(code: str, start: int) -> Optional[tuple[int, int]]:
     end = _close(code, start, "(", ")")
     if end < 0:
         return None
-    k = end + 1
-    # A return type, then `=>` for an arrow; the body is the next `{` at this level.
-    m = re.compile(r"\s*(?::\s*[^={;]+?)?\s*(=>)?\s*\{").match(code, k)
+    k, n = end + 1, len(code)
+    while k < n and code[k].isspace():
+        k += 1
+    if k < n and code[k] == ":":
+        # A return type, which may hold braces of its own (`Promise<{}>`, `{ a: string }`):
+        # the body is the first `{` outside it, once some of the type has been read.
+        k += 1
+        depth, started, last = 0, False, ":"
+        while k < n:
+            c = code[k]
+            if c == "=" and code.startswith("=>", k) and depth == 0:
+                break
+            if c == "{" and depth == 0 and started and last not in "|&<,:(":
+                break
+            if c in "<([{":
+                depth += 1
+            elif c in ">)]}":
+                depth = max(depth - 1, 0)
+            if not c.isspace():
+                started, last = True, c
+            k += 1
+    m = re.compile(r"\s*(=>)?\s*\{").match(code, k)
     if not m:
         return None
     brace = m.end() - 1
@@ -873,7 +902,9 @@ _REMOVAL = re.compile(
     r"\b(?:remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|drop(?:s|ped|ping)?|strip(?:s|ped|ping)?|get rid of|take out"
     r"|cut(?:s|ting)? (?:out|down|back)|simplif(?:y|ies|ied|ying)|shorten(?:s|ed|ing)?|trim(?:s|med|ming)?"
     r"|clean(?:s|ed|ing)?[- ]?up|refactor(?:s|ed|ing)?|split(?:s|ting)?|extract(?:s|ed|ing)?|mov(?:e|es|ed|ing)"
-    r"|merg(?:e|es|ed|ing))\b",
+    r"|merg(?:e|es|ed|ing)|replac(?:e|es|ed|ing)|rewrit(?:e|es|ing|ten)|redesign(?:s|ed|ing)?|convert(?:s|ed|ing)?"
+    r"|swap(?:s|ped|ping)?|instead of|turn(?:s|ed|ing)? (?:it |this |that )?into|(?:just|only) (?:a|an|the|one)"
+    r"|smaller|shorter|minimal|fewer|less)\b",
     re.IGNORECASE,
 )
 #: Below this, a file is too small for a share of it to mean anything.
@@ -929,6 +960,18 @@ def lost_code(path: str, before: str, after: str, asked: str = "") -> Optional[P
         named += " and more" if len(gone) > 4 else ""
     what = f"{lost_lines} of its {len(old)} lines" + (f", including {named}" if named else "") if lines_bad else named
     return Problem(path, f"dropped {what}. Return the whole file with only the change made.", PLACEHOLDER)
+
+
+def edited(path: str, before: str, after: str, asked: str = "", cap: Optional[int] = _PER_FILE) -> list[Problem]:
+    """What an edit is answerable for in a file it rewrote (#79): the placeholders it
+    added — not a TODO the file already had — and the code it lost, unless the change
+    asked for code to go. One rule for the per-file pass and the gate."""
+    if after == before:
+        return []
+    found = new_in(file_placeholders(path, after, None), file_placeholders(path, before, None))
+    found = found if cap is None else found[:cap]
+    lost = lost_code(path, before, after, asked)
+    return found + ([lost] if lost is not None else [])
 
 
 def is_lost_code(problem: Problem) -> bool:

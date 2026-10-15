@@ -302,10 +302,10 @@ def deploy_problems(problems: Iterable[dict], phase: str) -> list[dict]:
     return list({p["key"]: p for p in found}.values())
 
 
-#: How the fix note names what a problem broke, by the step that found it.
 #: What the compile gate's #101 kinds are called in a fix note.
 _UNFINISHED = {"placeholder": "is unfinished", "weak_test": "tests nothing"}
 
+#: How the fix note names what a problem broke, by the step that found it.
 _BROKE = {
     "install": "does not install",
     "build": "fails the build",
