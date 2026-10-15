@@ -125,3 +125,25 @@ def test_a_cloud_model_keeps_its_providers_default(monkeypatch):
     assert "temperature" not in sent[-1], "an agent's call never sends a cloud model a temperature"
     provider.generate([ChatMessage(role="user", content="hi")], "gpt-4o", GenerationOptions(temperature=0.3))
     assert sent[-1]["temperature"] == 0.3, "a caller's own temperature still does"
+
+
+def test_what_exact_output_is_sampled_at_by_model():
+    from app.router.model_profile import ModelProfile
+    from app.router.runtimes.provider import exact_temperature
+
+    def profile(**kw):
+        return ModelProfile(provider="ollama", model="m", context_limit=8192, context_window=8192, max_output_tokens=2048, **kw)
+
+    assert exact_temperature(profile()) == 0.2
+    # A model the runtime only lists and sends elsewhere to run keeps its host's default.
+    assert exact_temperature(profile(is_local=False)) is None
+    # A thinking model's card, read whatever form the runtime reported it in.
+    assert exact_temperature(profile(thinking=THINKS_TOGGLE, defaults={"temperature": "0.6"})) == 0.6
+    assert exact_temperature(profile(thinking=THINKS_TOGGLE, defaults={"temperature": True})) == settings.local_temperature
+
+
+def test_settings_says_what_agents_send(router_with, tmp_path, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(model_settings, "_PATH", tmp_path / "model_settings.local.json")
+    src = _source("ollama", [ModelEntry(name="qwen2.5:7b", kind="chat")])
+    router_with(src)
+    assert src.generation_view("qwen2.5:7b")["agent_sends"] == {"temperature": 0.2}

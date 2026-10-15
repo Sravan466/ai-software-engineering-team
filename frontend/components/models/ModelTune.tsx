@@ -245,6 +245,13 @@ export default function ModelTune({
     }
     if (f.key === "kv_cache_type") return `Assumed ${data.fallbacks.kv_cache_type} unless set.`;
     if (f.group === "machine") return "The runtime decides unless set.";
+    // A build's calls are an agent's JSON and code, sampled at their own value when the
+    // field is blank (#101): that's what this hint answers first.
+    const agents = f.key === "temperature" ? data.agent_sends?.temperature : undefined;
+    if (agents !== undefined && agents !== null) {
+      const server = f.key in data.defaults ? ` Server default ${shown(data.defaults[f.key])}.` : "";
+      return `Without one, agents send ${shown(agents)}.${server}`;
+    }
     if (f.key in data.defaults) return `Server default ${shown(data.defaults[f.key])}.`;
     const sent = data.sent_when_unset[f.key];
     if (sent !== undefined && sent !== null) return `Not reported. ${shown(sent)} is sent.`;

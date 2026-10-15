@@ -1880,6 +1880,8 @@ export type ModelGeneration = {
   /** What is sent for a field left unset that the server has no default for; null
    *  means the runtime's own default applies. */
   sent_when_unset: Record<string, number | null>;
+  /** What an agent's JSON and code calls are sampled at when the field is blank (#101). */
+  agent_sends?: { temperature?: number | null };
   /** This backend's configured defaults. */
   fallbacks: {
     temperature: number;
