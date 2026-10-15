@@ -62,6 +62,11 @@ class GenerationOptions(BaseModel):
     """Knobs passed from agents to the router. Kept minimal and provider-neutral."""
 
     temperature: Optional[float] = None
+    #: An agent's JSON or code call (#101): output that has to match a shape or build,
+    #: not prose. A local runtime samples it low (`AGENT_TEMPERATURE`), or at a thinking
+    #: model's own card values; a cloud provider keeps its own tuned default. An explicit
+    #: `temperature` from the caller wins over this either way.
+    exact: bool = False
     #: Ceiling on tokens this one call may generate. `None` — the normal case — means
     #: "as much as the resolved model window allows", because a literal here is a
     #: guess about a model the caller has never seen. Providers resolve it against

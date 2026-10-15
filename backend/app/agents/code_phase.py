@@ -908,7 +908,7 @@ class _Run:
                 mode=ctx.routing_mode,
                 preferred_model=ctx.preferred_model,
                 # Code is exact output too (#101).
-                options=GenerationOptions(temperature=settings.agent_temperature),
+                options=GenerationOptions(exact=True),
                 complexity=agent._complexity(ctx),
                 role=agent.key,
                 pin=ctx.pin_model,
