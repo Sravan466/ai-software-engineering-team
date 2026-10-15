@@ -253,10 +253,14 @@ function BuildPage({ id }: { id: string }) {
   // changes the tab.
   const lastStatus = useRef<string | null>(null);
   const currentStatus = project?.status ?? null;
+  // A build that stops while you watch is announced; one that had already stopped
+  // when you opened it is just shown.
+  const [stoppedWhileWatching, setStoppedWhileWatching] = useState(false);
   useEffect(() => {
     if (!currentStatus) return;
     const was = lastStatus.current;
     lastStatus.current = currentStatus;
+    if ((was === "running" || was === "pending") && currentStatus !== was) setStoppedWhileWatching(true);
     if (currentStatus !== "completed" || was === "completed") return;
     if (was !== null || !deepLinked.current) setTab("preview");
   }, [currentStatus]);
@@ -485,6 +489,7 @@ function BuildPage({ id }: { id: string }) {
             id={id}
             jump={jump}
             onJumpDone={clearJump}
+            stoppedWhileWatching={stoppedWhileWatching}
             onDeliver={(intent) => {
               setShipIntent(intent ?? null);
               setTab("summary");
@@ -642,11 +647,14 @@ function RunInterrupted({
   busy,
   act,
   id,
+  announce,
 }: {
   project: Project;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<boolean>;
   id: string;
+  /** The build stopped while this page was open: say so to a screen reader. */
+  announce: boolean;
 }) {
   const state = effectiveStatus(project);
   const copy: Record<string, { title: string; text: string; action: string }> = {
@@ -686,7 +694,11 @@ function RunInterrupted({
   if (help) {
     copy.failed = {
       title: help.title,
-      text: `${help.body} Or pick another model in Settings and resume. Approved work is kept.`,
+      // A window too small (#101) already says which model to change and how.
+      text:
+        help.kind === "window"
+          ? `${help.body} Approved work is kept.`
+          : `${help.body} Or pick another model in Settings and resume. Approved work is kept.`,
       action: "Resume from checkpoint",
     };
   }
@@ -696,7 +708,8 @@ function RunInterrupted({
   return (
     <div
       className={"notice " + (state === "cancelled" || state === "paused" ? "notice-warn" : "notice-bad")}
-      role={state === "paused" ? "status" : undefined}
+      // A failure is announced as it happens, never on every visit; a pause, politely.
+      role={state === "paused" ? "status" : state === "failed" && announce ? "alert" : undefined}
     >
       {Icon.alert}
       <div className="notice-body">
@@ -761,6 +774,7 @@ function BuildTab({
   id,
   jump,
   onJumpDone,
+  stoppedWhileWatching,
   onDeliver,
 }: {
   project: Project;
@@ -771,6 +785,8 @@ function BuildTab({
   /** A phase the relay is asking us to go to, if any. */
   jump: Jump | null;
   onJumpDone: () => void;
+  /** The build stopped while this page was open. */
+  stoppedWhileWatching: boolean;
   onDeliver: (intent?: ShipIntent) => void;
 }) {
   const pct = localPct(project);
@@ -806,7 +822,9 @@ function BuildTab({
         !(project.change.status === "awaiting_approval" && WHOLE_BUILD_GATES.has(project.gate_kind ?? "")) && (
           <ChangeStrip project={project} id={id} busy={busy} act={act} />
         )}
-      {interrupted && <RunInterrupted project={project} busy={busy} act={act} id={id} />}
+      {interrupted && (
+        <RunInterrupted project={project} busy={busy} act={act} id={id} announce={stoppedWhileWatching} />
+      )}
 
       {/* The crew fixing its own serious problems: progress, not a question. */}
       {state === "running" && <FixingPanel project={project} />}

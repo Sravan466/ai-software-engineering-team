@@ -132,6 +132,11 @@ class RuntimeAdapter(abc.ABC):
     def chat(self, request: ChatRequest) -> ChatResult:
         """One completion. Raises `ProviderError` on failure."""
 
+    def count_tokens(self, model: str, messages: list[dict]) -> Optional[int]:
+        """The exact token count of a chat prompt, template included, when this runtime
+        can say (#101). None when it can't — most can't, and nothing is guessed here."""
+        return None
+
     def embed(self, model: str, inputs: list[str], *, request_id: Optional[str] = None) -> list[list[float]]:
         """One vector per input. Raises `ProviderError` on failure.
 

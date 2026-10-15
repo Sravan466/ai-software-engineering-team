@@ -36,8 +36,9 @@ from app.orchestration.charter import Charter
 from app.orchestration.charter import violations as charter_violations
 from app.orchestration import activity
 from app.orchestration.claim import Superseded
-from app.router.model_profile import ModelProfile
-from app.router.base import RequestCancelled
+from app.router.model_profile import ModelProfile, reply_floor, reply_gives_way
+from app.router.base import PromptTooLong, RequestCancelled, StillTooLong, WindowTooSmall
+from app.router.fitting import send_fitting
 from app.router.router import router
 from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text, subset_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
@@ -109,6 +110,8 @@ _SKILLS_FRAME = "# How this team does this work — follow these procedures\n{bo
 #: handed "follow these procedures" with the knowledge base sitting underneath it as
 #: the only thing that looks like an answer.
 _SKILLS_FRAME_COST = len(_SKILLS_FRAME.format(body="")) + 1  # + the "\n" join
+#: The least reference material or memory worth a heading of its own (#101).
+_MIN_CONTEXT_CHARS = 200
 
 
 @dataclass
@@ -218,6 +221,9 @@ class Prompt:
     skills_used: list[str] = field(default_factory=list)
     #: One record per dependency: what of it reached the model.
     deps: list[dict] = field(default_factory=list)
+    #: The reply ceiling this prompt was built against, when the instructions needed
+    #: some of the reply's room (#101): the call is sent with it. None: the model's own.
+    max_tokens: Optional[int] = None
 
 
 @dataclass
@@ -266,12 +272,11 @@ class BaseAgent:
 
             ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
         )
-        ask = self._build_messages(ctx, profile)
         # Exact output (#101): sampled low on a local runtime; a model's own setting, a
         # thinking model's card, or a cloud provider's tuned default still decides.
         options = GenerationOptions(json_mode=True, json_schema=self._schema_for(ctx), exact=True)
 
-        resp = self._complete(ask.messages, ctx, options)
+        resp, ask, profile = self._send(ctx, options, profile, lambda p: self._build_messages(ctx, p))
         responses = [resp]
         # A reply cut off at the output limit is kept for its finished fields, and
         # the next round asks only for what is missing — not for the whole object
@@ -308,14 +313,21 @@ class BaseAgent:
             # loses the system prompt that carries it.
             if partial:
                 missing = self._missing(partial)
-                retry = self._continue_messages(ctx, profile, partial, missing)
+                build = lambda p, missing=missing: self._continue_messages(ctx, p, partial, missing)  # noqa: E731
                 round_options = options.model_copy(
                     update={"json_schema": subset_schema(self.output_model, missing)}
                 )
             else:
-                retry = self._repair_messages(ctx, profile, echo, errors)
+                build = lambda p, echo=echo, errors=errors: self._repair_messages(ctx, p, echo, errors)  # noqa: E731
                 round_options = options
-            resp = self._complete(retry.messages, ctx, round_options)
+            try:
+                resp, retry, profile = self._send(ctx, round_options, profile, build)
+            except (PromptTooLong, StillTooLong, WindowTooSmall) as e:
+                # A repair round that can't be made to fit this window (#101): the best
+                # answer so far stands, rather than the phase failing for want of a repair.
+                log.warning("%s: a repair round doesn't fit this model's window (%s); keeping the best answer.", self.title, e)
+                rounds -= 1  # never sent: not a round, and the answer isn't "repaired"
+                break
             responses.append(resp)
             merged = bool(partial)
             raw, partial, cut = self._read_reply(resp, partial)
@@ -764,7 +776,7 @@ class BaseAgent:
         return run.as_dict()
 
     def _complete(
-        self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions
+        self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions, pin: Optional[str] = None
     ) -> LLMResponse:
         # Named for the computer answering it: "Backend Engineer for build 'Todo app'".
         with inflight.agent(self.title):
@@ -775,8 +787,27 @@ class BaseAgent:
                 options=options,
                 complexity=self._complexity(ctx),
                 role=self.key,
-                pin=ctx.pin_model,
+                pin=pin or ctx.pin_model,
             )
+
+    def _send(
+        self, ctx: AgentContext, options: GenerationOptions, profile: ModelProfile, build
+    ) -> tuple[LLMResponse, "Prompt", ModelProfile]:
+        """Send what `build(profile)` makes; if it doesn't fit, shrink it and send once more.
+
+        A runtime told not to cut a prompt (#101) refuses it with its real size, and a
+        prompt that met a fallback model is refused before sending: either way the ask
+        is rebuilt — every section budget scaled by what fits over what was sent — for
+        the model that will answer it, and held to that model. Returns the reply, the
+        prompt that got it, and the profile the next round should be sized with.
+        """
+        def send(ask: "Prompt", pin: Optional[str]) -> LLMResponse:
+            # Held to the reply ceiling the prompt was built against, when its
+            # instructions needed some of the reply's room.
+            sent = options.model_copy(update={"max_tokens": ask.max_tokens}) if ask.max_tokens else options
+            return self._complete(ask.messages, ctx, sent, pin=pin) if pin else self._complete(ask.messages, ctx, sent)
+
+        return send_fitting(build, profile, send, who=self.title)
 
     # ── prompt construction ─────────────────────────────────────────────────
     def _registry(self, ctx: AgentContext) -> handoff.Registry:
@@ -840,27 +871,51 @@ class BaseAgent:
         ctx: AgentContext,
         profile: Optional[ModelProfile] = None,
         reserve: int = 0,
+        keys: bool = True,
+        bodies: Optional[_Deps] = None,
     ) -> Prompt:
         if profile is None:
             profile = router.profile_for(
                 ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
             )
-        bodies = self._prepare_deps(ctx, profile)
-        budget = self._section_budgets(ctx, profile, reserve, bodies)
+        bodies = bodies or self._prepare_deps(ctx, profile)
+        held: Optional[int] = None
+        need = self._overhead(ctx, bodies) + max(reserve, 0)
+        if need > profile.prompt_char_budget:
+            # The instructions don't fit beside the full reply: the reply gives way (#101),
+            # far enough for the person's own words to come whole too, else down to its
+            # floor. When even the floor leaves the instructions no room, the window is too
+            # small for this phase.
+            if reply_gives_way(profile, need) is None:
+                raise WindowTooSmall(window_too_small(self.title, profile, need - max(reserve, 0)))
+            smaller = reply_gives_way(profile, need + sum(len(w) for w in _written(ctx).values())) or reply_floor(profile)
+            log.info(
+                "%s: its instructions don't fit %s beside a full reply, so the reply is capped at %s tokens.",
+                self.title, profile.model, f"{smaller.max_output_tokens:,}",
+            )
+            profile, held = smaller, smaller.max_output_tokens
+        budget = self._section_budgets(ctx, profile, reserve, bodies, whole_words=held is not None)
         used: list[str] = []
         seen: list[dict] = []
         prompt = Prompt(
             messages=[
                 ChatMessage(role="system", content=self.system_prompt(ctx.charter, self._registry(ctx))),
-                ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies, used, seen)),
+                ChatMessage(role="user", content=self._user_turn(ctx, budget, bodies, used, seen, keys=keys)),
             ],
             skills_used=used,
             deps=seen,
+            max_tokens=held,
         )
         # What it is being handed, readable while it works (#91): the crew floor shows
         # the hand-off as it happens, not only once the row is saved.
         activity.given(self.key, seen)
         return prompt
+
+    def _overhead(self, ctx: AgentContext, bodies: _Deps) -> int:
+        """The instructions' cost in characters: the system prompt and the user turn with
+        every trimmable section at zero — headings, digests and the task included."""
+        empty = dict.fromkeys(list(_PERSON_SHARE) + list(_CONTEXT_SHARE), 0)
+        return len(self.system_prompt(ctx.charter, self._registry(ctx))) + len(self._user_turn(ctx, empty, bodies))
 
     def _prepare_deps(self, ctx: AgentContext, profile: Optional[ModelProfile]) -> _Deps:
         """Every dependency's digest, fitted to its share of the window, and its want.
@@ -886,6 +941,7 @@ class BaseAgent:
         bodies: Optional[_Deps] = None,
         skills_used: Optional[list[str]] = None,
         deps_seen: Optional[list[dict]] = None,
+        keys: bool = True,
     ) -> str:
         """Everything the agent is given, with every section held to its budget.
 
@@ -934,10 +990,14 @@ class BaseAgent:
             if skills_used is not None:
                 skills_used[:] = used
 
-        if ctx.rag_context:
-            parts.append(_RAG_FRAME.format(body=_clip(ctx.rag_context, budget["rag"])))
-        if ctx.memory_context:
-            parts.append(_MEMORY_FRAME.format(body=_clip(ctx.memory_context, budget["memory"])))
+        # Reference material and lessons are context, not instructions: each frame is
+        # paid for out of its own share, and a share too small for anything under its
+        # heading prints nothing at all (#101) — a heading over a "cut here" marker is
+        # room the instructions needed on a small window.
+        for text, frame, name in ((ctx.rag_context, _RAG_FRAME, "rag"), (ctx.memory_context, _MEMORY_FRAME, "memory")):
+            room = budget.get(name, 0) - len(frame.format(body="")) - len(_TRUNCATED) - 2
+            if text and room >= min(len(text), _MIN_CONTEXT_CHARS):
+                parts.append(frame.format(body=_clip(text, room)))
         if ctx.scan_context:
             parts.append(f"{_clip(ctx.scan_context, budget['scan'])}\n")
         if ctx.extra_context:
@@ -960,7 +1020,17 @@ class BaseAgent:
             )
 
         parts.append(self._task_for(ctx))
+        if keys and not ctx.editing:
+            # The required keys once more, last (#101): the shape is written at the top
+            # of the system prompt, the first thing a long prompt loses a model's
+            # attention to ("Lost in the Middle").
+            keys = self._required_keys()
+            if keys:
+                parts.append(f"Answer with one JSON object that has at least these keys: {', '.join(keys)}.")
         return "\n".join(parts)
+
+    def _required_keys(self) -> list[str]:
+        return [name for name, info in self.output_model.model_fields.items() if info.is_required()]
 
     def _section_budgets(
         self,
@@ -968,6 +1038,7 @@ class BaseAgent:
         profile: Optional[ModelProfile],
         reserve: int = 0,
         bodies: Optional[_Deps] = None,
+        whole_words: bool = False,
     ) -> dict[str, int]:
         """How many characters each section may spend.
 
@@ -990,44 +1061,36 @@ class BaseAgent:
                 ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
             )
 
-        empty = dict.fromkeys(list(_PERSON_SHARE) + list(_CONTEXT_SHARE), 0)
         # The charter is part of the overhead, not part of the context: it is printed
         # in full or the phase is not really bound by it, so it is counted here at its
         # real cost rather than being sized like a section that can be trimmed.
         if bodies is None:
             bodies = self._prepare_deps(ctx, profile)
-        overhead = len(self.system_prompt(ctx.charter, self._registry(ctx))) + len(
-            self._user_turn(ctx, empty, bodies)
-        )
+        overhead = self._overhead(ctx, bodies)
         if overhead > profile.prompt_char_budget:
             # Nothing can be trimmed to fix this: the overhead *is* the instructions
-            # and the shape they carry. Said out loud, because the alternative is the
-            # original bug — a prompt silently cut from the head, and an agent
-            # generating against a shape it was never shown.
-            log.error(
-                "%s cannot fit its own instructions in %s's %s-token window "
-                "(needs ~%s characters, has %s). Raise the window or use a model with "
-                "a larger one; this phase will be truncated.",
-                self.title,
-                profile.model,
-                f"{profile.context_window:,}",
-                f"{overhead:,}",
-                f"{profile.prompt_char_budget:,}",
-            )
+            # and the shape they carry. A prompt sent anyway is cut from the head by the
+            # runtime, or refused — and an agent generating against a shape it was never
+            # shown is the original bug. So the phase stops, and says why (#101).
+            raise WindowTooSmall(window_too_small(self.title, profile, overhead))
         free = max(profile.prompt_char_budget - overhead - max(reserve, 0), 0)
 
         # What a person wrote is served first: what it needs, never more than its
         # share *of what is actually free*. Taking the share off the whole budget
         # instead double-counts the overhead, and on a small window that alone puts
         # the prompt back over the top.
-        written = {
-            "idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context, "scan": ctx.scan_context,
-            "change": ctx.change if ctx.editing else "",
-        }
-        budget = {
-            name: min(len(written[name]), int(free * share))
-            for name, share in _PERSON_SHARE.items()
-        }
+        written = _written(ctx)
+        if whole_words:
+            # The reply gave way for these (#101): served whole, the fix the person asked
+            # for first, as far as the room goes.
+            budget = {}
+            for name in ("feedback", "change", "idea", "extra", "scan"):
+                budget[name] = min(len(written[name]), free - sum(budget.values()))
+        else:
+            budget = {
+                name: min(len(written[name]), int(free * share))
+                for name, share in _PERSON_SHARE.items()
+            }
         free = max(free - sum(budget.values()), 0)
 
         present = {
@@ -1112,9 +1175,7 @@ class BaseAgent:
         and the head is the system prompt naming the shape being repaired.
         """
         problems = "\n".join(f"- {e}" for e in errors[:12])
-        instruction = (
-            "That response is not the deliverable that was asked for. Fix exactly "
-            f"these problems:\n{problems}\n\n"
+        tail = (
             "Return the COMPLETE JSON object again — every key from the shape, "
             "not a patch and not an apology. Keep everything that was already correct."
             + (
@@ -1123,16 +1184,27 @@ class BaseAgent:
                 else ""
             )
         )
-        echo_budget = max(profile.prompt_char_budget // 4, 1000)
-        echo = _clip(attempt, echo_budget)
-        ask = self._build_messages(ctx, profile, reserve=len(echo) + len(instruction))
+        shown = f"That response is not the deliverable that was asked for. Fix exactly these problems:\n{problems}\n\n{tail}"
+        # The echo gets what the window leaves beside the instructions and the person's
+        # own words (#101), never a fixed share the reply or the brief would give up.
+        bodies = self._prepare_deps(ctx, profile)
+        words = sum(len(w) for w in _written(ctx).values())
+        free = profile.prompt_char_budget - self._overhead(ctx, bodies) - words - len(shown)
+        echo_budget = min(max(profile.prompt_char_budget // 4, 1000), max(free - len(_TRUNCATED) - 2, 0))
+        echo = _clip(attempt, echo_budget) if echo_budget >= 200 else ""
+        # Without the echo, "that response" would point at nothing the model can see.
+        instruction = shown if echo else (
+            f"Your last answer was not the deliverable that was asked for. It had these problems:\n{problems}\n\n{tail}"
+        )
+        ask = self._build_messages(ctx, profile, reserve=len(echo) + len(instruction), bodies=bodies)
         return Prompt(
             messages=[
                 *ask.messages,
-                ChatMessage(role="assistant", content=echo),
+                *([ChatMessage(role="assistant", content=echo)] if echo else []),
                 ChatMessage(role="user", content=instruction),
             ],
             skills_used=ask.skills_used,
+            max_tokens=ask.max_tokens,
         )
 
     def _continue_messages(
@@ -1154,11 +1226,14 @@ class BaseAgent:
             f"Return a JSON object with ONLY the remaining keys: {', '.join(missing)}. "
             "Keep it shorter than before — fewer, smaller items — so it fits."
         )
-        ask = self._build_messages(ctx, profile, reserve=len(instruction))
+        # No key line here: this round asks for the missing keys only, and the line
+        # would tell it to send them all.
+        ask = self._build_messages(ctx, profile, reserve=len(instruction), keys=False)
         return Prompt(
             messages=[*ask.messages, ChatMessage(role="user", content=instruction)],
             skills_used=ask.skills_used,
             deps=ask.deps,
+            max_tokens=ask.max_tokens,
         )
 
     # ── output handling ───────────────────────────────────────────────────────
@@ -1255,6 +1330,30 @@ def _finished_fields(text: str) -> dict:
 #: cost exactly what the finished prompt costs, and "55,344" is six characters longer
 #: than "0" — which is the whole overshoot, five sections over.
 _TRUNCATED = "… [cut here to fit this model's context window]\n"
+
+
+def _written(ctx: AgentContext) -> dict[str, str]:
+    """The person's own words in a prompt, by section (`_PERSON_SHARE`)."""
+    return {
+        "idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context or "",
+        "scan": ctx.scan_context or "", "change": ctx.change if ctx.editing else "",
+    }
+
+
+def window_too_small(title: str, profile: ModelProfile, chars: int) -> str:
+    """What a phase whose instructions don't fit even beside the smallest reply says
+    (#101), in tokens a person can compare with the window Settings shows."""
+    from app.core import keyerrors
+
+    ratio = profile.ratio
+    least = reply_floor(profile)
+    return keyerrors.window_advice(
+        f"{profile.model}'s {profile.context_window:,}-token window is too small for the {title}",
+        f"Its instructions need about {int(chars / ratio):,} tokens, and at most {least.prompt_token_budget:,} "
+        f"fit, even with the reply cut to {least.max_output_tokens:,} tokens. Pick a model with a larger window "
+        "for this phase, or raise this model's window (the context ceiling in Settings, or the runtime's own "
+        "limit).",
+    ).sentence()
 
 
 def _pack_skills(skills: tuple[Selected, ...], limit: int) -> tuple[str, list[str]]:

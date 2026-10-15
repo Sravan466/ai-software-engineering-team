@@ -36,7 +36,7 @@ from app.connector.hub import ConnectorError, hub
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.router import inflight
-from app.router.base import ComputerDisconnected, ProviderError, RequestCancelled
+from app.router.base import ComputerDisconnected, ProviderError, RequestCancelled, too_long
 from app.router.runtimes import table
 from app.router.runtimes.base import RuntimeAdapter
 from app.router.runtimes.provider import Source, SourceProvider, SourceState
@@ -223,6 +223,12 @@ class ConnectorAdapter(RuntimeAdapter):
             return ProviderError(f"{self.device_name or 'Your computer'} refused: {e}", retryable=False)
         if e.code == P.ERR_REFUSED:
             return ProviderError(f"{self.device_name or 'Your computer'} refused: {e}", retryable=False)
+        if e.code == P.ERR_RUNTIME:
+            # The computer's runtime refused a prompt too long for its window (#101):
+            # this side shrinks and resends it, as for a runtime here.
+            refused = too_long(str(e))
+            if refused is not None:
+                return refused
         if e.code in (P.ERR_RUNTIME, P.ERR_UNREACHABLE):
             return ProviderError(f"On {self.device_name or 'your computer'}: {e}")
         return ProviderError(str(e), retryable=False)

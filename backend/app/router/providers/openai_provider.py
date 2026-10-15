@@ -32,6 +32,17 @@ class OpenAIProvider(CloudKey, LLMProvider):
             self._client = OpenAI(api_key=self.secret(), max_retries=0)
         return self._client
 
+    def count_tokens(self, messages: list[ChatMessage], model: str) -> Optional[int]:
+        """The prompt in `model`'s own encoding (#101), when `tiktoken` is installed and
+        knows the model — OpenAI's per-message framing counted as its cookbook does."""
+        try:
+            import tiktoken
+
+            encoding = tiktoken.encoding_for_model(model)
+        except Exception:  # noqa: BLE001 - not installed, or a model it doesn't know
+            return None
+        return sum(len(encoding.encode(m.content)) + 3 for m in messages) + 3
+
     def generate(
         self,
         messages: list[ChatMessage],

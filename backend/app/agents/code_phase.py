@@ -32,13 +32,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from pydantic import BaseModel
 
 from app.agents import handoff
 from app.agents.base import (
     RevisionRefused,
+    window_too_small,
     _MEMORY_FRAME,
     _RAG_FRAME,
     _SKILLS_FRAME,
@@ -64,7 +65,9 @@ from app.core.reading import CodeBlock, code_blocks, json_object
 from app.orchestration import activity, claim
 from app.orchestration.charter import violations as charter_violations
 from app.router import inflight
-from app.router.model_profile import ModelProfile, files_per_call
+from app.router.base import WindowTooSmall
+from app.router.fitting import send_fitting
+from app.router.model_profile import ModelProfile, files_per_call, reply_floor, reply_gives_way
 from app.router.router import router
 from app.schemas.agent_outputs import EditPlan, response_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
@@ -313,6 +316,9 @@ class _Run:
         #: What the change asks, in the person's words: a request to remove code may
         #: shrink a file as much as it likes.
         self.asked = ""
+        #: The reply ceiling the last prompt was built against when its instructions
+        #: needed some of the reply's room (#101); None: the model's own.
+        self.reply_cap: Optional[int] = None
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -424,7 +430,7 @@ class _Run:
         try:
             activity.plan([path], 1, note=request)
             claim.between_calls()
-            resp = self._call(self._messages([planned], editing=asked), [planned], "changing")
+            resp = self._call(lambda: self._messages([planned], editing=asked), [planned], "changing")
             self.truncated += 1 if _cut(resp) else 0
             landed, _partial = self._take(resp, [planned])
             if path not in landed:
@@ -635,7 +641,7 @@ class _Run:
         """The average file's tokens: the configured guess, refined by every file landed."""
         if not self.lengths:
             return None
-        chars = max(settings.approx_chars_per_token, 1.0)
+        chars = self.profile.ratio if getattr(self, "profile", None) is not None else max(settings.approx_chars_per_token, 1.0)
         prior = settings.code_avg_file_tokens
         return (prior + sum(n / chars for n in self.lengths)) / (1 + len(self.lengths))
 
@@ -645,7 +651,7 @@ class _Run:
         for p in batch:
             activity.file(p.path, "writing")
         self.largest = max(self.largest, len(batch))
-        resp = self._call(self._messages(batch), batch, "writing")
+        resp = self._call(lambda: self._messages(batch), batch, "writing")
         cut = _cut(resp)
         self.truncated += 1 if cut else 0
         landed, partial = self._take(resp, batch)
@@ -679,7 +685,7 @@ class _Run:
     def _split(self, planned: _Planned, partial: Optional[CodeBlock]) -> list[str]:
         """One file was too long for one reply: ask once for it as two smaller modules."""
         claim.between_calls()
-        resp = self._call(self._messages([planned], split=True), [planned], "writing")
+        resp = self._call(lambda: self._messages([planned], split=True), [planned], "writing")
         cut = _cut(resp)
         self.truncated += 1 if cut else 0
         landed, still = self._take(resp, [planned], split_of=planned)
@@ -728,7 +734,7 @@ class _Run:
         for w in failing:
             activity.file(w.path, "fixing")
         planned = [self._plan_entry(w.path) for w in failing]
-        resp = self._call(self._messages(planned, fixing=failing), planned, "fixing")
+        resp = self._call(lambda: self._messages(planned, fixing=failing), planned, "fixing")
         self.truncated += 1 if _cut(resp) else 0
         blocks = {path: block for path, block in self._match(resp, planned) if block.complete}
         still: list[_Written] = []
@@ -889,7 +895,10 @@ class _Run:
         activity.file(planned.path, "missing")
 
     # ── the call ─────────────────────────────────────────────────────────────
-    def _call(self, messages: list[ChatMessage], batch: list[_Planned], doing: str) -> LLMResponse:
+    def _call(self, build: Callable[[], list[ChatMessage]], batch: list[_Planned], doing: str) -> LLMResponse:
+        """One write call. `build` makes its prompt from `self.profile`; a prompt the
+        model refuses as too long (#101) is rebuilt to fit and sent once more, held to
+        the model it was rebuilt for, and the phase's later calls are sized the same."""
         agent, ctx = self.agent, self.ctx
         first = batch[0].path
         if self.change_mode and self.edits:
@@ -902,17 +911,26 @@ class _Run:
         more = f" and {len(batch) - 1} more" if len(batch) > 1 else ""
         label = f"{agent.title} — {doing} {first}{more} ({min(number, total)} of {total})"
         activity.stage(doing, detail=first, total=total)
-        with inflight.agent(label):
-            resp = router.complete(
-                messages,
-                mode=ctx.routing_mode,
-                preferred_model=ctx.preferred_model,
-                # Code is exact output too (#101).
-                options=GenerationOptions(exact=True),
-                complexity=agent._complexity(ctx),
-                role=agent.key,
-                pin=ctx.pin_model,
-            )
+
+        def built(profile: ModelProfile) -> list[ChatMessage]:
+            self.profile = profile
+            return build()
+
+        def send(messages: list[ChatMessage], pin: Optional[str]) -> LLMResponse:
+            with inflight.agent(label):
+                return router.complete(
+                    messages,
+                    mode=ctx.routing_mode,
+                    preferred_model=ctx.preferred_model,
+                    # Code is exact output too (#101), held to the reply ceiling the prompt
+                    # was built against when its instructions needed some of the room.
+                    options=GenerationOptions(exact=True, max_tokens=self.reply_cap),
+                    complexity=agent._complexity(ctx),
+                    role=agent.key,
+                    pin=pin or ctx.pin_model,
+                )
+
+        resp, _, self.profile = send_fitting(built, self.profile, send, who=agent.title)
         self.calls.append(resp)
         return resp
 
@@ -935,6 +953,21 @@ class _Run:
         """
         ctx, budget = self.ctx, self.profile.prompt_char_budget
         sections: dict[str, str] = {}
+        ask = self._write_now(batch, split, fixing, editing)
+        self.reply_cap = None
+        if len(self.system) + len(ask) + 1 > budget:
+            # The standing instructions and the list of files to write are the call. The
+            # reply gives way to its floor before the window is called too small (#101),
+            # so the files' real exports and any problems to fix still have room; sent
+            # anyway, a runtime would cut the instructions from the head.
+            if reply_gives_way(self.profile, len(self.system) + len(ask) + 1) is None:
+                raise WindowTooSmall(window_too_small(self.agent.title, self.profile, len(self.system) + len(ask)))
+            floor = reply_floor(self.profile)
+            budget, self.reply_cap = floor.prompt_char_budget, floor.max_output_tokens
+            log.info(
+                "%s: the call for %s doesn't fit %s beside a full reply, so the reply is capped at %s tokens.",
+                self.agent.title, batch[0].path, self.profile.model, f"{floor.max_output_tokens:,}",
+            )
         left = budget - len(self.system)
 
         def put(name: str, text: str, force: bool = False) -> bool:
@@ -946,8 +979,7 @@ class _Run:
             left -= cost
             return True
 
-        if not put("write", self._write_now(batch, split, fixing, editing), force=True):
-            log.error("%s: the file list alone does not fit this model's window.", self.agent.title)
+        put("write", ask, force=True)
         for w in fixing or []:
             room = max(int(left * 0.4) // max(len(fixing), 1) - 200, 0)
             if w.path in self.existing and any(placeholders.is_lost_code(p) for p in w.problems):
@@ -1380,7 +1412,7 @@ class _Run:
                 activity.file(w.path, "fixing")
             self.repairs += 1
             planned = [self._plan_entry(w.path) for w in group]
-            resp = self._call(self._messages(planned, fixing=group), planned, "fixing")
+            resp = self._call(lambda group=group, planned=planned: self._messages(planned, fixing=group), planned, "fixing")
             self.truncated += 1 if _cut(resp) else 0
             for path, block in self._match(resp, planned):
                 if block.complete and path in named:

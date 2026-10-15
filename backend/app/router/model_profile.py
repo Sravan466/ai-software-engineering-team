@@ -23,10 +23,11 @@ want the memory back.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Optional
 
 from app.core.config import settings
@@ -108,6 +109,9 @@ class ModelProfile:
     described: bool = False
     #: Extra notes worth showing a person (e.g. "this model is small").
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    #: Characters per token as this model's own counts have shown (#101), less a margin.
+    #: None until a call has been seen: the configured estimate stands in.
+    chars_per_token: Optional[float] = None
 
     # ── budgets derived from the window ──────────────────────────────────────
     @property
@@ -134,9 +138,15 @@ class ModelProfile:
         return min(budget, ceiling) if ceiling and ceiling > 0 else budget
 
     @property
+    def ratio(self) -> float:
+        """Characters per token: what this model's own counts have shown, once any have
+        (#101), else the configured estimate. The one place the two are chosen between."""
+        return max(self.chars_per_token or settings.approx_chars_per_token, 1.0)
+
+    @property
     def prompt_char_budget(self) -> int:
         """The same budget in characters, which is what truncation actually cuts."""
-        return int(self.prompt_token_budget * max(settings.approx_chars_per_token, 1.0))
+        return int(self.prompt_token_budget * self.ratio)
 
     @property
     def files_per_call(self) -> int:
@@ -197,6 +207,7 @@ class ModelProfile:
             "kv_cache_type": self.kv_cache_type,
             "defaults": dict(self.defaults),
             "warnings": list(self.warnings),
+            "chars_per_token": self.chars_per_token,
         }
 
 
@@ -247,6 +258,65 @@ def files_per_call(
         return 1
     n = max(profile.max_output_tokens // _avg(avg_file_tokens), 1)
     return min(n, cap) if cap else n
+
+
+def _same_model(a: "ModelProfile", b: "ModelProfile") -> bool:
+    return (a.provider, a.model, a.context_window) == (b.provider, b.model, b.context_window)
+
+
+def fitted(error, profile: "ModelProfile") -> "ModelProfile":
+    """The profile to rebuild a prompt with after `error` (a `PromptTooLong`) (#101).
+
+    The model it was for — a fallback's, when the router moved on — with the window the
+    runtime really ran, and, when the runtime counted, the characters-per-token that
+    count shows, less 5%: the section budgets are scaled by budget / real count, which
+    is the same thing said per character.
+    """
+    target = getattr(error, "profile", None) or profile
+    window = getattr(error, "context", None)
+    if window and window < target.context_window:
+        target = replace(target, context_window=window, max_output_tokens=min(target.max_output_tokens, max(window // 2, 1)))
+    tokens, chars = getattr(error, "prompt_tokens", None), getattr(error, "chars", 0)
+    estimate, room = getattr(error, "estimate", None), getattr(error, "room", None)
+    if tokens and chars:
+        # Counted: the real characters-per-token, less 5%.
+        target = replace(target, chars_per_token=min(chars / tokens * 0.95, target.ratio))
+    elif estimate and room and estimate > room and _same_model(target, profile):
+        # Estimated over the room by the model the prompt was built for: it overshot its
+        # own budget (sections it can't leave out), and rebuilt at that budget it would
+        # come back the same. So every budget is scaled by room over estimate. A prompt
+        # sized for a larger model (a fallback's refusal) shrinks by being rebuilt at the
+        # fallback's own budget, and is not shrunk twice.
+        target = replace(target, chars_per_token=max(target.ratio * room / estimate * 0.95, 1.0))
+    return target
+
+
+#: The least a reply may be held to so a call's instructions fit beside it (#101).
+MIN_REPLY_TOKENS = 1024
+
+
+def reply_floor(profile: "ModelProfile") -> "ModelProfile":
+    """The same window with the reply held to the least it may be (#101):
+    `MIN_REPLY_TOKENS`, or the ceiling when that is smaller. The most room a prompt can
+    have on this model."""
+    return replace(profile, max_output_tokens=min(MIN_REPLY_TOKENS, profile.max_output_tokens))
+
+
+def reply_gives_way(profile: "ModelProfile", chars: int) -> Optional["ModelProfile"]:
+    """The profile to send a call with whose prompt (`chars`) doesn't fit beside the full
+    reply ceiling: the same window, the reply held to what the prompt leaves, never below
+    `reply_floor`. None when the prompt doesn't fit even beside the floor (#101).
+
+    The prompt still fits and nothing is cut: a runtime given the smaller ceiling stops
+    the reply there, and a reply cut off at it is continued or split, not lost.
+    """
+    floor = reply_floor(profile)
+    # MAX_PROMPT_TOKENS still guards the bill: a smaller reply buys nothing past it.
+    if floor.prompt_char_budget < chars:
+        return None
+    room = math.ceil(chars / profile.ratio) + 1  # tokens, rounded up, and one for rounding below
+    output = profile.context_window - profile.reasoning_tokens - math.ceil(room / _PROMPT_SAFETY_MARGIN)
+    return replace(profile, max_output_tokens=max(min(output, profile.max_output_tokens), floor.max_output_tokens))
 
 
 def _avg(avg_file_tokens: Optional[float]) -> int:

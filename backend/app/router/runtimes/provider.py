@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.router import compat, generation
 from app.router import inflight, memory_gate
-from app.router.base import ComputerDisconnected, LLMProvider, ProviderError, RequestCancelled
+from app.router.base import ComputerDisconnected, LLMProvider, PromptTooLong, ProviderError, RequestCancelled
 from app.router.model_profile import (
     ModelProfile,
     ProfileCache,
@@ -493,6 +493,14 @@ class SourceProvider(LLMProvider):
             },
         }
 
+    def count_tokens(self, messages: list[ChatMessage], model: str) -> Optional[int]:
+        """The runtime's own count, template included, where it can give one (#101)."""
+        try:
+            self._check_guard()
+            return self.adapter.count_tokens(model, [m.model_dump() for m in messages])
+        except Exception:  # noqa: BLE001 - a count is a courtesy; the estimate stands in
+            return None
+
     # ── generation ───────────────────────────────────────────────────────────
     def generate(
         self,
@@ -571,6 +579,10 @@ class SourceProvider(LLMProvider):
                 if inflight.was_cancelled(request.request_id):
                     raise RequestCancelled()  # finished just as Stop landed; Stop wins
         except RequestCancelled:
+            raise
+        except PromptTooLong as e:
+            # What was sent, so the real characters-per-token is learned from it (#101).
+            e.chars = e.chars or sum(len(m.content) for m in messages)
             raise
         except ProviderError as e:
             if e.unreachable:
@@ -695,15 +707,14 @@ class SourceProvider(LLMProvider):
         from a schema that did not match.
         """
         if prompt_tokens and prompt_tokens >= profile.context_window * 0.95:
+            # Rare now (#101): a prompt is refused rather than cut, and the next one is
+            # budgeted at the characters-per-token this one's count showed.
             log.warning(
-                "Prompt for %s used %s of a %s-token window — at or past the point a "
-                "runtime truncates it or refuses it, which drops the system prompt and "
-                "the required output shape with it. Lower APPROX_CHARS_PER_TOKEN "
-                "(currently %s) so prompts are budgeted more conservatively.",
+                "Prompt for %s used %s of a %s-token window, close to where it would be "
+                "refused. The next prompt is budgeted from this model's real count.",
                 model,
                 f"{prompt_tokens:,}",
                 f"{profile.context_window:,}",
-                settings.approx_chars_per_token,
             )
         if finish_reason == "length":
             log.warning(

@@ -51,6 +51,7 @@ not hiccups.
 """
 from __future__ import annotations
 import threading
+from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Iterator, Optional
 
@@ -69,7 +70,14 @@ from app.core.logging import get_logger
 from app.router import compat, history, keycheck, track_record
 from app.router.keycheck import KeyCheck
 from app.connector.remote import ConnectorProvider, DeviceSources, looks_like_device_source
-from app.router.base import CLOUD_PROVIDERS, ComputerDisconnected, LLMProvider, ProviderError, RequestCancelled
+from app.router.base import (
+    CLOUD_PROVIDERS,
+    ComputerDisconnected,
+    LLMProvider,
+    PromptTooLong,
+    ProviderError,
+    RequestCancelled,
+)
 from app.router.model_profile import FILES_ALL, ModelProfile, fallback_profile
 from app.router.providers.anthropic_provider import AnthropicProvider
 from app.router.providers.gemini_provider import GeminiProvider
@@ -124,6 +132,19 @@ class Readiness:
     #: Each role's model and why (`explain_pick`), so the page names Auto's choice
     #: per agent rather than guessing it. Filled when the run can start.
     picks: tuple[dict, ...] = field(default_factory=tuple)
+
+
+#: Learning each model's characters-per-token (#101): the calls kept, how many must
+#: agree before a learned ratio may raise a budget, the margin kept under what was seen,
+#: and the bounds no learned ratio leaves.
+_RATIO_WINDOW = 20
+_RATIO_MIN_CALLS = 3
+_RATIO_MIN_CHARS = 400
+_RATIO_MARGIN = 0.92
+_RATIO_CEILING = 6.0
+#: A prompt estimated past this share of its room is counted exactly where it can be —
+#: above the 0.9 the agents size to, so a prompt that filled its budget isn't counted.
+_COUNT_ABOVE = 0.95
 
 
 class ModelRouter:
@@ -184,6 +205,11 @@ class ModelRouter:
         #: Auto's candidates per difficulty, kept a few seconds (#96): every call
         #: resolves its chain, and assessing every local model each time is waste.
         self._prior_cache: dict[str, tuple[float, Any]] = {}
+        #: (characters sent, tokens the model counted) for each model's recent calls
+        #: (#101): its real characters-per-token, learned the way `_note_reasoning`
+        #: learns a reasoning budget — from what the model reported, not its name.
+        self._ratios: dict[tuple[str, str], deque] = {}
+        self._ratio_lock = threading.Lock()
         # Apply any keys/models saved at runtime via the Settings UI (overrides .env).
         self._load_persisted()
 
@@ -339,11 +365,71 @@ class ModelRouter:
         for pname, model in chain:
             prov = self.provider(pname)
             if prov is not None and prov.available():
-                return prov.profile(model)
+                return self._with_ratio(pname, model, prov.profile(model))
         if not chain:
             return fallback_profile("none", "unresolved")
         pname, model = chain[0]
         return fallback_profile(pname, model, local=pname not in CLOUD_PROVIDERS)
+
+    # ── how many characters make a token, for each model (#101) ─────────────
+    def _learn(self, pname: str, model: str, chars: int, tokens: int) -> None:
+        """One call's real count. A prompt of a few hundred characters is mostly the
+        chat template's own tokens, so it says nothing about the text and is skipped."""
+        if chars < _RATIO_MIN_CHARS or tokens <= 0:
+            return
+        with self._ratio_lock:
+            self._ratios.setdefault((pname, model), deque(maxlen=_RATIO_WINDOW)).append((chars, tokens))
+
+    def chars_per_token(self, pname: str, model: str) -> Optional[float]:
+        """What `model`'s counts have shown, less a margin; None before any were seen.
+
+        Lower than the configured estimate at once — an overflow is news to act on — but
+        higher only after a few calls agree, so one odd prompt never buys a budget the
+        next prompt can't keep.
+        """
+        with self._ratio_lock:
+            seen = list(self._ratios.get((pname, model)) or ())
+        if not seen:
+            return None
+        observed = sum(c for c, _ in seen) / max(sum(t for _, t in seen), 1)
+        learned = observed * _RATIO_MARGIN
+        if len(seen) < _RATIO_MIN_CALLS:
+            learned = min(learned, settings.approx_chars_per_token)
+        return round(max(1.0, min(learned, _RATIO_CEILING)), 3)
+
+    def _with_ratio(self, pname: str, model: str, profile: ModelProfile) -> ModelProfile:
+        ratio = self.chars_per_token(pname, model)
+        return replace(profile, chars_per_token=ratio) if ratio else profile
+
+    def _fits(
+        self, prov: LLMProvider, pname: str, model: str, messages: list[ChatMessage], chars: int, options: GenerationOptions
+    ) -> None:
+        """Refuse to send a prompt that won't fit `model` — before a runtime cuts it.
+
+        Estimated at the model's learned ratio; counted exactly when the estimate is
+        close and the provider can count (llama.cpp's own tokenizer, Anthropic's count
+        endpoint, tiktoken). A prompt sized for another model — the head of a chain
+        that has fallen back — is the usual case: the agent re-sizes it for this one.
+        """
+        profile = self._with_ratio(pname, model, prov.profile(model))
+        room = max(
+            profile.context_window - options.resolve_max_tokens(profile.max_output_tokens) - profile.reasoning_tokens, 1
+        )
+        estimate = chars / profile.ratio
+        if estimate < room * _COUNT_ABOVE:
+            return
+        counted = prov.count_tokens(messages, model)
+        tokens = counted if counted is not None else int(estimate)
+        if tokens > room:
+            error = PromptTooLong(
+                f"The prompt is {'' if counted is not None else 'about '}{tokens:,} tokens; {model} has "
+                f"room for {room:,} beside its reply.",
+                prompt_tokens=counted,
+                context=profile.context_window,
+                chars=chars,
+            )
+            error.estimate, error.room = int(estimate), room
+            raise error
 
     def _pinned(self, chain: list[tuple[str, str]], pin: Optional[str]) -> list[tuple[str, str]]:
         """`chain` with `pin` tried first — the fix loop's stronger model."""
@@ -1533,8 +1619,16 @@ class ModelRouter:
 
         attempts: list[dict] = []
         last_error: Optional[ProviderError] = None
+        #: A fallback the prompt didn't fit: the chain goes on to a link it may fit, and
+        #: only when none answers is the caller told to re-size it for this one (#101).
+        deferred: Optional[PromptTooLong] = None
+        #: The link `profile_for` sized the prompt for: the first one that is available.
+        sized_for: Optional[int] = None
+        chars = sum(len(m.content) for m in messages)
         for idx, (pname, model) in enumerate(chain):
             prov = self.provider(pname)
+            if sized_for is None and prov is not None and prov.available():
+                sized_for = idx
             if isinstance(prov, ConnectorProvider) and not prov.available():
                 # The user's own computer: gone, the build waits for it (pauses)
                 # rather than falling through to a model nobody picked. Connected
@@ -1545,7 +1639,10 @@ class ModelRouter:
                 attempts.append(self._skipped(pname, model, refused))
                 continue
             try:
+                self._fits(prov, pname, model, messages, chars, options)
                 resp = self._generate(prov, messages, model, options)
+                if resp.usage.prompt_tokens:
+                    self._learn(pname, model, chars, resp.usage.prompt_tokens)
                 resp.fallback_used = idx > 0
                 resp.attempts = attempts
                 if resp.is_local is None:
@@ -1577,6 +1674,22 @@ class ModelRouter:
                 return resp
             except (RequestCancelled, ComputerDisconnected):
                 raise  # a Stop, or a computer to wait for: never the next link's job
+            except PromptTooLong as e:
+                # Not the next link's job either (#101): a shorter prompt is, and only
+                # the agent that built this one can make it. It is told which model the
+                # prompt has to fit, with that model's real ratio once counted.
+                e.chars = e.chars or chars
+                if e.prompt_tokens:
+                    self._learn(pname, model, e.chars, e.prompt_tokens)
+                e.model = f"{pname}:{model}"
+                e.profile = self._with_ratio(pname, model, prov.profile(model))
+                log.warning("%s:%s — %s", pname, model, e)
+                if idx == sized_for:
+                    raise  # the model the prompt was sized for: the caller shrinks it
+                deferred = deferred or e
+                attempts.append({"provider": pname, "model": model, "error": str(e), "kind": e.kind,
+                                 "why": "prompt too long", "tried": False})
+                continue
             except ProviderError as e:
                 log.warning("Provider %s/%s failed: %s", pname, model, e)
                 attempts.append({
@@ -1591,6 +1704,8 @@ class ModelRouter:
                 if pname in CLOUD_PROVIDERS:
                     self._note_failure(pname, model, e)
 
+        if deferred is not None:
+            raise deferred
         # The models that were sent the call and failed at it for a reason about the
         # model — what a failed phase is put down to in Auto's record (#96). A runtime
         # that wasn't running, a key, a bill or a rate limit names none.

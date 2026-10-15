@@ -409,25 +409,38 @@ def test_the_budget_and_the_prompt_agree_about_what_was_injected(library):
             limit=len(sizes),
         )
     )
+    from app.router.base import WindowTooSmall
+
+    checked = 0
     for window in range(3_000, 40_001, 250):
         profile = _profile(window)
         ctx = AgentContext(**shared, skills=skills)
-        budget = agent._section_budgets(ctx, profile, 0, agent._prepare_deps(ctx, profile))
-        printed = _skills_block(agent._build_messages(ctx, profile).messages[1].content)
+        try:
+            budget = agent._section_budgets(ctx, profile, 0, agent._prepare_deps(ctx, profile))
+        except WindowTooSmall:
+            continue  # QA's own instructions don't fit: no prompt is built at all (#101)
+        printed = _skills_block(agent._build_messages(ctx, profile).messages[1].content, agent.task_text())
         assert len(printed) == budget["skills"], (
             f"at a {window}-token window the budget charged {budget['skills']} "
             f"characters for skills and the prompt carries {len(printed)}"
         )
+        checked += 1
+    assert checked >= 140, checked
 
 
-def _skills_block(user_turn: str) -> str:
-    """The skills section of a built prompt, joins and all, or "" when there is none."""
+def _skills_block(user_turn: str, task: str = "") -> str:
+    """The skills section of a built prompt, joins and all, or "" when there is none —
+    up to the next heading, or the task when no section follows it (#101: a section
+    with no room prints nothing, heading included)."""
     heading = "# How this team does this work"
     if heading not in user_turn:
         return ""
     start = user_turn.index(heading)
     rest = user_turn[start:]
-    end = rest.index("\n# ", 1) if "\n# " in rest[1:] else len(rest)
+    ends = [rest.index("\n# ", 1)] if "\n# " in rest[1:] else []
+    if task and f"\n{task}" in rest:
+        ends.append(rest.index(f"\n{task}"))
+    end = min(ends) if ends else len(rest)
     # The block plus the "\n" the join puts in front of it.
     return user_turn[start - 1 : start + end]
 

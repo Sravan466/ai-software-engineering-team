@@ -42,6 +42,7 @@ from app.preview import sections as X
 from app.preview.brief import SiteBrief, brief_from_idea, site_brief
 from app.preview.jobs import NullReporter, Reporter
 from app.router.base import ProviderError
+from app.router.fitting import send_fitting
 from app.router.model_profile import ModelProfile
 from app.core import identity
 from app.router.router import router
@@ -103,9 +104,11 @@ class EditTooLarge(ValueError):
 class _Calls:
     """Every model call one build makes, in order — for usage and the report."""
 
-    def __init__(self, mode: RoutingMode, preferred_model: Optional[str]) -> None:
+    def __init__(self, mode: RoutingMode, preferred_model: Optional[str], edit: bool = False) -> None:
         self.mode = mode
         self.preferred_model = preferred_model
+        #: An edit's prompt is the part being edited: never cut to fit, refused (#101).
+        self.edit = edit
         self.responses: list[LLMResponse] = []
         self._profile: Optional[ModelProfile] = None
 
@@ -126,14 +129,30 @@ class _Calls:
         return int(self.profile.max_output_tokens * max(settings.approx_chars_per_token, 1.0))
 
     def complete(self, messages: list[ChatMessage], options: GenerationOptions) -> LLMResponse:
-        resp = router.complete(
-            messages,
-            mode=self.mode,
-            preferred_model=self.preferred_model,
-            options=options,
-            complexity=COMPLEXITY,
-            role=ROLE,
-        )
+        def send(sent: list[ChatMessage], pin: Optional[str]) -> LLMResponse:
+            return router.complete(
+                sent,
+                mode=self.mode,
+                preferred_model=self.preferred_model,
+                options=options,
+                complexity=COMPLEXITY,
+                role=ROLE,
+                pin=pin,
+            )
+
+        def build(profile: ModelProfile) -> list[ChatMessage]:
+            # Every pass sizes its own prompt from `char_budget`; a refused one (#101)
+            # is trimmed in its middle — the design context — keeping the headings at
+            # the top and the task at the end, and later passes are sized to fit.
+            if profile is self.profile:
+                return messages
+            if self.edit:
+                # Cut, the half the model never saw would be lost from the mockup.
+                raise EditTooLarge(sum(len(m.content) for m in messages), profile.prompt_char_budget)
+            self._profile = profile
+            return _trimmed(messages, profile.prompt_char_budget)
+
+        resp, _, _ = send_fitting(build, self.profile, send, who="The mockup")
         self.responses.append(resp)
         return resp
 
@@ -168,6 +187,22 @@ class _Calls:
         except ValidationError as e:
             log.info("Mockup pass returned an unusable shape: %s", str(e)[:200])
             return None
+
+
+def _trimmed(messages: list[ChatMessage], budget: int) -> list[ChatMessage]:
+    """`messages` cut to `budget` characters by taking the middle out of the longest user
+    message: its headings stay at the top and its task at the end (#101)."""
+    excess = sum(len(m.content) for m in messages) - budget
+    users = [i for i, m in enumerate(messages) if m.role == "user"]
+    if excess <= 0 or not users:
+        return messages
+    i = max(users, key=lambda k: len(messages[k].content))
+    text = messages[i].content
+    marker = "\n… [cut here to fit this model's context window]\n"
+    keep = max(len(text) - excess - len(marker), 0)
+    head, tail = text[: keep // 2], text[len(text) - (keep - keep // 2):] if keep else ""
+    cut = head + marker + tail
+    return [*messages[:i], messages[i].model_copy(update={"content": cut}), *messages[i + 1 :]]
 
 
 # ── the passes ───────────────────────────────────────────────────────────────
@@ -442,7 +477,7 @@ def edit_section(
     no longer works. Such an edit gets one repair round, then is refused with the
     reasons rather than saved.
     """
-    calls = _Calls(mode, preferred_model)
+    calls = _Calls(mode, preferred_model, edit=True)
     section = P.section_from_data(site, section_id) if site and section_id else None
     if site is None or section is None:
         return _edit_legacy(calls, fragment, instruction), calls.responses
@@ -553,7 +588,7 @@ def edit_element(
     knows it is a link in the navbar. What it returns must keep every binding the
     element had; one repair round, then the edit is refused with what went missing.
     """
-    calls = _Calls(mode, preferred_model)
+    calls = _Calls(mode, preferred_model, edit=True)
     ds = None
     if site is not None:
         plan = P.site_from_data(site)

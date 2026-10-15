@@ -306,9 +306,12 @@ class Project(Base):
     def last_error_help(self) -> Optional[dict]:
         """The words and the one action for `last_error_kind` — from the one place
         they live, so the page never writes its own."""
+        from app.core import keyerrors
+
+        if self.last_error_kind == keyerrors.WINDOW:
+            return keyerrors.window_help(self.last_error or "")
         if not self.last_error_kind or not self.last_error_provider:
             return None
-        from app.core import keyerrors
 
         return keyerrors.advice(self.last_error_kind, self.last_error_provider).as_dict()
 

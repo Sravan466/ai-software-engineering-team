@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import abc
+import re
 from typing import Optional
 
 from app.router.model_profile import ModelProfile, fallback_profile
@@ -136,6 +137,92 @@ CLOUD_PROVIDERS = ("anthropic", "openai", "gemini")
 RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 
+class PromptTooLong(ProviderError):
+    """The prompt doesn't fit the window of the model about to answer it (#101).
+
+    Raised instead of letting a runtime cut it: Ollama, by default, drops the head of
+    an oversized prompt and still answers 200 — the system prompt and the shape it
+    carries are what go. With `truncate: false` it says so, with the exact count, and
+    so does llama.cpp; a count taken before sending says it sooner. The agent that
+    built the prompt shrinks it to `fits` and sends it once more. The router fills in
+    which model it was for, so a prompt that met a fallback is re-sized for that one.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        prompt_tokens: Optional[int] = None,
+        context: Optional[int] = None,
+        chars: int = 0,
+    ) -> None:
+        super().__init__(message, retryable=False, kind="too_long")
+        #: The prompt's real (or exactly counted) size, when the runtime said.
+        self.prompt_tokens = prompt_tokens
+        #: The window it was measured against, when the runtime said.
+        self.context = context
+        #: Characters sent, so the real characters-per-token can be learned from it.
+        self.chars = chars
+        #: When nothing counted it: the router's estimate and the room it had (tokens).
+        self.estimate: Optional[int] = None
+        self.room: Optional[int] = None
+        #: Set by the router: `provider:model`, and that model's profile.
+        self.model: Optional[str] = None
+        self.profile: Optional[ModelProfile] = None
+
+
+class StillTooLong(ProviderError):
+    """A prompt refused as too long, rebuilt for the model, and refused again (#101). Not
+    retried: the same rebuild would be refused a third time. Its advice is a window too
+    small's, so the build page says so rather than blaming the runtime."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False, kind="window")  # keyerrors.WINDOW
+
+
+class WindowTooSmall(ProviderError):
+    """An agent's own instructions don't fit the model's window (#101).
+
+    Nothing can be trimmed: the instructions *are* the shape it must answer in, and a
+    runtime would cut them from the head. The phase stops and says so, rather than
+    sending a prompt that has already lost what it is asking for.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False, kind="window")  # keyerrors.WINDOW
+
+
+_OURS = re.compile(r"The prompt is (?:about )?([\d,]+) tokens; .*?(?:has a ([\d,]+)-token window|room for)")
+
+
+def too_long(text: str) -> Optional[PromptTooLong]:
+    """A refusal relayed as text — from a connected computer, whose adapters raise
+    `PromptTooLong` there (#101) — as the error it was, so this side can shrink and resend."""
+    found = overflow(text or "")
+    if found:
+        return PromptTooLong(text, prompt_tokens=found[0], context=found[1])
+    mine = _OURS.search(text or "")
+    if mine:
+        window = int(mine.group(2).replace(",", "")) if mine.group(2) else None
+        return PromptTooLong(text, prompt_tokens=int(mine.group(1).replace(",", "")), context=window)
+    return None
+
+
+def overflow(text: str) -> Optional[tuple[int, Optional[int]]]:
+    """(prompt tokens, window) from a runtime's "the prompt doesn't fit" answer, or
+    None when the answer is about something else. llama.cpp's shape, which Ollama's
+    engine shares: `exceed_context_size_error`, `n_prompt_tokens`, `n_ctx` — possibly
+    JSON inside a JSON string."""
+    said = text or ""
+    if "exceed_context_size" not in said and "n_prompt_tokens" not in said and "longer than the context" not in said:
+        return None
+    found = re.search(r"n_prompt_tokens\W{0,6}(\d+)", said) or re.search(r"request \((\d+) tokens\)", said)
+    window = re.search(r"n_ctx\W{0,6}(\d+)", said) or re.search(r"context size \((\d+) tokens\)", said)
+    if not found:
+        return None
+    return int(found.group(1)), int(window.group(1)) if window else None
+
+
 def status_is_retryable(error: Exception) -> bool:
     """Whether a provider SDK's exception carries an HTTP status worth retrying.
 
@@ -199,6 +286,12 @@ class LLMProvider(abc.ABC):
         so per model. Everything else answers for all its models at once.
         """
         return self.is_local
+
+    def count_tokens(self, messages: list[ChatMessage], model: str) -> Optional[int]:
+        """The prompt's exact size in this model's tokens, chat template included, when
+        this provider can count it (#101) — None when it can't, and the learned
+        characters-per-token stands in."""
+        return None
 
     def profile(self, model: str) -> ModelProfile:
         """How much room `model` has, and what it can be asked to do.
