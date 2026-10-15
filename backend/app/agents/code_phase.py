@@ -735,22 +735,33 @@ class _Run:
             activity.file(path, "failed" if w.faults() else "ok")
 
     def _repair_groups(self, failing: list[_Written]) -> list[list[_Written]]:
-        """`failing` in groups one repair call can each show whole (#101): within the
-        prompt's share for echoes and the reply's share for files, in order. A batch's
-        failing files sent together would each be clipped to a slice of that room, and
-        the model would rebuild their missing ends from nothing."""
-        room = int(max(self.profile.prompt_char_budget - len(self.system), 0) * _FIX_ECHO_SHARE)
-        reply = int(self.profile.max_output_tokens * BATCH_REPLY_SHARE * self.profile.ratio)
+        """`failing` in groups one repair call can each show whole (#101), in order:
+        their echoes within the pool `_messages` gives them beside the real ask, and
+        their files within the reply's share. A batch's failing files sent together
+        would each be clipped to a slice of that room, and the model would rebuild
+        their missing ends from nothing."""
         groups: list[list[_Written]] = [[]]
-        size = 0
         for w in failing:
-            cost = len(w.code) + 200
-            if groups[-1] and size + cost > min(room, reply):
-                groups.append([])
-                size = 0
-            groups[-1].append(w)
-            size += cost
+            trial = groups[-1] + [w]
+            if groups[-1] and not self._fix_fits(trial):
+                groups.append([w])
+            else:
+                groups[-1] = trial
         return groups
+
+    def _fix_fits(self, group: list[_Written]) -> bool:
+        ask = self._write_now([self._plan_entry(w.path) for w in group], False, group)
+        pool = int(max(self.profile.prompt_char_budget - len(self.system) - len(ask) - 1, 0) * _FIX_ECHO_SHARE)
+        reply = int(self.profile.max_output_tokens * BATCH_REPLY_SHARE * self.profile.ratio)
+        sources = [len(self._echo_source(w)) for w in group]
+        return sum(n + 200 for n in sources) <= pool and sum(sources) <= reply
+
+    def _echo_source(self, w: _Written) -> str:
+        """What a fix call shows of `w`: the file as it was when a rewrite lost much of
+        it (#101), else the failing version."""
+        if w.path in self.existing and any(placeholders.is_lost_code(p) for p in w.problems):
+            return self.existing[w.path]
+        return w.code
 
     def _repair(self, failing: list[_Written]) -> list[_Written]:
         """One repair call for `failing`, problems named. Returns what still fails."""
@@ -1005,8 +1016,14 @@ class _Run:
             return True
 
         put("write", ask, force=True)
+        # The echoes share one pool, each by its size (#101): a group `_repair_groups`
+        # made fits whole; a single file larger than the pool is clipped to it.
+        pool = int(left * _FIX_ECHO_SHARE)
+        needs = {w.path: len(self._echo_source(w)) + 200 for w in fixing or []}
+        total = sum(needs.values())
         for w in fixing or []:
-            room = max(int(left * _FIX_ECHO_SHARE) // max(len(fixing), 1) - 200, 0)
+            share = needs[w.path] if total <= pool else pool * needs[w.path] // max(total, 1)
+            room = max(share - 200, 0)
             if w.path in self.existing and any(placeholders.is_lost_code(p) for p in w.problems):
                 # The rewrite lost much of the file (#101): what to start again from is
                 # the file as it was, whole, not the half that came back.

@@ -7,12 +7,20 @@ not `available()` however present it is.
 """
 from __future__ import annotations
 
-from typing import Optional, Union
+import re
+from typing import Callable, Optional, Union
 
 from pydantic import SecretStr
 
 from app.core import scrub
+from app.core.logging import get_logger
 from app.router.model_profile import ModelProfile, fallback_profile
+
+log = get_logger(__name__)
+
+#: A refusal that names the model's own reply limit (#101): OpenAI's "supports at most
+#: N completion tokens", Anthropic's "max_tokens: X > N".
+_REPLY_LIMIT = re.compile(r"supports at most (\d+) completion tokens|max_tokens: \d+ > (\d+)")
 
 
 def _clean(key: Union[str, SecretStr, None]) -> Optional[SecretStr]:
@@ -78,6 +86,22 @@ class CloudKey:
         if own:
             return min(own, configured) if configured else own
         return configured if model == getattr(self, "default_model", None) else None
+
+    def within_reply_limit(self, model: str, kwargs: dict, create: Callable, key: str = "max_tokens"):
+        """`create(**kwargs)`, sent once more within the model's reply limit when it
+        refuses one too large and names its own (#101): a model whose limit no check
+        could read learns it here, for this call and every later one."""
+        try:
+            return create(**kwargs)
+        except Exception as e:  # noqa: BLE001 - only a refusal naming the limit is handled
+            found = _REPLY_LIMIT.search(str(e))
+            limit = int(found.group(1) or found.group(2)) if found else 0
+            if not limit or limit >= int(kwargs.get(key) or 0):
+                raise
+            self.known_output[model] = limit
+            log.warning("%s:%s takes replies of at most %s tokens; sent once more within that.",
+                        getattr(self, "name", "cloud"), model, f"{limit:,}")
+            return create(**{**kwargs, key: limit})
 
     def profile(self, model: str) -> ModelProfile:
         window = self.known_context.get(model)

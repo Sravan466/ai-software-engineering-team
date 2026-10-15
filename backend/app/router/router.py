@@ -536,6 +536,9 @@ class ModelRouter:
             prov.set_api_key(api_key)
         if default_model:
             self._default_model[provider] = default_model
+            # The provider's configured reply ceiling is for its default (#101): the one
+            # chosen in Settings, not only the one in .env.
+            prov.default_model = default_model
         # Auto's candidates name each cloud provider's model and need its key.
         self._prior_cache.clear()
 
@@ -618,6 +621,12 @@ class ModelRouter:
             return
         found = keycheck.check(provider, prov.secret() or "", model)
         self._model_checks[(provider, model)] = found
+        # What the check read about the model itself (#101): its window and its own reply
+        # limit, so a model a role or a run picked is sized like the default.
+        if found.context_tokens:
+            prov.known_context[model] = found.context_tokens
+        if getattr(found, "output_tokens", None):
+            prov.known_output[model] = found.output_tokens
         if found.status in keycheck.KEY_REJECTED:
             # About the key, not the model: that is its standing everywhere.
             try:

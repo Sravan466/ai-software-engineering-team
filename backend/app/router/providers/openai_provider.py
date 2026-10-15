@@ -69,7 +69,7 @@ class OpenAIProvider(CloudKey, LLMProvider):
 
         started = time.perf_counter()
         try:
-            resp = self._get_client().chat.completions.create(**kwargs)
+            resp = self.within_reply_limit(model, kwargs, self._get_client().chat.completions.create)
         except Exception as e:  # noqa: BLE001
             raise cloud_error(self.name, "OpenAI", e) from e
 

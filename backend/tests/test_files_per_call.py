@@ -121,16 +121,28 @@ def test_a_batch_leaves_room_in_the_reply():
 def test_a_batch_repair_shows_every_file_whole(monkeypatch):
     """Failing files whose echoes don't fit one fix call together are fixed in more than
     one, each shown whole, never clipped to a slice of the room."""
-    from app.agents.code_phase import _Run, _Written
+    from app.agents.base import _TRUNCATED
 
-    run = _Run.__new__(_Run)
-    run.profile = _profile(16_384, 4_096)
-    run.system = "s" * 3_000
-    big = [_Written(f"app/f{i}.py", "x = 1\n" * 900, "python", "", "plan") for i in range(4)]
-    groups = run._repair_groups(big)
-    assert len(groups) > 1 and [w.path for g in groups for w in g] == [w.path for w in big]
-    small = [_Written(f"app/s{i}.py", "x = 1\n" * 20, "python", "", "plan") for i in range(4)]
-    assert len(run._repair_groups(small)) == 1
+    paths = [f"backend/app/f{i}.py" for i in range(4)]
+    body = "".join(f"VALUE_{n} = {n}  # a line of the module, long enough to count\n" for n in range(150))
+    fix_prompts: list[str] = []
+
+    def reply(model, wanted, n):
+        prompt = model.prompts[-1]
+        if "# Your last version of" in prompt:
+            fix_prompts.append(prompt)
+            return "".join(f"### {p}\n```python\n{body}```\n\n" for p in wanted)
+        return "".join(f"### {p}\n```python\ndef broken(:\n{body}```\n\n" for p in wanted)
+
+    plan = [{"path": p.removeprefix("backend/"), "purpose": "a module"} for p in paths]
+    model = Scripted("Backend Engineer", plan, reply=reply)
+    result = _run(monkeypatch, "backend_engineer", model, _profile(200_000, 16_384), AgentContext(idea="A tool library"))
+    assert len(fix_prompts) > 1, "four files too large to show together: more than one fix call"
+    for prompt in fix_prompts:
+        assert _TRUNCATED not in prompt, "every echo whole"
+    shown = [p for prompt in fix_prompts for p in paths if f"# Your last version of {p}" in prompt]
+    assert sorted(shown) == sorted(paths)
+    assert result.build_status == "ok"
 
 
 def test_settings_figures_against_the_instructions_a_run_really_had(client, monkeypatch):
@@ -142,3 +154,70 @@ def test_settings_figures_against_the_instructions_a_run_really_had(client, monk
     roles = client.get("/api/settings/roles").json()["roles"]
     after = next(x for x in roles if x["role"] == "frontend_engineer")["files_per_call_auto"]
     assert before >= 2 and after == 1
+
+
+def _refusing_client(limit_message: str, sent: list):
+    from types import SimpleNamespace
+
+    def create(**kwargs):
+        sent.append(kwargs)
+        if len(sent) == 1:
+            raise RuntimeError(limit_message)
+        usage = SimpleNamespace(prompt_tokens=3, completion_tokens=2, total_tokens=5, input_tokens=3, output_tokens=2)
+        choice = SimpleNamespace(message=SimpleNamespace(content="{}"), finish_reason="stop")
+        return SimpleNamespace(choices=[choice], usage=usage, content=[SimpleNamespace(type="text", text="{}")],
+                               stop_reason="end_turn")
+    return create
+
+
+def test_a_model_that_refuses_a_reply_ceiling_names_its_own_and_is_sent_once_more(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.schemas.llm import ChatMessage, GenerationOptions
+
+    sent: list = []
+    openai = OpenAIProvider(api_key="sk-test")
+    monkeypatch.setattr(openai, "available", lambda: True)
+    openai._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_refusing_client(
+        "Error code: 400 - max_tokens is too large: 16384. This model supports at most 4096 completion tokens, "
+        "whereas you provided 16384.", sent))))
+    openai.default_model = "gpt-4-turbo"
+    openai.generate([ChatMessage(role="user", content="hi")], "gpt-4-turbo", GenerationOptions())
+    assert [k["max_tokens"] for k in sent] == [16_384, 4_096]
+    assert openai.profile("gpt-4-turbo").max_output_tokens == 4_096, "learned for every later call"
+
+    sent.clear()
+    claude = AnthropicProvider(api_key="sk-ant-test")
+    monkeypatch.setattr(claude, "available", lambda: True)
+    claude._client = SimpleNamespace(messages=SimpleNamespace(create=_refusing_client(
+        "Error code: 400 - max_tokens: 16384 > 8192, which is the maximum allowed number of output tokens "
+        "for claude-3-5-haiku-20241022", sent)))
+    claude.generate([ChatMessage(role="user", content="hi")], "claude-opus-4-8", GenerationOptions())
+    assert [k["max_tokens"] for k in sent] == [16_384, 8_192]
+    # An explicit timeout, so a newer SDK never refuses the unstreamed call itself.
+    assert all(k["timeout"] >= 600 for k in sent)
+
+
+def test_a_model_chosen_for_a_run_keeps_what_its_check_read(monkeypatch):
+    from app.router import keycheck
+    from app.router.router import ModelRouter
+
+    model_router = ModelRouter()
+    prov = model_router._cloud["anthropic"]
+    prov.set_api_key("sk-ant-test-key-0000")
+    monkeypatch.setattr(model_router, "key_check", lambda provider: keycheck.KeyCheck(
+        status=keycheck.VALID, reason="ok", message="ok", model="claude-opus-4-8"))
+    monkeypatch.setattr(keycheck, "check", lambda provider, key, model: keycheck.KeyCheck(
+        status=keycheck.VALID, reason="ok", message="ok", model=model, context_tokens=200_000, output_tokens=8_192))
+    model_router._check_chosen_model("anthropic", "claude-3-5-haiku")
+    assert prov.profile("claude-3-5-haiku").max_output_tokens == 8_192
+
+
+def test_the_default_chosen_in_settings_gets_the_providers_ceiling():
+    from app.router.router import ModelRouter
+
+    model_router = ModelRouter()
+    model_router._apply("openai", None, "gpt-4.1")
+    prov = model_router._cloud["openai"]
+    assert prov.profile("gpt-4.1").max_output_tokens == settings.openai_max_output_tokens
+    assert prov.profile("gpt-4o").max_output_tokens == settings.max_output_tokens
