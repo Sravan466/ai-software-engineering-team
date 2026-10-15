@@ -40,6 +40,7 @@ def test_the_default_export_by_every_spelling():
     assert ex.read("a.ts", "export const x = 1;\n").default is None
     assert ex.read("a.js", "module.exports = router;\n").default == "router"
     assert ex.read("a.js", "module.exports = { list, create };\nexports.extra = 1;\n").named == ["list", "create", "extra"]
+    assert ex.read("a.js", "exports.default = Thing;\n").default == ""
 
 
 def test_python_exports_are_the_public_top_level_names_or_all():
@@ -62,15 +63,18 @@ def test_the_tree_check_returns_each_modules_exports_with_re_exports_followed():
         ),
         "backend/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
     }
-    check = check_tree(files, list(files))
+    check = check_tree(files, list(files), exports=True)
     assert check.exports["frontend/components/index.ts"].render() == "named: Button, TodoList · types: Item"
     assert check.exports["frontend/components/Button.tsx"].render() == "default: Button"
     assert check.exports["backend/main.py"].render() == "names: app"
-    # The default-vs-named mistake is counted, and named by the build's own path.
+    # The default-vs-named mistake is counted, and the module named as the page imports
+    # it — never by the checker's in-memory path, which a model would copy.
     assert check.export_misses == 1
     [problem] = check.problems
     assert "has no default export" in problem.message and "/__build__" not in problem.message
-    assert '"frontend/components/TodoList"' in problem.message
+    assert '"../components/TodoList"' in problem.message
+    # Asked for only by the code phases: the scorecard's check doesn't pay for it.
+    assert check_tree(files, list(files)).exports == {}
 
 
 # ── what the next write call is told ─────────────────────────────────────────
@@ -134,3 +138,47 @@ def test_a_repair_after_the_tree_check_sees_the_checkers_exports(monkeypatch):
     repair = next(p for p in model.prompts if "fix 1 file" in p)
     assert "`frontend/components/index.ts` — barrel. Exports: named: TodoList" in repair
     assert "everything from" not in repair.split("# Written so far")[1].split("\n# ")[0]
+
+
+# ── review of #105 ───────────────────────────────────────────────────────────
+def test_the_names_a_regex_could_take_for_a_name_are_not_names():
+    assert ex.read("a.tsx", "export default class extends React.Component {}\n").default == ""
+    assert ex.read("a.ts", "export const enum Color { Red }\n").named == ["Color"]
+    assert ex.read("a.ts", "export function *gen() {}\nexport function* gen2() {}\n").named == ["gen", "gen2"]
+
+
+def test_a_package_offers_what_it_imports_and_names_inside_top_level_blocks_count():
+    assert ex.read("app/models/__init__.py", "from app.models.user import User\n").named == ["User"]
+    # Elsewhere an absolute import is the module's own business, not its exports.
+    assert ex.read("app/main.py", "from fastapi import FastAPI\napp = FastAPI()\n").named == ["app"]
+    code = "try:\n    import orjson as json_lib\nexcept ImportError:\n    json_lib = None\nif True:\n    def helper():\n        return 1\n"
+    assert ex.read("app/util.py", code).named == ["json_lib", "helper"]
+
+
+def test_the_checker_names_dunder_exports_as_written():
+    check = check_tree({"frontend/lib/x.ts": "export const __foo = 1;\n"}, ["frontend/lib/x.ts"], exports=True)
+    assert check.exports["frontend/lib/x.ts"].named == ["__foo"]
+
+
+def test_a_file_cut_off_before_it_ended_says_nothing_about_its_exports():
+    from app.agents.code_phase import _Written
+
+    cut = _Written("frontend/a.ts", "export function A() {}\nexport function B(", "typescript", "", complete=False)
+    assert cut.real_exports() is None
+    whole = _Written("frontend/a.ts", "export function A() {}\n", "typescript", "")
+    assert whole.real_exports().named == ["A"]
+
+
+def test_an_empty_read_falls_back_to_the_plan_in_the_written_list(monkeypatch):
+    plan = [
+        {"path": "components/Odd.tsx", "purpose": "odd", "exports": ["Odd"]},
+        {"path": "app/page.tsx", "purpose": "home", "imports": ["components/Odd.tsx"]},
+    ]
+    model = Scripted("Frontend Engineer", plan, code={
+        # Exports nothing a reader can see: what the plan said is the best there is.
+        "frontend/components/Odd.tsx": "function Odd() {\n  return <p>odd</p>;\n}\n",
+        "frontend/app/page.tsx": PAGE,
+    })
+    _run(monkeypatch, "frontend_engineer", model, SMALL)
+    written = model.prompts[-1].split("# Written so far")[1].split("\n# ")[0]
+    assert "`frontend/components/Odd.tsx` — odd. Exports: Odd" in written

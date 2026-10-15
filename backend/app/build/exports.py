@@ -26,8 +26,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-_JS_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
-
+#: The JavaScript and TypeScript sources a reader here (and the placeholder check) reads.
+JS_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_JS_EXT = JS_EXT
 
 @dataclass
 class Exports:
@@ -72,25 +73,26 @@ class Exports:
 
 
 def read(path: str, content: str) -> Optional[Exports]:
-    """The exports of one file, or None for a file no reader here understands (or one
-    that does not parse — the parser names that, and a guess would mislead)."""
+    """The exports of one file, or None for a file no reader here understands. Python
+    that doesn't parse gives None (the parser names that, and a guess would mislead);
+    JavaScript is read leniently, so a file with one bad line still lists the rest."""
     low = path.lower()
     if low.endswith(".py"):
-        return _python(content)
+        return _python(content, package=low.rsplit("/", 1)[-1] == "__init__.py")
     if low.endswith(_JS_EXT) and not low.endswith(".d.ts"):
         return _javascript(content)
     return None
 
 
 # ── Python ───────────────────────────────────────────────────────────────────
-def _python(content: str) -> Optional[Exports]:
+def _python(content: str, package: bool = False) -> Optional[Exports]:
     try:
         tree = ast.parse(content)
     except (SyntaxError, ValueError):
         return None
     names: list[str] = []
     declared: Optional[list[str]] = None
-    for node in tree.body:
+    for node in _top_level(tree.body):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.append(node.name)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -104,23 +106,37 @@ def _python(content: str) -> Optional[Exports]:
                     names.append(t.id)
                 elif isinstance(t, ast.Tuple):
                     names += [e.id for e in t.elts if isinstance(e, ast.Name)]
-        elif isinstance(node, (ast.Import, ast.ImportFrom)) and _reexports(node):
-            names += [a.asname or a.name for a in node.names if a.name != "*"]
+        elif isinstance(node, ast.ImportFrom) and (package or node.level) and all(a.name != "*" for a in node.names):
+            # A package's `__init__` offers what it imports, relative or absolute; any
+            # module offers what it takes from a sibling (`from .models import User`).
+            names += [a.asname or a.name for a in node.names]
     public = declared if declared is not None else [n for n in dict.fromkeys(names) if not n.startswith("_")]
     return Exports(named=list(dict.fromkeys(public)), python=True)
 
 
-def _reexports(node: ast.AST) -> bool:
-    """`from .models import User` in a package's `__init__` style: a relative import
-    that names what it takes is how a module offers another's names."""
-    return isinstance(node, ast.ImportFrom) and bool(node.level) and all(a.name != "*" for a in node.names)
+def _top_level(body: list) -> list:
+    """The module's own statements, including those inside a top-level `if`, `try` or
+    `with` — `try: import orjson … except ImportError: …` still defines its names."""
+    out = []
+    for node in body:
+        if isinstance(node, (ast.If, ast.Try, ast.With)):
+            for part in ("body", "orelse", "finalbody"):
+                out += _top_level(getattr(node, part, None) or [])
+            for handler in getattr(node, "handlers", None) or []:
+                out += _top_level(handler.body)
+        else:
+            out.append(node)
+    return out
 
 
 # ── JavaScript and TypeScript ────────────────────────────────────────────────
 _IDENT = r"[A-Za-z_$][\w$]*"
 _DECL = re.compile(
-    rf"\bexport\s+(default\s+)?(?:declare\s+)?(?:async\s+)?(function\s*\*?|class|const|let|var|enum|interface|type|abstract\s+class)\s+({_IDENT})"
+    rf"\bexport\s+(default\s+)?(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?"
+    rf"(function\s*\*\s*|function\s+|class\s+|const\s+enum\s+|const\s+|let\s+|var\s+|enum\s+|interface\s+|type\s+)({_IDENT})"
 )
+#: Words that follow `class` in an anonymous class, never a name.
+_NOT_A_NAME = frozenset({"extends", "implements"})
 _DEFAULT_EXPR = re.compile(rf"\bexport\s+default\s+(?:async\s+)?(?:({_IDENT})\s*;?\s*$|(?:function|class)\b|[(\[{{<]|\w)", re.MULTILINE)
 _LIST = re.compile(r"\bexport\s+(type\s+)?\{([^}]*)\}\s*(?:from\s*(['\"])([^'\"]+)\3)?")
 _STAR = re.compile(r"\bexport\s+\*\s*(?:as\s+(" + _IDENT + r")\s+)?from\s*(['\"])([^'\"]+)\2")
@@ -131,11 +147,11 @@ _CJS_NAMED = re.compile(rf"\b(?:module\.)?exports\.({_IDENT})\s*=")
 
 
 def _javascript(content: str) -> Exports:
-    from app.build.placeholders import _lex
+    from app.build.placeholders import lex
 
-    # The lexer empties strings and comments; `from '…'` specifiers are read from the
-    # original at the same offsets.
-    code, _ = _lex(content)
+    # The lexer the placeholder check uses: strings and comments emptied, so neither
+    # is ever read as an export; `from '…'` specifiers are read from the original.
+    code, _ = lex(content)
     out = Exports()
 
     def add(name: str, kind: str = "named") -> None:
@@ -144,11 +160,14 @@ def _javascript(content: str) -> Exports:
             bucket.append(name)
 
     for m in _DECL.finditer(code):
-        kind = m.group(2).split()[-1]
+        kind = m.group(2).split()[-1].strip("*")
+        name = m.group(3)
+        if name in _NOT_A_NAME:
+            name = ""  # `export default class extends Base`
         if m.group(1):
-            out.default = m.group(3)
-        else:
-            add(m.group(3), "type" if kind in ("interface", "type") else "named")
+            out.default = name
+        elif name:
+            add(name, "type" if kind in ("interface", "type") else "named")
     for m in _DEFAULT_EXPR.finditer(code):
         if out.default is None:
             out.default = m.group(1) or ""
@@ -187,7 +206,10 @@ def _javascript(content: str) -> Exports:
             if re.fullmatch(_IDENT, name):
                 add(name)
     for m in _CJS_NAMED.finditer(code):
-        add(m.group(1))
+        if m.group(1) == "default":
+            out.default = out.default or ""  # `exports.default = X`: a transpiled default
+        else:
+            add(m.group(1))
     return out
 
 

@@ -36,6 +36,7 @@ import tokenize
 from typing import Iterable, Optional
 
 from app.build.check import Problem
+from app.build.exports import JS_EXT
 
 PLACEHOLDER = "placeholder"
 WEAK_TEST = "weak_test"
@@ -45,7 +46,7 @@ KINDS = (PLACEHOLDER, WEAK_TEST)
 #: nothing to a repair prompt the first three didn't.
 _PER_FILE = 3
 
-_JS_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_JS_EXT = JS_EXT
 _CSS_EXT = (".css", ".scss")
 #: Files that are meant to be empty.
 _EMPTY_OK = frozenset({"__init__.py", "conftest.py", ".gitkeep", ".keep", "py.typed", ".nojekyll"})
@@ -526,7 +527,7 @@ _KEYWORDS_BEFORE_REGEX = frozenset(
 )
 
 
-def _lex(content: str) -> tuple[str, list[tuple[int, str]]]:
+def lex(content: str) -> tuple[str, list[tuple[int, str]]]:
     """(the code with every string, template, regex and comment emptied to spaces,
     the comments with their lines).
 
@@ -708,7 +709,7 @@ def _js_body(code: str, start: int) -> Optional[tuple[int, int]]:
 
 
 def _javascript(path: str, content: str) -> list[Problem]:
-    code, comments = _lex(content)
+    code, comments = lex(content)
     out = _comments(path, comments)
     if not code.strip(" \n\t;"):
         return [Problem(path, "has no code in it. Write the module.", PLACEHOLDER)]

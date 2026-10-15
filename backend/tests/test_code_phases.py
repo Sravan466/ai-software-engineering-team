@@ -320,9 +320,9 @@ def test_a_phase_spawns_one_javascript_check_however_many_files(stub_router, mon
     runs = []
     real = build_check._run_js
 
-    def counting(groups):
+    def counting(groups, *args, **kwargs):
         runs.append(groups)
-        return real(groups)
+        return real(groups, *args, **kwargs)
 
     monkeypatch.setattr(build_check, "_run_js", counting)
     code = {f"frontend/app/mod{i}.tsx": f"export const VALUE{i} = {i};\n" for i in range(1, 5)}

@@ -126,6 +126,10 @@ class _Written:
     read: bool = False
 
     def real_exports(self) -> Optional[module_exports.Exports]:
+        """What the code exports — None for a file cut off before it ended, whose
+        exports are only the ones that made it in before the cut."""
+        if not self.complete:
+            return None
         if not self.read:
             self.exports, self.read = module_exports.read(self.path, self.code), True
         return self.exports
@@ -709,6 +713,7 @@ class _Run:
                 # was, as a cut-off one does, and the change's record says why.
                 self.written[path] = _Written(path, self.existing[path], w.language, w.purpose, w.origin)
                 self._judge(self.written[path])
+                self._agree(self._entry(path), self.written[path].real_exports())
                 if path not in self.lost:
                     self.lost.append(path)
                 continue
@@ -1140,9 +1145,11 @@ class _Run:
             # The names its code really has (#101), not what the plan guessed; the plan's
             # list only for a file no reader here understands.
             real = w.real_exports()
-            if real is not None:
+            if real is not None and not real.empty():
                 line += f". Exports: {real.render()}"
             elif planned is not None and planned.exports:
+                # Read nothing — a reader can miss what it can't parse: the plan's list,
+                # which is what the plan shown beside this says too.
                 line += f". Exports: {', '.join(planned.exports[:12])}"
             lines.append(line)
         return "\n".join(lines) + "\n"
@@ -1343,6 +1350,7 @@ class _Run:
             w = self.written[path]
             failing.append(_Written(w.path, w.code, w.language, w.purpose, w.origin, w.complete, problems, w.stack))
         before = dict(self.written)
+        planned_before = {p.path: list(p.exports) for p in self.planned}
         n = self._batch_size(len(failing))
         for i in range(0, len(failing), n):
             claim.between_calls()
@@ -1363,14 +1371,19 @@ class _Run:
         output2, errors2 = self._assemble()
         stack2 = charter_violations(self.ctx.charter, self.agent.key, output2) if settings.enforce_stack_charter else []
         build2 = self.agent._build_check(self.ctx, output2)
-        self._take_exports(build2)
         run2 = self.agent._run_build(self.ctx, output2, build2) if real else None
         for path in named:
             activity.file(path, "ok" if not any(p.path == path for p in (build2.problems if build2 else [])) else "failed")
         # The second check is kept only when it is no worse than the first.
         if build2 is not None and len(build2.problems) <= len(build.problems):
+            self._take_exports(build2)
             return build2, output2, errors2, stack2, run2
+        # The repair isn't kept, nor what it said about exports (#101): the plan goes
+        # back to describing the files that ship.
         self.written = before
+        for p in self.planned:
+            if p.path in planned_before:
+                p.exports = planned_before[p.path]
         for path in named:
             activity.file(path, "failed")
         return build, output, errors, stack, _UNCHANGED

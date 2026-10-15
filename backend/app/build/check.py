@@ -352,13 +352,14 @@ def _paths_for(files: dict[str, str], side: str) -> dict:
 EXPORT_MISS_CODES = frozenset({2305, 2724, 2613, 2614, 1192})
 
 
-def _run_js(groups: list[dict]) -> tuple[Optional[list[dict]], Optional[str], list[dict]]:
-    """(diagnostics, reason-if-not-run, each reported module's exports)."""
+def _run_js(groups: list[dict], exports: bool = False) -> tuple[Optional[list[dict]], Optional[str], list[dict]]:
+    """(diagnostics, reason-if-not-run, each reported module's exports — asked for only
+    when `exports`)."""
     ts_path = toolchain.typescript()
     node = toolchain.node()
     if not ts_path or not node:
         return None, toolchain.unavailable_reason() or "No JavaScript parser is available.", []
-    payload = json.dumps({"typescript": ts_path, "groups": groups})
+    payload = json.dumps({"typescript": ts_path, "groups": groups, "exports": exports})
     try:
         result = subprocess.run(
             [node, str(_CHECKER)],
@@ -386,8 +387,8 @@ _VIRTUAL = re.compile(r"/__build__/(?:root/)?")
 
 
 def _js_problem(d: dict) -> Problem:
-    # The module as the build names it — a model told `"/__build__/frontend/x"` has no
-    # export would import that path (#101).
+    # `check_js.cjs` names a module as the importing file wrote it; anywhere it couldn't,
+    # by the build's own path rather than the checker's in-memory root (#101).
     message = _VIRTUAL.sub("", d.get("message") or "does not parse")
     if d.get("syntactic"):
         return Problem(d["path"], f"does not parse: {message}", "syntax", d.get("line"))
@@ -446,8 +447,9 @@ def unfinished(path: str, content: str) -> list[Problem]:
 
 
 # ── the check ────────────────────────────────────────────────────────────────
-def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
-    """Check `report_on` (placed paths) against the whole tree `files`."""
+def check_tree(files: dict[str, str], report_on: Iterable[str], exports: bool = False) -> BuildCheck:
+    """Check `report_on` (placed paths) against the whole tree `files`. `exports`: also
+    say what each checked module exports (#101) — what a code phase's next call is told."""
     tree = set(files)
     dirs = {posixpath.dirname(p) for p in tree}
     # Every ancestor, so `backend/app` counts as a package when only
@@ -466,7 +468,7 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
         if path.endswith(".py"):
             out.checked += 1
             problems += _check_python(path, content, tree, dirs)
-            found = module_exports.read(path, content)
+            found = module_exports.read(path, content) if exports else None
             if found is not None:
                 out.exports[path] = found
         elif path.endswith(".json"):
@@ -495,7 +497,7 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
                     "paths": _paths_for(files, side),
                 }
             )
-        diagnostics, reason, exported = _run_js(groups)
+        diagnostics, reason, exported = _run_js(groups, exports)
         if diagnostics is None:
             out.unchecked = js_targets
             out.reason = reason
@@ -596,7 +598,7 @@ def check_phase(
     from app.build.scaffold import platform_owned
 
     targets = [p for p in mine if not platform_owned(p)]
-    out = check_tree(files, targets)
+    out = check_tree(files, targets, exports=True)
     names = name_problems(files, targets, phase_key, prior_outputs) if settings.check_endpoint_references else []
     if names:
         # After the compile problems: a file that does not parse is fixed first, and
