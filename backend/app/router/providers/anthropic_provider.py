@@ -21,6 +21,15 @@ log = get_logger(__name__)
 _ADAPTIVE_THINKING_PREFIXES = ("claude-opus-4-8", "claude-opus-4-7", "claude-fable-5")
 
 
+def _shape(messages: list[ChatMessage]) -> tuple[str, list[dict]]:
+    """(system text, the conversation) as the Messages API takes them."""
+    system_text = "\n\n".join(m.content for m in messages if m.role == "system")
+    convo = [{"role": m.role, "content": m.content} for m in messages if m.role in ("user", "assistant")]
+    if not convo:  # the API requires at least one user turn
+        convo = [{"role": "user", "content": system_text or "Proceed."}]
+    return system_text, convo
+
+
 class AnthropicProvider(CloudKey, LLMProvider):
     name = "anthropic"
     is_local = False
@@ -40,6 +49,20 @@ class AnthropicProvider(CloudKey, LLMProvider):
             self._client = anthropic.Anthropic(api_key=self.secret(), max_retries=0)
         return self._client
 
+    def count_tokens(self, messages: list[ChatMessage], model: str) -> Optional[int]:
+        """Anthropic's own count of a request (#101): `/v1/messages/count_tokens`."""
+        if not self.available():
+            return None
+        system_text, convo = _shape(messages)
+        kwargs: dict = {"model": model, "messages": convo}
+        if system_text:
+            kwargs["system"] = system_text
+        try:
+            return int(self._get_client().messages.count_tokens(**kwargs).input_tokens)
+        except Exception as e:  # noqa: BLE001 - a count is a courtesy; the estimate stands in
+            log.info("Anthropic couldn't count the prompt for %s: %s", model, type(e).__name__)
+            return None
+
     def generate(
         self,
         messages: list[ChatMessage],
@@ -52,14 +75,7 @@ class AnthropicProvider(CloudKey, LLMProvider):
             raise ProviderError("ANTHROPIC_API_KEY is not set.", retryable=False)
 
         # Anthropic takes `system` separately from the user/assistant turns.
-        system_text = "\n\n".join(m.content for m in messages if m.role == "system")
-        convo = [
-            {"role": m.role, "content": m.content}
-            for m in messages
-            if m.role in ("user", "assistant")
-        ]
-        if not convo:  # the API requires at least one user turn
-            convo = [{"role": "user", "content": system_text or "Proceed."}]
+        system_text, convo = _shape(messages)
 
         kwargs: dict = {
             "model": model,

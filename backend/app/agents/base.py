@@ -36,8 +36,8 @@ from app.orchestration.charter import Charter
 from app.orchestration.charter import violations as charter_violations
 from app.orchestration import activity
 from app.orchestration.claim import Superseded
-from app.router.model_profile import ModelProfile
-from app.router.base import RequestCancelled
+from app.router.model_profile import ModelProfile, fitted
+from app.router.base import PromptTooLong, RequestCancelled, WindowTooSmall
 from app.router.router import router
 from app.schemas.agent_outputs import GenericOutput, response_schema, shape_text, subset_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse, Usage
@@ -109,6 +109,8 @@ _SKILLS_FRAME = "# How this team does this work — follow these procedures\n{bo
 #: handed "follow these procedures" with the knowledge base sitting underneath it as
 #: the only thing that looks like an answer.
 _SKILLS_FRAME_COST = len(_SKILLS_FRAME.format(body="")) + 1  # + the "\n" join
+#: The least reference material or memory worth a heading of its own (#101).
+_MIN_CONTEXT_CHARS = 200
 
 
 @dataclass
@@ -266,12 +268,11 @@ class BaseAgent:
 
             ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
         )
-        ask = self._build_messages(ctx, profile)
         # Exact output (#101): sampled low on a local runtime; a model's own setting, a
         # thinking model's card, or a cloud provider's tuned default still decides.
         options = GenerationOptions(json_mode=True, json_schema=self._schema_for(ctx), exact=True)
 
-        resp = self._complete(ask.messages, ctx, options)
+        resp, ask, profile = self._send(ctx, options, profile, lambda p: self._build_messages(ctx, p))
         responses = [resp]
         # A reply cut off at the output limit is kept for its finished fields, and
         # the next round asks only for what is missing — not for the whole object
@@ -308,14 +309,14 @@ class BaseAgent:
             # loses the system prompt that carries it.
             if partial:
                 missing = self._missing(partial)
-                retry = self._continue_messages(ctx, profile, partial, missing)
+                build = lambda p, missing=missing: self._continue_messages(ctx, p, partial, missing)  # noqa: E731
                 round_options = options.model_copy(
                     update={"json_schema": subset_schema(self.output_model, missing)}
                 )
             else:
-                retry = self._repair_messages(ctx, profile, echo, errors)
+                build = lambda p, echo=echo, errors=errors: self._repair_messages(ctx, p, echo, errors)  # noqa: E731
                 round_options = options
-            resp = self._complete(retry.messages, ctx, round_options)
+            resp, retry, profile = self._send(ctx, round_options, profile, build)
             responses.append(resp)
             merged = bool(partial)
             raw, partial, cut = self._read_reply(resp, partial)
@@ -764,7 +765,7 @@ class BaseAgent:
         return run.as_dict()
 
     def _complete(
-        self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions
+        self, messages: list[ChatMessage], ctx: AgentContext, options: GenerationOptions, pin: Optional[str] = None
     ) -> LLMResponse:
         # Named for the computer answering it: "Backend Engineer for build 'Todo app'".
         with inflight.agent(self.title):
@@ -775,8 +776,34 @@ class BaseAgent:
                 options=options,
                 complexity=self._complexity(ctx),
                 role=self.key,
-                pin=ctx.pin_model,
+                pin=pin or ctx.pin_model,
             )
+
+    def _send(
+        self, ctx: AgentContext, options: GenerationOptions, profile: ModelProfile, build
+    ) -> tuple[LLMResponse, "Prompt", ModelProfile]:
+        """Send what `build(profile)` makes; if it doesn't fit, shrink it and send once more.
+
+        A runtime told not to cut a prompt (#101) refuses it with its real size, and a
+        prompt that met a fallback model is refused before sending: either way the ask
+        is rebuilt — every section budget scaled by what fits over what was sent — for
+        the model that will answer it, and held to that model. Returns the reply, the
+        prompt that got it, and the profile the next round should be sized with.
+        """
+        ask = build(profile)
+        try:
+            return self._complete(ask.messages, ctx, options), ask, profile
+        except PromptTooLong as e:
+            smaller = fitted(e, profile)
+            log.warning(
+                "%s's prompt didn't fit %s (%s). Rebuilt at %s characters and sent once more.",
+                self.title,
+                e.model or smaller.model,
+                e,
+                f"{smaller.prompt_char_budget:,}",
+            )
+            ask = build(smaller)
+            return self._complete(ask.messages, ctx, options, pin=e.model), ask, smaller
 
     # ── prompt construction ─────────────────────────────────────────────────
     def _registry(self, ctx: AgentContext) -> handoff.Registry:
@@ -934,10 +961,14 @@ class BaseAgent:
             if skills_used is not None:
                 skills_used[:] = used
 
-        if ctx.rag_context:
-            parts.append(_RAG_FRAME.format(body=_clip(ctx.rag_context, budget["rag"])))
-        if ctx.memory_context:
-            parts.append(_MEMORY_FRAME.format(body=_clip(ctx.memory_context, budget["memory"])))
+        # Reference material and lessons are context, not instructions: each frame is
+        # paid for out of its own share, and a share too small for anything under its
+        # heading prints nothing at all (#101) — a heading over a "cut here" marker is
+        # room the instructions needed on a small window.
+        for text, frame, name in ((ctx.rag_context, _RAG_FRAME, "rag"), (ctx.memory_context, _MEMORY_FRAME, "memory")):
+            room = budget.get(name, 0) - len(frame.format(body="")) - len(_TRUNCATED) - 2
+            if text and room >= min(len(text), _MIN_CONTEXT_CHARS):
+                parts.append(frame.format(body=_clip(text, room)))
         if ctx.scan_context:
             parts.append(f"{_clip(ctx.scan_context, budget['scan'])}\n")
         if ctx.extra_context:
@@ -960,7 +991,17 @@ class BaseAgent:
             )
 
         parts.append(self._task_for(ctx))
+        if not ctx.editing:
+            # The required keys once more, last (#101): the shape is written at the top
+            # of the system prompt, the first thing a long prompt loses a model's
+            # attention to ("Lost in the Middle").
+            keys = self._required_keys()
+            if keys:
+                parts.append(f"Answer with one JSON object with these keys: {', '.join(keys)}.")
         return "\n".join(parts)
+
+    def _required_keys(self) -> list[str]:
+        return [name for name, info in self.output_model.model_fields.items() if info.is_required()]
 
     def _section_budgets(
         self,
@@ -1001,19 +1042,10 @@ class BaseAgent:
         )
         if overhead > profile.prompt_char_budget:
             # Nothing can be trimmed to fix this: the overhead *is* the instructions
-            # and the shape they carry. Said out loud, because the alternative is the
-            # original bug — a prompt silently cut from the head, and an agent
-            # generating against a shape it was never shown.
-            log.error(
-                "%s cannot fit its own instructions in %s's %s-token window "
-                "(needs ~%s characters, has %s). Raise the window or use a model with "
-                "a larger one; this phase will be truncated.",
-                self.title,
-                profile.model,
-                f"{profile.context_window:,}",
-                f"{overhead:,}",
-                f"{profile.prompt_char_budget:,}",
-            )
+            # and the shape they carry. A prompt sent anyway is cut from the head by the
+            # runtime, or refused — and an agent generating against a shape it was never
+            # shown is the original bug. So the phase stops, and says why (#101).
+            raise WindowTooSmall(window_too_small(self.title, profile, overhead))
         free = max(profile.prompt_char_budget - overhead - max(reserve, 0), 0)
 
         # What a person wrote is served first: what it needs, never more than its
@@ -1255,6 +1287,18 @@ def _finished_fields(text: str) -> dict:
 #: cost exactly what the finished prompt costs, and "55,344" is six characters longer
 #: than "0" — which is the whole overshoot, five sections over.
 _TRUNCATED = "… [cut here to fit this model's context window]\n"
+
+
+def window_too_small(title: str, profile: ModelProfile, chars: int) -> str:
+    """What a phase whose instructions don't fit says (#101), in tokens a person can
+    compare with the window Settings shows."""
+    ratio = max(profile.chars_per_token or settings.approx_chars_per_token, 1.0)
+    return (
+        f"{profile.model}'s {profile.context_window:,}-token window is too small for the {title}: its "
+        f"instructions need about {int(chars / ratio):,} tokens, and {profile.prompt_token_budget:,} are free "
+        f"once the reply's {profile.max_output_tokens:,} are kept. Use a model with a larger window for this "
+        "phase, or give this one a larger window in Settings."
+    )
 
 
 def _pack_skills(skills: tuple[Selected, ...], limit: int) -> tuple[str, list[str]]:

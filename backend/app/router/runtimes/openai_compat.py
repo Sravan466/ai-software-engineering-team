@@ -17,7 +17,7 @@ from typing import Optional
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import ProviderError
+from app.router.base import PromptTooLong, ProviderError, overflow
 from app.router.runtimes.base import (
     CHAT_TIMEOUT,
     EMBED_TIMEOUT,
@@ -229,6 +229,15 @@ class OpenAICompatAdapter(RuntimeAdapter):
             except Exception as e:  # noqa: BLE001
                 raise http_error(e, f"The model server at {self.base_url}") from e
             said = (r.text or "").lower()
+            too_long = overflow(r.text) if r.status_code in (400, 413, 422) else None
+            if too_long is not None:
+                # llama.cpp's own refusal (#101): the prompt as counted, never cut.
+                raise PromptTooLong(
+                    f"The prompt is {too_long[0]:,} tokens; {request.model} has a "
+                    f"{too_long[1] or request.context_window:,}-token window.",
+                    prompt_tokens=too_long[0],
+                    context=too_long[1] or request.context_window,
+                )
             if r.status_code in (400, 422) and send_thinking and any(w in said for w in _THINKING_WORDS) and (
                 "chat_template_kwargs" in body or "reasoning_effort" in body
             ):

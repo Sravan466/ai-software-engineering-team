@@ -139,6 +139,23 @@ class LlamaCppAdapter(OpenAICompatAdapter):
         return Hello(runtime=cls.runtime, base_url=base, version=str(version) if version else None)
 
     # ── what each model is for ───────────────────────────────────────────────
+    def count_tokens(self, model: str, messages: list[dict]) -> Optional[int]:
+        """The prompt exactly as the server will see it (#101): its own chat template
+        applied (`/apply-template`), then its own tokenizer (`/tokenize`)."""
+        try:
+            applied = self._post("/apply-template", {"model": model, "messages": messages}, timeout=FINGERPRINT_TIMEOUT * 4)
+            prompt = applied.json().get("prompt") if applied.status_code == 200 else None
+            if not isinstance(prompt, str):
+                return None
+            counted = self._post(
+                "/tokenize", {"model": model, "content": prompt, "add_special": True, "parse_special": True},
+                timeout=FINGERPRINT_TIMEOUT * 4,
+            )
+            tokens = counted.json().get("tokens") if counted.status_code == 200 else None
+            return len(tokens) if isinstance(tokens, list) else None
+        except (httpx.HTTPError, ValueError):
+            return None
+
     def _props(self) -> dict:
         props = get_json(self.base_url, "/props", self.api_key, timeout=FINGERPRINT_TIMEOUT)
         return props if isinstance(props, dict) else {}

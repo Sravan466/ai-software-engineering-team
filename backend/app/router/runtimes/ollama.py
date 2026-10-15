@@ -24,7 +24,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.router.base import ProviderError
+from app.router.base import PromptTooLong, ProviderError, overflow
 from app.router.runtimes.base import (
     CHAT_TIMEOUT,
     EMBED_TIMEOUT,
@@ -739,6 +739,8 @@ class OllamaAdapter(RuntimeAdapter):
         rejected = False
         try:
             data = self._chat(self._payload(request, schema=True), request.request_id)
+        except PromptTooLong:
+            raise
         except _SchemaFormatRejected as e:
             # The server took the schema badly (an old build, or one whose grammar
             # converter cannot express this shape). Valid JSON plus the shape written
@@ -756,6 +758,8 @@ class OllamaAdapter(RuntimeAdapter):
             # is not pulled, say) still reaches the user as the advice they need.
             try:
                 data = self._chat(self._payload(request, schema=False), request.request_id)
+            except PromptTooLong:
+                raise
             except Exception as inner:  # noqa: BLE001
                 raise _as_provider_error(inner, request.model) from inner
         except Exception as e:  # noqa: BLE001
@@ -817,6 +821,11 @@ class OllamaAdapter(RuntimeAdapter):
             "messages": request.messages,
             "stream": False,
             "options": options,
+            # An oversized prompt is refused with its exact size (#101), never cut from
+            # the head — the default, which drops the system prompt and still answers
+            # 200 — and the window never slides under a reply mid-way.
+            "truncate": False,
+            "shift": False,
         }
         if request.thinking is not None:
             # Only ever sent for a model the runtime says thinks — asking one that
@@ -838,6 +847,16 @@ class OllamaAdapter(RuntimeAdapter):
         r = self._post_cancellable(
             "/api/chat", payload, timeout=CHAT_TIMEOUT, request_id=request_id
         )
+        too_long = overflow(r.text) if r.status_code == 400 else None
+        if too_long is not None:
+            # Before the schema retry below: the same prompt without its schema is no
+            # shorter, and this 400 is about length.
+            raise PromptTooLong(
+                f"The prompt is {too_long[0]:,} tokens; {payload.get('model')} has a "
+                f"{too_long[1] or payload['options'].get('num_ctx'):,}-token window.",
+                prompt_tokens=too_long[0],
+                context=too_long[1] or payload["options"].get("num_ctx"),
+            )
         # Only a 400 is worth retrying without the schema. A 404 is a model that is
         # not pulled and a 5xx is a server in trouble; neither gets better by asking
         # again, and the second attempt would only delay the real error.

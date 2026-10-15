@@ -268,6 +268,9 @@ def _fresh_auto_choices():
 
     for loaded in routers.loaded():
         loaded._prior_cache.clear()
+        # Each model's learned characters-per-token (#101): a stand-in runtime's made-up
+        # counts must not size the next test's prompts.
+        loaded._ratios.clear()
     history.forget()
     yield
 

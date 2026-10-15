@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Optional
 
 from app.core.config import settings
@@ -108,6 +108,9 @@ class ModelProfile:
     described: bool = False
     #: Extra notes worth showing a person (e.g. "this model is small").
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    #: Characters per token as this model's own counts have shown (#101), less a margin.
+    #: None until a call has been seen: the configured estimate stands in.
+    chars_per_token: Optional[float] = None
 
     # ── budgets derived from the window ──────────────────────────────────────
     @property
@@ -135,8 +138,15 @@ class ModelProfile:
 
     @property
     def prompt_char_budget(self) -> int:
-        """The same budget in characters, which is what truncation actually cuts."""
-        return int(self.prompt_token_budget * max(settings.approx_chars_per_token, 1.0))
+        """The same budget in characters, which is what truncation actually cuts — at
+        the ratio this model's own counts have shown, once any have (#101)."""
+        return int(self.prompt_token_budget * max(self.chars_per_token or settings.approx_chars_per_token, 1.0))
+
+    @property
+    def prompt_room(self) -> int:
+        """Tokens a prompt can take before the runtime refuses it or cuts the reply: the
+        window less the reply's ceiling and any reasoning kept beside it."""
+        return max(self.context_window - self.max_output_tokens - self.reasoning_tokens, 1)
 
     @property
     def files_per_call(self) -> int:
@@ -197,6 +207,7 @@ class ModelProfile:
             "kv_cache_type": self.kv_cache_type,
             "defaults": dict(self.defaults),
             "warnings": list(self.warnings),
+            "chars_per_token": self.chars_per_token,
         }
 
 
@@ -247,6 +258,25 @@ def files_per_call(
         return 1
     n = max(profile.max_output_tokens // _avg(avg_file_tokens), 1)
     return min(n, cap) if cap else n
+
+
+def fitted(error, profile: "ModelProfile") -> "ModelProfile":
+    """The profile to rebuild a prompt with after `error` (a `PromptTooLong`) (#101).
+
+    The model it was for — a fallback's, when the router moved on — with the window the
+    runtime really ran, and, when the runtime counted, the characters-per-token that
+    count shows, less 5%: the section budgets are scaled by budget / real count, which
+    is the same thing said per character.
+    """
+    target = getattr(error, "profile", None) or profile
+    window = getattr(error, "context", None)
+    if window and window < target.context_window:
+        target = replace(target, context_window=window, max_output_tokens=min(target.max_output_tokens, max(window // 2, 1)))
+    tokens, chars = getattr(error, "prompt_tokens", None), getattr(error, "chars", 0)
+    if tokens and chars:
+        ratio = chars / tokens * 0.95
+        target = replace(target, chars_per_token=min(ratio, target.chars_per_token or settings.approx_chars_per_token))
+    return target
 
 
 def _avg(avg_file_tokens: Optional[float]) -> int:
