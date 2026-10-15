@@ -260,6 +260,10 @@ def files_per_call(
     return min(n, cap) if cap else n
 
 
+def _same_model(a: "ModelProfile", b: "ModelProfile") -> bool:
+    return (a.provider, a.model, a.context_window) == (b.provider, b.model, b.context_window)
+
+
 def fitted(error, profile: "ModelProfile") -> "ModelProfile":
     """The profile to rebuild a prompt with after `error` (a `PromptTooLong`) (#101).
 
@@ -277,9 +281,12 @@ def fitted(error, profile: "ModelProfile") -> "ModelProfile":
     if tokens and chars:
         # Counted: the real characters-per-token, less 5%.
         target = replace(target, chars_per_token=min(chars / tokens * 0.95, target.ratio))
-    elif estimate and room and estimate > room:
-        # Estimated over the room at this model's ratio: every budget scaled by room over
-        # estimate, so the rebuilt prompt is smaller and not the same one sent again.
+    elif estimate and room and estimate > room and _same_model(target, profile):
+        # Estimated over the room by the model the prompt was built for: it overshot its
+        # own budget (sections it can't leave out), and rebuilt at that budget it would
+        # come back the same. So every budget is scaled by room over estimate. A prompt
+        # sized for a larger model (a fallback's refusal) shrinks by being rebuilt at the
+        # fallback's own budget, and is not shrunk twice.
         target = replace(target, chars_per_token=max(target.ratio * room / estimate * 0.95, 1.0))
     return target
 

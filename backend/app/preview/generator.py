@@ -104,9 +104,11 @@ class EditTooLarge(ValueError):
 class _Calls:
     """Every model call one build makes, in order — for usage and the report."""
 
-    def __init__(self, mode: RoutingMode, preferred_model: Optional[str]) -> None:
+    def __init__(self, mode: RoutingMode, preferred_model: Optional[str], edit: bool = False) -> None:
         self.mode = mode
         self.preferred_model = preferred_model
+        #: An edit's prompt is the part being edited: never cut to fit, refused (#101).
+        self.edit = edit
         self.responses: list[LLMResponse] = []
         self._profile: Optional[ModelProfile] = None
 
@@ -144,6 +146,9 @@ class _Calls:
             # the top and the task at the end, and later passes are sized to fit.
             if profile is self.profile:
                 return messages
+            if self.edit:
+                # Cut, the half the model never saw would be lost from the mockup.
+                raise EditTooLarge(sum(len(m.content) for m in messages), profile.prompt_char_budget)
             self._profile = profile
             return _trimmed(messages, profile.prompt_char_budget)
 
@@ -472,7 +477,7 @@ def edit_section(
     no longer works. Such an edit gets one repair round, then is refused with the
     reasons rather than saved.
     """
-    calls = _Calls(mode, preferred_model)
+    calls = _Calls(mode, preferred_model, edit=True)
     section = P.section_from_data(site, section_id) if site and section_id else None
     if site is None or section is None:
         return _edit_legacy(calls, fragment, instruction), calls.responses
@@ -583,7 +588,7 @@ def edit_element(
     knows it is a link in the navbar. What it returns must keep every binding the
     element had; one repair round, then the edit is refused with what went missing.
     """
-    calls = _Calls(mode, preferred_model)
+    calls = _Calls(mode, preferred_model, edit=True)
     ds = None
     if site is not None:
         plan = P.site_from_data(site)

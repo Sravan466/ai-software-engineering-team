@@ -326,6 +326,7 @@ class BaseAgent:
                 # A repair round that can't be made to fit this window (#101): the best
                 # answer so far stands, rather than the phase failing for want of a repair.
                 log.warning("%s: a repair round doesn't fit this model's window (%s); keeping the best answer.", self.title, e)
+                rounds -= 1  # never sent: not a round, and the answer isn't "repaired"
                 break
             responses.append(resp)
             merged = bool(partial)
@@ -871,12 +872,13 @@ class BaseAgent:
         profile: Optional[ModelProfile] = None,
         reserve: int = 0,
         keys: bool = True,
+        bodies: Optional[_Deps] = None,
     ) -> Prompt:
         if profile is None:
             profile = router.profile_for(
                 ctx.routing_mode, ctx.preferred_model, complexity=self._complexity(ctx), role=self.key, pin=ctx.pin_model
             )
-        bodies = self._prepare_deps(ctx, profile)
+        bodies = bodies or self._prepare_deps(ctx, profile)
         held: Optional[int] = None
         need = self._overhead(ctx, bodies) + max(reserve, 0)
         if need > profile.prompt_char_budget:
@@ -1173,9 +1175,7 @@ class BaseAgent:
         and the head is the system prompt naming the shape being repaired.
         """
         problems = "\n".join(f"- {e}" for e in errors[:12])
-        instruction = (
-            "That response is not the deliverable that was asked for. Fix exactly "
-            f"these problems:\n{problems}\n\n"
+        tail = (
             "Return the COMPLETE JSON object again — every key from the shape, "
             "not a patch and not an apology. Keep everything that was already correct."
             + (
@@ -1184,12 +1184,19 @@ class BaseAgent:
                 else ""
             )
         )
-        # The echo gets what the window leaves beside the instructions (#101) — never a
-        # fixed share that the reply would have to give up its room for.
-        free = profile.prompt_char_budget - self._overhead(ctx, self._prepare_deps(ctx, profile)) - len(instruction)
+        shown = f"That response is not the deliverable that was asked for. Fix exactly these problems:\n{problems}\n\n{tail}"
+        # The echo gets what the window leaves beside the instructions and the person's
+        # own words (#101), never a fixed share the reply or the brief would give up.
+        bodies = self._prepare_deps(ctx, profile)
+        words = sum(len(w) for w in _written(ctx).values())
+        free = profile.prompt_char_budget - self._overhead(ctx, bodies) - words - len(shown)
         echo_budget = min(max(profile.prompt_char_budget // 4, 1000), max(free - len(_TRUNCATED) - 2, 0))
         echo = _clip(attempt, echo_budget) if echo_budget >= 200 else ""
-        ask = self._build_messages(ctx, profile, reserve=len(echo) + len(instruction))
+        # Without the echo, "that response" would point at nothing the model can see.
+        instruction = shown if echo else (
+            f"Your last answer was not the deliverable that was asked for. It had these problems:\n{problems}\n\n{tail}"
+        )
+        ask = self._build_messages(ctx, profile, reserve=len(echo) + len(instruction), bodies=bodies)
         return Prompt(
             messages=[
                 *ask.messages,

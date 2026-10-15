@@ -1622,9 +1622,13 @@ class ModelRouter:
         #: A fallback the prompt didn't fit: the chain goes on to a link it may fit, and
         #: only when none answers is the caller told to re-size it for this one (#101).
         deferred: Optional[PromptTooLong] = None
+        #: The link `profile_for` sized the prompt for: the first one that is available.
+        sized_for: Optional[int] = None
         chars = sum(len(m.content) for m in messages)
         for idx, (pname, model) in enumerate(chain):
             prov = self.provider(pname)
+            if sized_for is None and prov is not None and prov.available():
+                sized_for = idx
             if isinstance(prov, ConnectorProvider) and not prov.available():
                 # The user's own computer: gone, the build waits for it (pauses)
                 # rather than falling through to a model nobody picked. Connected
@@ -1680,7 +1684,7 @@ class ModelRouter:
                 e.model = f"{pname}:{model}"
                 e.profile = self._with_ratio(pname, model, prov.profile(model))
                 log.warning("%s:%s — %s", pname, model, e)
-                if idx == 0:
+                if idx == sized_for:
                     raise  # the model the prompt was sized for: the caller shrinks it
                 deferred = deferred or e
                 attempts.append({"provider": pname, "model": model, "error": str(e), "kind": e.kind,

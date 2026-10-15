@@ -441,9 +441,9 @@ def window_advice(title: str, body: str) -> Advice:
 
 
 def window_help(message: str) -> Optional[dict]:
-    """The failed build's advice, from the message `window_advice(...).sentence()` made."""
-    marker = message.find("too small for the ")
-    cut = message.find(". ", marker) if marker >= 0 else -1
+    """The failed build's advice, from the message `window_advice(...).sentence()` made:
+    its title is the first sentence (no title has ". " in it), its body the rest."""
+    cut = message.find(". ")
     if cut < 0:
         return None
     return window_advice(message[:cut], message[cut + 2 :]).as_dict()

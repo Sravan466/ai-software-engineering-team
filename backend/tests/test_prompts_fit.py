@@ -314,6 +314,7 @@ def test_a_repair_round_that_cant_fit_keeps_the_best_answer(monkeypatch, stub_ro
 
     result = ProductManagerAgent().run(AgentContext(idea="A tool library"))
     assert result.schema_status == "invalid" and result.output.get("summary") == "only this"
+    assert result.repair_rounds == 0, "a round never sent is not counted"
 
 
 def test_an_estimated_refusal_rebuilds_smaller_not_the_same_prompt():
@@ -325,16 +326,38 @@ def test_an_estimated_refusal_rebuilds_smaller_not_the_same_prompt():
 
 
 def test_a_fallback_too_small_for_the_prompt_is_passed_over_for_one_it_fits(router_with, monkeypatch):  # noqa: F811
-    down = _source("down", [ModelEntry(name="m", kind="chat")], up=False)
+    from app.router.base import ProviderError
+
+    head = _source("head", [ModelEntry(name="m", kind="chat")])
+
+    def fails(request):
+        raise ProviderError("the runtime answered 500", retryable=False)
+
+    head.adapter.chat = fails
     small = _source("small", [ModelEntry(name="m", kind="chat")])
     small.adapter = _Counting(small.adapter.models, ratio=3.0, window=4096)
     big = _source("big", [ModelEntry(name="m", kind="chat")])
     big.adapter = _Counting(big.adapter.models, ratio=3.0, window=65536)
-    model_router = router_with(down, small, big)
-    monkeypatch.setattr(model_router, "_resolve_chain", lambda *a, **k: [("down", "m"), ("small", "m"), ("big", "m")])
+    model_router = router_with(head, small, big)
+    monkeypatch.setattr(model_router, "_resolve_chain", lambda *a, **k: [("head", "m"), ("small", "m"), ("big", "m")])
     resp = model_router.complete([ChatMessage(role="user", content="x" * 30_000)], mode=RoutingMode.MANUAL,
                                  options=GenerationOptions())
     assert resp.provider == "big" and not small.adapter.calls
+
+
+def test_the_first_available_link_is_the_one_the_prompt_was_sized_for(router_with, monkeypatch):  # noqa: F811
+    """`profile_for` sizes for the first link that's up: when the head is down, that
+    link's refusal goes back to be shrunk, not on to a bigger model nobody sized for."""
+    down = _source("down", [ModelEntry(name="m", kind="chat")], up=False)
+    small = _source("small", [ModelEntry(name="m", kind="chat")])
+    small.adapter = _Counting(small.adapter.models, ratio=3.0, window=4096)
+    big = _source("big", [ModelEntry(name="m", kind="chat")])
+    model_router = router_with(down, small, big)
+    monkeypatch.setattr(model_router, "_resolve_chain", lambda *a, **k: [("down", "m"), ("small", "m"), ("big", "m")])
+    with pytest.raises(PromptTooLong) as caught:
+        model_router.complete([ChatMessage(role="user", content="x" * 30_000)], mode=RoutingMode.MANUAL,
+                              options=GenerationOptions())
+    assert caught.value.model == "small:m" and not big.adapter.calls
 
 
 def test_a_connected_computers_refusal_is_read_as_one():
@@ -443,3 +466,62 @@ def test_a_code_write_call_that_doesnt_fit_beside_the_full_reply_is_held_to_the_
 
     get_agent("backend_engineer").run(AgentContext(idea="A tool library", prior_outputs={}))
     assert 1024 in caps, "a write call held to the floor"
+
+
+def test_a_fallbacks_estimated_refusal_is_not_shrunk_twice():
+    """Sized for a 32K head, refused by an 8K fallback on the router's estimate: rebuilt
+    at the fallback's own budget it fits, so its ratio is left alone."""
+    fallback = _profile(8192, 4096, chars_per_token=3.5)
+    error = PromptTooLong("about 12,000 tokens; room for 4,096", prompt_tokens=None, context=8192, chars=42_000)
+    error.estimate, error.room, error.profile = 12_000, 4096, fallback
+    rebuilt = fitted(error, _profile(32768, 4096))
+    assert rebuilt.ratio == 3.5 and rebuilt.prompt_char_budget == fallback.prompt_char_budget
+
+
+def test_a_mockup_edit_that_doesnt_fit_is_refused_not_cut(monkeypatch, stub_router):
+    from app.preview.generator import EditTooLarge, edit_section
+
+    def complete(messages, **kwargs):
+        chars = sum(len(m.content) for m in messages)
+        raise PromptTooLong("too long", prompt_tokens=int(chars / 1.5), context=8192, chars=chars)
+
+    stub(monkeypatch, "complete", complete)
+    stub(monkeypatch, "profile_for", lambda *a, **k: _profile(8192, 4096))
+    with pytest.raises(EditTooLarge):
+        edit_section("<section>" + "<p class='a b c'>x</p>" * 300 + "</section>", "Make it blue")
+
+
+def test_a_tight_repair_round_still_carries_the_idea(monkeypatch, stub_router):
+    sent: list = []
+
+    def complete(messages, **kwargs):
+        sent.append("\n".join(m.content for m in messages))
+        resp = _fake_complete(messages, **kwargs)
+        return resp if len(sent) > 1 else resp.model_copy(update={"text": '{"summary": "' + "s" * 6000 + '"}'})
+
+    stub(monkeypatch, "complete", complete)
+    stub(monkeypatch, "profile_for", lambda *a, **k: _profile(4096, 2048))
+    from app.agents.qa_engineer import QAEngineerAgent
+
+    QAEngineerAgent().run(AgentContext(idea="A tool library for a neighbourhood"))
+    assert len(sent) >= 2
+    assert "A tool library for a neighbourhood" in sent[1], "the repair round kept the brief"
+
+
+def test_a_prompt_refused_twice_gets_the_window_advice():
+    from app.core import keyerrors
+    from app.router.base import StillTooLong
+    from app.router.fitting import send_fitting
+
+    def send(messages, pin):
+        error = PromptTooLong("The prompt is 5,000 tokens; m has room for 2,048 beside its reply.", prompt_tokens=5000,
+                              context=4096, chars=15_000)
+        error.model = "ollama:qwen2.5:7b"
+        raise error
+
+    with pytest.raises(StillTooLong) as caught:
+        send_fitting(lambda profile: [], _profile(4096, 2048), send, who="QA Engineer")
+    assert caught.value.kind == keyerrors.WINDOW and not caught.value.retryable
+    advice = keyerrors.window_help(str(caught.value))
+    assert advice["title"] == "QA Engineer's prompt doesn't fit qwen2.5:7b's window"
+    assert advice["body"].startswith("It was rebuilt smaller after the first refusal and refused again")

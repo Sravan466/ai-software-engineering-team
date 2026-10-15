@@ -43,6 +43,14 @@ def send_fitting(
         try:
             return send(built, e.model), built, smaller
         except PromptTooLong as again:
+            from app.core import keyerrors
+
+            model = again.model.split(":", 1)[-1] if again.model else smaller.model
             raise StillTooLong(
-                f"{who}'s prompt still didn't fit {again.model or smaller.model} after it was rebuilt for it: {again}"
+                keyerrors.window_advice(
+                    f"{who}'s prompt doesn't fit {model}'s window",
+                    f"It was rebuilt smaller after the first refusal and refused again ({again}). Pick a model "
+                    "with a larger window for this phase, or raise this model's window (the context ceiling "
+                    "in Settings, or the runtime's own limit).",
+                ).sentence()
             ) from again

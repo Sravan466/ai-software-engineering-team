@@ -173,10 +173,11 @@ class PromptTooLong(ProviderError):
 
 class StillTooLong(ProviderError):
     """A prompt refused as too long, rebuilt for the model, and refused again (#101). Not
-    retried: the same rebuild would be refused a third time."""
+    retried: the same rebuild would be refused a third time. Its advice is a window too
+    small's, so the build page says so rather than blaming the runtime."""
 
     def __init__(self, message: str) -> None:
-        super().__init__(message, retryable=False, kind="too_long")
+        super().__init__(message, retryable=False, kind="window")  # keyerrors.WINDOW
 
 
 class WindowTooSmall(ProviderError):
