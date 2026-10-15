@@ -9,6 +9,8 @@ from typing import Optional
 
 import time
 
+import httpx
+
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.router.base import LLMProvider, ProviderError, cloud_error
@@ -99,7 +101,8 @@ class AnthropicProvider(CloudKey, LLMProvider):
         # An explicit timeout, long enough for the reply asked for (#101). Without one, a
         # newer SDK refuses an unstreamed request whose max_tokens it thinks too long for
         # its default ten minutes, per model, before anything is sent.
-        kwargs["timeout"] = max(600.0, 3600.0 * kwargs["max_tokens"] / 128_000)
+        # Connecting keeps the SDK's own 5 seconds: an unreachable API fails fast.
+        kwargs["timeout"] = httpx.Timeout(max(600.0, 3600.0 * kwargs["max_tokens"] / 128_000), connect=5.0)
 
         started = time.perf_counter()
         try:

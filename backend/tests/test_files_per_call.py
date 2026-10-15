@@ -194,8 +194,9 @@ def test_a_model_that_refuses_a_reply_ceiling_names_its_own_and_is_sent_once_mor
         "for claude-3-5-haiku-20241022", sent)))
     claude.generate([ChatMessage(role="user", content="hi")], "claude-opus-4-8", GenerationOptions())
     assert [k["max_tokens"] for k in sent] == [16_384, 8_192]
-    # An explicit timeout, so a newer SDK never refuses the unstreamed call itself.
-    assert all(k["timeout"] >= 600 for k in sent)
+    # An explicit timeout, so a newer SDK never refuses the unstreamed call itself; an
+    # unreachable API still fails in the SDK's 5 seconds.
+    assert all(k["timeout"].read >= 600 and k["timeout"].connect == 5.0 for k in sent)
 
 
 def test_a_model_chosen_for_a_run_keeps_what_its_check_read(monkeypatch):
@@ -221,3 +222,22 @@ def test_the_default_chosen_in_settings_gets_the_providers_ceiling():
     prov = model_router._cloud["openai"]
     assert prov.profile("gpt-4.1").max_output_tokens == settings.openai_max_output_tokens
     assert prov.profile("gpt-4o").max_output_tokens == settings.max_output_tokens
+
+
+def test_a_short_failing_file_is_still_shown_in_its_fix_call(monkeypatch):
+    """A file of a few lines that fails (an empty test, a missing bracket) is echoed like
+    any other: the model fixes what is there, not a guess from the purpose alone."""
+    fix_prompts: list[str] = []
+
+    def reply(model, wanted, n):
+        prompt = model.prompts[-1]
+        if "# Your last version of" in prompt:
+            fix_prompts.append(prompt)
+            return "".join(f"### {p}\n```python\nVALUE = 1\n```\n\n" for p in wanted)
+        return "".join(f"### {p}\n```python\ndef broken(:\n```\n\n" for p in wanted)
+
+    plan = [{"path": "app/a.py", "purpose": "a"}, {"path": "app/b.py", "purpose": "b"}]
+    model = Scripted("Backend Engineer", plan, reply=reply)
+    _run(monkeypatch, "backend_engineer", model, _profile(200_000, 16_384), AgentContext(idea="A tool library"))
+    # Each failing file is 13 characters: under the 200 an echo used to need.
+    assert fix_prompts and all("def broken(:" in p for p in fix_prompts), "the short files are shown"

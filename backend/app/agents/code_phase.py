@@ -1022,8 +1022,9 @@ class _Run:
         needs = {w.path: len(self._echo_source(w)) + 200 for w in fixing or []}
         total = sum(needs.values())
         for w in fixing or []:
-            share = needs[w.path] if total <= pool else pool * needs[w.path] // max(total, 1)
-            room = max(share - 200, 0)
+            # A file that fits gets its whole need, frame included: a short file is shown
+            # too, never dropped as too small to echo.
+            room = needs[w.path] if total <= pool else max(pool * needs[w.path] // max(total, 1) - 200, 0)
             if w.path in self.existing and any(placeholders.is_lost_code(p) for p in w.problems):
                 # The rewrite lost much of the file (#101): what to start again from is
                 # the file as it was, whole, not the half that came back.
