@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
+from app.build import exports as module_exports
 from app.build import layout, toolchain
 from app.build import packages as pkg
 from app.build.scaffold import js_imports, py_imports
@@ -78,6 +79,12 @@ class BuildCheck:
     unchecked: list[str] = field(default_factory=list)
     reason: Optional[str] = None
     checked: int = 0
+    #: What each checked module really exports (#101): Python read with `ast`, JavaScript
+    #: and TypeScript from the checker's own program. Placed path -> Exports.
+    exports: dict = field(default_factory=dict)
+    #: Imports of a name a module doesn't export, or of a default it doesn't have (TS
+    #: 2305/2724/2613/2614/1192), before any cap — the eval's measure of #101's fix 2.
+    export_misses: int = 0
 
     def messages(self) -> list[str]:
         return [p.text() for p in self.problems]
@@ -341,12 +348,16 @@ def _paths_for(files: dict[str, str], side: str) -> dict:
     return out
 
 
-def _run_js(groups: list[dict]) -> tuple[Optional[list[dict]], Optional[str]]:
-    """(diagnostics, reason-if-not-run)."""
+#: TypeScript's codes for importing what a module doesn't export.
+EXPORT_MISS_CODES = frozenset({2305, 2724, 2613, 2614, 1192})
+
+
+def _run_js(groups: list[dict]) -> tuple[Optional[list[dict]], Optional[str], list[dict]]:
+    """(diagnostics, reason-if-not-run, each reported module's exports)."""
     ts_path = toolchain.typescript()
     node = toolchain.node()
     if not ts_path or not node:
-        return None, toolchain.unavailable_reason() or "No JavaScript parser is available."
+        return None, toolchain.unavailable_reason() or "No JavaScript parser is available.", []
     payload = json.dumps({"typescript": ts_path, "groups": groups})
     try:
         result = subprocess.run(
@@ -357,20 +368,27 @@ def _run_js(groups: list[dict]) -> tuple[Optional[list[dict]], Optional[str]]:
             timeout=max(settings.build_check_timeout_seconds, 10),
         )
     except subprocess.TimeoutExpired:
-        return None, "The JavaScript check took too long and was stopped."
+        return None, "The JavaScript check took too long and was stopped.", []
     except OSError as e:
-        return None, f"The JavaScript check could not start: {e}"
+        return None, f"The JavaScript check could not start: {e}", []
     if result.returncode != 0:
         log.warning("JS check crashed: %s", result.stderr[-400:])
-        return None, "The JavaScript check crashed."
+        return None, "The JavaScript check crashed.", []
     try:
-        return json.loads(result.stdout).get("diagnostics", []), None
+        data = json.loads(result.stdout)
     except ValueError:
-        return None, "The JavaScript check returned something unreadable."
+        return None, "The JavaScript check returned something unreadable.", []
+    return data.get("diagnostics", []), None, [e for e in data.get("exports") or [] if isinstance(e, dict)]
+
+
+#: The checker's in-memory root, as TypeScript prints it in a message: `"/__build__/frontend/components/x"`.
+_VIRTUAL = re.compile(r"/__build__/(?:root/)?")
 
 
 def _js_problem(d: dict) -> Problem:
-    message = d.get("message") or "does not parse"
+    # The module as the build names it — a model told `"/__build__/frontend/x"` has no
+    # export would import that path (#101).
+    message = _VIRTUAL.sub("", d.get("message") or "does not parse")
     if d.get("syntactic"):
         return Problem(d["path"], f"does not parse: {message}", "syntax", d.get("line"))
     name = re.match(r"Cannot find name '([^']+)'", message)
@@ -448,6 +466,9 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
         if path.endswith(".py"):
             out.checked += 1
             problems += _check_python(path, content, tree, dirs)
+            found = module_exports.read(path, content)
+            if found is not None:
+                out.exports[path] = found
         elif path.endswith(".json"):
             out.checked += 1
             problems += syntax_problems(path, content)
@@ -474,7 +495,7 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
                     "paths": _paths_for(files, side),
                 }
             )
-        diagnostics, reason = _run_js(groups)
+        diagnostics, reason, exported = _run_js(groups)
         if diagnostics is None:
             out.unchecked = js_targets
             out.reason = reason
@@ -485,6 +506,11 @@ def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
                 side = d.get("group")
                 full = d["path"] if side == "root" else f"{side}/{d['path']}"
                 problems.append(_js_problem({**d, "path": full}))
+                out.export_misses += 1 if d.get("code") in EXPORT_MISS_CODES else 0
+            for e in exported:
+                side = e.get("group")
+                full = e["path"] if side == "root" else f"{side}/{e['path']}"
+                out.exports[full] = module_exports.from_checker(e)
 
     # Worst first within a file (a syntax error makes the rest noise), capped.
     per_file: dict[str, list[Problem]] = {}

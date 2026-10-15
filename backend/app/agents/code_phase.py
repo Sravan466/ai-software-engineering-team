@@ -19,6 +19,10 @@ sinks the whole phase. Now each phase:
      whole-tree check once the last file is in, so a planned file is never "missing"
      just because it has not been written yet. That check is the phase's one `node` run.
 
+Each later call is told what every written file *really* exports (#101), read from its
+code as it lands, and the plan entry is rewritten to match: a file planned with a
+default export and written with a named one is imported as named from then on.
+
 The deliverable is the same `files: [{path, language, purpose, code}]` shape it always
 was, so everything downstream reads it unchanged. If the plan comes back with no files
 to write, the phase falls back to the one-reply path and says so (`generation.mode`).
@@ -49,6 +53,7 @@ from app.agents.base import (
     _merge,
     _pack_skills,
 )
+from app.build import exports as module_exports
 from app.build import layout, placeholders
 from app.build.check import BuildCheck, Problem, file_problems
 from app.core.artifacts import NOTE_KIND
@@ -115,6 +120,15 @@ class _Written:
     complete: bool = True
     problems: list[Problem] = field(default_factory=list)
     stack: list[str] = field(default_factory=list)
+    #: What the code really exports (#101): read as it lands, then the checker's own
+    #: answer once the tree is checked. None until read; a read that failed stays None.
+    exports: Optional[module_exports.Exports] = None
+    read: bool = False
+
+    def real_exports(self) -> Optional[module_exports.Exports]:
+        if not self.read:
+            self.exports, self.read = module_exports.read(self.path, self.code), True
+        return self.exports
 
     def faults(self) -> list[str]:
         return [p.text() for p in self.problems] + list(self.stack)
@@ -719,6 +733,7 @@ class _Run:
                 # Fewer things wrong wins; a repair that came back worse is not kept.
                 if len(trial.faults()) <= len(w.faults()):
                     self.written[w.path] = trial
+                    self._agree(self._entry(w.path), trial.real_exports())
                     w = trial
             if w.faults():
                 still.append(w)
@@ -808,6 +823,21 @@ class _Run:
             self.unwritten.remove(planned.path)
         self.landed.add(planned.path)
         self.lengths.append(len(code))
+        self._agree(planned, self.written[planned.path].real_exports())
+
+    def _agree(self, planned: Optional[_Planned], real: Optional[module_exports.Exports]) -> None:
+        """The plan says what the code exports, once the code exists (#101): later calls,
+        and the plan they are shown, describe the file as it was written."""
+        if planned is not None and real is not None and not real.empty():
+            planned.exports = real.labels()
+
+    def _take_exports(self, build: Optional[BuildCheck]) -> None:
+        """The tree check's exact answer for each written module, re-exports followed."""
+        for path, real in ((build.exports if build is not None else None) or {}).items():
+            w = self.written.get(path)
+            if w is not None and isinstance(real, module_exports.Exports):
+                w.exports, w.read = real, True
+                self._agree(self._entry(path), real)
 
     def _judge(self, w: _Written) -> None:
         w.problems = file_problems(w.path, w.code)
@@ -1107,7 +1137,12 @@ class _Run:
             line = f"- `{w.path}`"
             if w.purpose:
                 line += f" — {w.purpose}"
-            if planned is not None and planned.exports:
+            # The names its code really has (#101), not what the plan guessed; the plan's
+            # list only for a file no reader here understands.
+            real = w.real_exports()
+            if real is not None:
+                line += f". Exports: {real.render()}"
+            elif planned is not None and planned.exports:
                 line += f". Exports: {', '.join(planned.exports[:12])}"
             lines.append(line)
         return "\n".join(lines) + "\n"
@@ -1180,6 +1215,7 @@ class _Run:
         output, errors = self._assemble()
         stack = charter_violations(ctx.charter, agent.key, output) if settings.enforce_stack_charter else []
         build = agent._build_check(ctx, output)
+        self._take_exports(build)
         if build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
             build, output, errors, stack, _ = self._fix_build(build, output, errors, stack)
         # Once it parses, for real (#75): installed, built and started in a sandbox —
@@ -1327,6 +1363,7 @@ class _Run:
         output2, errors2 = self._assemble()
         stack2 = charter_violations(self.ctx.charter, self.agent.key, output2) if settings.enforce_stack_charter else []
         build2 = self.agent._build_check(self.ctx, output2)
+        self._take_exports(build2)
         run2 = self.agent._run_build(self.ctx, output2, build2) if real else None
         for path in named:
             activity.file(path, "ok" if not any(p.path == path for p in (build2.problems if build2 else [])) else "failed")

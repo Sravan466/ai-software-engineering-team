@@ -1,7 +1,9 @@
 // The compile gate's JavaScript/TypeScript reader. Run by `app.build.check` with node.
 //
 // Reads {typescript, groups: [{name, files: {rel: content}, report: [rel], paths}]}
-// from stdin and writes {diagnostics: [{group, path, line, code, message, syntactic}]}.
+// from stdin and writes {diagnostics: [{group, path, line, code, message, syntactic}],
+// exports: [{group, path, default, named, types}]} — the second is what each reported
+// module really exports (#101), from the same program, re-exports followed.
 //
 // Nothing is written to disk and nothing is installed: the files live in memory under
 // a virtual root, and only TypeScript's own lib files are read from disk. Packages are
@@ -49,6 +51,34 @@ function text(message) {
 }
 
 const out = [];
+const exported = [];
+
+// A module's exports, as the next file's write call is told them: the default's local
+// name ("" when it has none), named values, and types apart from values.
+function exportsOf(checker, sf) {
+  const moduleSymbol = checker.getSymbolAtLocation(sf);
+  if (!moduleSymbol) return null; // a script, or CommonJS: the light reader answers
+  const entry = { default: null, named: [], types: [] };
+  for (const s of checker.getExportsOfModule(moduleSymbol)) {
+    let target = s;
+    if (s.flags & ts.SymbolFlags.Alias) {
+      try { target = checker.getAliasedSymbol(s); } catch (err) { target = s; }
+    }
+    const name = String(s.escapedName);
+    if (name === 'default') {
+      const decl = (target.declarations || s.declarations || [])[0];
+      const local = decl && ts.getNameOfDeclaration(decl);
+      const own = target !== s && target.escapedName !== 'default' ? String(target.escapedName) : '';
+      entry.default = own || (local && local.text) || '';
+    } else if (target.flags & ts.SymbolFlags.Value || !(target.flags & ts.SymbolFlags.Type)) {
+      entry.named.push(name);
+    } else {
+      entry.types.push(name);
+    }
+  }
+  return entry;
+}
+
 for (const group of input.groups) {
   const root = `${VIRTUAL}/${group.name}`;
   const files = new Map(
@@ -100,10 +130,21 @@ for (const group of input.groups) {
     out.push({ group: group.name, path: null, line: null, code: 0, message: String(err), syntactic: false, crashed: true });
     continue;
   }
+  let checker = null;
   for (const rel of group.report) {
     const sf = program.getSourceFile(`${root}/${rel}`);
     if (!sf) continue;
     const syntactic = program.getSyntacticDiagnostics(sf);
+    if (!syntactic.length) {
+      try {
+        checker = checker || program.getTypeChecker();
+        const entry = exportsOf(checker, sf);
+        if (entry) exported.push({ group: group.name, path: rel, ...entry });
+      } catch (err) {
+        // Exports are a courtesy to the next write call; a checker that can't say leaves
+        // the light reader's answer in place.
+      }
+    }
     const semantic = syntactic.length ? [] : program.getSemanticDiagnostics(sf);
     for (const d of syntactic) {
       const pos = d.start !== undefined ? sf.getLineAndCharacterOfPosition(d.start) : null;
@@ -120,4 +161,4 @@ for (const group of input.groups) {
   }
 }
 
-process.stdout.write(JSON.stringify({ diagnostics: out }));
+process.stdout.write(JSON.stringify({ diagnostics: out, exports: exported }));
