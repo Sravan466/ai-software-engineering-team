@@ -33,6 +33,9 @@ class GeminiProvider(CloudKey, LLMProvider):
     is_local = False
     #: Published rather than probed — there is no capability endpoint to ask.
     context_tokens = settings.gemini_context_tokens
+    output_tokens = settings.gemini_max_output_tokens
+    #: The model `output_tokens` is published for (#101).
+    default_model = settings.gemini_default_model
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self._init_key(api_key or settings.gemini_api_key)

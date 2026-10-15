@@ -265,6 +265,8 @@ class LLMProvider(abc.ABC):
     #: Context window this provider publishes for its models, when it publishes one.
     #: Local backends override `profile()` and probe the model instead.
     context_tokens: Optional[int] = None
+    #: The most one reply may be, as the provider publishes it (#101).
+    output_tokens: Optional[int] = None
 
     @abc.abstractmethod
     def available(self) -> bool:
@@ -305,4 +307,5 @@ class LLMProvider(abc.ABC):
             model,
             context_limit=self.context_tokens,
             source="configured" if self.context_tokens else "fallback",
+            max_output=self.output_tokens,
         )

@@ -175,8 +175,9 @@ class Settings(BaseSettings):
     local_concurrent_generations: BlankTolerantInt(1) = 1
     #: The window assumed *only* when a provider will not report one at all.
     model_context_fallback_tokens: BlankTolerantInt(8192) = 8192
-    #: Ceiling on tokens one call may generate. The resolved window can lower this,
-    #: never raise it — half the window is the hard cap.
+    #: The reply ceiling of a local model (#101): what one call may generate when nobody
+    #: has set one for the model in Settings. Half the window is the hard cap. Cloud
+    #: models use their provider's published maximum instead (`*_MAX_OUTPUT_TOKENS`).
     max_output_tokens: BlankTolerantInt(4096) = 4096
     #: Ceiling on tokens one *prompt* may occupy, whatever the window allows. A
     #: 200k-token cloud window would otherwise let every phase inline every earlier
@@ -244,13 +245,10 @@ class Settings(BaseSettings):
     #: Whether the Backend and Frontend phases plan their files and then write them in
     #: batches, as fenced code. Off means the one-JSON-reply path for every build.
     code_by_file: bool = True
-    #: Below either of these a model writes one file per call: its prompt cannot hold the
-    #: plan, the digests and what is already written beside several files' worth of ask,
-    #: or its reply cannot hold several files. Measured budgets, never a model's name.
-    code_batch_min_prompt_chars: BlankTolerantInt(60_000) = 60_000
-    code_batch_min_output_tokens: BlankTolerantInt(8192) = 8192
-    #: What one file is assumed to cost before any is written; the phase refines it from
-    #: its own files as they land.
+    #: A model writes several files per call when its reply holds two or more average files
+    #: and its prompt can hold what those files import (#101); otherwise one. Measured
+    #: budgets, never a model's name. What one file is assumed to cost before any is
+    #: written; the phase refines it from its own files as they land.
     code_avg_file_tokens: BlankTolerantInt(1200) = 1200
     #: The most files one plan may list. Each is a call on a small model.
     code_max_files: BlankTolerantInt(30) = 30
@@ -359,12 +357,20 @@ class Settings(BaseSettings):
     #: Published context windows. Cloud providers expose no probe, so these are
     #: configuration rather than a guess — override them when a model differs.
     anthropic_context_tokens: BlankTolerantInt(200_000) = 200_000
+    #: The most one reply may be (#101), for the provider's default model and as a cap on
+    #: any model's own published limit — still at most half the window. A large reply is
+    #: what lets a cloud model write several files in one call; MAX_OUTPUT_TOKENS is a
+    #: local model's ceiling, and any cloud model's whose limit isn't known. Anthropic's
+    #: stays under 21,333: above it its SDK refuses a request that isn't streamed.
+    anthropic_max_output_tokens: BlankTolerantInt(16_384) = 16_384
     openai_api_key: Optional[SecretStr] = None
     openai_default_model: str = "gpt-4o"
     openai_context_tokens: BlankTolerantInt(128_000) = 128_000
+    openai_max_output_tokens: BlankTolerantInt(16_384) = 16_384
     gemini_api_key: Optional[SecretStr] = None
     gemini_default_model: str = "gemini-1.5-pro"
     gemini_context_tokens: BlankTolerantInt(1_000_000) = 1_000_000
+    gemini_max_output_tokens: BlankTolerantInt(8_192) = 8_192
     #: Seconds a key check may take, per request. The SDKs' own default is ten minutes
     #: with two retries; a Save button waiting on that would look broken.
     key_check_timeout_seconds: BlankTolerantInt(12) = 12

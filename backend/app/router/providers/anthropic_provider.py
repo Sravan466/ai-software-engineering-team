@@ -9,6 +9,8 @@ from typing import Optional
 
 import time
 
+import httpx
+
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.router.base import LLMProvider, ProviderError, cloud_error
@@ -35,6 +37,9 @@ class AnthropicProvider(CloudKey, LLMProvider):
     is_local = False
     #: Published rather than probed — there is no capability endpoint to ask.
     context_tokens = settings.anthropic_context_tokens
+    output_tokens = settings.anthropic_max_output_tokens
+    #: The model `output_tokens` is published for (#101).
+    default_model = settings.anthropic_default_model
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self._init_key(api_key or settings.anthropic_api_key)
@@ -93,10 +98,16 @@ class AnthropicProvider(CloudKey, LLMProvider):
         elif options.temperature is not None:
             kwargs["temperature"] = options.temperature
 
+        # An explicit timeout, long enough for the reply asked for (#101). Without one, a
+        # newer SDK refuses an unstreamed request whose max_tokens it thinks too long for
+        # its default ten minutes, per model, before anything is sent.
+        # Connecting keeps the SDK's own 5 seconds: an unreachable API fails fast.
+        kwargs["timeout"] = httpx.Timeout(max(600.0, 3600.0 * kwargs["max_tokens"] / 128_000), connect=5.0)
+
         started = time.perf_counter()
         try:
             client = self._get_client()
-            resp = client.messages.create(**kwargs)
+            resp = self.within_reply_limit(model, kwargs, client.messages.create)
         except Exception as e:  # noqa: BLE001 - normalise SDK/network errors
             raise cloud_error(self.name, "Anthropic", e) from e
 

@@ -18,6 +18,9 @@ class OpenAIProvider(CloudKey, LLMProvider):
     is_local = False
     #: Published rather than probed — there is no capability endpoint to ask.
     context_tokens = settings.openai_context_tokens
+    output_tokens = settings.openai_max_output_tokens
+    #: The model `output_tokens` is published for (#101).
+    default_model = settings.openai_default_model
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self._init_key(api_key or settings.openai_api_key)
@@ -66,7 +69,7 @@ class OpenAIProvider(CloudKey, LLMProvider):
 
         started = time.perf_counter()
         try:
-            resp = self._get_client().chat.completions.create(**kwargs)
+            resp = self.within_reply_limit(model, kwargs, self._get_client().chat.completions.create)
         except Exception as e:  # noqa: BLE001
             raise cloud_error(self.name, "OpenAI", e) from e
 

@@ -67,7 +67,7 @@ from app.orchestration.charter import violations as charter_violations
 from app.router import inflight
 from app.router.base import WindowTooSmall
 from app.router.fitting import send_fitting
-from app.router.model_profile import ModelProfile, files_per_call, reply_floor, reply_gives_way
+from app.router.model_profile import BATCH_REPLY_SHARE, ModelProfile, files_per_call, reply_floor, reply_gives_way
 from app.router.router import router
 from app.schemas.agent_outputs import EditPlan, response_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
@@ -99,6 +99,8 @@ _WRITE_NOW = "# Write now"
 _FIX_ECHO = "# Your last version of {path} (fix it; keep what was right)\n{fence}{lang}\n{code}{nl}{fence}\n"
 #: A change asked for on the app preview (#78): the file as it is, to change in place.
 _EDIT_ECHO = "# The current version of {path} (change only what is asked)\n{fence}{lang}\n{code}{nl}{fence}\n"
+#: The share of a fix call's free prompt the failing files' echoes may take (#101).
+_FIX_ECHO_SHARE = 0.4
 
 
 @dataclass
@@ -354,6 +356,7 @@ class _Run:
         )
         self.choice = _choice(router.files_per_call_choice(agent.key))
         self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
+        router.note_write_overhead(agent.key, len(self.system))
         self.digests = {
             dep: handoff.digest(dep, ctx.prior_outputs[dep])
             for dep in agent.depends_on
@@ -401,6 +404,7 @@ class _Run:
         )
         self.choice = 1
         self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
+        router.note_write_overhead(agent.key, len(self.system))
         self.digests = {
             dep: handoff.digest(dep, ctx.prior_outputs[dep])
             for dep in agent.depends_on
@@ -571,6 +575,7 @@ class _Run:
 
         self.choice = 1
         self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
+        router.note_write_overhead(agent.key, len(self.system))
         self.digests = {
             dep: handoff.digest(dep, ctx.prior_outputs[dep])
             for dep in agent.depends_on
@@ -630,7 +635,9 @@ class _Run:
         return ends[0] if len(ends) == 1 else None
 
     def _batch_size(self, remaining: int) -> int:
-        n = files_per_call(self.profile, remaining, avg_file_tokens=self._avg(), override=self.choice)
+        n = files_per_call(
+            self.profile, remaining, avg_file_tokens=self._avg(), override=self.choice, overhead=len(self.system)
+        )
         if self.cap:
             n = min(n, self.cap)
         n = max(1, min(n, remaining))
@@ -713,7 +720,7 @@ class _Run:
         rounds = 0
         while failing and rounds < allowed:
             rounds += 1
-            failing = self._repair(failing)
+            failing = [w for group in self._repair_groups(failing) for w in self._repair(group)]
         for path in paths:
             w = self.written[path]
             if self.change_mode and any(placeholders.is_lost_code(p) for p in w.problems):
@@ -726,6 +733,35 @@ class _Run:
                     self.lost.append(path)
                 continue
             activity.file(path, "failed" if w.faults() else "ok")
+
+    def _repair_groups(self, failing: list[_Written]) -> list[list[_Written]]:
+        """`failing` in groups one repair call can each show whole (#101), in order:
+        their echoes within the pool `_messages` gives them beside the real ask, and
+        their files within the reply's share. A batch's failing files sent together
+        would each be clipped to a slice of that room, and the model would rebuild
+        their missing ends from nothing."""
+        groups: list[list[_Written]] = [[]]
+        for w in failing:
+            trial = groups[-1] + [w]
+            if groups[-1] and not self._fix_fits(trial):
+                groups.append([w])
+            else:
+                groups[-1] = trial
+        return groups
+
+    def _fix_fits(self, group: list[_Written]) -> bool:
+        ask = self._write_now([self._plan_entry(w.path) for w in group], False, group)
+        pool = int(max(self.profile.prompt_char_budget - len(self.system) - len(ask) - 1, 0) * _FIX_ECHO_SHARE)
+        reply = int(self.profile.max_output_tokens * BATCH_REPLY_SHARE * self.profile.ratio)
+        sources = [len(self._echo_source(w)) for w in group]
+        return sum(n + 200 for n in sources) <= pool and sum(sources) <= reply
+
+    def _echo_source(self, w: _Written) -> str:
+        """What a fix call shows of `w`: the file as it was when a rewrite lost much of
+        it (#101), else the failing version."""
+        if w.path in self.existing and any(placeholders.is_lost_code(p) for p in w.problems):
+            return self.existing[w.path]
+        return w.code
 
     def _repair(self, failing: list[_Written]) -> list[_Written]:
         """One repair call for `failing`, problems named. Returns what still fails."""
@@ -980,8 +1016,15 @@ class _Run:
             return True
 
         put("write", ask, force=True)
+        # The echoes share one pool, each by its size (#101): a group `_repair_groups`
+        # made fits whole; a single file larger than the pool is clipped to it.
+        pool = int(left * _FIX_ECHO_SHARE)
+        needs = {w.path: len(self._echo_source(w)) + 200 for w in fixing or []}
+        total = sum(needs.values())
         for w in fixing or []:
-            room = max(int(left * 0.4) // max(len(fixing), 1) - 200, 0)
+            # A file that fits gets its whole need, frame included: a short file is shown
+            # too, never dropped as too small to echo.
+            room = needs[w.path] if total <= pool else max(pool * needs[w.path] // max(total, 1) - 200, 0)
             if w.path in self.existing and any(placeholders.is_lost_code(p) for p in w.problems):
                 # The rewrite lost much of the file (#101): what to start again from is
                 # the file as it was, whole, not the half that came back.
