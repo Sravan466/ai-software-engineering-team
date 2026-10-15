@@ -36,7 +36,7 @@ from app.orchestration.charter import Charter
 from app.orchestration.charter import violations as charter_violations
 from app.orchestration import activity
 from app.orchestration.claim import Superseded
-from app.router.model_profile import ModelProfile, reply_gives_way
+from app.router.model_profile import ModelProfile, reply_floor, reply_gives_way
 from app.router.base import PromptTooLong, RequestCancelled, StillTooLong, WindowTooSmall
 from app.router.fitting import send_fitting
 from app.router.router import router
@@ -878,20 +878,21 @@ class BaseAgent:
             )
         bodies = self._prepare_deps(ctx, profile)
         held: Optional[int] = None
-        overhead = self._overhead(ctx, bodies)
-        if overhead + max(reserve, 0) > profile.prompt_char_budget:
-            # The instructions don't fit beside the full reply: the reply gives way, down
-            # to a floor (#101). Below that, the window is too small for this phase.
-            smaller = reply_gives_way(profile, overhead + max(reserve, 0))
-            if smaller is None:
-                floor = reply_gives_way(profile, 0) or profile
-                raise WindowTooSmall(window_too_small(self.title, profile, overhead, floor))
+        need = self._overhead(ctx, bodies) + max(reserve, 0)
+        if need > profile.prompt_char_budget:
+            # The instructions don't fit beside the full reply: the reply gives way (#101),
+            # far enough for the person's own words to come whole too, else down to its
+            # floor. When even the floor leaves the instructions no room, the window is too
+            # small for this phase.
+            if reply_gives_way(profile, need) is None:
+                raise WindowTooSmall(window_too_small(self.title, profile, need - max(reserve, 0)))
+            smaller = reply_gives_way(profile, need + sum(len(w) for w in _written(ctx).values())) or reply_floor(profile)
             log.info(
                 "%s: its instructions don't fit %s beside a full reply, so the reply is capped at %s tokens.",
                 self.title, profile.model, f"{smaller.max_output_tokens:,}",
             )
             profile, held = smaller, smaller.max_output_tokens
-        budget = self._section_budgets(ctx, profile, reserve, bodies)
+        budget = self._section_budgets(ctx, profile, reserve, bodies, whole_words=held is not None)
         used: list[str] = []
         seen: list[dict] = []
         prompt = Prompt(
@@ -1035,6 +1036,7 @@ class BaseAgent:
         profile: Optional[ModelProfile],
         reserve: int = 0,
         bodies: Optional[_Deps] = None,
+        whole_words: bool = False,
     ) -> dict[str, int]:
         """How many characters each section may spend.
 
@@ -1068,22 +1070,25 @@ class BaseAgent:
             # and the shape they carry. A prompt sent anyway is cut from the head by the
             # runtime, or refused — and an agent generating against a shape it was never
             # shown is the original bug. So the phase stops, and says why (#101).
-            floor = reply_gives_way(profile, 0) or profile
-            raise WindowTooSmall(window_too_small(self.title, profile, overhead, floor))
+            raise WindowTooSmall(window_too_small(self.title, profile, overhead))
         free = max(profile.prompt_char_budget - overhead - max(reserve, 0), 0)
 
         # What a person wrote is served first: what it needs, never more than its
         # share *of what is actually free*. Taking the share off the whole budget
         # instead double-counts the overhead, and on a small window that alone puts
         # the prompt back over the top.
-        written = {
-            "idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context, "scan": ctx.scan_context,
-            "change": ctx.change if ctx.editing else "",
-        }
-        budget = {
-            name: min(len(written[name]), int(free * share))
-            for name, share in _PERSON_SHARE.items()
-        }
+        written = _written(ctx)
+        if whole_words:
+            # The reply gave way for these (#101): served whole, the fix the person asked
+            # for first, as far as the room goes.
+            budget = {}
+            for name in ("feedback", "change", "idea", "extra", "scan"):
+                budget[name] = min(len(written[name]), free - sum(budget.values()))
+        else:
+            budget = {
+                name: min(len(written[name]), int(free * share))
+                for name, share in _PERSON_SHARE.items()
+            }
         free = max(free - sum(budget.values()), 0)
 
         present = {
@@ -1320,14 +1325,21 @@ def _finished_fields(text: str) -> dict:
 _TRUNCATED = "… [cut here to fit this model's context window]\n"
 
 
-def window_too_small(title: str, profile: ModelProfile, chars: int, floor: Optional[ModelProfile] = None) -> str:
-    """What a phase whose instructions don't fit says (#101), in tokens a person can
-    compare with the window Settings shows. `floor`: the profile with the reply held to
-    the least it may be, which is the most room the instructions could have had."""
+def _written(ctx: AgentContext) -> dict[str, str]:
+    """The person's own words in a prompt, by section (`_PERSON_SHARE`)."""
+    return {
+        "idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context or "",
+        "scan": ctx.scan_context or "", "change": ctx.change if ctx.editing else "",
+    }
+
+
+def window_too_small(title: str, profile: ModelProfile, chars: int) -> str:
+    """What a phase whose instructions don't fit even beside the smallest reply says
+    (#101), in tokens a person can compare with the window Settings shows."""
     from app.core import keyerrors
 
     ratio = profile.ratio
-    least = floor or profile
+    least = reply_floor(profile)
     return keyerrors.window_advice(
         f"{profile.model}'s {profile.context_window:,}-token window is too small for the {title}",
         f"Its instructions need about {int(chars / ratio):,} tokens, and at most {least.prompt_token_budget:,} "

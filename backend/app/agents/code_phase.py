@@ -67,7 +67,7 @@ from app.orchestration.charter import violations as charter_violations
 from app.router import inflight
 from app.router.base import WindowTooSmall
 from app.router.fitting import send_fitting
-from app.router.model_profile import ModelProfile, files_per_call, reply_gives_way
+from app.router.model_profile import ModelProfile, files_per_call, reply_floor, reply_gives_way
 from app.router.router import router
 from app.schemas.agent_outputs import EditPlan, response_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
@@ -957,15 +957,17 @@ class _Run:
         self.reply_cap = None
         if len(self.system) + len(ask) + 1 > budget:
             # The standing instructions and the list of files to write are the call. The
-            # reply gives way, down to a floor, before the window is called too small
-            # (#101) — sent anyway, a runtime would cut the instructions from the head.
-            smaller = reply_gives_way(self.profile, len(self.system) + len(ask) + 1)
-            if smaller is None:
-                floor = reply_gives_way(self.profile, 0) or self.profile
-                raise WindowTooSmall(
-                    window_too_small(self.agent.title, self.profile, len(self.system) + len(ask), floor)
-                )
-            budget, self.reply_cap = smaller.prompt_char_budget, smaller.max_output_tokens
+            # reply gives way to its floor before the window is called too small (#101),
+            # so the files' real exports and any problems to fix still have room; sent
+            # anyway, a runtime would cut the instructions from the head.
+            if reply_gives_way(self.profile, len(self.system) + len(ask) + 1) is None:
+                raise WindowTooSmall(window_too_small(self.agent.title, self.profile, len(self.system) + len(ask)))
+            floor = reply_floor(self.profile)
+            budget, self.reply_cap = floor.prompt_char_budget, floor.max_output_tokens
+            log.info(
+                "%s: the call for %s doesn't fit %s beside a full reply, so the reply is capped at %s tokens.",
+                self.agent.title, batch[0].path, self.profile.model, f"{floor.max_output_tokens:,}",
+            )
         left = budget - len(self.system)
 
         def put(name: str, text: str, force: bool = False) -> bool:

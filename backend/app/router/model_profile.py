@@ -288,23 +288,28 @@ def fitted(error, profile: "ModelProfile") -> "ModelProfile":
 MIN_REPLY_TOKENS = 1024
 
 
+def reply_floor(profile: "ModelProfile") -> "ModelProfile":
+    """The same window with the reply held to the least it may be (#101):
+    `MIN_REPLY_TOKENS`, or the ceiling when that is smaller. The most room a prompt can
+    have on this model."""
+    return replace(profile, max_output_tokens=min(MIN_REPLY_TOKENS, profile.max_output_tokens))
+
+
 def reply_gives_way(profile: "ModelProfile", chars: int) -> Optional["ModelProfile"]:
-    """The profile to send a call with whose instructions (`chars`) don't fit beside the
-    full reply ceiling: the same window, the reply held to what is left — never below
-    `MIN_REPLY_TOKENS` (or the ceiling, when that is smaller). None when even that floor
-    leaves the instructions no room, which is a window too small for the call (#101).
+    """The profile to send a call with whose prompt (`chars`) doesn't fit beside the full
+    reply ceiling: the same window, the reply held to what the prompt leaves, never below
+    `reply_floor`. None when the prompt doesn't fit even beside the floor (#101).
 
     The prompt still fits and nothing is cut: a runtime given the smaller ceiling stops
-    the reply there, and a reply cut off at it is continued, not lost.
+    the reply there, and a reply cut off at it is continued or split, not lost.
     """
-    room = math.ceil(chars / profile.ratio) + 1  # tokens, rounded up, and one for rounding below
-    needed = math.ceil(room / _PROMPT_SAFETY_MARGIN)
-    output = profile.context_window - profile.reasoning_tokens - needed
-    if output < min(MIN_REPLY_TOKENS, profile.max_output_tokens):
-        return None
-    smaller = replace(profile, max_output_tokens=min(output, profile.max_output_tokens))
+    floor = reply_floor(profile)
     # MAX_PROMPT_TOKENS still guards the bill: a smaller reply buys nothing past it.
-    return smaller if smaller.prompt_char_budget >= chars else None
+    if floor.prompt_char_budget < chars:
+        return None
+    room = math.ceil(chars / profile.ratio) + 1  # tokens, rounded up, and one for rounding below
+    output = profile.context_window - profile.reasoning_tokens - math.ceil(room / _PROMPT_SAFETY_MARGIN)
+    return replace(profile, max_output_tokens=max(min(output, profile.max_output_tokens), floor.max_output_tokens))
 
 
 def _avg(avg_file_tokens: Optional[float]) -> int:

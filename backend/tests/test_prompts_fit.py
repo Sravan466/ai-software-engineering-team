@@ -395,3 +395,51 @@ def test_a_window_too_small_has_its_own_advice_on_the_failed_build(client, monke
     assert help["kind"] == "window" and help["badge"] == "Window too small"
     assert help["title"] == "m's 1,024-token window is too small for the QA Engineer"
     assert help["body"].startswith("Its instructions need about") and help["blocking"] is True
+
+
+def test_when_the_reply_gives_way_a_fix_rounds_feedback_still_reaches_the_model(monkeypatch, stub_router):
+    """The give-way funds the person's own words too: a fix round whose note was cut for
+    want of room would ask for a fix without saying what to fix."""
+    sent: list = []
+
+    def complete(messages, **kwargs):
+        sent.append(messages[-1].content)
+        return _fake_complete(messages, **kwargs)
+
+    stub(monkeypatch, "complete", complete)
+    tight = _profile(4096, 2048, chars_per_token=2.5)
+    stub(monkeypatch, "profile_for", lambda *a, **k: tight)
+    from app.agents.qa_engineer import QAEngineerAgent
+
+    note = "backend/app/services.py line 1 (is unfinished): `total` has no body yet (only `pass`). " * 3
+    QAEngineerAgent().run(AgentContext(idea="A tool library", feedback=note))
+    assert note.strip() in sent[0]
+
+
+def test_the_stop_names_the_smallest_reply_not_the_full_one(monkeypatch, stub_router):
+    from app.agents.base import window_too_small
+    from app.router.model_profile import reply_floor
+
+    profile = _profile(4096, 2048)
+    assert reply_floor(profile).max_output_tokens == 1024
+    message = window_too_small("QA Engineer", profile, 12_000)
+    assert "even with the reply cut to 1,024 tokens" in message
+    assert "at most 2,764 fit" in message
+
+
+def test_a_code_write_call_that_doesnt_fit_beside_the_full_reply_is_held_to_the_floor(monkeypatch):
+    from tests.test_code_phases import Scripted
+
+    model = Scripted("Backend Engineer", [{"path": "app/a.py", "purpose": "a"}])
+    caps: list = []
+
+    def scripted(messages, **kwargs):
+        caps.append(kwargs["options"].max_tokens)
+        return model(messages, **kwargs)
+
+    stub(monkeypatch, "complete", scripted)
+    stub(monkeypatch, "profile_for", lambda *a, **k: _profile(4096, 2048, chars_per_token=1.4))
+    from app.agents import get_agent
+
+    get_agent("backend_engineer").run(AgentContext(idea="A tool library", prior_outputs={}))
+    assert 1024 in caps, "a write call held to the floor"
