@@ -30,7 +30,7 @@ const GROUPS: { key: GenerationField["group"]; title: string; note: string }[] =
   {
     key: "limits",
     title: "Ceilings",
-    note: "These can only lower the model's own limits.",
+    note: "None of these goes past what the model and its window allow.",
   },
   {
     key: "machine",

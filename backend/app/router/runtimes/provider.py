@@ -720,8 +720,8 @@ class SourceProvider(LLMProvider):
             log.warning(
                 "%s stopped at the %s-token output limit rather than finishing. Its "
                 "reply is cut off, so it will not parse as the shape it was asked for. "
-                "Raise MAX_OUTPUT_TOKENS (currently %s) or give the model a larger "
-                "window.",
+                "Raise its Reply ceiling in Settings (or MAX_OUTPUT_TOKENS, %s, when it "
+                "has none), within half its window, or give it a larger window.",
                 model,
                 f"{request.max_tokens:,}",
                 settings.max_output_tokens,

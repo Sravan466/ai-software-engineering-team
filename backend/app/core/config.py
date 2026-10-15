@@ -357,10 +357,12 @@ class Settings(BaseSettings):
     #: Published context windows. Cloud providers expose no probe, so these are
     #: configuration rather than a guess — override them when a model differs.
     anthropic_context_tokens: BlankTolerantInt(200_000) = 200_000
-    #: The most one reply may be, as each provider publishes it for its default model
-    #: (#101) — still at most half the window. A large reply is what lets a cloud model
-    #: write several files in one call; MAX_OUTPUT_TOKENS is a local model's ceiling.
-    anthropic_max_output_tokens: BlankTolerantInt(32_000) = 32_000
+    #: The most one reply may be (#101), for the provider's default model and as a cap on
+    #: any model's own published limit — still at most half the window. A large reply is
+    #: what lets a cloud model write several files in one call; MAX_OUTPUT_TOKENS is a
+    #: local model's ceiling, and any cloud model's whose limit isn't known. Anthropic's
+    #: stays under 21,333: above it its SDK refuses a request that isn't streamed.
+    anthropic_max_output_tokens: BlankTolerantInt(16_384) = 16_384
     openai_api_key: Optional[SecretStr] = None
     openai_default_model: str = "gpt-4o"
     openai_context_tokens: BlankTolerantInt(128_000) = 128_000

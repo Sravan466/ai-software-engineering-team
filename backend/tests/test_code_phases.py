@@ -109,25 +109,29 @@ def test_files_per_call_is_read_from_the_budgets_and_never_the_name(big_budgets)
         small = _profile(4300, 2048, model=name)
         assert files_per_call(small, 9) == 1
         big = _profile(64000, 16384, model=name)
-        assert files_per_call(big, 40) == 16384 // settings.code_avg_file_tokens
+        # Six tenths of the reply, over the average file and its fence (#101).
+        assert files_per_call(big, 40) == int(16384 * 0.6) // (settings.code_avg_file_tokens + 25) == 8
         # The whole plan, when it fits.
         assert files_per_call(big, 5) == 5
     # A reply that holds two or more files writes them together (#101), as many as it
     # holds — the old fixed floor of 8,192 reply tokens is gone.
-    assert files_per_call(_profile(64000, 4096), 9) == 4096 // settings.code_avg_file_tokens == 3
+    assert files_per_call(_profile(64000, 4096), 9) == int(4096 * 0.6) // (settings.code_avg_file_tokens + 25) == 2
     # A reply that holds one, or a prompt too small for a second file's imports, is one.
     assert files_per_call(_profile(64000, 2048), 9) == 1
-    assert files_per_call(_profile(8192, 4096), 9) == 1, "qwen2.5:7b at 8K: no room to write two against"
+    # qwen2.5:7b at 8K and at the starting estimate of a file: no room to write two
+    # against. As the files it writes come in smaller, the average falls and it may.
+    assert files_per_call(_profile(8192, 4096), 9) == 1
+    assert files_per_call(_profile(8192, 4096), 9, avg_file_tokens=354) == 2
     assert files_per_call(_profile(4096, 2048), 9) == 1, "qwen2.5:7b at 4K: one file per call"
     # The instructions a call carries come first.
-    assert files_per_call(_profile(16384, 4096), 9, overhead=3_000) == 3
-    assert files_per_call(_profile(16384, 4096), 9, overhead=30_000) == 1
+    assert files_per_call(_profile(16384, 4096), 9, overhead=3_000, avg_file_tokens=600) == 3
+    assert files_per_call(_profile(16384, 4096), 9, overhead=30_000, avg_file_tokens=600) == 1
     # The person's choice wins, either way.
     assert files_per_call(SMALL, 9, override=3) == 3
     assert files_per_call(SMALL, 9, override="all") == 9
     assert files_per_call(big_budgets, 9, override=2) == 2
     # And a running average of real files moves it.
-    assert files_per_call(big_budgets, 40, avg_file_tokens=4096) == 4
+    assert files_per_call(big_budgets, 40, avg_file_tokens=4096) == int(16384 * 0.6) // (4096 + 25) == 2
 
 
 def test_a_small_window_plans_once_and_writes_one_file_per_call(stub_router, monkeypatch):
@@ -170,9 +174,10 @@ def test_the_files_per_call_a_person_chose_for_the_role_is_used(client, monkeypa
     r = client.put("/api/settings/roles/backend_engineer/files-per-call", json={"value": 2})
     assert r.status_code == 200, r.text
     row = next(x for x in r.json()["roles"] if x["role"] == "backend_engineer")
-    # Automatic is what the budgets say (#101): the stub's 4,096-token reply holds three.
+    # Automatic is what the budgets say (#101): six tenths of the stub's 4,096-token
+    # reply holds two average files.
     try:
-        assert row["files_per_call"] == 2 and row["files_per_call_auto"] == STUB_PROFILE.files_per_call == 3
+        assert row["files_per_call"] == 2 and row["files_per_call_auto"] == STUB_PROFILE.files_per_call == 2
     except AssertionError:
         client.put("/api/settings/roles/backend_engineer/files-per-call", json={"value": None})
         raise

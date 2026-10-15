@@ -78,7 +78,7 @@ from app.router.base import (
     ProviderError,
     RequestCancelled,
 )
-from app.router.model_profile import FILES_ALL, ModelProfile, fallback_profile
+from app.router.model_profile import FILES_ALL, ModelProfile, fallback_profile, files_per_call
 from app.router.providers.anthropic_provider import AnthropicProvider
 from app.router.providers.gemini_provider import GeminiProvider
 from app.router.providers.openai_provider import OpenAIProvider
@@ -147,6 +147,18 @@ _RATIO_CEILING = 6.0
 _COUNT_ABOVE = 0.95
 
 
+
+def _bare_write_overhead(role: str) -> int:
+    """A code-writing role's standing instructions before any run has measured them:
+    the prompt without a charter or a name registry, which a run adds to (#101)."""
+    from app.agents import get_agent
+
+    try:
+        return len(get_agent(role).write_system_prompt())
+    except Exception:  # noqa: BLE001 - no agent, or no write prompt: the rule's own estimate
+        return 0
+
+
 class ModelRouter:
     CLOUD_PROVIDERS = CLOUD_PROVIDERS
 
@@ -209,6 +221,9 @@ class ModelRouter:
         #: (#101): its real characters-per-token, learned the way `_note_reasoning`
         #: learns a reasoning budget — from what the model reported, not its name.
         self._ratios: dict[tuple[str, str], deque] = {}
+        #: Each code-writing role's standing instructions, measured on its last run
+        #: (#101): what Settings' automatic files-per-call is figured against.
+        self._write_overhead: dict[str, int] = {}
         self._ratio_lock = threading.Lock()
         # Apply any keys/models saved at runtime via the Settings UI (overrides .env).
         self._load_persisted()
@@ -566,6 +581,8 @@ class ModelRouter:
             prov.usable = found.status not in keycheck.KEY_REJECTED
             if found.context_tokens and found.model:
                 prov.known_context[found.model] = found.context_tokens
+            if getattr(found, "output_tokens", None) and found.model:
+                prov.known_output[found.model] = found.output_tokens
         if persist:
             self._secrets.set_check(provider, found.to_dict() if found else None)
 
@@ -900,9 +917,15 @@ class ModelRouter:
 
         mode = RoutingMode.AUTO if pair and pair[0] in CLOUD_PROVIDERS else RoutingMode.LOCAL_ONLY
         try:
-            return self.profile_for(mode, None, "high", role).files_per_call
+            profile = self.profile_for(mode, None, "high", role)
+            return files_per_call(profile, 0, overhead=self._write_overhead.get(role) or _bare_write_overhead(role))
         except Exception:  # noqa: BLE001 - nothing resolvable is "no automatic answer"
             return None
+
+    def note_write_overhead(self, role: str, chars: int) -> None:
+        """A code phase's standing instructions, as long as they really were (#101)."""
+        if chars > 0:
+            self._write_overhead[role] = chars
 
     def _refuse_if_it_cannot_write(self, pair: tuple[str, str], what: str) -> None:
         """Refuse a model the runtime says cannot write, at the moment it is chosen.

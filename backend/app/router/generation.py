@@ -101,7 +101,8 @@ FIELDS: tuple[Field, ...] = (
           "Run at most this many tokens of window. Only ever lowers what the runtime "
           "reports; below 4,096 no agent prompt fits.", 512, 1_048_576, 256),
     Field("max_output_tokens", LIMITS, "Reply ceiling", "int",
-          "The most one answer may use, never more than half the window.", 64, 131_072, 64),
+          "The most one answer may use, above or below the default. Never more than half the "
+          "window.", 64, 131_072, 64),
     Field("reasoning_tokens", LIMITS, "Reasoning budget", "int",
           "Extra tokens kept for thinking on top of the answer, when thinking is on.",
           0, 131_072, 64),

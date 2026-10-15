@@ -271,6 +271,7 @@ def _fresh_auto_choices():
         # Each model's learned characters-per-token (#101): a stand-in runtime's made-up
         # counts must not size the next test's prompts.
         loaded._ratios.clear()
+        loaded._write_overhead.clear()
     history.forget()
     yield
 

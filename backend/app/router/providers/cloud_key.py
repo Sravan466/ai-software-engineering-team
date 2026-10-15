@@ -36,6 +36,8 @@ class CloudKey:
         #: Input windows the provider reported per model when the key was checked —
         #: read, where it publishes one, rather than configured.
         self.known_context: dict[str, int] = {}
+        #: Each model's own reply limit, read the same way (#101).
+        self.known_output: dict[str, int] = {}
 
     def set_api_key(self, key: Union[str, SecretStr, None]) -> None:
         """Replace the key (Settings), and drop anything built on the old one."""
@@ -62,8 +64,28 @@ class CloudKey:
     def available(self) -> bool:
         return self._key is not None and self.usable
 
+    def reply_ceiling(self, model: str) -> Optional[int]:
+        """The most one reply from `model` may be (#101).
+
+        Its own published limit, when a key check read one — never above this
+        provider's configured ceiling, which also bounds the bill and how long a reply
+        may take. The configured ceiling as is for the configured default model, whose
+        limit it was set from. Any other model: None, the local default every model
+        takes, since sent a larger `max_tokens` than it allows a model refuses the call.
+        """
+        configured = getattr(self, "output_tokens", None)
+        own = self.known_output.get(model)
+        if own:
+            return min(own, configured) if configured else own
+        return configured if model == getattr(self, "default_model", None) else None
+
     def profile(self, model: str) -> ModelProfile:
         window = self.known_context.get(model)
-        if window:
-            return fallback_profile(self.name, model, context_limit=window, source="probe")
-        return super().profile(model)  # type: ignore[misc]
+        published = getattr(self, "context_tokens", None)
+        return fallback_profile(
+            self.name,
+            model,
+            context_limit=window or published,
+            source="probe" if window else ("configured" if published else "fallback"),
+            max_output=self.reply_ceiling(model),
+        )

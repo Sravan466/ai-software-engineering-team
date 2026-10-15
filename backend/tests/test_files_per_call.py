@@ -21,11 +21,41 @@ from tests.test_code_phases import Scripted, _profile, _run
 
 def test_a_cloud_model_gets_its_providers_published_reply_ceiling():
     claude = AnthropicProvider().profile("claude-opus-4-8")
-    assert claude.max_output_tokens == settings.anthropic_max_output_tokens == 32_000
+    # Under 21,333: above it, Anthropic's SDK refuses a request that isn't streamed.
+    assert claude.max_output_tokens == settings.anthropic_max_output_tokens == 16_384
     assert OpenAIProvider().profile("gpt-4o").max_output_tokens == 16_384
     assert GeminiProvider().profile("gemini-1.5-pro").max_output_tokens == 8_192
     # The bill guard is unchanged: a 200K window still budgets at most MAX_PROMPT_TOKENS.
     assert claude.prompt_token_budget == settings.max_prompt_tokens
+
+
+def test_a_key_checked_window_keeps_the_reply_ceiling_and_each_model_its_own_limit():
+    """The key check reads a model's window and its own reply limit: the window must not
+    cost the ceiling, and a model with a smaller limit is never sent the provider's."""
+    claude = AnthropicProvider()
+    claude.known_context["claude-opus-4-8"] = 200_000
+    assert claude.profile("claude-opus-4-8").max_output_tokens == 16_384
+    # A model whose own limit the check read: that limit, never above the ceiling.
+    claude.known_output["claude-3-5-haiku"] = 8_192
+    assert claude.profile("claude-3-5-haiku").max_output_tokens == 8_192
+    claude.known_output["claude-opus-4-8"] = 32_000
+    assert claude.profile("claude-opus-4-8").max_output_tokens == 16_384
+    # A model nobody read a limit for: the default every model takes, as before.
+    assert OpenAIProvider().profile("gpt-3.5-turbo").max_output_tokens == settings.max_output_tokens
+    gemini = GeminiProvider()
+    gemini.known_context["gemini-2.5-flash"] = 1_048_576
+    assert gemini.profile("gemini-2.5-flash").max_output_tokens == settings.max_output_tokens
+
+
+def test_the_key_check_reads_each_models_own_reply_limit():
+    from app.router import keycheck
+
+    assert keycheck._output_tokens("anthropic", {"max_input_tokens": 200_000, "max_tokens": 32_000}) == 32_000
+    assert keycheck._output_tokens("gemini", {"inputTokenLimit": 1_048_576, "outputTokenLimit": 65_536}) == 65_536
+    assert keycheck._output_tokens("openai", {"id": "gpt-4o"}) is None
+    assert keycheck._output_tokens("anthropic", None) is None
+    saved = keycheck.KeyCheck(status=keycheck.VALID, reason="ok", message="The key works.", model="m", output_tokens=8_192)
+    assert keycheck.KeyCheck.from_dict(saved.to_dict()).output_tokens == 8_192
 
 
 def test_a_local_model_keeps_the_default_and_a_per_model_setting_can_raise_it():
@@ -76,3 +106,39 @@ def test_the_batch_is_what_both_the_reply_and_the_prompt_hold():
     # these, but MAX_PROMPT_TOKENS — the bill guard — leaves room to write two against.
     assert files_per_call(_profile(200_000, 32_000), 40, avg_file_tokens=4_000, overhead=3_000) == 2
     assert files_per_call(_profile(200_000, 32_000), 40, avg_file_tokens=12_000, overhead=3_000) == 1
+
+
+def test_a_batch_leaves_room_in_the_reply():
+    """Six tenths of the reply, over the average file and its fence: a file larger than
+    average, and a cloud model's thinking, fit in what is left."""
+    seven_b = _profile(32_768, 4_096, model="qwen2.5:7b")
+    assert files_per_call(seven_b, 40, avg_file_tokens=1_200) == 2
+    assert files_per_call(seven_b, 40, avg_file_tokens=354) == 6
+    # Gemini's 8,192 holds four of the default, not six.
+    assert files_per_call(_profile(1_000_000, 8_192), 40, overhead=3_000) == 4
+
+
+def test_a_batch_repair_shows_every_file_whole(monkeypatch):
+    """Failing files whose echoes don't fit one fix call together are fixed in more than
+    one, each shown whole, never clipped to a slice of the room."""
+    from app.agents.code_phase import _Run, _Written
+
+    run = _Run.__new__(_Run)
+    run.profile = _profile(16_384, 4_096)
+    run.system = "s" * 3_000
+    big = [_Written(f"app/f{i}.py", "x = 1\n" * 900, "python", "", "plan") for i in range(4)]
+    groups = run._repair_groups(big)
+    assert len(groups) > 1 and [w.path for g in groups for w in g] == [w.path for w in big]
+    small = [_Written(f"app/s{i}.py", "x = 1\n" * 20, "python", "", "plan") for i in range(4)]
+    assert len(run._repair_groups(small)) == 1
+
+
+def test_settings_figures_against_the_instructions_a_run_really_had(client, monkeypatch):
+    from app.router.router import router as model_router
+
+    roles = client.get("/api/settings/roles").json()["roles"]
+    before = next(x for x in roles if x["role"] == "frontend_engineer")["files_per_call_auto"]
+    model_router.note_write_overhead("frontend_engineer", 60_000)
+    roles = client.get("/api/settings/roles").json()["roles"]
+    after = next(x for x in roles if x["role"] == "frontend_engineer")["files_per_call_auto"]
+    assert before >= 2 and after == 1

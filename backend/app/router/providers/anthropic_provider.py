@@ -36,6 +36,8 @@ class AnthropicProvider(CloudKey, LLMProvider):
     #: Published rather than probed — there is no capability endpoint to ask.
     context_tokens = settings.anthropic_context_tokens
     output_tokens = settings.anthropic_max_output_tokens
+    #: The model `output_tokens` is published for (#101).
+    default_model = settings.anthropic_default_model
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self._init_key(api_key or settings.anthropic_api_key)

@@ -235,6 +235,12 @@ _BATCH_PROMPT_SHARE = 0.6
 #: files, and its line in the list of files to write.
 _IMPORTS_PER_FILE = 1.5
 _ASK_LINE_CHARS = 200
+#: The share of the reply a batch's files are expected to fill (#101). The rest is room
+#: for a file larger than the average, the path line and fence around each, and the
+#: thinking a cloud model counts against the same ceiling.
+BATCH_REPLY_SHARE = 0.6
+#: What the `### path` line and the code fence add to each file, in tokens.
+_FENCE_TOKENS = 25
 #: What a code phase's standing instructions cost, for an answer given before any are
 #: built (Settings' "automatic" figure): about what the Frontend's are.
 _WRITE_OVERHEAD = 3_000
@@ -263,8 +269,9 @@ def files_per_call(
     if isinstance(override, int) and not isinstance(override, bool) and override > 0:
         return min(override, cap) if cap else override
     avg = _avg(avg_file_tokens)
-    # The reply has to hold the files (#101) …
-    by_reply = profile.max_output_tokens // avg
+    # The reply has to hold the files (#101), with room to spare: a file larger than
+    # average is common, each one is fenced, and a reply cut off halves the batches left.
+    by_reply = int(profile.max_output_tokens * BATCH_REPLY_SHARE) // (avg + _FENCE_TOKENS)
     # … and the prompt what each of them is written against: its line in the ask and the
     # code of what it imports — about one and a half average files — beside the plan,
     # the digests and the index of what is written, which keep the rest.
@@ -540,8 +547,9 @@ def build_profile(
 
     `tuning` is the model's saved settings (`app.router.generation.read`): a ceiling
     on the window and the reply, the reasoning budget, the thinking setting, and the
-    KV cache type the memory estimate assumes. Each can only lower what the model
-    and the machine allow.
+    KV cache type the memory estimate assumes. None goes past what the model and the
+    machine allow; the reply ceiling replaces MAX_OUTPUT_TOKENS, above it or below it,
+    within half the window (#101).
     """
     from app.router.runtimes.types import THINKING_OFF, THINKING_SETTINGS, thinking_for, thinks
 

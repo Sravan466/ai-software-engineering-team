@@ -89,6 +89,8 @@ class KeyCheck:
     models: list[str] = field(default_factory=list)
     #: The model's input window, when the provider publishes it per model.
     context_tokens: Optional[int] = None
+    #: The model's own reply limit, when the provider publishes it per model (#101).
+    output_tokens: Optional[int] = None
     #: Which key this is about: a truncated hash, so a verdict never outlives its key.
     key_id: Optional[str] = None
     #: Set when a build's own call, not a check, gave this verdict — checked again
@@ -200,6 +202,14 @@ def _context_tokens(provider: str, body: object) -> Optional[int]:
         return None
     value = body.get("max_input_tokens") if provider == "anthropic" else body.get("inputTokenLimit")
     return value if isinstance(value, int) and value > 0 else None
+
+
+def _output_tokens(provider: str, body: object) -> Optional[int]:
+    """The model's own reply limit, from the same answer as its window (#101)."""
+    if not isinstance(body, dict):
+        return None
+    value = body.get("max_tokens") if provider == "anthropic" else body.get("outputTokenLimit")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 # ── classifying an answer ─────────────────────────────────────────────────────
@@ -366,19 +376,23 @@ def _check(provider: str, key: str, model: str, via: Optional[httpx.BaseTranspor
                 if found.status != VALID and found.reason != "restricted":
                     return found
             try:
-                context = _context_tokens(provider, r.json()) if r.status_code == 200 else None
+                listed = r.json() if r.status_code == 200 else None
             except ValueError:
-                context = None
+                listed = None
+            context, output = _context_tokens(provider, listed), _output_tokens(provider, listed)
             # 2 — one token: can it actually make a request, on an account that pays?
             path, body = _one_token(provider, model)
             r = client.post(path, json=body)
             if r.status_code == 200:
-                return KeyCheck(status=VALID, reason="ok", message=f"The key works with {model}.", context_tokens=context)
+                return KeyCheck(
+                    status=VALID, reason="ok", message=f"The key works with {model}.", context_tokens=context,
+                    output_tokens=output,
+                )
             body, raw = _answer(r)
             found = _verdict(provider, r.status_code, body, model, headers=r.headers, text=raw)
             if found.status == MODEL_UNAVAILABLE:
                 found.models = _list_models(client, provider)
-            found.context_tokens = context
+            found.context_tokens, found.output_tokens = context, output
             return found
     except httpx.TimeoutException:
         return KeyCheck(status=UNVERIFIED, reason="timeout", message=f"{who} didn't answer in time. The key is saved but not verified yet.")
