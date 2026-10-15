@@ -10,16 +10,13 @@ import type { ReactNode } from "react";
  * legend names the group for a screen reader, the arrow keys move between options,
  * and each option's description is tied to it with `aria-describedby`.
  *
- * An option can carry something that opens under its own row while it is chosen
- * (Pick a model's select). It opens its own height and folds away again, and while
- * folded it is hidden from the keyboard and assistive tech, not merely clipped.
+ * The build page's review-policy popover asks with these, a column narrow enough
+ * that rows read best. The composer asks the same question with `ChoiceTiles`.
  */
 export type Choice<T extends string> = {
   value: T;
   label: string;
   description: ReactNode;
-  /** Opens under this row while it is the chosen one. */
-  under?: ReactNode;
 };
 
 export default function ChoiceRows<T extends string>({
@@ -63,11 +60,6 @@ export default function ChoiceRows<T extends string>({
                 </span>
               </span>
             </label>
-            {choice.under !== undefined && (
-              <div className="choice-under" data-open={on || undefined}>
-                <div className="choice-under-inner">{choice.under}</div>
-              </div>
-            )}
           </div>
         );
       })}
