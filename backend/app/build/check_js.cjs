@@ -63,6 +63,10 @@ function exportsOf(checker, sf) {
     let target = s;
     if (s.flags & ts.SymbolFlags.Alias) {
       try { target = checker.getAliasedSymbol(s); } catch (err) { target = s; }
+      // A re-export of something that doesn't exist (`export { default } from './x'`
+      // when x has no default): the checker's own error names it; it is not an export.
+      // The checker's "unknown" stand-in has no declaration; every real export has one.
+      if (!target.declarations || target.declarations.length === 0) continue;
     }
     // `symbolName`, not `escapedName`: the latter is TypeScript's internal form, which
     // writes `__foo` as `___foo`.

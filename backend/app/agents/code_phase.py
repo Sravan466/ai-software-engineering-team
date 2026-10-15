@@ -108,6 +108,8 @@ class _Planned:
     origin: str = "plan"
     #: Times the file was asked for and did not come back.
     misses: int = 0
+    #: The exports the plan promised, before the code said what it really exports (#101).
+    promised: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -832,9 +834,25 @@ class _Run:
 
     def _agree(self, planned: Optional[_Planned], real: Optional[module_exports.Exports]) -> None:
         """The plan says what the code exports, once the code exists (#101): later calls,
-        and the plan they are shown, describe the file as it was written."""
+        and the plan they are shown, describe the file as it was written. A name the plan
+        promised and the code doesn't export is kept apart (`missing`), so the next call
+        is told not to import it rather than never hearing of it."""
         if planned is not None and real is not None and not real.empty():
+            if planned.origin == "plan" and not planned.promised:
+                planned.promised = list(planned.exports)
             planned.exports = real.labels()
+
+    def _unexported(self, planned: Optional[_Planned], real: module_exports.Exports) -> list[str]:
+        """Names the plan promised that the code doesn't export."""
+        if planned is None or not planned.promised:
+            return []
+        have = {real.default or "", *real.named, *real.types}
+        wanted = []
+        for entry in planned.promised:
+            name = next(iter(re.findall(r"[A-Za-z_$][\w$]*", entry.replace("(default)", "").replace("(type)", ""))), "")
+            if name and name not in have and name.lower() not in ("default", "type", "export", "exports") and name not in wanted:
+                wanted.append(name)
+        return wanted
 
     def _take_exports(self, build: Optional[BuildCheck]) -> None:
         """The tree check's exact answer for each written module, re-exports followed."""
@@ -1147,6 +1165,9 @@ class _Run:
             real = w.real_exports()
             if real is not None and not real.empty():
                 line += f". Exports: {real.render()}"
+                missing = self._unexported(planned, real)
+                if missing:
+                    line += f" (planned, not exported: {', '.join(missing[:6])})"
             elif planned is not None and planned.exports:
                 # Read nothing — a reader can miss what it can't parse: the plan's list,
                 # which is what the plan shown beside this says too.
@@ -1350,7 +1371,6 @@ class _Run:
             w = self.written[path]
             failing.append(_Written(w.path, w.code, w.language, w.purpose, w.origin, w.complete, problems, w.stack))
         before = dict(self.written)
-        planned_before = {p.path: list(p.exports) for p in self.planned}
         n = self._batch_size(len(failing))
         for i in range(0, len(failing), n):
             claim.between_calls()
@@ -1378,12 +1398,9 @@ class _Run:
         if build2 is not None and len(build2.problems) <= len(build.problems):
             self._take_exports(build2)
             return build2, output2, errors2, stack2, run2
-        # The repair isn't kept, nor what it said about exports (#101): the plan goes
-        # back to describing the files that ship.
+        # The repair isn't kept, and neither is what its check said about exports (#101):
+        # those were only ever taken on the branch above.
         self.written = before
-        for p in self.planned:
-            if p.path in planned_before:
-                p.exports = planned_before[p.path]
         for path in named:
             activity.file(path, "failed")
         return build, output, errors, stack, _UNCHANGED

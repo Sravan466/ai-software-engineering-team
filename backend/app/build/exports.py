@@ -28,7 +28,6 @@ from typing import Optional
 
 #: The JavaScript and TypeScript sources a reader here (and the placeholder check) reads.
 JS_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
-_JS_EXT = JS_EXT
 
 @dataclass
 class Exports:
@@ -50,14 +49,14 @@ class Exports:
     def render(self) -> str:
         """`default: App · named: useTodos, Todo` — how the next write call reads it."""
         if self.python:
-            return f"names: {', '.join(self.named[:16])}" if self.named else "nothing importable"
+            return f"names: {_some(self.named, 20)}" if self.named else "nothing importable"
         parts = []
         if self.default is not None:
             parts.append(f"default: {self.default or '(anonymous)'}")
         if self.named:
-            parts.append(f"named: {', '.join(self.named[:14])}")
+            parts.append(f"named: {_some(self.named, 20)}")
         if self.types:
-            parts.append(f"types: {', '.join(self.types[:8])}")
+            parts.append(f"types: {_some(self.types, 12)}")
         if self.star:
             parts.append("everything from " + ", ".join(f"`{s}`" for s in self.star[:3]))
         return " · ".join(parts) if parts else "no exports"
@@ -72,6 +71,13 @@ class Exports:
         return out[:20]
 
 
+def _some(names: list[str], cap: int) -> str:
+    """The first `cap` names, saying how many more there are: a list cut short silently
+    reads as "and nothing else"."""
+    shown = ", ".join(names[:cap])
+    return shown + (f" (+{len(names) - cap} more)" if len(names) > cap else "")
+
+
 def read(path: str, content: str) -> Optional[Exports]:
     """The exports of one file, or None for a file no reader here understands. Python
     that doesn't parse gives None (the parser names that, and a guess would mislead);
@@ -79,7 +85,7 @@ def read(path: str, content: str) -> Optional[Exports]:
     low = path.lower()
     if low.endswith(".py"):
         return _python(content, package=low.rsplit("/", 1)[-1] == "__init__.py")
-    if low.endswith(_JS_EXT) and not low.endswith(".d.ts"):
+    if low.endswith(JS_EXT) and not low.endswith(".d.ts"):
         return _javascript(content)
     return None
 
@@ -119,6 +125,8 @@ def _top_level(body: list) -> list:
     `with` — `try: import orjson … except ImportError: …` still defines its names."""
     out = []
     for node in body:
+        if isinstance(node, ast.If) and "__main__" in ast.dump(node.test):
+            continue  # `if __name__ == "__main__":` — a script's locals, not the module's
         if isinstance(node, (ast.If, ast.Try, ast.With)):
             for part in ("body", "orelse", "finalbody"):
                 out += _top_level(getattr(node, part, None) or [])
@@ -133,7 +141,8 @@ def _top_level(body: list) -> list:
 _IDENT = r"[A-Za-z_$][\w$]*"
 _DECL = re.compile(
     rf"\bexport\s+(default\s+)?(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?"
-    rf"(function\s*\*\s*|function\s+|class\s+|const\s+enum\s+|const\s+|let\s+|var\s+|enum\s+|interface\s+|type\s+)({_IDENT})"
+    rf"(function\s*\*\s*|function\s+|class\s+|const\s+enum\s+|const\s+|let\s+|var\s+|enum\s+|interface\s+|type\s+"
+    rf"|namespace\s+|module\s+)({_IDENT})"
 )
 #: Words that follow `class` in an anonymous class, never a name.
 _NOT_A_NAME = frozenset({"extends", "implements"})
@@ -143,7 +152,7 @@ _STAR = re.compile(r"\bexport\s+\*\s*(?:as\s+(" + _IDENT + r")\s+)?from\s*(['\"]
 _DESTRUCTURED = re.compile(r"\bexport\s+(?:const|let|var)\s*\{([^}]*)\}\s*=")
 _CJS_DEFAULT = re.compile(rf"\bmodule\.exports\s*=\s*({_IDENT})\s*;?\s*$", re.MULTILINE)
 _CJS_OBJECT = re.compile(r"\bmodule\.exports\s*=\s*\{([^}]*)\}")
-_CJS_NAMED = re.compile(rf"\b(?:module\.)?exports\.({_IDENT})\s*=")
+_CJS_NAMED = re.compile(rf"\b(?:module\.)?exports\.({_IDENT})\s*=(?!=)")
 
 
 def _javascript(content: str) -> Exports:
@@ -154,12 +163,19 @@ def _javascript(content: str) -> Exports:
     code, _ = lex(content)
     out = Exports()
 
+    def top(i: int) -> bool:
+        """Whether offset `i` is at the module's top level, not inside a namespace or a
+        function — `export` inside `namespace Api { … }` is the namespace's."""
+        return code.count("{", 0, i) == code.count("}", 0, i)
+
     def add(name: str, kind: str = "named") -> None:
         bucket = out.types if kind == "type" else out.named
         if name and name not in bucket:
             bucket.append(name)
 
     for m in _DECL.finditer(code):
+        if not top(m.start()):
+            continue
         kind = m.group(2).split()[-1].strip("*")
         name = m.group(3)
         if name in _NOT_A_NAME:
@@ -169,9 +185,11 @@ def _javascript(content: str) -> Exports:
         elif name:
             add(name, "type" if kind in ("interface", "type") else "named")
     for m in _DEFAULT_EXPR.finditer(code):
-        if out.default is None:
+        if out.default is None and top(m.start()):
             out.default = m.group(1) or ""
     for m in _LIST.finditer(code):
+        if not top(m.start()):
+            continue
         is_type = bool(m.group(1))
         for part in m.group(2).split(","):
             part = part.strip()
@@ -186,6 +204,8 @@ def _javascript(content: str) -> Exports:
             elif re.fullmatch(_IDENT, name):
                 add(name, "type" if part_type else "named")
     for m in _STAR.finditer(code):
+        if not top(m.start()):
+            continue
         spec = content[m.start(3) : m.end(3)]
         if m.group(1):
             add(m.group(1))

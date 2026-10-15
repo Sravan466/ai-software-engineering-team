@@ -117,7 +117,8 @@ def test_a_python_module_is_shown_with_its_real_names(monkeypatch):
     })
     _run(monkeypatch, "backend_engineer", model, SMALL)
     written = model.prompts[-1].split("# Written so far")[1].split("\n# ")[0]
-    assert "Exports: names: total" in written and "calculate_total" not in written
+    # The code's names, and the planned one it left out, said rather than dropped.
+    assert "Exports: names: total (planned, not exported: calculate_total)" in written
 
 
 def test_a_repair_after_the_tree_check_sees_the_checkers_exports(monkeypatch):
@@ -182,3 +183,40 @@ def test_an_empty_read_falls_back_to_the_plan_in_the_written_list(monkeypatch):
     _run(monkeypatch, "frontend_engineer", model, SMALL)
     written = model.prompts[-1].split("# Written so far")[1].split("\n# ")[0]
     assert "`frontend/components/Odd.tsx` — odd. Exports: Odd" in written
+
+
+# ── re-review of #105 ────────────────────────────────────────────────────────
+def test_a_re_export_of_nothing_is_not_an_export():
+    files = {
+        "frontend/components/Button.tsx": "export const Button = () => <button/>;\n",
+        "frontend/components/index.ts": "export { default } from './Button';\nexport { Button } from './Button';\n",
+    }
+    check = check_tree(files, list(files), exports=True)
+    found = check.exports["frontend/components/index.ts"]
+    assert found.default is None and found.named == ["Button"]
+
+
+def test_comparisons_and_script_locals_are_not_exports():
+    assert ex.read("a.js", "if (exports.x === 1) {}\nexports.y = 2;\n").named == ["y"]
+    main = "def create():\n    return 1\n\nif __name__ == '__main__':\n    args = parse()\n    server = create()\n"
+    assert ex.read("app/main.py", main).named == ["create"]
+
+
+def test_a_long_list_says_how_many_more_and_namespaces_are_read():
+    many = "".join(f"export const n{i} = {i};\n" for i in range(24))
+    assert ex.read("a.ts", many).render().endswith("n19 (+4 more)")
+    assert ex.read("a.ts", "export namespace Api { export const x = 1; }\n").named == ["Api"]
+
+
+def test_a_planned_export_the_code_left_out_is_said_not_dropped(monkeypatch):
+    plan = [
+        {"path": "lib/hooks.ts", "purpose": "hooks", "exports": ["useTodos", "useFilter"]},
+        {"path": "app/page.tsx", "purpose": "home", "imports": ["lib/hooks.ts"]},
+    ]
+    model = Scripted("Frontend Engineer", plan, code={
+        "frontend/lib/hooks.ts": "export function useTodos() { return []; }\nfunction useFilter() { return 'all'; }\n",
+        "frontend/app/page.tsx": "import { useTodos } from '../lib/hooks';\nexport default function Page() {\n  return <p>{useTodos().length}</p>;\n}\n",
+    })
+    _run(monkeypatch, "frontend_engineer", model, SMALL)
+    written = model.prompts[-1].split("# Written so far")[1].split("\n# ")[0]
+    assert "`frontend/lib/hooks.ts` — hooks. Exports: named: useTodos (planned, not exported: useFilter)" in written
