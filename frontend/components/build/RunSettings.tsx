@@ -609,7 +609,11 @@ export default function RunSettings({
               value: m.id,
               label: m.label,
               description: describe(m, choices, roles, local),
-              more: m.backend === "local_only" ? localExceptions(roles, local) : undefined,
+              // With the tile's own wording, which names the exceptions only beside a default.
+              more:
+                m.backend === "local_only" && choices.localDefault
+                  ? localExceptions(roles, local)
+                  : undefined,
               under: m.needsModel ? picker : undefined,
             }))}
           />

@@ -52,9 +52,12 @@ export default function ChoiceTiles<T extends string>({
   const chosen = on >= 0 ? choices[on] : undefined;
   const open = Boolean(chosen && (chosen.more || chosen.under));
 
-  // While the strip folds it keeps what it showed, rather than folding up empty.
+  // While the strip folds it keeps what it showed, rather than folding up empty: the
+  // last answer it was open for, recorded once that render has committed.
   const shown = useRef<T | null>(null);
-  if (open) shown.current = value;
+  useLayoutEffect(() => {
+    if (open) shown.current = value;
+  }, [open, value]);
   const at = open ? on : choices.findIndex((c) => c.value === shown.current);
   const detail = at >= 0 ? choices[at] : undefined;
 

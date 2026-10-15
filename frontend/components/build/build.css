@@ -613,7 +613,8 @@
   padding: 18px;
   border-top: 1px solid var(--line);
   background: var(--bg-raised);
-  animation: rise var(--tr) ease both;
+  /* `--tr` carries its own curve: a second one drops the whole declaration. */
+  animation: rise var(--tr) both;
   /* The tiles stack by the panel's own width, not the window's: the sidebar takes
      a different share of the same window depending on whether it is open. */
   container-type: inline-size;
@@ -817,7 +818,7 @@
   border: 1px solid var(--line-2);
   border-radius: var(--r);
   background: var(--strip);
-  animation: tiles-in var(--tr) ease both;
+  animation: tiles-in var(--tr) both;
 }
 @keyframes tiles-in { from { opacity: 0; } }
 .tiles-more {
@@ -1271,7 +1272,7 @@
   flex-direction: column;
   gap: 12px;
   margin-top: 10px;
-  animation: rise var(--tr) ease both;
+  animation: rise var(--tr) both;
 }
 
 .pick-rows {
