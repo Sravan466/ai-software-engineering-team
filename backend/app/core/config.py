@@ -228,6 +228,10 @@ class Settings(BaseSettings):
     #: Whether the compile gate also checks names across phases: a frontend call no
     #: backend route serves, a backend route that is a near miss of a registry path.
     check_endpoint_references: bool = True
+    #: Whether the compile gate also sends back code that parses and isn't finished
+    #: (#101): a function with only `pass` or `{}`, a comment where code should be, a
+    #: TODO, lorem ipsum, an empty file, a refusal, a test that asserts nothing.
+    check_placeholders: bool = True
 
     # ── Code phases, file by file (#81) ──
     #: Whether the Backend and Frontend phases plan their files and then write them in

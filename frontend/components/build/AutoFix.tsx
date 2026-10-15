@@ -92,6 +92,12 @@ const BROKE: Record<string, string> = {
   test: "can't run as a test",
 };
 
+/** Code that parses and isn't finished (#101), said as that rather than "doesn't compile". */
+const UNFINISHED: Record<NonNullable<AutoFixProblem["problem"]>, string> = {
+  placeholder: "unfinished",
+  weak_test: "tests nothing",
+};
+
 /** Where a real build found a problem, as a tag beside it. */
 const FOUND_BY: Record<string, string> = {
   install: "Install",
@@ -434,7 +440,9 @@ function CodeLeft({ track }: { track: AutoFixTrack }) {
                 ? "contradicts the stack"
                 : p.kind === "test"
                   ? "still fails"
-                  : BROKE[p.step ?? ""] ?? "doesn't compile"}
+                  : p.problem
+                    ? UNFINISHED[p.problem]
+                    : BROKE[p.step ?? ""] ?? "doesn't compile"}
             </span>
             <ProblemTitle title={p.title} />
           </div>

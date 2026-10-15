@@ -3,6 +3,7 @@
 import type { BuildProblem } from "@/lib/api";
 import { AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
+import { allUnfinished } from "./SchemaBadge";
 
 /**
  * What still does not compile, by file, with the way to send each one back.
@@ -22,6 +23,9 @@ const KIND: Record<string, string> = {
   type: "Type error",
   runtime: "Crashes",
   build: "Build failed",
+  // Parses, and isn't finished (#101).
+  placeholder: "Unfinished",
+  weak_test: "Tests nothing",
 };
 
 /** "uses `Header`, which…" with the name set as code rather than as backticks. */
@@ -51,7 +55,11 @@ export default function BuildProblems({
     <div className="build-problems">
       <div className="build-problems-head">
         <span className="label">
-          {problems.some((p) => p.step) ? "Still doesn't build" : "Still doesn't compile"}
+          {problems.some((p) => p.step)
+            ? "Still doesn't build"
+            : allUnfinished(problems)
+              ? "Still unfinished"
+              : "Still doesn't compile"}
         </span>
         <span className="rule" />
         <span className="field-hint">

@@ -1,5 +1,10 @@
 import type { PhaseResult } from "@/lib/api";
 
+/** Problems that are all stubs and empty tests (#101): the code compiles, it just isn't done. */
+export function allUnfinished(problems: { kind: string }[]): boolean {
+  return problems.length > 0 && problems.every((p) => p.kind === "placeholder" || p.kind === "weak_test");
+}
+
 /**
  * Whether an agent delivered what it was asked for — in shape, in stack, and in
  * whether its code compiles.
@@ -51,7 +56,13 @@ export default function SchemaBadge({ row }: { row: PhaseResult }) {
             .join("\n") || "This phase's code does not compile."
         }
       >
-        {files > 1 ? `${files} files don't ${verb}` : `Doesn't ${verb}`}
+        {allUnfinished(problems)
+          ? files > 1
+            ? `${files} files unfinished`
+            : "Unfinished"
+          : files > 1
+            ? `${files} files don't ${verb}`
+            : `Doesn't ${verb}`}
       </span>,
     );
   } else if (row.build_status === "unchecked") {

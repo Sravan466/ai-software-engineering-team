@@ -382,9 +382,13 @@ def build_note(problems: list) -> str:
         return "This build's code does not compile."
     first = rows[0]
     where = f"{first.get('path')}" + (f" line {first.get('line')}" if first.get("line") else "")
-    subject = "file doesn't" if len(files) == 1 else "files don't"
+    # Code that parses and is still a stub (#101) doesn't fail to compile; it's unfinished.
+    if all(p.get("kind") in ("placeholder", "weak_test") for p in rows):
+        verb = "file isn't finished" if len(files) == 1 else "files aren't finished"
+    else:
+        verb = "file doesn't compile" if len(files) == 1 else "files don't compile"
     return (
-        f"{len(files)} {subject} compile, after the crew's fix rounds. "
+        f"{len(files)} {verb}, after the crew's fix rounds. "
         f"The first: {where} — {first.get('message')}"
     )
 

@@ -667,8 +667,11 @@ class BaseAgent:
         self._carry_theme(ctx, output)
         if not settings.enforce_build_check or self.key not in CODE_PHASES:
             return None
+        # A change request (#79) is held to the files as they were: a rewrite that lost
+        # much of one is sent back like a stub (#101).
+        previous = {"output": ctx.base_output, "asked": ctx.change} if ctx.editing else None
         try:
-            return check_phase(ctx.prior_outputs, self.key, output, ctx.charter)
+            return check_phase(ctx.prior_outputs, self.key, output, ctx.charter, previous=previous)
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure
             log.warning("%s: the compile check could not run: %s", self.title, e)
             return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")

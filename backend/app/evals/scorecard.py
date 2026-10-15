@@ -28,6 +28,13 @@ and, since #81, how the code phases wrote their code:
   files_written         of those, files that were written
   compile_by_path       ok | failed for every file the code phases wrote
 
+and, since #101, code that parses and is not finished:
+
+  placeholders          stubs, comments standing in for code, TODOs, lorem ipsum,
+                        stand-in values, empty files and refusals, over every code file
+  weak_tests            tests that assert nothing (or only what is always true), are
+                        skipped, or mock the module they test
+
 and, since #76, what running QA's tests measured — never the model's own estimate:
 
   tests_passed_pct      passed / tests that ran, across every suite; None if none ran
@@ -43,7 +50,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.agents import handoff
-from app.build import layout, routes
+from app.build import layout, placeholders, routes
 from app.build.check import check_tree
 from app.core import artifacts
 from app.core.constants import CODE_PHASES, SchemaStatus, StackStatus
@@ -163,6 +170,8 @@ def score(db: Session, project: Project) -> dict:
         "compiles": check.status,
         "compile_problems": len(check.problems),
         "compile_unchecked": len(check.unchecked),
+        # Uncapped, unlike the gate's list: a count, not a repair prompt.
+        **placeholders.counts(placeholders.placeholder_problems(tree, code_paths)),
         "mockup": _mockup(db, project),
         "tokens": sum(ph.total_tokens or 0 for ph in phases),
         "names_used_pct": names_used(outputs, agent_tree),

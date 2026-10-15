@@ -290,6 +290,9 @@ def _build_problem(p: dict, phase: str) -> dict:
     # problems have none.
     if p.get("step"):
         out["step"] = str(p["step"])
+    # Code that parses and isn't finished (#101): said as that, not "does not compile".
+    if p.get("kind") in _UNFINISHED:
+        out["problem"] = str(p["kind"])
     return out
 
 
@@ -300,6 +303,9 @@ def deploy_problems(problems: Iterable[dict], phase: str) -> list[dict]:
 
 
 #: How the fix note names what a problem broke, by the step that found it.
+#: What the compile gate's #101 kinds are called in a fix note.
+_UNFINISHED = {"placeholder": "is unfinished", "weak_test": "tests nothing"}
+
 _BROKE = {
     "install": "does not install",
     "build": "fails the build",
@@ -543,7 +549,11 @@ def code_note(
     lines = []
     for p in problems:
         where = f" in `{p['where']}`" if p.get("where") else ""
-        label = "contradicts the stack" if p["kind"] == "stack" else _BROKE.get(p.get("step") or "", "does not compile")
+        label = (
+            "contradicts the stack"
+            if p["kind"] == "stack"
+            else _UNFINISHED.get(p.get("problem") or "") or _BROKE.get(p.get("step") or "", "does not compile")
+        )
         lines.append(f"- ({label}){where}: {p['title']}")
         code = (snippets or {}).get(p["key"])
         if code:

@@ -12,6 +12,9 @@ failures that stop a build before it runs:
   **import**    — a relative import of a file nobody wrote, or a package the platform
                   cannot put in the manifest
 
+and, since #101, code that parses and is still not finished — a stub, a comment
+standing in for code, a test that asserts nothing (`placeholders.py`).
+
 Type errors are not on this list: a parser can't judge them without the packages
 installed. The real build does (`runner.py`, #75) — once a phase parses, it is
 installed and built with `next build`, which type-checks, in a sandbox.
@@ -50,7 +53,7 @@ _TOTAL = 24
 class Problem:
     path: str
     message: str
-    kind: str  # syntax | reference | import | package | type | runtime | build
+    kind: str  # syntax | reference | import | package | type | runtime | build | placeholder | weak_test
     line: Optional[int] = None
     #: Which step of a real build found it (#75) — install | build | boot | vercel.
     #: None for what the parser found.
@@ -406,6 +409,24 @@ def syntax_problems(path: str, content: str) -> list[Problem]:
     return []
 
 
+def file_problems(path: str, content: str) -> list[Problem]:
+    """One file as it lands (#101): it parses, and it isn't a stub.
+
+    An empty file or a refusal is named as that rather than as the parse error it also
+    is: "starts with “I'm sorry…”" is the problem; "invalid syntax on line 1" is a
+    symptom. Placeholders in a file that does not parse wait until it does.
+    """
+    found = unfinished(path, content)
+    if found and placeholders.is_whole_file(found[0]):
+        return found
+    return syntax_problems(path, content) or found
+
+
+def unfinished(path: str, content: str) -> list[Problem]:
+    """A file's placeholders and weak tests, or nothing when the check is switched off."""
+    return placeholders.file_placeholders(path, content) if settings.check_placeholders else []
+
+
 # ── the check ────────────────────────────────────────────────────────────────
 def check_tree(files: dict[str, str], report_on: Iterable[str]) -> BuildCheck:
     """Check `report_on` (placed paths) against the whole tree `files`."""
@@ -537,7 +558,11 @@ def phase_tree(
     return files, mine
 
 
-def check_phase(prior_outputs: dict, phase_key: str, output: dict, charter=None) -> BuildCheck:
+def check_phase(
+    prior_outputs: dict, phase_key: str, output: dict, charter=None, previous: Optional[dict] = None
+) -> BuildCheck:
+    """`previous` (#101): the phase's deliverable before a change request edited it —
+    a file the edit rewrote and lost much of is a problem, unless `asked` for that."""
     files, mine = phase_tree(prior_outputs, phase_key, output, charter)
     # Platform-owned files an agent wrote anyway are replaced, not checked.
     from app.build.scaffold import platform_owned
@@ -550,6 +575,25 @@ def check_phase(prior_outputs: dict, phase_key: str, output: dict, charter=None)
         # its calls are read again once it does.
         out.problems = (out.problems + names)[:_TOTAL]
         out.status = BuildStatus.FAILED.value
+    stubs = [p for path in targets for p in unfinished(path, files[path])]
+    if previous and settings.check_placeholders:
+        before, _ = phase_tree(prior_outputs, phase_key, previous.get("output") or {}, charter)
+        for path in targets:
+            if path in before and before[path] != files[path]:
+                lost = placeholders.lost_code(path, before[path], files[path], str(previous.get("asked") or ""))
+                if lost is not None:
+                    stubs.append(lost)
+    if stubs:
+        # An empty file or a refusal replaces its own parse error, ahead of everything
+        # else in it; other placeholders wait behind the compile problems, and not at
+        # all in a file that does not parse — the rewrite that fixes that is a new file.
+        whole = [p for p in stubs if placeholders.is_whole_file(p)]
+        gone = {p.path for p in whole}
+        broken = {p.path for p in out.problems if p.kind == "syntax"}
+        rest = [p for p in stubs if p not in whole and p.path not in broken]
+        out.problems = (whole + [p for p in out.problems if p.path not in gone] + rest)[:_TOTAL]
+        if whole or rest:
+            out.status = BuildStatus.FAILED.value
     leaks = secret_leaks(files, targets, charter)
     if leaks:
         # Ahead of the compile problems: a key in the browser bundle is the one a
@@ -557,6 +601,10 @@ def check_phase(prior_outputs: dict, phase_key: str, output: dict, charter=None)
         out.problems = (leaks + out.problems)[:_TOTAL]
         out.status = BuildStatus.FAILED.value
     return out
+
+
+# Below the definitions it reads: `placeholders` builds its problems from `Problem`.
+from app.build import placeholders  # noqa: E402
 
 
 # ── names across phases (#80) ────────────────────────────────────────────────
