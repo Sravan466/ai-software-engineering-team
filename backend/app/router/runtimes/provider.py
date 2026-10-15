@@ -477,8 +477,16 @@ class SourceProvider(LLMProvider):
         # it, so it wins over the calling agent's own temperature. Anything unset is
         # left unset, and the runtime's (or the model file's) default applies.
         values = {key: sampling.get(key) for key in SAMPLING_KEYS if key != "thinking"}
-        if values["temperature"] is None:
+        saved = values["temperature"] is not None
+        if not saved:
             values["temperature"] = options.temperature
+        if not saved and options.temperature is not None and profile.thinking not in (None, THINKS_NONE):
+            # A thinking model keeps its card's sampling (#101), not an agent's low
+            # temperature: its model file's default when the runtime reported one, the
+            # configured local temperature otherwise. Qwen3's card says it outright —
+            # never greedy, and 0.6 thinking / 0.7 not.
+            card = profile.defaults.get("temperature")
+            values["temperature"] = card if isinstance(card, (int, float)) and card > 0 else settings.local_temperature
         if thinks(profile.thinking_level):
             # A thinking model decoded greedily repeats itself, sometimes forever —
             # whichever runtime serves it, and whoever asked for temperature 0.
