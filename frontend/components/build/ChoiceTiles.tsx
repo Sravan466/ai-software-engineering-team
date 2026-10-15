@@ -53,8 +53,11 @@ export default function ChoiceTiles<T extends string>({
   onChange: (next: T) => void;
   disabled?: boolean;
 }) {
-  const on = Math.max(0, choices.findIndex((c) => c.value === value));
-  const chosen = choices[on];
+  // A value that isn't among the answers (one stopped being offered, and the page
+  // hasn't moved to another yet) checks nothing, as a radio group would: checking
+  // the first would show an answer the run isn't using, and one you can't click.
+  const on = choices.findIndex((c) => c.value === value);
+  const chosen = on >= 0 ? choices[on] : undefined;
   const open = Boolean(chosen && (chosen.more || chosen.under));
 
   // While the strip folds it keeps what it showed, rather than folding up empty.
@@ -66,7 +69,7 @@ export default function ChoiceTiles<T extends string>({
   const detail = at >= 0 ? choices[at] : undefined;
 
   const inner = useRef<HTMLDivElement>(null);
-  const height = useHeight(inner);
+  const height = useHeight(inner, detail?.value ?? "");
   const moreId = `${name}-more`;
 
   return (
@@ -133,16 +136,24 @@ export default function ChoiceTiles<T extends string>({
 /**
  * An element's laid-out height, kept current as its content changes. Null where it
  * can't be watched, which leaves the strip at its natural height, unanimated.
+ *
+ * Measured before paint whenever `content` changes, so the strip's first frame
+ * already heads for the new height instead of the old one; and on every reflow after
+ * that (the window narrows, a note appears under the select). Unrounded: the strip
+ * clips at this height, and a whole-pixel `offsetHeight` can shave its last pixel.
  */
-function useHeight(ref: RefObject<HTMLElement>): number | null {
+function useHeight(ref: RefObject<HTMLElement>, content: string): number | null {
   const [height, setHeight] = useState<number | null>(null);
+  const watchable = typeof ResizeObserver !== "undefined";
   useLayoutEffect(() => {
+    if (watchable && ref.current) setHeight(ref.current.getBoundingClientRect().height);
+  }, [ref, content, watchable]);
+  useEffect(() => {
     const el = ref.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    setHeight(el.offsetHeight);
-    const ro = new ResizeObserver(() => setHeight(el.offsetHeight));
+    if (!el || !watchable) return;
+    const ro = new ResizeObserver(() => setHeight(el.getBoundingClientRect().height));
     ro.observe(el);
     return () => ro.disconnect();
-  }, [ref]);
+  }, [ref, watchable]);
   return height;
 }
