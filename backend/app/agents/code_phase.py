@@ -19,6 +19,10 @@ sinks the whole phase. Now each phase:
      whole-tree check once the last file is in, so a planned file is never "missing"
      just because it has not been written yet. That check is the phase's one `node` run.
 
+Each later call is told what every written file *really* exports (#101), read from its
+code as it lands, and the plan entry is rewritten to match: a file planned with a
+default export and written with a named one is imported as named from then on.
+
 The deliverable is the same `files: [{path, language, purpose, code}]` shape it always
 was, so everything downstream reads it unchanged. If the plan comes back with no files
 to write, the phase falls back to the one-reply path and says so (`generation.mode`).
@@ -49,6 +53,7 @@ from app.agents.base import (
     _merge,
     _pack_skills,
 )
+from app.build import exports as module_exports
 from app.build import layout, placeholders
 from app.build.check import BuildCheck, Problem, file_problems
 from app.core.artifacts import NOTE_KIND
@@ -103,6 +108,8 @@ class _Planned:
     origin: str = "plan"
     #: Times the file was asked for and did not come back.
     misses: int = 0
+    #: The exports the plan promised, before the code said what it really exports (#101).
+    promised: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,6 +122,19 @@ class _Written:
     complete: bool = True
     problems: list[Problem] = field(default_factory=list)
     stack: list[str] = field(default_factory=list)
+    #: What the code really exports (#101): read as it lands, then the checker's own
+    #: answer once the tree is checked. None until read; a read that failed stays None.
+    exports: Optional[module_exports.Exports] = None
+    read: bool = False
+
+    def real_exports(self) -> Optional[module_exports.Exports]:
+        """What the code exports — None for a file cut off before it ended, whose
+        exports are only the ones that made it in before the cut."""
+        if not self.complete:
+            return None
+        if not self.read:
+            self.exports, self.read = module_exports.read(self.path, self.code), True
+        return self.exports
 
     def faults(self) -> list[str]:
         return [p.text() for p in self.problems] + list(self.stack)
@@ -695,6 +715,7 @@ class _Run:
                 # was, as a cut-off one does, and the change's record says why.
                 self.written[path] = _Written(path, self.existing[path], w.language, w.purpose, w.origin)
                 self._judge(self.written[path])
+                self._agree(self._entry(path), self.written[path].real_exports())
                 if path not in self.lost:
                     self.lost.append(path)
                 continue
@@ -719,6 +740,7 @@ class _Run:
                 # Fewer things wrong wins; a repair that came back worse is not kept.
                 if len(trial.faults()) <= len(w.faults()):
                     self.written[w.path] = trial
+                    self._agree(self._entry(w.path), trial.real_exports())
                     w = trial
             if w.faults():
                 still.append(w)
@@ -808,6 +830,37 @@ class _Run:
             self.unwritten.remove(planned.path)
         self.landed.add(planned.path)
         self.lengths.append(len(code))
+        self._agree(planned, self.written[planned.path].real_exports())
+
+    def _agree(self, planned: Optional[_Planned], real: Optional[module_exports.Exports]) -> None:
+        """The plan says what the code exports, once the code exists (#101): later calls,
+        and the plan they are shown, describe the file as it was written. A name the plan
+        promised and the code doesn't export is kept apart (`missing`), so the next call
+        is told not to import it rather than never hearing of it."""
+        if planned is not None and real is not None and not real.empty():
+            if planned.origin == "plan" and not planned.promised:
+                planned.promised = list(planned.exports)
+            planned.exports = real.labels()
+
+    def _unexported(self, planned: Optional[_Planned], real: module_exports.Exports) -> list[str]:
+        """Names the plan promised that the code doesn't export."""
+        if planned is None or not planned.promised:
+            return []
+        have = {real.default or "", *real.named, *real.types}
+        wanted = []
+        for entry in planned.promised:
+            name = next(iter(re.findall(r"[A-Za-z_$][\w$]*", entry.replace("(default)", "").replace("(type)", ""))), "")
+            if name and name not in have and name.lower() not in ("default", "type", "export", "exports") and name not in wanted:
+                wanted.append(name)
+        return wanted
+
+    def _take_exports(self, build: Optional[BuildCheck]) -> None:
+        """The tree check's exact answer for each written module, re-exports followed."""
+        for path, real in ((build.exports if build is not None else None) or {}).items():
+            w = self.written.get(path)
+            if w is not None and isinstance(real, module_exports.Exports):
+                w.exports, w.read = real, True
+                self._agree(self._entry(path), real)
 
     def _judge(self, w: _Written) -> None:
         w.problems = file_problems(w.path, w.code)
@@ -1107,7 +1160,17 @@ class _Run:
             line = f"- `{w.path}`"
             if w.purpose:
                 line += f" — {w.purpose}"
-            if planned is not None and planned.exports:
+            # The names its code really has (#101), not what the plan guessed; the plan's
+            # list only for a file no reader here understands.
+            real = w.real_exports()
+            if real is not None and not real.empty():
+                line += f". Exports: {real.render()}"
+                missing = self._unexported(planned, real)
+                if missing:
+                    line += f" (planned, not exported: {', '.join(missing[:6])})"
+            elif planned is not None and planned.exports:
+                # Read nothing — a reader can miss what it can't parse: the plan's list,
+                # which is what the plan shown beside this says too.
                 line += f". Exports: {', '.join(planned.exports[:12])}"
             lines.append(line)
         return "\n".join(lines) + "\n"
@@ -1180,6 +1243,7 @@ class _Run:
         output, errors = self._assemble()
         stack = charter_violations(ctx.charter, agent.key, output) if settings.enforce_stack_charter else []
         build = agent._build_check(ctx, output)
+        self._take_exports(build)
         if build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
             build, output, errors, stack, _ = self._fix_build(build, output, errors, stack)
         # Once it parses, for real (#75): installed, built and started in a sandbox —
@@ -1332,7 +1396,10 @@ class _Run:
             activity.file(path, "ok" if not any(p.path == path for p in (build2.problems if build2 else [])) else "failed")
         # The second check is kept only when it is no worse than the first.
         if build2 is not None and len(build2.problems) <= len(build.problems):
+            self._take_exports(build2)
             return build2, output2, errors2, stack2, run2
+        # The repair isn't kept, and neither is what its check said about exports (#101):
+        # those were only ever taken on the branch above.
         self.written = before
         for path in named:
             activity.file(path, "failed")

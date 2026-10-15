@@ -35,6 +35,10 @@ and, since #101, code that parses and is not finished:
   weak_tests            tests that assert nothing (or only what is always true), are
                         skipped, or mock the module they test
 
+  export_mismatches     imports of a name a module doesn't export, or of a default it
+                        doesn't have (TypeScript 2305/2724/2613/2614/1192) — what showing
+                        each write call the exports a file really has is meant to cut
+
 and, since #76, what running QA's tests measured — never the model's own estimate:
 
   tests_passed_pct      passed / tests that ran, across every suite; None if none ran
@@ -170,6 +174,7 @@ def score(db: Session, project: Project) -> dict:
         "compiles": check.status,
         "compile_problems": len(check.problems),
         "compile_unchecked": len(check.unchecked),
+        "export_mismatches": check.export_misses,
         # Uncapped, unlike the gate's list: a count, not a repair prompt.
         **placeholders.counts(placeholders.placeholder_problems(tree, code_paths, cap=None)),
         "mockup": _mockup(db, project),

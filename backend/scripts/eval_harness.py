@@ -128,6 +128,7 @@ def _row(result: dict) -> str:
         f"wired {_p(result.get('endpoints_wired_pct'))} criteria {_p(result.get('criteria_covered_pct'))} "
         f"cut {result.get('truncated_replies', 0)}  "
         f"stubs {result.get('placeholders', '-')} weak {result.get('weak_tests', '-')}  "
+        f"export-misses {result.get('export_mismatches', '-')}  "
         f"code {'/'.join(sorted(set((result.get('generation_mode') or {}).values()))) or '-'} "
         f"{result.get('files_written', 0)}/{result.get('files_planned', 0)} files"
     )
@@ -145,9 +146,10 @@ def compare(results: list[dict]) -> list[str]:
         calls = sum(sum((r.get("calls_per_phase") or {}).values()) for r in mine)
         stubs = sum(int(r.get("placeholders") or 0) for r in mine)
         weak = sum(int(r.get("weak_tests") or 0) for r in mine)
+        misses = sum(int(r.get("export_mismatches") or 0) for r in mine)
         lines.append(
             f"{mode:8} compiles {compiled}/{len(mine)}  files {written}/{planned}  "
-            f"truncated {cut}  calls {calls}  placeholders {stubs}  weak tests {weak}"
+            f"truncated {cut}  calls {calls}  placeholders {stubs}  weak tests {weak}  export misses {misses}"
         )
     return lines
 

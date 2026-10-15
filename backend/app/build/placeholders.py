@@ -36,6 +36,7 @@ import tokenize
 from typing import Iterable, Optional
 
 from app.build.check import Problem
+from app.build.exports import JS_EXT
 
 PLACEHOLDER = "placeholder"
 WEAK_TEST = "weak_test"
@@ -45,7 +46,6 @@ KINDS = (PLACEHOLDER, WEAK_TEST)
 #: nothing to a repair prompt the first three didn't.
 _PER_FILE = 3
 
-_JS_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 _CSS_EXT = (".css", ".scss")
 #: Files that are meant to be empty.
 _EMPTY_OK = frozenset({"__init__.py", "conftest.py", ".gitkeep", ".keep", "py.typed", ".nojekyll"})
@@ -151,7 +151,7 @@ def file_placeholders(path: str, content: str, cap: Optional[int] = _PER_FILE) -
     found: list[Problem] = []
     if low.endswith(".py"):
         found += _python(path, content)
-    elif low.endswith(_JS_EXT):
+    elif low.endswith(JS_EXT):
         found += _javascript(path, content)
     elif low.endswith(_CSS_EXT):
         found += _comments(path, _block_comments(content))
@@ -190,7 +190,7 @@ def _whole_file(path: str, content: str) -> Optional[Problem]:
     if not content.strip():
         # Only a module is wrong for being empty: a CSS module, a `.gitignore` or a
         # Dockerfile with nothing in it yet is a fine file.
-        if name in _EMPTY_OK or not name.lower().endswith((".py", *_JS_EXT)):
+        if name in _EMPTY_OK or not name.lower().endswith((".py", *JS_EXT)):
             return None
         return Problem(path, _EMPTY_FILE, PLACEHOLDER)
     first = next((line.strip() for line in content.splitlines() if line.strip()), "")
@@ -526,7 +526,7 @@ _KEYWORDS_BEFORE_REGEX = frozenset(
 )
 
 
-def _lex(content: str) -> tuple[str, list[tuple[int, str]]]:
+def lex(content: str) -> tuple[str, list[tuple[int, str]]]:
     """(the code with every string, template, regex and comment emptied to spaces,
     the comments with their lines).
 
@@ -708,7 +708,7 @@ def _js_body(code: str, start: int) -> Optional[tuple[int, int]]:
 
 
 def _javascript(path: str, content: str) -> list[Problem]:
-    code, comments = _lex(content)
+    code, comments = lex(content)
     out = _comments(path, comments)
     if not code.strip(" \n\t;"):
         return [Problem(path, "has no code in it. Write the module.", PLACEHOLDER)]
@@ -926,7 +926,7 @@ def _definitions(path: str, content: str) -> list[str]:
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 names += [t.id for t in targets if isinstance(t, ast.Name)]
         return names
-    if path.endswith(_JS_EXT):
+    if path.endswith(JS_EXT):
         return re.findall(
             r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)",
             content,

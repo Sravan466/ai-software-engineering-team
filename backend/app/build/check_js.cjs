@@ -1,7 +1,9 @@
 // The compile gate's JavaScript/TypeScript reader. Run by `app.build.check` with node.
 //
 // Reads {typescript, groups: [{name, files: {rel: content}, report: [rel], paths}]}
-// from stdin and writes {diagnostics: [{group, path, line, code, message, syntactic}]}.
+// from stdin and writes {diagnostics: [{group, path, line, code, message, syntactic}],
+// exports: [{group, path, default, named, types}]} — the second is what each reported
+// module really exports (#101), from the same program, re-exports followed.
 //
 // Nothing is written to disk and nothing is installed: the files live in memory under
 // a virtual root, and only TypeScript's own lib files are read from disk. Packages are
@@ -49,6 +51,52 @@ function text(message) {
 }
 
 const out = [];
+const exported = [];
+
+// A module's exports, as the next file's write call is told them: the default's local
+// name ("" when it has none), named values, and types apart from values.
+function exportsOf(checker, sf) {
+  const moduleSymbol = checker.getSymbolAtLocation(sf);
+  if (!moduleSymbol) return null; // a script, or CommonJS: the light reader answers
+  const entry = { default: null, named: [], types: [] };
+  for (const s of checker.getExportsOfModule(moduleSymbol)) {
+    let target = s;
+    if (s.flags & ts.SymbolFlags.Alias) {
+      try { target = checker.getAliasedSymbol(s); } catch (err) { target = s; }
+      // A re-export of something that doesn't exist (`export { default } from './x'`
+      // when x has no default): the checker's own error names it; it is not an export.
+      // The checker's "unknown" stand-in has no declaration; every real export has one.
+      if (!target.declarations || target.declarations.length === 0) continue;
+    }
+    // `symbolName`, not `escapedName`: the latter is TypeScript's internal form, which
+    // writes `__foo` as `___foo`.
+    const name = ts.symbolName(s);
+    if (s.escapedName === 'default') {
+      const decl = (target.declarations || s.declarations || [])[0];
+      const local = decl && ts.getNameOfDeclaration(decl);
+      const own = target !== s && target.escapedName !== 'default' ? ts.symbolName(target) : '';
+      entry.default = own || (local && local.text) || '';
+    } else if (target.flags & ts.SymbolFlags.Value || !(target.flags & ts.SymbolFlags.Type)) {
+      entry.named.push(name);
+    } else {
+      entry.types.push(name);
+    }
+  }
+  return entry;
+}
+
+// The specifier of the import declaration at `pos`, when the diagnostic is in one.
+function importedAs(sf, pos) {
+  if (pos === undefined) return null;
+  for (const stmt of sf.statements) {
+    if (pos < stmt.getStart(sf) || pos > stmt.end) continue;
+    const decl = ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt) ? stmt : null;
+    const spec = decl && decl.moduleSpecifier;
+    return spec && ts.isStringLiteral(spec) ? spec.text : null;
+  }
+  return null;
+}
+
 for (const group of input.groups) {
   const root = `${VIRTUAL}/${group.name}`;
   const files = new Map(
@@ -100,10 +148,21 @@ for (const group of input.groups) {
     out.push({ group: group.name, path: null, line: null, code: 0, message: String(err), syntactic: false, crashed: true });
     continue;
   }
+  let checker = null;
   for (const rel of group.report) {
     const sf = program.getSourceFile(`${root}/${rel}`);
     if (!sf) continue;
     const syntactic = program.getSyntacticDiagnostics(sf);
+    if (!syntactic.length && input.exports) {
+      try {
+        checker = checker || program.getTypeChecker();
+        const entry = exportsOf(checker, sf);
+        if (entry) exported.push({ group: group.name, path: rel, ...entry });
+      } catch (err) {
+        // Exports are a courtesy to the next write call; a checker that can't say leaves
+        // the light reader's answer in place.
+      }
+    }
     const semantic = syntactic.length ? [] : program.getSemanticDiagnostics(sf);
     for (const d of syntactic) {
       const pos = d.start !== undefined ? sf.getLineAndCharacterOfPosition(d.start) : null;
@@ -111,7 +170,12 @@ for (const group of input.groups) {
     }
     for (const d of semantic) {
       if (!KEEP.has(d.code)) continue;
-      const message = text(d.messageText);
+      let message = text(d.messageText);
+      // The module as this file names it (#101), not the checker's in-memory path: told
+      // `"/__build__/frontend/components/TodoList"` has no default export, a model
+      // imports that path; told `"../components/TodoList"`, it fixes the import.
+      const spec = importedAs(sf, d.start);
+      if (spec) message = message.replace(new RegExp(`"${VIRTUAL}/[^"]*"`, 'g'), JSON.stringify(spec));
       const name = /Cannot find name '([^']+)'/.exec(message);
       if (name && AMBIENT.has(name[1])) continue;
       const pos = d.start !== undefined ? sf.getLineAndCharacterOfPosition(d.start) : null;
@@ -120,4 +184,4 @@ for (const group of input.groups) {
   }
 }
 
-process.stdout.write(JSON.stringify({ diagnostics: out }));
+process.stdout.write(JSON.stringify({ diagnostics: out, exports: exported }));
