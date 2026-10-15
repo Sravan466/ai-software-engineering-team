@@ -26,7 +26,7 @@ from app.router.base import RequestCancelled
 from app.router.model_profile import ModelProfile, files_per_call
 from app.schemas.agent_outputs import BackendEngineerOutput, FrontendEngineerOutput
 from app.schemas.project import ProjectOut
-from tests.conftest import _fake_complete, asked_files, fenced, stub, through_database_gate
+from tests.conftest import STUB_PROFILE, _fake_complete, asked_files, fenced, stub, through_database_gate
 
 
 def _profile(window: int, output: int, model: str = "m") -> ModelProfile:
@@ -112,8 +112,16 @@ def test_files_per_call_is_read_from_the_budgets_and_never_the_name(big_budgets)
         assert files_per_call(big, 40) == 16384 // settings.code_avg_file_tokens
         # The whole plan, when it fits.
         assert files_per_call(big, 5) == 5
-    # A big window with a small reply ceiling is still one at a time.
-    assert files_per_call(_profile(64000, 4096), 9) == 1
+    # A reply that holds two or more files writes them together (#101), as many as it
+    # holds — the old fixed floor of 8,192 reply tokens is gone.
+    assert files_per_call(_profile(64000, 4096), 9) == 4096 // settings.code_avg_file_tokens == 3
+    # A reply that holds one, or a prompt too small for a second file's imports, is one.
+    assert files_per_call(_profile(64000, 2048), 9) == 1
+    assert files_per_call(_profile(8192, 4096), 9) == 1, "qwen2.5:7b at 8K: no room to write two against"
+    assert files_per_call(_profile(4096, 2048), 9) == 1, "qwen2.5:7b at 4K: one file per call"
+    # The instructions a call carries come first.
+    assert files_per_call(_profile(16384, 4096), 9, overhead=3_000) == 3
+    assert files_per_call(_profile(16384, 4096), 9, overhead=30_000) == 1
     # The person's choice wins, either way.
     assert files_per_call(SMALL, 9, override=3) == 3
     assert files_per_call(SMALL, 9, override="all") == 9
@@ -162,7 +170,12 @@ def test_the_files_per_call_a_person_chose_for_the_role_is_used(client, monkeypa
     r = client.put("/api/settings/roles/backend_engineer/files-per-call", json={"value": 2})
     assert r.status_code == 200, r.text
     row = next(x for x in r.json()["roles"] if x["role"] == "backend_engineer")
-    assert row["files_per_call"] == 2 and row["files_per_call_auto"] == 1
+    # Automatic is what the budgets say (#101): the stub's 4,096-token reply holds three.
+    try:
+        assert row["files_per_call"] == 2 and row["files_per_call_auto"] == STUB_PROFILE.files_per_call == 3
+    except AssertionError:
+        client.put("/api/settings/roles/backend_engineer/files-per-call", json={"value": None})
+        raise
     assert "files_per_call" not in next(x for x in r.json()["roles"] if x["role"] == "qa_engineer")
     try:
         model = Scripted("Backend Engineer", _files(3))
@@ -682,7 +695,9 @@ def test_no_plan_or_write_prompt_overruns_its_window(stub_router, monkeypatch, w
 
     model = Scripted(role, [{"path": f"app/m{i}.py", "purpose": "p " * 40, "exports": ["a"] * 20} for i in range(8)], reply=reply)
     _run(monkeypatch, phase, model, profile, ctx)
-    assert len(model.writes) >= 8
+    # Every planned file asked for — several to a call where the reply holds them (#101).
+    side = "backend" if phase == "backend_engineer" else "frontend"
+    assert {f"{side}/app/m{i}.py" for i in range(8)} <= {p for w in model.writes for p in w}
     assert max(model.sizes) <= profile.prompt_char_budget, (max(model.sizes), profile.prompt_char_budget)
 
 

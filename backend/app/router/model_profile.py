@@ -152,10 +152,9 @@ class ModelProfile:
     def files_per_call(self) -> int:
         """How many files one code-writing call asks this model for, plan aside (#81).
 
-        One when the measured prompt budget or reply ceiling is below the batching
-        floor, else as many average files as the reply ceiling holds. A property of the
-        budgets alone: two models with the same window get the same answer, whatever
-        they are called.
+        As many average files as both the reply and the prompt hold, and one when that
+        is fewer than two (#101). A property of the budgets alone: two models with the
+        same window and reply ceiling get the same answer, whatever they are called.
         """
         return files_per_call(self, 0)
 
@@ -229,6 +228,16 @@ _REASONING_SHARE = 0.25
 
 #: A per-role choice that writes the whole plan in one call, however long it is.
 FILES_ALL = "all"
+#: The share of a write call's prompt — after its standing instructions — its files'
+#: imports may take; the plan, the digests and the written index keep the rest (#101).
+_BATCH_PROMPT_SHARE = 0.6
+#: What one file of a batch brings into the prompt: the files it imports, in average
+#: files, and its line in the list of files to write.
+_IMPORTS_PER_FILE = 1.5
+_ASK_LINE_CHARS = 200
+#: What a code phase's standing instructions cost, for an answer given before any are
+#: built (Settings' "automatic" figure): about what the Frontend's are.
+_WRITE_OVERHEAD = 3_000
 
 
 def files_per_call(
@@ -237,26 +246,33 @@ def files_per_call(
     *,
     avg_file_tokens: Optional[float] = None,
     override: object = None,
+    overhead: int = 0,
 ) -> int:
     """Files one write call asks for. `planned` 0 means "no plan yet, no cap".
 
     `override` is the person's per-role choice — a count, or `FILES_ALL` — and wins
     over the budgets: they may know their model writes more than its window suggests.
-    Otherwise one file when the prompt budget or the reply ceiling is under the batching
-    floor, else `max_output_tokens // avg_file_tokens`, capped at the plan. When that
-    holds the whole plan, the whole plan goes in one call.
+    Otherwise as many files as the reply holds at the average file's size and the prompt
+    can be written against — `overhead` is the call's standing instructions, which come
+    first — capped at the plan; one when that is fewer than two (#101). When it holds
+    the whole plan, the whole plan goes in one call.
     """
     cap = planned if planned > 0 else None
     if override == FILES_ALL:
         return cap or max(profile.max_output_tokens // _avg(avg_file_tokens), 1)
     if isinstance(override, int) and not isinstance(override, bool) and override > 0:
         return min(override, cap) if cap else override
-    if (
-        profile.prompt_char_budget < settings.code_batch_min_prompt_chars
-        or profile.max_output_tokens < settings.code_batch_min_output_tokens
-    ):
+    avg = _avg(avg_file_tokens)
+    # The reply has to hold the files (#101) …
+    by_reply = profile.max_output_tokens // avg
+    # … and the prompt what each of them is written against: its line in the ask and the
+    # code of what it imports — about one and a half average files — beside the plan,
+    # the digests and the index of what is written, which keep the rest.
+    room = max(profile.prompt_char_budget - (overhead or _WRITE_OVERHEAD), 0)
+    by_prompt = int(room * _BATCH_PROMPT_SHARE // (avg * profile.ratio * _IMPORTS_PER_FILE + _ASK_LINE_CHARS))
+    n = min(by_reply, by_prompt)
+    if n < 2:
         return 1
-    n = max(profile.max_output_tokens // _avg(avg_file_tokens), 1)
     return min(n, cap) if cap else n
 
 
@@ -331,6 +347,7 @@ def fallback_profile(
     context_limit: Optional[int] = None,
     source: str = "fallback",
     local: bool = False,
+    max_output: Optional[int] = None,
 ) -> ModelProfile:
     """A profile for a model nobody could probe: the configured window, and no schema.
 
@@ -338,6 +355,8 @@ def fallback_profile(
     and for a local model while its source is unreachable — the run still needs
     budgets. `local` says whether `LOCAL_CONTEXT_CEILING` applies: it is a knob about
     the memory the runtime has, and has no business shrinking a cloud model's window.
+    `max_output` is the provider's published reply ceiling (#101), which a cloud model
+    gets instead of the local default.
     """
     limit = context_limit or settings.model_context_fallback_tokens
     window = _apply_ceiling(limit) if local else limit
@@ -346,7 +365,7 @@ def fallback_profile(
         model=model,
         context_limit=context_limit,
         context_window=window,
-        max_output_tokens=_output_budget(window),
+        max_output_tokens=_output_budget(window, None if local else max_output),
         source=source,
     )
 
@@ -365,13 +384,14 @@ def _apply_ceiling(window: int) -> int:
     return window
 
 
-def _output_budget(window: int) -> int:
-    """How many tokens a single reply may use.
+def _output_budget(window: int, ceiling: Optional[int] = None) -> int:
+    """How many tokens a single reply may use: `ceiling` — the provider's published
+    maximum, or a value set for the model — else the local default (#101).
 
     Half the window at most: an agent that is allowed to generate more than it was
     allowed to read is the truncation bug with the numbers reversed.
     """
-    return max(1, min(settings.max_output_tokens, window // 2))
+    return max(1, min(ceiling or settings.max_output_tokens, window // 2))
 
 
 def resolve_window(
@@ -548,9 +568,9 @@ def build_profile(
     if wanted_thinking not in THINKING_SETTINGS:
         wanted_thinking = THINKING_OFF
     level = thinking_for(info.thinking, wanted_thinking)
-    output = _output_budget(window)
-    if limits.get("max_output_tokens"):
-        output = max(1, min(output, int(limits["max_output_tokens"])))
+    # The reply ceiling set for this model in Settings raises the local default as well
+    # as lowering it (#101), within half the window.
+    output = _output_budget(window, int(limits["max_output_tokens"]) if limits.get("max_output_tokens") else None)
     reasoning = 0
     if thinks(level):
         wanted = limits.get("reasoning_tokens")

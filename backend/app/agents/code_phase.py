@@ -630,7 +630,9 @@ class _Run:
         return ends[0] if len(ends) == 1 else None
 
     def _batch_size(self, remaining: int) -> int:
-        n = files_per_call(self.profile, remaining, avg_file_tokens=self._avg(), override=self.choice)
+        n = files_per_call(
+            self.profile, remaining, avg_file_tokens=self._avg(), override=self.choice, overhead=len(self.system)
+        )
         if self.cap:
             n = min(n, self.cap)
         n = max(1, min(n, remaining))
