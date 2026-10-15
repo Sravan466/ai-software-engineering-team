@@ -211,8 +211,9 @@ def test_instructions_that_dont_fit_stop_the_phase_with_a_plain_reason(monkeypat
         QAEngineerAgent().run(AgentContext(idea="A tool library"))
     assert not calls, "nothing is sent that would lose its shape"
     message = str(caught.value)
-    assert message.startswith("m's 1,024-token window is too small for the QA Engineer: its instructions need about")
-    assert "Use a model with a larger window for this phase" in message and not caught.value.retryable
+    assert message.startswith("m's 1,024-token window is too small for the QA Engineer. Its instructions need about")
+    assert "even with the reply cut to 512 tokens" in message
+    assert "Pick a model with a larger window for this phase" in message and not caught.value.retryable
 
 
 def test_a_build_on_a_window_too_small_for_a_phase_fails_saying_so(client, monkeypatch, stub_router):
@@ -237,12 +238,12 @@ def test_the_required_keys_are_said_once_more_at_the_end_of_the_ask(stub_router)
     ask = agent._build_messages(AgentContext(idea="A tool library"), _profile(32768, 4096))
     last = ask.messages[-1].content.rstrip().splitlines()[-1]
     keys = [k for k, f in agent.output_model.model_fields.items() if f.is_required()]
-    assert last == f"Answer with one JSON object with these keys: {', '.join(keys)}."
+    assert last == f"Answer with one JSON object that has at least these keys: {', '.join(keys)}."
     # Editing returns only what changes, so there is no list of keys to repeat.
     editing = agent._build_messages(
         AgentContext(idea="x", change="rename it", base_output={"summary": "s"}), _profile(32768, 4096)
     )
-    assert "Answer with one JSON object with these keys" not in editing.messages[-1].content
+    assert "Answer with one JSON object that has at least these keys" not in editing.messages[-1].content
 
 
 def test_a_code_phase_write_call_is_rebuilt_to_fit_and_the_rest_are_sized_alike(monkeypatch):
@@ -268,3 +269,129 @@ def test_a_code_phase_write_call_is_rebuilt_to_fit_and_the_rest_are_sized_alike(
     get_agent("backend_engineer").run(AgentContext(idea="A tool library " * 300, prior_outputs={}))
     assert len(sizes) == 3, "one refusal, its resend, then the second file"
     assert sizes[1] < sizes[0] and sizes[2] <= sizes[1] * 1.2
+
+
+# ── review of #107 ───────────────────────────────────────────────────────────
+def test_instructions_over_the_budget_but_inside_the_window_hold_the_reply_instead_of_stopping(monkeypatch, stub_router):
+    """A 4K window where the reply's full 2,048 leaves the instructions too little room:
+    the reply is held to what's left, the prompt fits, nothing is stopped or cut."""
+    sent: list = []
+
+    def complete(messages, **kwargs):
+        sent.append((sum(len(m.content) for m in messages), kwargs["options"].max_tokens))
+        return _fake_complete(messages, **kwargs)
+
+    stub(monkeypatch, "complete", complete)
+    # A model whose counts showed 2.5 characters a token: QA's instructions no longer
+    # fit beside a 2,048-token reply, but fit beside a 1,024-token one.
+    tight = _profile(4096, 2048, chars_per_token=2.5)
+    stub(monkeypatch, "profile_for", lambda *a, **k: tight)
+    from app.agents.qa_engineer import QAEngineerAgent
+
+    agent = QAEngineerAgent()
+    ctx = AgentContext(idea="A tool library")
+    overhead = agent._overhead(ctx, agent._prepare_deps(ctx, tight))
+    assert overhead > tight.prompt_char_budget, "the case under test: instructions past the budget"
+    agent.run(ctx)
+    chars, held = sent[0]
+    assert held is not None and 1024 <= held < 2048
+    assert chars / 2.5 + held <= tight.context_window
+
+
+def test_a_repair_round_that_cant_fit_keeps_the_best_answer(monkeypatch, stub_router):
+    calls: list = []
+
+    def complete(messages, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise PromptTooLong("too long", prompt_tokens=9000, context=8192, chars=30_000)
+        resp = _fake_complete(messages, **kwargs)
+        return resp.model_copy(update={"text": '{"summary": "only this"}'})
+
+    stub(monkeypatch, "complete", complete)
+    stub(monkeypatch, "profile_for", lambda *a, **k: _profile(8192, 4096))
+    from app.agents.product_manager import ProductManagerAgent
+
+    result = ProductManagerAgent().run(AgentContext(idea="A tool library"))
+    assert result.schema_status == "invalid" and result.output.get("summary") == "only this"
+
+
+def test_an_estimated_refusal_rebuilds_smaller_not_the_same_prompt():
+    error = PromptTooLong("about 2,400 tokens; room for 2,048", prompt_tokens=None, context=4096, chars=7200)
+    error.estimate, error.room = 2400, 2048
+    profile = _profile(4096, 2048)
+    smaller = fitted(error, profile)
+    assert smaller.prompt_char_budget < profile.prompt_char_budget * 0.9
+
+
+def test_a_fallback_too_small_for_the_prompt_is_passed_over_for_one_it_fits(router_with, monkeypatch):  # noqa: F811
+    down = _source("down", [ModelEntry(name="m", kind="chat")], up=False)
+    small = _source("small", [ModelEntry(name="m", kind="chat")])
+    small.adapter = _Counting(small.adapter.models, ratio=3.0, window=4096)
+    big = _source("big", [ModelEntry(name="m", kind="chat")])
+    big.adapter = _Counting(big.adapter.models, ratio=3.0, window=65536)
+    model_router = router_with(down, small, big)
+    monkeypatch.setattr(model_router, "_resolve_chain", lambda *a, **k: [("down", "m"), ("small", "m"), ("big", "m")])
+    resp = model_router.complete([ChatMessage(role="user", content="x" * 30_000)], mode=RoutingMode.MANUAL,
+                                 options=GenerationOptions())
+    assert resp.provider == "big" and not small.adapter.calls
+
+
+def test_a_connected_computers_refusal_is_read_as_one():
+    from app.router.base import too_long
+
+    relayed = too_long("The prompt is 4,299 tokens; qwen2.5:7b has a 4,096-token window.")
+    assert isinstance(relayed, PromptTooLong) and relayed.prompt_tokens == 4299 and relayed.context == 4096
+    assert too_long(OLLAMA_OVERFLOW).prompt_tokens == 1525
+    assert too_long("model not found") is None
+
+
+def test_the_debate_and_the_mockup_shrink_and_resend_too(monkeypatch, stub_router):
+    sizes: list = []
+
+    def complete(messages, **kwargs):
+        sizes.append(sum(len(m.content) for m in messages))
+        if len(sizes) == 1:
+            raise PromptTooLong("too long", prompt_tokens=int(sizes[0] / 1.5), context=8192, chars=sizes[0])
+        return _fake_complete(messages, **kwargs)
+
+    stub(monkeypatch, "complete", complete)
+    stub(monkeypatch, "profile_for", lambda *a, **k: _profile(8192, 4096))
+    from app.orchestration import debate
+
+    debate.conduct_debate(debate.TOPIC, "architecture " * 5000, mode=RoutingMode.LOCAL_ONLY, preferred_model=None)
+    assert len(sizes) == 2 and sizes[1] < sizes[0]
+
+    from app.preview.generator import _trimmed
+
+    messages = [ChatMessage(role="system", content="sys"),
+                ChatMessage(role="user", content="# Head\n" + "ctx " * 3000 + "\n# Task\nDo it.")]
+    cut = _trimmed(messages, 2000)
+    assert sum(len(m.content) for m in cut) <= 2000
+    assert cut[1].content.startswith("# Head") and cut[1].content.endswith("# Task\nDo it.")
+
+
+def test_a_continuation_round_has_no_key_line(stub_router):
+    from app.agents.product_manager import ProductManagerAgent
+
+    agent = ProductManagerAgent()
+    ask = agent._continue_messages(AgentContext(idea="x"), _profile(32768, 4096), {"product_name": "x"}, ["features"])
+    assert "has at least these keys" not in ask.messages[1].content
+    assert "ONLY the remaining keys: features" in ask.messages[-1].content
+
+
+def test_a_window_too_small_has_its_own_advice_on_the_failed_build(client, monkeypatch, stub_router):
+    def small(*a, role=None, **k):
+        return _profile(1024, 512) if role == "qa_engineer" else _profile(32768, 4096)
+
+    stub(monkeypatch, "profile_for", small)
+    from tests.conftest import through_question_gates
+
+    pid = client.post("/api/projects", json={"idea": "A tool library", "routing_mode": "local_only",
+                                             "approval_mode": "unattended"}).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    project = through_question_gates(client, pid)
+    help = project["last_error_help"]
+    assert help["kind"] == "window" and help["badge"] == "Window too small"
+    assert help["title"] == "m's 1,024-token window is too small for the QA Engineer"
+    assert help["body"].startswith("Its instructions need about") and help["blocking"] is True

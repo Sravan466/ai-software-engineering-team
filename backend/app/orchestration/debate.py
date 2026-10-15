@@ -21,6 +21,8 @@ from typing import Optional
 from app.core.constants import RoutingMode
 from app.core.reading import json_object
 from app.core.logging import get_logger
+from app.router.fitting import send_fitting
+from app.router.model_profile import ModelProfile
 from app.router.router import router
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
 
@@ -70,16 +72,25 @@ def conduct_debate(
         )
 
     overhead = len(_SYSTEM) + len(assemble(""))
-    user = assemble(context[: max(profile.prompt_char_budget - overhead, 0)])
-    resp = router.complete(
-        [ChatMessage(role="system", content=_SYSTEM), ChatMessage(role="user", content=user)],
-        mode=mode,
-        preferred_model=preferred_model,
-        # A JSON answer like any agent's: exact output (#101).
-        options=GenerationOptions(json_mode=True, exact=True),
-        complexity=COMPLEXITY,
-        role=ROLE,
-    )
+
+    def build(fitted: ModelProfile) -> list[ChatMessage]:
+        user = assemble(context[: max(fitted.prompt_char_budget - overhead, 0)])
+        return [ChatMessage(role="system", content=_SYSTEM), ChatMessage(role="user", content=user)]
+
+    def send(messages: list[ChatMessage], pin: Optional[str]) -> LLMResponse:
+        return router.complete(
+            messages,
+            mode=mode,
+            preferred_model=preferred_model,
+            # A JSON answer like any agent's: exact output (#101).
+            options=GenerationOptions(json_mode=True, exact=True),
+            complexity=COMPLEXITY,
+            role=ROLE,
+            pin=pin,
+        )
+
+    # A prompt the model refuses as too long is re-quoted to fit and sent once more (#101).
+    resp, _, _ = send_fitting(build, profile, send, who="The debate")
     record = _parse(resp.text, topic)
     return record, resp
 

@@ -746,7 +746,9 @@ export type ConnectorVar = {
 export type KeyAdvice = {
   kind:
     | "invalid" | "expired" | "revoked" | "no_credit" | "spend_limit" | "billing_disabled"
-    | "plan_quota" | "not_permitted" | "region" | "rate_limited" | "provider_down" | "unknown";
+    | "plan_quota" | "not_permitted" | "region" | "rate_limited" | "provider_down" | "unknown"
+    // A phase whose instructions don't fit its model's window (#101).
+    | "window";
   /** Two or three words for a badge: "Expired", "No credit". */
   badge: string;
   /** What happened, without a full stop. */

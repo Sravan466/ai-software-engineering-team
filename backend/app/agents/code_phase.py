@@ -65,8 +65,9 @@ from app.core.reading import CodeBlock, code_blocks, json_object
 from app.orchestration import activity, claim
 from app.orchestration.charter import violations as charter_violations
 from app.router import inflight
-from app.router.base import PromptTooLong, WindowTooSmall
-from app.router.model_profile import ModelProfile, files_per_call, fitted
+from app.router.base import WindowTooSmall
+from app.router.fitting import send_fitting
+from app.router.model_profile import ModelProfile, files_per_call, reply_gives_way
 from app.router.router import router
 from app.schemas.agent_outputs import EditPlan, response_schema
 from app.schemas.llm import ChatMessage, GenerationOptions, LLMResponse
@@ -315,6 +316,9 @@ class _Run:
         #: What the change asks, in the person's words: a request to remove code may
         #: shrink a file as much as it likes.
         self.asked = ""
+        #: The reply ceiling the last prompt was built against when its instructions
+        #: needed some of the reply's room (#101); None: the model's own.
+        self.reply_cap: Optional[int] = None
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -637,7 +641,7 @@ class _Run:
         """The average file's tokens: the configured guess, refined by every file landed."""
         if not self.lengths:
             return None
-        chars = max(settings.approx_chars_per_token, 1.0)
+        chars = self.profile.ratio if getattr(self, "profile", None) is not None else max(settings.approx_chars_per_token, 1.0)
         prior = settings.code_avg_file_tokens
         return (prior + sum(n / chars for n in self.lengths)) / (1 + len(self.lengths))
 
@@ -908,28 +912,25 @@ class _Run:
         label = f"{agent.title} — {doing} {first}{more} ({min(number, total)} of {total})"
         activity.stage(doing, detail=first, total=total)
 
+        def built(profile: ModelProfile) -> list[ChatMessage]:
+            self.profile = profile
+            return build()
+
         def send(messages: list[ChatMessage], pin: Optional[str]) -> LLMResponse:
             with inflight.agent(label):
                 return router.complete(
                     messages,
                     mode=ctx.routing_mode,
                     preferred_model=ctx.preferred_model,
-                    # Code is exact output too (#101).
-                    options=GenerationOptions(exact=True),
+                    # Code is exact output too (#101), held to the reply ceiling the prompt
+                    # was built against when its instructions needed some of the room.
+                    options=GenerationOptions(exact=True, max_tokens=self.reply_cap),
                     complexity=agent._complexity(ctx),
                     role=agent.key,
-                    pin=pin,
+                    pin=pin or ctx.pin_model,
                 )
 
-        try:
-            resp = send(build(), ctx.pin_model)
-        except PromptTooLong as e:
-            self.profile = fitted(e, self.profile)
-            log.warning(
-                "%s: the prompt for %s didn't fit %s (%s). Rebuilt at %s characters and sent once more.",
-                agent.title, first, e.model or self.profile.model, e, f"{self.profile.prompt_char_budget:,}",
-            )
-            resp = send(build(), e.model or ctx.pin_model)
+        resp, _, self.profile = send_fitting(built, self.profile, send, who=agent.title)
         self.calls.append(resp)
         return resp
 
@@ -952,6 +953,19 @@ class _Run:
         """
         ctx, budget = self.ctx, self.profile.prompt_char_budget
         sections: dict[str, str] = {}
+        ask = self._write_now(batch, split, fixing, editing)
+        self.reply_cap = None
+        if len(self.system) + len(ask) + 1 > budget:
+            # The standing instructions and the list of files to write are the call. The
+            # reply gives way, down to a floor, before the window is called too small
+            # (#101) — sent anyway, a runtime would cut the instructions from the head.
+            smaller = reply_gives_way(self.profile, len(self.system) + len(ask) + 1)
+            if smaller is None:
+                floor = reply_gives_way(self.profile, 0) or self.profile
+                raise WindowTooSmall(
+                    window_too_small(self.agent.title, self.profile, len(self.system) + len(ask), floor)
+                )
+            budget, self.reply_cap = smaller.prompt_char_budget, smaller.max_output_tokens
         left = budget - len(self.system)
 
         def put(name: str, text: str, force: bool = False) -> bool:
@@ -963,11 +977,6 @@ class _Run:
             left -= cost
             return True
 
-        ask = self._write_now(batch, split, fixing, editing)
-        if len(self.system) + len(ask) + 1 > budget:
-            # The standing instructions and the list of files to write are the call:
-            # sent anyway, a runtime cuts the instructions from the head (#101).
-            raise WindowTooSmall(window_too_small(self.agent.title, self.profile, len(self.system) + len(ask)))
         put("write", ask, force=True)
         for w in fixing or []:
             room = max(int(left * 0.4) // max(len(fixing), 1) - 200, 0)

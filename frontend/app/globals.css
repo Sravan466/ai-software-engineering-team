@@ -542,7 +542,7 @@ h1, h2, h3, h4 {
 }
 .notice > svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
 .notice-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.notice-title { font-size: var(--t-base); font-weight: 600; color: var(--ink); }
+.notice-title { font-size: var(--t-base); font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
 .notice-text  { font-size: var(--t-sm); color: var(--ink-2); line-height: 1.55; }
 .notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .notice-warn { border-color: var(--accent-line); background: var(--warn-soft); }

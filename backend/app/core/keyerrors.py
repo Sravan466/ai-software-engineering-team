@@ -431,6 +431,24 @@ class Advice:
         return asdict(self)
 
 
+#: A phase whose own instructions don't fit its model's window (#101): not a key, and
+#: not a runtime that's down, so neither of those pages' advice.
+WINDOW = "window"
+
+
+def window_advice(title: str, body: str) -> Advice:
+    return Advice(kind=WINDOW, badge="Window too small", title=title, body=body)
+
+
+def window_help(message: str) -> Optional[dict]:
+    """The failed build's advice, from the message `window_advice(...).sentence()` made."""
+    marker = message.find("too small for the ")
+    cut = message.find(". ", marker) if marker >= 0 else -1
+    if cut < 0:
+        return None
+    return window_advice(message[:cut], message[cut + 2 :]).as_dict()
+
+
 #: Two words, for "openai:gpt-x → no credit" and the "every model failed" line.
 SHORT = {
     INVALID: "key not recognised",

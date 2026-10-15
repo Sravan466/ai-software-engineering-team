@@ -142,8 +142,9 @@ _RATIO_MIN_CALLS = 3
 _RATIO_MIN_CHARS = 400
 _RATIO_MARGIN = 0.92
 _RATIO_CEILING = 6.0
-#: A prompt estimated past this share of its room is counted exactly where it can be.
-_COUNT_ABOVE = 0.8
+#: A prompt estimated past this share of its room is counted exactly where it can be —
+#: above the 0.9 the agents size to, so a prompt that filled its budget isn't counted.
+_COUNT_ABOVE = 0.95
 
 
 class ModelRouter:
@@ -414,19 +415,21 @@ class ModelRouter:
         room = max(
             profile.context_window - options.resolve_max_tokens(profile.max_output_tokens) - profile.reasoning_tokens, 1
         )
-        estimate = chars / max(profile.chars_per_token or settings.approx_chars_per_token, 1.0)
+        estimate = chars / profile.ratio
         if estimate < room * _COUNT_ABOVE:
             return
         counted = prov.count_tokens(messages, model)
         tokens = counted if counted is not None else int(estimate)
         if tokens > room:
-            raise PromptTooLong(
+            error = PromptTooLong(
                 f"The prompt is {'' if counted is not None else 'about '}{tokens:,} tokens; {model} has "
                 f"room for {room:,} beside its reply.",
                 prompt_tokens=counted,
                 context=profile.context_window,
                 chars=chars,
             )
+            error.estimate, error.room = int(estimate), room
+            raise error
 
     def _pinned(self, chain: list[tuple[str, str]], pin: Optional[str]) -> list[tuple[str, str]]:
         """`chain` with `pin` tried first — the fix loop's stronger model."""
@@ -1616,6 +1619,9 @@ class ModelRouter:
 
         attempts: list[dict] = []
         last_error: Optional[ProviderError] = None
+        #: A fallback the prompt didn't fit: the chain goes on to a link it may fit, and
+        #: only when none answers is the caller told to re-size it for this one (#101).
+        deferred: Optional[PromptTooLong] = None
         chars = sum(len(m.content) for m in messages)
         for idx, (pname, model) in enumerate(chain):
             prov = self.provider(pname)
@@ -1674,7 +1680,12 @@ class ModelRouter:
                 e.model = f"{pname}:{model}"
                 e.profile = self._with_ratio(pname, model, prov.profile(model))
                 log.warning("%s:%s — %s", pname, model, e)
-                raise
+                if idx == 0:
+                    raise  # the model the prompt was sized for: the caller shrinks it
+                deferred = deferred or e
+                attempts.append({"provider": pname, "model": model, "error": str(e), "kind": e.kind,
+                                 "why": "prompt too long", "tried": False})
+                continue
             except ProviderError as e:
                 log.warning("Provider %s/%s failed: %s", pname, model, e)
                 attempts.append({
@@ -1689,6 +1700,8 @@ class ModelRouter:
                 if pname in CLOUD_PROVIDERS:
                     self._note_failure(pname, model, e)
 
+        if deferred is not None:
+            raise deferred
         # The models that were sent the call and failed at it for a reason about the
         # model — what a failed phase is put down to in Auto's record (#96). A runtime
         # that wasn't running, a key, a bill or a rate limit names none.

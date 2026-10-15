@@ -686,7 +686,11 @@ function RunInterrupted({
   if (help) {
     copy.failed = {
       title: help.title,
-      text: `${help.body} Or pick another model in Settings and resume. Approved work is kept.`,
+      // A window too small (#101) already says which model to change and how.
+      text:
+        help.kind === "window"
+          ? `${help.body} Approved work is kept.`
+          : `${help.body} Or pick another model in Settings and resume. Approved work is kept.`,
       action: "Resume from checkpoint",
     };
   }
@@ -696,7 +700,8 @@ function RunInterrupted({
   return (
     <div
       className={"notice " + (state === "cancelled" || state === "paused" ? "notice-warn" : "notice-bad")}
-      role={state === "paused" ? "status" : undefined}
+      // A stop is announced as it happens; a pause, politely.
+      role={state === "paused" ? "status" : state === "failed" ? "alert" : undefined}
     >
       {Icon.alert}
       <div className="notice-body">

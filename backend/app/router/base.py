@@ -163,9 +163,20 @@ class PromptTooLong(ProviderError):
         self.context = context
         #: Characters sent, so the real characters-per-token can be learned from it.
         self.chars = chars
+        #: When nothing counted it: the router's estimate and the room it had (tokens).
+        self.estimate: Optional[int] = None
+        self.room: Optional[int] = None
         #: Set by the router: `provider:model`, and that model's profile.
         self.model: Optional[str] = None
         self.profile: Optional[ModelProfile] = None
+
+
+class StillTooLong(ProviderError):
+    """A prompt refused as too long, rebuilt for the model, and refused again (#101). Not
+    retried: the same rebuild would be refused a third time."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False, kind="too_long")
 
 
 class WindowTooSmall(ProviderError):
@@ -177,7 +188,23 @@ class WindowTooSmall(ProviderError):
     """
 
     def __init__(self, message: str) -> None:
-        super().__init__(message, retryable=False, kind="window")
+        super().__init__(message, retryable=False, kind="window")  # keyerrors.WINDOW
+
+
+_OURS = re.compile(r"The prompt is (?:about )?([\d,]+) tokens; .*?(?:has a ([\d,]+)-token window|room for)")
+
+
+def too_long(text: str) -> Optional[PromptTooLong]:
+    """A refusal relayed as text — from a connected computer, whose adapters raise
+    `PromptTooLong` there (#101) — as the error it was, so this side can shrink and resend."""
+    found = overflow(text or "")
+    if found:
+        return PromptTooLong(text, prompt_tokens=found[0], context=found[1])
+    mine = _OURS.search(text or "")
+    if mine:
+        window = int(mine.group(2).replace(",", "")) if mine.group(2) else None
+        return PromptTooLong(text, prompt_tokens=int(mine.group(1).replace(",", "")), context=window)
+    return None
 
 
 def overflow(text: str) -> Optional[tuple[int, Optional[int]]]:

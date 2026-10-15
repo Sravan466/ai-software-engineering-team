@@ -23,6 +23,7 @@ want the memory back.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import threading
@@ -137,16 +138,15 @@ class ModelProfile:
         return min(budget, ceiling) if ceiling and ceiling > 0 else budget
 
     @property
-    def prompt_char_budget(self) -> int:
-        """The same budget in characters, which is what truncation actually cuts — at
-        the ratio this model's own counts have shown, once any have (#101)."""
-        return int(self.prompt_token_budget * max(self.chars_per_token or settings.approx_chars_per_token, 1.0))
+    def ratio(self) -> float:
+        """Characters per token: what this model's own counts have shown, once any have
+        (#101), else the configured estimate. The one place the two are chosen between."""
+        return max(self.chars_per_token or settings.approx_chars_per_token, 1.0)
 
     @property
-    def prompt_room(self) -> int:
-        """Tokens a prompt can take before the runtime refuses it or cuts the reply: the
-        window less the reply's ceiling and any reasoning kept beside it."""
-        return max(self.context_window - self.max_output_tokens - self.reasoning_tokens, 1)
+    def prompt_char_budget(self) -> int:
+        """The same budget in characters, which is what truncation actually cuts."""
+        return int(self.prompt_token_budget * self.ratio)
 
     @property
     def files_per_call(self) -> int:
@@ -273,10 +273,38 @@ def fitted(error, profile: "ModelProfile") -> "ModelProfile":
     if window and window < target.context_window:
         target = replace(target, context_window=window, max_output_tokens=min(target.max_output_tokens, max(window // 2, 1)))
     tokens, chars = getattr(error, "prompt_tokens", None), getattr(error, "chars", 0)
+    estimate, room = getattr(error, "estimate", None), getattr(error, "room", None)
     if tokens and chars:
-        ratio = chars / tokens * 0.95
-        target = replace(target, chars_per_token=min(ratio, target.chars_per_token or settings.approx_chars_per_token))
+        # Counted: the real characters-per-token, less 5%.
+        target = replace(target, chars_per_token=min(chars / tokens * 0.95, target.ratio))
+    elif estimate and room and estimate > room:
+        # Estimated over the room at this model's ratio: every budget scaled by room over
+        # estimate, so the rebuilt prompt is smaller and not the same one sent again.
+        target = replace(target, chars_per_token=max(target.ratio * room / estimate * 0.95, 1.0))
     return target
+
+
+#: The least a reply may be held to so a call's instructions fit beside it (#101).
+MIN_REPLY_TOKENS = 1024
+
+
+def reply_gives_way(profile: "ModelProfile", chars: int) -> Optional["ModelProfile"]:
+    """The profile to send a call with whose instructions (`chars`) don't fit beside the
+    full reply ceiling: the same window, the reply held to what is left — never below
+    `MIN_REPLY_TOKENS` (or the ceiling, when that is smaller). None when even that floor
+    leaves the instructions no room, which is a window too small for the call (#101).
+
+    The prompt still fits and nothing is cut: a runtime given the smaller ceiling stops
+    the reply there, and a reply cut off at it is continued, not lost.
+    """
+    room = math.ceil(chars / profile.ratio) + 1  # tokens, rounded up, and one for rounding below
+    needed = math.ceil(room / _PROMPT_SAFETY_MARGIN)
+    output = profile.context_window - profile.reasoning_tokens - needed
+    if output < min(MIN_REPLY_TOKENS, profile.max_output_tokens):
+        return None
+    smaller = replace(profile, max_output_tokens=min(output, profile.max_output_tokens))
+    # MAX_PROMPT_TOKENS still guards the bill: a smaller reply buys nothing past it.
+    return smaller if smaller.prompt_char_budget >= chars else None
 
 
 def _avg(avg_file_tokens: Optional[float]) -> int:

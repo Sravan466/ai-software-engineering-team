@@ -2638,7 +2638,9 @@ class PipelineRunner:
         from app.core import keyerrors
 
         keyed = bool(kind and provider and kind in keyerrors.BLOCKING)
-        project.last_error_kind = kind if keyed else None
+        # A window too small for a phase (#101) has advice of its own, about the model.
+        window = kind == keyerrors.WINDOW
+        project.last_error_kind = kind if keyed or window else None
         project.last_error_provider = provider if keyed else None
         db.commit()
         log.warning("Run failed: %s — %s", project.id, message)
