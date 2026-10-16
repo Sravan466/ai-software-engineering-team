@@ -829,8 +829,9 @@ def take_person(t: dict) -> tuple[Optional[str], Optional[str], bool]:
 def undecide(data: dict, text: str) -> list[str]:
     """Stop treating `text` as a decision (#102): taken off every track that holds it."""
     names = []
+    said = (text or "").strip()
     for name, t in data["tracks"].items():
-        if t.get("decision") == text:
+        if (t.get("decision") or "").strip() == said:
             t.pop("decision", None)
             names.append(name)
     return names

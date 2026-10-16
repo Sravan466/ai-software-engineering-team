@@ -237,9 +237,26 @@ def test_not_a_decision_takes_it_back(script, client):
     assert r.status_code == 200, r.text
     after = r.json()["message"]
     assert not after["decided"] and after["meant_for"] == []
+    # Its check against finished work goes with it, unless it had already started.
+    assert after["change"] in (None, "cancelled", "none", "unchecked", "applied")
     assert after["replies"][-1]["text"].startswith("Not a decision, then.")
     track = client.get(f"/api/projects/{pid}").json()["auto_fix"]["tracks"]["build:backend_engineer"]
     assert "decision" not in track
     with SessionLocal() as db:
         assert crew_chat.asked_during(db, pid) == []
     assert client.post(f"/api/projects/{pid}/messages/{m['id']}/cancel", json={"decision": True}).status_code == 409
+
+
+def test_not_a_decision_cancels_a_change_it_was_waiting_to_make(client):
+    pid = client.post("/api/projects", json={"idea": "A tiny app"}).json()["id"]
+    with SessionLocal() as db:
+        m = CrewMessage(project_id=pid, author="person", text="skip voice input", kind="note", status="applied",
+                        meant_for=["qa_engineer"], applied_to=["backend_engineer"],
+                        plan={"decided": True, "state": "scheduled", "touched": ["frontend_engineer"]})
+        db.add(m)
+        db.commit()
+        mid = m.id
+    r = client.post(f"/api/projects/{pid}/messages/{mid}/cancel", json={"decision": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["message"]["change"] == "cancelled"
+    assert autofix.undecide({"tracks": {"t": {"decision": "  skip voice input\n"}}}, "skip voice input") == ["t"]

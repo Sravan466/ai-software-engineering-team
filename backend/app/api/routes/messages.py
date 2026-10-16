@@ -349,6 +349,9 @@ def _undecide(message_id: str, project: Project, db: Session) -> dict:
         autofix.undecide(data, asked.text)
         autofix.save(project, data)
         asked.plan = {k: v for k, v in (asked.plan or {}).items() if k != "decided"}
+        # What it would have changed in finished work goes with it, unless already under way.
+        if crew_chat.change_state(asked) in (crew_chat.CHECKING, crew_chat.SCHEDULED_CHANGE):
+            crew_chat.resolve(asked, crew_chat.CANCELLED_CHANGE)
         asked.meant_for = []
         crew_chat.reply(db, asked, "Not a decision, then. The crew treats it as a hint for that round only.", asked.agent)
         db.commit()
