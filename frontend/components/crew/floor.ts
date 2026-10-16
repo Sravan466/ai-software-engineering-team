@@ -6,6 +6,7 @@ import {
   crewAtRest,
   effectiveStatus,
   firstLine,
+  noteTaken,
   latestRow,
   nodeStateFor,
   sentBack,
@@ -185,6 +186,11 @@ export function liveFloor(project: Project, tick = 0): Floor {
         bubble = step ?? { head: agent.lines.working };
         plate = step ? (step.path ? `${step.head} ${step.path}` : step.head) : agent.lines.working;
         if (backNote) Object.assign(bubble, { note: backNote, noteTag: "Sent back" });
+        else {
+          // The agent working with a note the person sent while it built (#102).
+          const note = noteTaken(project, agent.key);
+          if (note) Object.assign(bubble, { note, noteTag: "Got your note" });
+        }
         break;
       }
       case "gate":

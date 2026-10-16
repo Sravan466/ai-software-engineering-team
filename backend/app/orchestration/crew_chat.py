@@ -614,6 +614,16 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
         if row is not None and getattr(row, "status", "") == PhaseStatus.RUNNING.value:
             # Stopped mid-phase: that phase runs again when the build resumes.
             ahead = [current, *ahead]
+    if not stopped and _writing_files(project, rows):
+        # A code phase between two files reads it before the next one (#102).
+        later = list(ahead)
+        ahead = [current, *ahead]
+        said = f"Got it. {title(current)} reads this before its next file"
+        if not later:
+            return f"{said}.", current, ahead
+        if len(later) == 1:
+            return f"{said}, and {title(later[0])} gets it when it starts.", current, ahead
+        return f"{said}, and {title(later[0])} and the {len(later) - 1} after it get it when they start.", current, ahead
     if not ahead:
         return "Every phase has started, so this note waits with the build until the crew can act on it.", None, []
     first = ahead[0]
@@ -627,6 +637,98 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
     else:
         said = f"{title(first)} and the {len(rest)} after it haven't started, so they get this note when they start."
     return f"Got it. {said}", first, ahead
+
+
+def _writing_files(project: Project, rows: dict) -> bool:
+    """Whether the phase working now is a code phase with files still to write."""
+    current = project.current_phase
+    if current not in CODE_PHASES or phase_state(project, current, rows) != "working":
+        return False
+    found = project.activity or {}
+    if found.get("ended") or found.get("stage") not in ("planning", "writing"):
+        return False
+    files = found.get("files") or []
+    return not files or any(f.get("state") in ("planned", "writing") for f in files)
+
+
+# ── notes reach the phases they're for ────────────────────────────────────────
+#: The notes a phase's prompt carries, newest kept when there are more.
+NOTES_MAX = 8
+_HANDED = (QUEUED, APPLIED)
+
+
+def _notes(db: Session, project_id: str) -> list[CrewMessage]:
+    return list(
+        db.execute(
+            select(CrewMessage)
+            .where(
+                CrewMessage.project_id == project_id,
+                CrewMessage.author == PERSON,
+                CrewMessage.kind == NOTE,
+                CrewMessage.status.in_(_HANDED),
+            )
+            .order_by(CrewMessage.created_at)
+        ).scalars()
+    )
+
+
+def notes_count():
+    """A scalar subquery: how many notes a build holds — for `claim.between_calls`, which
+    reads it in the read it already makes before every file, so a code phase notices a
+    new note (or one taken back) without a query of its own."""
+    from sqlalchemy import func
+
+    return (
+        select(func.count())
+        .select_from(CrewMessage)
+        .where(
+            CrewMessage.project_id == Project.id,
+            CrewMessage.author == PERSON,
+            CrewMessage.kind == NOTE,
+            CrewMessage.status.in_(_HANDED),
+        )
+        .scalar_subquery()
+    )
+
+
+def for_phase(m: CrewMessage, phase: str) -> bool:
+    """A note is for the phases it named or that hadn't started when it was sent; one
+    from before that was recorded is for every phase that starts after it."""
+    return not m.meant_for or phase in m.meant_for
+
+
+def take_notes(project_id: str, phase: str) -> str:
+    """Every note for `phase`, as its prompt carries them: one a line, oldest first.
+
+    At a phase's start (the graph node) and between two of a code phase's files. Each is
+    marked handed to `phase`; the first phase to take a note says so in the thread. Taken
+    again on a re-run — a resume, a fix round — so a note stands for the whole build.
+    Never raises: a note that can't be read never stops a build."""
+    from app.db.base import SessionLocal
+
+    try:
+        with SessionLocal() as db:
+            mine = [m for m in _notes(db, project_id) if for_phase(m, phase)]
+            for m in mine:
+                given = list(m.applied_to or [])
+                if phase in given:
+                    continue
+                m.applied_to = [*given, phase]
+                if m.status == QUEUED:
+                    m.status = APPLIED
+                    m.applied_at = now()
+                    m.agent = phase
+                    reply(db, m, f"Got your note. {title(phase)} is working with it now.", phase)
+            db.commit()
+            return "\n".join(f"- {' '.join(m.text.split())}" for m in mine[-NOTES_MAX:])
+    except Exception:  # noqa: BLE001
+        log.exception("Couldn't read the notes for %s on %s", phase, project_id)
+        return ""
+
+
+def asked_during(db: Session, project_id: str) -> list[str]:
+    """What the person asked for while the build ran, for the app's settled decisions."""
+    return [f"Asked during the build: {' '.join(m.text.split())}" for m in _notes(db, project_id) if m.applied_to]
 
 
 # ── questions only a model can answer ─────────────────────────────────────────
@@ -766,6 +868,10 @@ __all__ = [
     "QUEUED",
     "SCHEDULED",
     "addressed_to",
+    "asked_during",
+    "for_phase",
+    "notes_count",
+    "take_notes",
     "ask_model",
     "classify",
     "is_status",

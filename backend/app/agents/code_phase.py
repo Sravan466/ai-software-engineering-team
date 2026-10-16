@@ -39,6 +39,8 @@ from pydantic import BaseModel
 from app.agents import handoff
 from app.agents.base import (
     RevisionRefused,
+    feedback_frame,
+    feedback_text,
     window_too_small,
     _MEMORY_FRAME,
     _RAG_FRAME,
@@ -62,7 +64,7 @@ from app.core.config import settings
 from app.core.constants import BuildStatus, Phase, SchemaStatus
 from app.core.logging import get_logger
 from app.core.reading import CodeBlock, code_blocks, json_object
-from app.orchestration import activity, claim
+from app.orchestration import activity, claim, crew_chat
 from app.orchestration.charter import violations as charter_violations
 from app.router import inflight
 from app.router.base import WindowTooSmall
@@ -318,6 +320,8 @@ class _Run:
     def __init__(self, agent: CodePhaseAgent, ctx: AgentContext) -> None:
         self.agent = agent
         self.ctx = ctx
+        #: How many notes to the crew the build held when they were last taken (#102).
+        self.notes_seen = -1
         self.calls: list[LLMResponse] = []
         self.truncated = 0
         self.repairs = 0
@@ -422,7 +426,7 @@ class _Run:
         activity.plan([p.path for p in queue], self._batch_size(len(queue)), note=summary if isinstance(summary, str) else "")
 
         while queue:
-            claim.between_calls()
+            self._between_files()
             n = self._batch_size(len(queue))
             batch, queue = queue[:n], queue[n:]
             queue = self._write(batch) + queue
@@ -614,7 +618,7 @@ class _Run:
         activity.plan([e.path for e in self.edits], 1, note=self.edit_summary or ctx.change.splitlines()[0][:200])
         queue = list(self.edits)
         while queue:
-            claim.between_calls()
+            self._between_files()
             batch, queue = queue[:1], queue[1:]
             try:
                 queue = self._write(batch) + queue
@@ -1431,6 +1435,18 @@ class _Run:
         activity.file(planned.path, "missing")
 
     # ── the call ─────────────────────────────────────────────────────────────
+    def _between_files(self) -> None:
+        """The safe point between two files (#81): stop here for Stop or a lost claim —
+        and pick up a note the person sent meanwhile (#102), so the files still to write
+        carry it. The count comes back in the read this makes anyway."""
+        held = claim.between_calls()
+        # A note added, or one taken back (#102 PR 3): the count moved either way.
+        if held != self.notes_seen and (held or self.notes_seen > 0):
+            build = inflight.current()
+            if build:
+                self.ctx.asked = crew_chat.take_notes(build["id"], self.agent.key)
+        self.notes_seen = held
+
     def _call(self, build: Callable[[], list[ChatMessage]], batch: list[_Planned], doing: str) -> LLMResponse:
         """One write call. `build` makes its prompt from `self.profile`; a prompt the
         model refuses as too long (#101) is rebuilt to fit and sent once more, held to
@@ -1583,13 +1599,12 @@ class _Run:
             if ctx.fix_note:
                 share = min(len(ctx.fix_note), budget // 7, max(left - 200, 0))
                 put("feedback", f"# Keep this while you fix\n{_clip(ctx.fix_note, share)}\n")
-        elif ctx.feedback:
-            share = min(len(ctx.feedback), budget // 7, max(left - 200, 0))
-            put(
-                "feedback",
-                "# Reviewer feedback on your previous attempt — address it directly\n"
-                f"{_clip(ctx.feedback, share)}\n",
-            )
+        elif ctx.feedback or ctx.asked:
+            # The reviewer's note, and what the person asked for during the build (#102) —
+            # one slot, one share.
+            said = feedback_text(ctx)
+            share = min(len(said), budget // 7, max(left - 200, 0))
+            put("feedback", f"{feedback_frame(ctx)}{_clip(said, share)}\n")
         if self.digests:
             each = max(min(int(budget * settings.handoff_digest_share), left // 2) // len(self.digests), 300)
             for dep, d in self.digests.items():

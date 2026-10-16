@@ -123,9 +123,11 @@ def check() -> None:
         raise Superseded(project_id)
 
 
-def between_calls() -> None:
+def between_calls() -> int:
     """For a phase that makes many model calls (#81): stop before the next one when the
-    build is no longer this driver's, or the person pressed Stop.
+    build is no longer this driver's, or the person pressed Stop. Returns how many notes
+    to the crew the build holds (#102), read in the same query: a code phase that sees
+    the number change takes them again before its next file.
 
     Stop cancels the call in flight, but a Stop landing *between* two calls has nothing
     to cancel — without this the next file's call would start anyway. Raises
@@ -140,16 +142,21 @@ def between_calls() -> None:
     build = inflight.current()
     project_id = held[0] if held is not None else (build or {}).get("id")
     if not project_id:
-        return
-    # One read for both questions: it runs before every file a code phase writes.
+        return 0
+    from app.orchestration import crew_chat
+
+    # One read for every question: it runs before every file a code phase writes.
     with SessionLocal() as db:
         found = db.execute(
-            select(Project.run_token, Project.cancel_requested).where(Project.id == project_id)
+            select(Project.run_token, Project.cancel_requested, crew_chat.notes_count()).where(
+                Project.id == project_id
+            )
         ).first()
     if held is not None and (found is None or found[0] != held[1]):
         raise Superseded(project_id)
     if found is None or found[1]:
         raise RequestCancelled()
+    return int(found[2] or 0)
 
 
 

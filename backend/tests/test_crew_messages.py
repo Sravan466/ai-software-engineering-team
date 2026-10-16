@@ -297,11 +297,15 @@ def test_a_note_waits_for_the_agents_that_havent_started(calls, client):
     pid = _running_backend(client)
     m = _say(client, pid, "make it purple")
     assert m["kind"] == "note" and m["status"] == "queued"
+    # Backend is between two files, so it reads the note before its next one (#102).
     assert m["replies"][0]["text"] == (
-        "Got it. Frontend Engineer and the 4 after it haven't started, so they get this note when they start."
+        "Got it. Backend Engineer reads this before its next file, and Frontend Engineer and the 4 after it "
+        "get it when they start."
     )
-    assert m["replies"][0]["agent"] == "frontend_engineer"
-    assert m["meant_for"] == ["frontend_engineer", "qa_engineer", "security_engineer", "devops_engineer", "cost_estimation"]
+    assert m["replies"][0]["agent"] == "backend_engineer"
+    assert m["meant_for"] == [
+        "backend_engineer", "frontend_engineer", "qa_engineer", "security_engineer", "devops_engineer", "cost_estimation",
+    ]
     assert calls == []
 
 

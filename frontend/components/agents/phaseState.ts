@@ -107,6 +107,15 @@ export function sentBack(project: Project, key: string): PhaseResult | null {
   return last.status === "running" && before?.status === "rejected" ? before : null;
 }
 
+/**
+ * The newest note the person sent this agent while the build ran (#102), once the agent
+ * has taken it — its first line, for the crew floor's "Got your note" bubble.
+ */
+export function noteTaken(project: Project, key: string): string {
+  const taken = (project.messages ?? []).filter((m) => m.kind === "note" && m.applied_to.includes(key));
+  return taken.length ? firstLine(taken[taken.length - 1].text) : "";
+}
+
 /** The first line of a reviewer's note, for a bubble or a nameplate. */
 export function firstLine(text: string | null | undefined): string {
   return (text ?? "").split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";

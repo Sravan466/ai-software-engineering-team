@@ -29,7 +29,7 @@ from app.core.constants import PHASE_ORDER, RoutingMode, Phase, PHASE_LABELS
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.memory.store import memory_store
-from app.orchestration import changes, claim, debate as debate_step
+from app.orchestration import changes, claim, crew_chat, debate as debate_step
 from app.orchestration.charter import binding_on, freeze
 from app.orchestration.debate import conduct_debate, decision_summary
 from app.orchestration.state import PipelineState
@@ -260,6 +260,10 @@ def run_debate(state: PipelineState) -> tuple[Optional[dict], str]:
     return record, decision_summary(record)
 
 
+def _asked(project_id: Optional[str], phase: str) -> str:
+    return crew_chat.take_notes(project_id, phase) if project_id else ""
+
+
 def _make_node(phase: Phase):
     agent = get_agent(phase.value)
 
@@ -305,6 +309,9 @@ def _make_node(phase: Phase):
             # The fix loop's last round asks every phase it rebuilds for the most
             # capable model. Set by `redo`, cleared by the next one.
             escalate=phase.value in (state.get("escalate") or []),
+            # What the person asked for while the build ran (#102), for this phase: taken
+            # at its start — a resume included, which starts the phase again.
+            asked=_asked(state.get("project_id"), phase.value),
         )
         if editing:
             edit_context(ctx, change, phase.value, (change.get("base") or {}).get(phase.value))
