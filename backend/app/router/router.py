@@ -495,10 +495,9 @@ class ModelRouter:
         # local model is a decision about where the code goes, and a fix round does
         # not get to overrule it.
         if mode == RoutingMode.AUTO and not self._roles.get(role):
-            for pname in CLOUD_PROVIDERS:
-                model = self._default_model.get(pname) or ""
-                if model and self._cloud[pname].available() and not self._refuses(pname, model):
-                    return None if (pname, model) == current else self._spec((pname, model))
+            cloud = self.strongest_cloud()
+            if cloud:
+                return None if current is not None and cloud == self._spec(current) else cloud
         if current is None or current[0] in CLOUD_PROVIDERS:
             return None
         src = self.sources.get(current[0])

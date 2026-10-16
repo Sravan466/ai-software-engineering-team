@@ -397,7 +397,12 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
                 {r.model && <span className="ledger-model mono"> on {r.model}</span>}
               </span>
               <span className="ledger-how">{approach(name, r.strategy, r)}</span>
-              {r.note && <span className="ledger-note">You said: “{r.note}”</span>}
+              {r.note && (
+                <span className="ledger-note">
+                  You said: “{r.note}”
+                  {r.note_sent === false && " It didn't fit beside the code in this model's window, so the model didn't see it."}
+                </span>
+              )}
             </div>
             <span
               className={`badge${result.tone === "plain" ? "" : ` badge-${result.tone}`}`}
@@ -414,15 +419,28 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
 
 // ── when the loop stopped ────────────────────────────────────────────────────
 /** Who a track's problems belong to, in a person's words. */
-const SIDE: Record<string, string> = {
-  backend_engineer: "the backend",
-  frontend_engineer: "the website",
-  qa_engineer: "the tests",
+type Side = { name: string; plural?: boolean };
+const SIDE: Record<string, Side> = {
+  backend_engineer: { name: "the backend" },
+  frontend_engineer: { name: "the website" },
+  qa_engineer: { name: "the tests", plural: true },
 };
 
-function sideOf(name: string): string {
+function sideOf(name: string): Side {
   const phase = name.replace(/^build:/, "");
-  return SIDE[phase] ?? `${AGENT_BY_KEY[phase]?.codename ?? phase}'s work`;
+  return SIDE[phase] ?? { name: `${AGENT_BY_KEY[phase]?.codename ?? phase}'s work` };
+}
+
+/** "the backend's", "the tests'". */
+function whose(side: Side): string {
+  return side.name.endsWith("s") ? `${side.name}'` : `${side.name}'s`;
+}
+
+/** What is left on a stopped track (#103), new problems included; older records only
+ * kept what the last round was sent, less what it fixed. */
+function leftOf(track: AutoFixTrack): AutoFixProblem[] {
+  const last = track.rounds[track.rounds.length - 1];
+  return track.stopped?.problems ?? (last ? last.problems.filter((p) => (last.remaining ?? []).includes(p.key)) : []);
 }
 
 function capital(text: string): string {
@@ -441,9 +459,8 @@ function headline(name: string, t: AutoFixTrack): string {
   if (name === "security") return "A security problem is still open.";
   if (name === "tests") return "Some of the app's tests fail.";
   const side = sideOf(name);
-  const last = t.rounds[t.rounds.length - 1];
-  const left = t.stopped?.problems ?? last?.problems ?? [];
-  const kinds = left.map((p): string => {
+  const { plural } = side;
+  const kinds = leftOf(t).map((p): string => {
     if (p.kind === "stack") return "stack";
     if (p.problem === "weak_test") return "weak";
     if (p.problem === "placeholder") return "unfinished";
@@ -460,32 +477,32 @@ function headline(name: string, t: AutoFixTrack): string {
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "other";
   switch (top) {
     case "wiring":
-      return `${capital(side)}'s files don't connect to each other yet.`;
+      return `${capital(whose(side))} files don't connect to each other yet.`;
     case "parse":
-      return `Some of ${side}'s code can't run as written.`;
+      return `Some of ${whose(side)} code can't run as written.`;
     case "unfinished":
-      return `Part of ${side} isn't finished.`;
+      return plural ? `Some of ${side.name} aren't finished.` : `Part of ${side.name} isn't finished.`;
     case "weak":
       return "Some tests don't check anything yet.";
     case "install":
-      return `${capital(side)} uses a package that can't be installed.`;
+      return `${capital(side.name)} ${plural ? "use" : "uses"} a package that can't be installed.`;
     case "stack":
-      return `Part of ${side} uses a different setup from the plan.`;
+      return plural
+        ? `Some of ${side.name} use a different setup from the plan.`
+        : `Part of ${side.name} uses a different setup from the plan.`;
     case "start":
-      return `${capital(side)} doesn't start yet.`;
+      return plural ? `${capital(side.name)} don't run yet.` : `${capital(side.name)} doesn't start yet.`;
     case "vercel":
       return "The website didn't build on Vercel.";
     default:
-      return `${capital(side)} has problems the crew couldn't fix.`;
+      return `${capital(side.name)} ${plural ? "have" : "has"} problems the crew couldn't fix.`;
   }
 }
 
 /** The compiler's own words, for whoever wants them (#103). */
 function Details({ track }: { track: AutoFixTrack }) {
   const [open, setOpen] = useState(false);
-  const last = track.rounds[track.rounds.length - 1];
-  const left = track.stopped?.problems ?? (last ? last.problems.filter((p) => (last.remaining ?? []).includes(p.key)) : []);
-  if (left.length === 0) return null;
+  if (leftOf(track).length === 0) return null;
   return (
     <div className="help-details">
       <button
@@ -537,8 +554,9 @@ export function NeedsHelp({
   const cloud = codeTracks.map(([, t]) => t.stopped?.cloud).find((m): m is string => Boolean(m)) ?? null;
   // Whose code goes to the cloud: every stuck side it was offered for.
   const cloudSides = codeTracks.filter(([, t]) => cloud && t.stopped?.cloud === cloud).map(([name]) => sideOf(name));
-  // Recorded as nothing (null), not a build stopped before this was asked (undefined).
-  const nothingStronger = !cloud && codeTracks.length > 0 && codeTracks.every(([, t]) => t.stopped?.stronger === null);
+  // Only when the record says adding a model is what would help: nothing stronger to
+  // reach and no cloud key at all. A build stopped before this was recorded says nothing.
+  const nothingStronger = !cloud && codeTracks.some(([, t]) => t.stopped?.add_model === true);
   const retry = (model?: string) =>
     act(() => api.keepTrying(id, { note: note.trim() || undefined, model }));
 
@@ -642,7 +660,7 @@ export function NeedsHelp({
               : "Try again gives the crew up to 2 more rounds."}
             {cloud && cloudSides.length > 0 && (
               <>
-                {" "}Using {modelName(cloud)} sends {cloudSides.map((side) => `${side}'s`).join(" and ")} code to{" "}
+                {" "}Using {modelName(cloud)} sends {cloudSides.map(whose).join(" and ")} code to{" "}
                 {PROVIDERS[cloud.split(":")[0]] ?? cloud.split(":")[0]}, for this round only.
               </>
             )}
@@ -705,10 +723,7 @@ function stoppedHint(t: AutoFixTrack): string {
 }
 
 function CodeLeft({ track }: { track: AutoFixTrack }) {
-  const last = track.rounds[track.rounds.length - 1];
-  // What is left, new problems included (#103); older records only kept what was sent.
-  const left = track.stopped?.problems
-    ?? (last ? last.problems.filter((p) => (last.remaining ?? []).includes(p.key)) : []);
+  const left = leftOf(track);
   if (left.length === 0) return null;
   return (
     <ul className="fix-list">

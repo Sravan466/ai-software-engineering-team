@@ -359,6 +359,10 @@ class _Run:
         self.reverted: list[str] = []
         #: Files asked for in a fix call and not sent back.
         self.unanswered: list[str] = []
+        #: Whether the last prompt built carried the person's note (#103), and how many of
+        #: the round's calls did and didn't.
+        self._person_put = False
+        self.person_calls = {"sent": 0, "dropped": 0}
         #: Each edited file -> every file its fix call wrote: reverted together (#103).
         self.called_with: dict[str, frozenset] = {}
         #: The attempt being fixed, checked without the prompt's caps: what "worse" is
@@ -833,6 +837,10 @@ class _Run:
                 "lost_code": list(self.lost),
                 "reverted": list(self.reverted),
                 "unanswered": list(self.unanswered),
+                # The person's note (#103): "dropped" only when no call had room for it.
+                "person": (
+                    ("sent" if self.person_calls["sent"] else "dropped") if sum(self.person_calls.values()) else None
+                ) if self.ctx.person_note else None,
                 "kept": len([p for p in self.existing if p not in changed]),
                 # Fix and write calls, the planner's aside: 0 when every file was too long
                 # to show whole, and the round tried nothing.
@@ -1456,6 +1464,8 @@ class _Run:
 
         resp, _, self.profile = send_fitting(built, self.profile, send, who=agent.title)
         self.calls.append(resp)
+        if self.fix_mode and ctx.person_note:
+            self.person_calls["sent" if self._person_put else "dropped"] += 1
         return resp
 
     # ── the prompt ───────────────────────────────────────────────────────────
@@ -1544,6 +1554,12 @@ class _Run:
                         raise _NoRoom(p.path)
 
         if self.fix_mode:
+            # What the person asked the crew to try (#103): whole, right after the files
+            # and before anything that can be cut. Without room for it, the round's record
+            # says it wasn't sent rather than the card claiming it was.
+            self._person_put = bool(ctx.person_note) and put(
+                "person", f"# What the person asks you to try\n{ctx.person_note.strip()}\n"
+            )
             # What a fix needs next after the files themselves (#103): what the files
             # around them really export, and the code of what they import. The plan,
             # the idea and the digests get what is left.
@@ -1601,6 +1617,8 @@ class _Run:
         order = [
             "idea", *[k for k in sections if k.startswith("dep:")], "skills", "rag", "memory",
             "extra", "change", "feedback", "plan", "written", "bodies",
+            # Next to the ask it is about (#103).
+            "person",
         ]
         parts = [sections[k] for k in order if k in sections]
         parts.append(sections.get("write", ""))

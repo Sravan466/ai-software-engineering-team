@@ -451,8 +451,10 @@ export type AutoFixRound = {
    * — they did, and it didn't answer, so the usual model ran. */
   model?: string | null;
   basis?: string | null;
-  /** What the person told the crew to try for this round, in their words (#103). */
+  /** What the person told the crew to try for this round, in their words (#103), and
+   * false when it didn't fit beside the code, so the model never saw it. */
   note?: string;
+  note_sent?: boolean;
   /** What the platform mended itself, without a model (#103): on the attempt this round
    * made, and — on an episode's first round — on the attempt before it. */
   platform?: PlatformFixed;
@@ -492,6 +494,8 @@ export type AutoFixTrack = {
      * stronger), and a cloud model it could use for one fix with the person's yes. */
     stronger?: string | null;
     cloud?: string | null;
+    /** Nothing stronger to reach and no cloud key at all: adding a model would help. */
+    add_model?: boolean;
   } | null;
   accepted: { kind: WaiveKind; reason: string; at: string } | null;
   resumed_after: number;

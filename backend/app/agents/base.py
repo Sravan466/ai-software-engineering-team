@@ -160,6 +160,8 @@ class AgentContext:
     #: What else the round is told beside the problems: a security fix this phase must
     #: keep while it fixes them.
     fix_note: str = ""
+    #: What the person told the crew to try on this round (#103), in their words.
+    person_note: str = ""
 
     @property
     def editing(self) -> bool:
