@@ -794,9 +794,6 @@ class PipelineRunner:
             # Every file the round had to fix was too long to show whole (#103): it
             # tried nothing. A round that found nothing to edit at all did, and failed.
             t["rounds"][-1]["nothing_sent"] = True
-        if closed is not None:
-            # The run of it, kept on the track for the page (#103): one place says it.
-            t["trend"] = autofix.trend(t)
         if not problems:
             autofix.settle(t)
             autofix.save(project, data)
@@ -814,7 +811,11 @@ class PipelineRunner:
                 keys = [p["key"] for p in problems]
             autofix.stop(t, step, keys, problems)
             if kept is not None:
-                t["stopped"]["kept_best"] = (kept.handoff or {}).get("kept_best")
+                best = (kept.handoff or {}).get("kept_best") or {}
+                t["stopped"]["kept_best"] = best
+                # Which round made it, for the round a Keep trying sends it to — on the
+                # track, so an episode that settles forgets it (the row keeps its marker).
+                t["kept"] = {"attempt": kept.id, "round": best.get("round")}
             autofix.save(project, data)
             db.commit()
             self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))
@@ -823,10 +824,11 @@ class PipelineRunner:
         n = len(t["rounds"]) + 1
         k = n - int(t.get("episode_start") or 0)
         strategy = remediation.strategy_for(k)
+        kept_now = t.get("kept") or {}
         autofix.start_round(
             t, strategy, [row.phase], problems, attempt=row.id,
             # An attempt the loop put back says which round made it (#103).
-            from_round=((row.handoff or {}).get("kept_best") or {}).get("round"),
+            from_round=kept_now.get("round") if kept_now.get("attempt") == row.id else None,
         )
         autofix.save(project, data)
         db.commit()
@@ -874,8 +876,11 @@ class PipelineRunner:
         old = db.get(PhaseResult, best["attempt"])
         if old is None or old.project_id != project.id or old.phase != row.phase or not isinstance(old.output, dict):
             return None
+        n = int(best["problems"])
         copy = versions.copy_row(
-            db, project, versions.snapshot_of(old), row.status, old.feedback,
+            db, project, versions.snapshot_of(old), row.status,
+            f"Put back by the fix loop: it had {n} problem{'' if n == 1 else 's'}, the attempt after it "
+            f"{best['instead_of']}.",
             {"kept_best": {"from": old.id, "round": best["round"], "problems": best["problems"],
                            "instead_of": best["instead_of"]}},
         )
@@ -887,11 +892,17 @@ class PipelineRunner:
             claim.check()
             cfg = _config(project.id)
             values = dict(graph.get_state(cfg).values)
-            graph.update_state(
-                cfg,
-                {"prior_outputs": {**(values.get("prior_outputs") or {}), row.phase: old.output}, "last_result": {}},
-                as_node=row.phase,
-            )
+            patch = {
+                "prior_outputs": {**(values.get("prior_outputs") or {}), row.phase: old.output},
+                "last_result": {},
+                # Nothing kept for re-checking describes the attempt that was rejected.
+                "kept": {k: v for k, v in (values.get("kept") or {}).items() if k != row.phase},
+            }
+            change = values.get("change")
+            if isinstance(change, dict) and row.phase in (change.get("base") or {}):
+                # An open change (#79) edits this attempt next, not the one it replaced.
+                patch["change"] = {**change, "base": {**change["base"], row.phase: old.output}}
+            graph.update_state(cfg, patch, as_node=row.phase)
         db.commit()
         if row.phase == Phase.FRONTEND_ENGINEER.value and self._clear_generated_mockup(db, project.id):
             # The front end the picture was drawn from isn't the one that ships now.

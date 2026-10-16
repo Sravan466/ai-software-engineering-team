@@ -122,7 +122,8 @@ def test_a_security_round_keeps_its_own_judgement():
     t = autofix.track(data, autofix.SECURITY)
     autofix.start_round(t, "guided", ["backend_engineer"], [{"key": "a"}, {"key": "b"}])
     autofix.close_round(t, ["c", "d", "e"])
-    assert "after" not in t["rounds"][-1] and autofix.trend(t) == []
+    seen = autofix.view(data)["tracks"][autofix.SECURITY]
+    assert "after" not in seen["rounds"][-1] and "trend" not in seen
 
 
 def test_after_a_put_back_the_next_round_starts_from_it_and_says_so():
@@ -136,5 +137,45 @@ def test_after_a_put_back_the_next_round_starts_from_it_and_says_so():
     _round(t, ["a", "b", "c"], [f"y{i}" for i in range(5)], "c0", "r2", from_round=0)
     assert _counts(t) == ["3", "6", "back 3", "5"]
     best = autofix.best_attempt(t)
-    assert best == {"attempt": "c0", "problems": 3, "round": 0, "instead_of": 5}
+    assert best == {"attempt": "r0", "problems": 3, "round": 0, "instead_of": 5}
     assert autofix.said(autofix.trend(t)) == "3 → 6 → back to 3 → 5"
+
+
+# ── review of #110 ───────────────────────────────────────────────────────────
+def test_an_old_record_reads_with_its_real_trend_and_net_counts():
+    """The issue's own build, as recorded before #103: rounds with no `after`. Each was
+    sent every problem the attempt before it had, so the trend is read off them."""
+    keys = [[f"r{n}-{i}" for i in range(c)] for n, c in enumerate([3, 6, 4, 4, 3])]
+    rounds = []
+    for n, sent in enumerate(keys):
+        nxt = keys[n + 1] if n + 1 < len(keys) else [f"end-{i}" for i in range(7)] + sent[:1]
+        rounds.append({"n": n + 1, "strategy": "guided", "phases": ["backend_engineer"],
+                       "problems": [{"key": k} for k in sent],
+                       "fixed": [k for k in sent if k not in nxt], "remaining": [k for k in sent if k in nxt]})
+    data = {"tracks": {"build:backend_engineer": {
+        "allowed": 5, "rounds": rounds, "resumed_after": 3, "episode_start": 0, "accepted": None,
+        "stopped": {"reason": "limit", "left": 8, "keys": [], "at": "x"},
+    }}}
+    seen = autofix.view(data)["tracks"]["build:backend_engineer"]
+    assert [p["n"] for p in seen["trend"]] == [3, 6, 4, 4, 3, 8]
+    assert seen["rounds"][-1]["after"] == 8 and seen["rounds"][-1]["broke"] == 7
+    assert "after" not in data["tracks"]["build:backend_engineer"]["rounds"][0]  # nothing written back
+
+
+def test_a_tie_goes_to_the_attempt_itself_not_a_copy_put_back():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    t["allowed"] = 5
+    _round(t, ["a", "b", "c"], [f"x{i}" for i in range(6)], "r0", "r1")
+    _round(t, ["a", "b", "c"], [f"y{i}" for i in range(5)], "c0", "r2", from_round=0)
+    assert autofix.best_attempt(t)["attempt"] == "r0"
+
+
+def test_a_put_back_s_round_is_forgotten_when_the_episode_settles():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    t["kept"] = {"attempt": "c0", "round": 3}
+    autofix.start_round(t, "guided", ["backend_engineer"], [{"key": "a"}])
+    autofix.close_round(t, [], net=True)
+    autofix.settle(t)
+    assert "kept" not in t

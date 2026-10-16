@@ -198,7 +198,7 @@ def stop(t: dict, reason: str, keys: list[str], problems: Optional[list[dict]] =
         t["stopped"]["problems"] = problems
 
 
-def _episode(t: dict) -> list[dict]:
+def episode(t: dict) -> list[dict]:
     """The latest episode's rounds — still together after `settle` moved the start on."""
     rounds = t.get("rounds") or []
     if not rounds:
@@ -209,43 +209,98 @@ def _episode(t: dict) -> list[dict]:
     return rounds[int(t.get("episode_start") or 0):]
 
 
+def _carried_on(t: dict, i: int) -> bool:
+    """Whether round i+1 carried on round i's problems, rather than opening an episode."""
+    rounds = t["rounds"]
+    r, nxt = rounds[i], rounds[i + 1]
+    if r.get("episode") is not None and nxt.get("episode") is not None:
+        return r["episode"] == nxt["episode"]
+    # Recorded before rounds said their episode: the current one is known, and a round
+    # that left some of its own problems was carried on whatever came next.
+    return i >= int(t.get("episode_start") or 0) or bool(r.get("remaining"))
+
+
+def after_of(t: dict, i: int) -> Optional[int]:
+    """What code round i left, new problems included (#103). Recorded since #103; for a
+    round before that, read off the round after it — each was sent every problem the
+    attempt before it had — or off how the loop ended."""
+    rounds = t.get("rounds") or []
+    r = rounds[i]
+    if r.get("fixed") is None:
+        return None
+    if r.get("after") is not None:
+        return int(r["after"])
+    if i + 1 < len(rounds):
+        return len(rounds[i + 1].get("problems") or []) if _carried_on(t, i) else None
+    if t.get("stopped"):
+        return int(t["stopped"].get("left") or 0)
+    if t.get("accepted"):
+        return len(t["accepted"].get("keys") or [])
+    return 0 if not r.get("remaining") else None
+
+
 def trend(t: dict) -> list[dict]:
     """The episode's problem counts (#103), one point per attempt: what its first round
     was sent, then what each round left — 3 → 6 → 4 is a loop going nowhere. A round
     sent an attempt the loop put back, not the one the round before it made, starts
     from it again (`back`). Each point says which attempt it is and which round made
-    it (0: none). Empty until a round has recorded what it left."""
-    rounds = _episode(t)
-    if not rounds or rounds[0].get("after") is None:
+    it (0: none)."""
+    rounds = t.get("rounds") or []
+    current = episode(t)
+    if not current:
         return []
-    base = int(rounds[0].get("n") or 1) - 1
+    first = rounds.index(current[0])
+    base = int(current[0].get("n") or 1) - 1
     out: list[dict] = []
     made: Optional[str] = None
-    for r in rounds:
+    for i in range(first, first + len(current)):
+        r = rounds[i]
         sent = len(r.get("problems") or [])
         if not out:
             out.append({"n": sent, "attempt": r.get("attempt"), "round": int(r.get("from_round") or 0), "back": False})
         elif r.get("attempt") and made and r["attempt"] != made:
             out.append({"n": sent, "attempt": r["attempt"], "round": int(r.get("from_round") or 0), "back": True})
-        if r.get("after") is None or r.get("fixed") is None:
+        after = after_of(t, i)
+        if after is None:
             break
-        out.append({"n": int(r["after"]), "attempt": r.get("result"), "round": int(r.get("n") or 0) - base, "back": False})
+        out.append({"n": after, "attempt": r.get("result"), "round": int(r.get("n") or 0) - base, "back": False})
         made = r.get("result")
-    return out
+    return out if len(out) > 1 else []
 
 
-def best_attempt(t: dict) -> Optional[dict]:
+def best_attempt(t: dict, points: Optional[list[dict]] = None) -> Optional[dict]:
     """The episode's attempt with the fewest problems, when it isn't the latest (#103):
     `{"attempt", "problems", "round", "instead_of"}` — `round` 0 is the attempt before
-    any round. A tie keeps the later one."""
-    points = [p for p in trend(t) if p.get("attempt")]
-    if not points:
+    any round. A tie goes to the attempt itself over a copy the loop put back, then to
+    the later one."""
+    seen = [p for p in (points if points is not None else trend(t)) if p.get("attempt")]
+    if not seen:
         return None
-    latest = points[-1]
-    best = min(enumerate(points), key=lambda ip: (ip[1]["n"], -ip[0]))[1]
+    latest = seen[-1]
+    best = min(enumerate(seen), key=lambda ip: (ip[1]["n"], ip[1]["back"], -ip[0]))[1]
     if best["n"] >= latest["n"] or best["attempt"] == latest["attempt"]:
         return None
     return {"attempt": best["attempt"], "problems": best["n"], "round": best["round"], "instead_of": latest["n"]}
+
+
+def view(data: object) -> object:
+    """The loop's record as the page reads it (#103): each code track with its trend,
+    and each of its rounds with what it left and broke — worked out here, once, for
+    records from before those were kept too. Nothing is written back."""
+    if not isinstance(data, dict) or not isinstance(data.get("tracks"), dict):
+        return data
+    out = copy.deepcopy(data)
+    for name, t in out["tracks"].items():
+        if not name.startswith(BUILD_PREFIX) or not isinstance(t, dict):
+            continue
+        for i, r in enumerate(t.get("rounds") or []):
+            if r.get("after") is None and r.get("fixed") is not None:
+                after = after_of(t, i)
+                if after is not None:
+                    r["after"] = after
+                    r["broke"] = max(after - len(r.get("remaining") or []), 0)
+        t["trend"] = trend(t)
+    return out
 
 
 def said(points: list[dict]) -> str:
@@ -274,6 +329,7 @@ def settle(t: dict) -> None:
     t["episode_start"] = len(t["rounds"])
     t["allowed"] = len(t["rounds"]) + max(int(settings.auto_fix_max_rounds), 0)
     t["stopped"] = None
+    t.pop("kept", None)  # an attempt put back belongs to the episode that put it back
 
 
 def stuck(data: dict) -> list[str]:
@@ -749,7 +805,10 @@ __all__ = [
     "start_round",
     "stop",
     "stuck",
+    "after_of",
+    "episode",
     "said",
+    "view",
     "track",
     "trend",
 ]

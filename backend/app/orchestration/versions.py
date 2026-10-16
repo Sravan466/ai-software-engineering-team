@@ -386,8 +386,11 @@ def copy_row(
 
 
 def snapshot_of(row: PhaseResult) -> dict:
-    """One attempt's fields, as a version snapshots them."""
-    return {name: getattr(row, name) for name in SNAP_FIELDS}
+    """One attempt's fields, as a version snapshots them — copies, so a row made from
+    them never shares a JSON value with the row they came from."""
+    import copy
+
+    return {name: copy.deepcopy(getattr(row, name)) for name in SNAP_FIELDS}
 
 
 def restore_rows(db: Session, project: Project, version: Version, note: str) -> dict[str, PhaseResult]:

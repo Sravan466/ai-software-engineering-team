@@ -86,60 +86,11 @@ function openRound(t: AutoFixTrack): AutoFixRound | null {
 }
 
 /**
- * What a round left, new problems included (#103). Recorded since #103; for a code
- * round before that, read off the round after it — each was sent every problem the
- * attempt before it had — or off what the loop stopped on.
- */
-function afterOf(t: AutoFixTrack, i: number, code: boolean): number | undefined {
-  const r = t.rounds[i];
-  if (r.fixed === null) return undefined;
-  if (r.after !== undefined) return r.after;
-  if (!code) return undefined;
-  const next = sameEpisodeNext(t, i);
-  if (next) return next.problems.length;
-  return t.stopped && i === t.rounds.length - 1 ? t.stopped.left : undefined;
-}
-
-/** The round after round `i`, when it carried on the same problems — not the first
- * round of a fresh episode after the phase came back clean. */
-function sameEpisodeNext(t: AutoFixTrack, i: number): AutoFixRound | undefined {
-  const r = t.rounds[i];
-  const next = t.rounds[i + 1];
-  if (!next) return undefined;
-  if (r.episode !== undefined && next.episode !== undefined) return r.episode === next.episode ? next : undefined;
-  // Recorded before rounds carried their episode: only the current one is known.
-  return i >= (t.episode_start ?? 0) ? next : undefined;
-}
-
-/**
- * The problems a code round made that weren't there before it (#103): everything its
- * re-check found, less what it was sent and didn't fix.
- */
-function brokeOf(t: AutoFixTrack, i: number, code: boolean): number | undefined {
-  const r = t.rounds[i];
-  if (r.broke !== undefined) return r.broke;
-  const after = afterOf(t, i, code);
-  if (after === undefined || r.fixed === null) return undefined;
-  const left = r.remaining?.length ?? r.problems.length - r.fixed.length;
-  return Math.max(after - left, 0);
-}
-
-/**
- * The episode's problem counts (#103), one point per attempt. The backend records them
- * as the loop runs; a build from before that has them read off its rounds here.
+ * A code track's problem counts (#103), one point per attempt — worked out by the
+ * backend as the page reads the build (`autofix.view`), older builds included.
  */
 export function trendOf(name: string, t: AutoFixTrack): TrendPoint[] {
-  if (t.trend && t.trend.length > 1) return t.trend;
-  const code = name.startsWith("build:");
-  const start = t.episode_start ?? 0;
-  if (!code || t.rounds.length <= start) return [];
-  const out: TrendPoint[] = [{ n: t.rounds[start].problems.length, round: 0, back: false }];
-  for (let i = start; i < t.rounds.length; i++) {
-    const after = afterOf(t, i, code);
-    if (after === undefined) break;
-    out.push({ n: after, round: i - start + 1, back: false });
-  }
-  return out.length > 1 ? out : [];
+  return name.startsWith("build:") && t.trend && t.trend.length > 1 ? t.trend : [];
 }
 
 /** Which attempt the build was put back on, in words. */
@@ -181,19 +132,17 @@ function Trend({ points, kept }: { points: TrendPoint[]; kept?: (KeptBest & { fr
 }
 
 /** A round's result, net (#103): what it fixed and what it broke, not "fixed 3 of 3". */
-function roundResult(name: string, t: AutoFixTrack, i: number): { text: string; tone: "ok" | "bad" | "warn" | "plain" } {
-  const r = t.rounds[i];
-  const code = name.startsWith("build:");
+function roundResult(r: AutoFixRound): { text: string; tone: "ok" | "bad" | "warn" | "plain" } {
   const sent = r.problems.length;
   const fixed = r.fixed?.length ?? 0;
   if (r.fixed === null) return { text: "Not re-checked", tone: "plain" };
   if (r.unjudged && fixed === 0) return { text: "Couldn't re-check", tone: "warn" };
   if (r.nothing_sent) return { text: "Too long to show", tone: "warn" };
-  const after = afterOf(t, i, code);
-  if (after === undefined) return { text: `Fixed ${fixed} of ${sent}`, tone: fixed > 0 ? "ok" : "plain" };
-  const broke = brokeOf(t, i, code) ?? 0;
+  // Security and test rounds, and code rounds nobody can know the result of, as before.
+  if (r.after === undefined) return { text: `Fixed ${fixed} of ${sent}`, tone: fixed > 0 ? "ok" : "plain" };
+  const broke = r.broke ?? 0;
   const text = broke > 0 ? `Fixed ${fixed}, broke ${broke}` : `Fixed ${fixed} of ${sent}`;
-  return { text, tone: after < sent ? "ok" : after > sent ? "bad" : "plain" };
+  return { text, tone: r.after < sent ? "ok" : r.after > sent ? "bad" : "plain" };
 }
 
 /** What a build problem broke, by the step that found it (#75). */
@@ -391,10 +340,10 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
   }
   return (
     <ol className="ledger">
-      {track.rounds.map((r, i) => {
+      {track.rounds.map((r) => {
         const sent = r.problems.length;
         const who = r.phases.map((p) => AGENT_BY_KEY[p]?.codename ?? p).join(", ");
-        const result = roundResult(name, track, i);
+        const result = roundResult(r);
         return (
           <li key={r.n} className="ledger-row" data-progress={result.tone === "ok" || undefined} data-worse={result.tone === "bad" || undefined}>
             <span className="ledger-n mono">R{r.n}</span>
