@@ -225,7 +225,7 @@ function Owner({ phase }: { phase: string }) {
   );
 }
 
-/** What the platform fixed itself across the episode, before any model round (#103). */
+/** What the platform fixed itself across the episode, without a model (#103). */
 function platformFixed(t: AutoFixTrack): { paths: number; imports: number } {
   const out = { paths: 0, imports: 0 };
   for (const r of t.rounds.slice(t.episode_start ?? 0)) {
@@ -237,7 +237,7 @@ function platformFixed(t: AutoFixTrack): { paths: number; imports: number } {
   return out;
 }
 
-/** "The platform fixed 3 import paths and 1 import itself, before any model round." */
+/** "The platform fixed 3 import paths and 1 import itself, without a model." */
 function PlatformLine({ track }: { track: AutoFixTrack }) {
   const { paths, imports } = platformFixed(track);
   if (paths + imports === 0) return null;
@@ -248,7 +248,7 @@ function PlatformLine({ track }: { track: AutoFixTrack }) {
   return (
     <p className="fix-kept fix-platform">
       {Icon.check}
-      <span>The platform fixed {parts.join(" and ")} itself, before any model round.</span>
+      <span>The platform fixed {parts.join(" and ")} itself, without a model.</span>
     </p>
   );
 }

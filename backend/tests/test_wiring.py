@@ -60,16 +60,16 @@ def test_a_default_import_of_a_module_with_no_default_becomes_a_named_one():
     assert "import { router } from './routes'" in out["backend/server.ts"] and (before, after) == (1, 0)
 
 
-def test_require_destructuring_of_module_exports_takes_the_export_itself():
+def test_require_destructuring_of_a_default_export_takes_the_export_itself():
+    """The issue's own case: `main.js` destructured a name out of a module whose only
+    export is its default — TypeScript's 2614, "did you mean `import getTodos from`"."""
     files = {
-        "backend/main.js": "const { todos } = require('./routes/todos');\nmodule.exports = todos;\n",
-        "backend/routes/todos.js": "const todos = { list: [] };\nmodule.exports = todos;\n",
+        "backend/main.js": "const { getTodos } = require('./routes/todos');\nmodule.exports = getTodos;\n",
+        "backend/routes/todos.js": "export default function getTodos() {\n  return [];\n}\n",
     }
-    before = _check(files)
-    if not before.problems:
-        return  # the checker reads this require as fine; nothing to mend
+    assert [p.code for p in _check(files).problems] == [2614]
     out, made, n_before, n_after = _mend(files)
-    assert "const todos = require('./routes/todos')" in out["backend/main.js"] and n_after < n_before
+    assert "const getTodos = require('./routes/todos')" in out["backend/main.js"] and (n_before, n_after) == (1, 0)
 
 
 def test_typescript_s_own_spelling_fix_is_applied():
@@ -145,3 +145,24 @@ def test_what_the_platform_fixed_is_counted_by_kind_on_the_round():
     row = SimpleNamespace(handoff={"wiring": [{"kind": "path"}, {"kind": "path"}, {"kind": "import"}]})
     assert autofix.platform_fixed(row) == {"paths": 2, "imports": 1}
     assert autofix.platform_fixed(SimpleNamespace(handoff=None)) == {}
+
+
+# ── review of #111 ───────────────────────────────────────────────────────────
+def test_two_files_asking_for_the_same_export_add_it_once():
+    files = {
+        "backend/a.ts": "import { helper } from './util';\nexport const a = helper;\n",
+        "backend/b.ts": "import { helper } from './util';\nexport const b = helper;\n",
+        "backend/util.ts": "function helper() {\n  return 1;\n}\nexport const other = 2;\n",
+    }
+    out, made, before, after = _mend(files)
+    assert "export function helper" in out["backend/util.ts"] and "export export" not in out["backend/util.ts"]
+    assert after == 0
+
+
+def test_a_typescript_import_written_with_js_keeps_js():
+    files = {
+        "backend/src/controllers/todo.ts": "import { list } from './todo_service.js';\nexport const all = list;\n",
+        "backend/src/services/todo_service.ts": "export function list() {\n  return [];\n}\n",
+    }
+    out, made, before, after = _mend(files)
+    assert "from '../services/todo_service.js'" in out["backend/src/controllers/todo.ts"] and after == 0

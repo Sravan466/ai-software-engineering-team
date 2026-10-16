@@ -200,6 +200,7 @@ for (const group of input.groups) {
       // A fix the service can't offer is a problem left for the model, never a crash.
     }
   }
+  if (input.fixesOnly) continue;
   let checker = null;
   for (const rel of group.report) {
     const sf = program.getSourceFile(`${root}/${rel}`);

@@ -98,8 +98,17 @@ class BuildCheck:
 
 
 # ── resolution ───────────────────────────────────────────────────────────────
+#: TypeScript's own rule: an import written as the JavaScript it compiles to names the
+#: TypeScript source — `./x.js` is `x.ts` (#103: NodeNext-style imports).
+_TS_FOR_JS = {".js": (".ts", ".tsx"), ".jsx": (".tsx",), ".mjs": (".mts",), ".cjs": (".cts",)}
+
+
 def resolve(target: str, tree: set[str]) -> Optional[str]:
     """The file a module path resolves to, as `next build` would find it, or None."""
+    stem, ext = posixpath.splitext(target)
+    for alt in _TS_FOR_JS.get(ext, ()):
+        if f"{stem}{alt}" in tree:
+            return f"{stem}{alt}"
     for ext in _RESOLVE_EXT:
         if f"{target}{ext}" in tree:
             return f"{target}{ext}"
@@ -357,8 +366,25 @@ def _paths_for(files: dict[str, str], side: str) -> dict:
     return out
 
 
-#: TypeScript's codes for importing what a module doesn't export.
-EXPORT_MISS_CODES = frozenset({2305, 2724, 2613, 2614, 1192})
+#: TypeScript's codes for importing what a module doesn't export — or declares and
+#: doesn't export (2459, #103).
+EXPORT_MISS_CODES = frozenset({2305, 2724, 2613, 2614, 1192, 2459})
+
+
+def _js_groups(files: dict[str, str], targets: list[str]) -> list[dict]:
+    """The checker's groups: one per side, its JavaScript files by side-relative path,
+    the ones to report on, and the side's import aliases."""
+    groups = []
+    for side in sorted({layout.side_of(p) or "root" for p in targets}):
+        prefix = "" if side == "root" else f"{side}/"
+        groups.append({
+            "name": side,
+            "files": {p[len(prefix):]: c for p, c in files.items()
+                      if p.endswith(_JS_EXT) and (p.startswith(prefix) if prefix else layout.side_of(p) is None)},
+            "report": [p[len(prefix):] for p in targets if (layout.side_of(p) or "root") == side],
+            "paths": _paths_for(files, side),
+        })
+    return groups
 
 
 def _run_js(
@@ -370,7 +396,9 @@ def _run_js(
     node = toolchain.node()
     if not ts_path or not node:
         return None, toolchain.unavailable_reason() or "No JavaScript parser is available.", []
-    payload = json.dumps({"typescript": ts_path, "groups": groups, "exports": exports, "codefixes": codefixes})
+    # A fixes-only run (#103) skips the checker's own diagnostics: the caller has them.
+    payload = json.dumps({"typescript": ts_path, "groups": groups, "exports": exports, "codefixes": codefixes,
+                          "fixesOnly": codefixes})
     try:
         result = subprocess.run(
             [node, str(_CHECKER)],
@@ -426,17 +454,7 @@ def code_fixes(files: dict[str, str], report_on: Iterable[str]) -> list[dict]:
     js = [p for p in dict.fromkeys(report_on) if p in files and p.endswith(_JS_EXT)]
     if not js:
         return []
-    groups = []
-    for side in sorted({layout.side_of(p) or "root" for p in js}):
-        prefix = "" if side == "root" else f"{side}/"
-        groups.append({
-            "name": side,
-            "files": {p[len(prefix):]: c for p, c in files.items()
-                      if p.endswith(_JS_EXT) and (p.startswith(prefix) if prefix else layout.side_of(p) is None)},
-            "report": [p[len(prefix):] for p in js if (layout.side_of(p) or "root") == side],
-            "paths": _paths_for(files, side),
-        })
-    _diagnostics, reason, fixes = _run_js(groups, codefixes=True)
+    _diagnostics, reason, fixes = _run_js(_js_groups(files, js), codefixes=True)
     if reason:
         return []
     out = []
@@ -532,23 +550,7 @@ def check_tree(files: dict[str, str], report_on: Iterable[str], exports: bool = 
             js_targets.append(path)
 
     if js_targets:
-        groups = []
-        for side in sorted({layout.side_of(p) or "root" for p in js_targets}):
-            prefix = "" if side == "root" else f"{side}/"
-            side_files = {
-                p[len(prefix):]: c
-                for p, c in files.items()
-                if p.endswith(_JS_EXT) and (p.startswith(prefix) if prefix else layout.side_of(p) is None)
-            }
-            groups.append(
-                {
-                    "name": side,
-                    "files": side_files,
-                    "report": [p[len(prefix):] for p in js_targets if (layout.side_of(p) or "root") == side],
-                    "paths": _paths_for(files, side),
-                }
-            )
-        diagnostics, reason, exported = _run_js(groups, exports)
+        diagnostics, reason, exported = _run_js(_js_groups(files, js_targets), exports)
         if diagnostics is None:
             out.unchecked = js_targets
             out.reason = reason

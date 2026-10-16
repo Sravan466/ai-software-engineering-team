@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 from pydantic import BaseModel
@@ -1000,15 +1000,25 @@ class _Run:
         self._take_exports(build)
         return build, output, errors, stack
 
+    def _tally(self, output: dict) -> tuple[Optional[int], set[str]]:
+        """(problems in the tree, counted uncapped; the files that don't parse) — or None
+        when the check couldn't run, which says nothing either way."""
+        check = self.agent._build_check(self.ctx, output, cap=False)
+        if check is None or check.status == BuildStatus.UNCHECKED.value:
+            return None, set()
+        counts, unparsed = _counts(check)
+        return sum(counts.values()), unparsed
+
     def _mend(
         self, build: Optional[BuildCheck], output: dict, errors: list[str], stack: list[str]
     ) -> tuple[Optional[BuildCheck], dict, list[str], list[str]]:
         """The platform's own wiring fixes (#103), before any model round: an import path
-        one folder off, a default import of a named export or the other way round, and
-        TypeScript's own spelling and not-exported fixes (`app.build.wiring`). Up to two
-        passes, since a corrected path can show a name the module doesn't export. Each
-        pass is kept only when the tree then has fewer problems — counted uncapped —
-        and the record says what was changed."""
+        one folder off, a default import of a named export or the other way round, a
+        misspelt import kept under its old name, and TypeScript's own not-exported fix
+        (`app.build.wiring`). Up to two passes, since a corrected path can show a name the
+        module doesn't export. A fix is kept only when the tree then has fewer problems —
+        counted uncapped — and every file that parsed still parses; the record says what
+        was changed."""
         from app.build import wiring
         from app.build.check import CODEFIX_CODES, code_fixes, phase_tree
 
@@ -1026,23 +1036,30 @@ class _Run:
                 made += more
             if not made:
                 break
-            # File by file, each kept only if the tree then has fewer problems than it
-            # had — counted uncapped — so one wrong answer can't sink the right ones.
-            current = sum(_counts(agent._build_check(ctx, output, cap=False))[0].values())
+            current, broken = self._tally(output)
+            if current is None:
+                break  # nothing to compare against: nothing is kept
+            changed = [p for p, code in mended.items() if code != own.get(p)]
+            # Everything at once first; file by file only when that didn't leave fewer
+            # problems — so one wrong answer can't sink the right ones, and the usual
+            # case costs one check.
             kept: set[str] = set()
-            for place, code in mended.items():
-                if code == own.get(place):
-                    continue
-                stored = stored_at[place]
-                was = self.written[stored]
-                self.written[stored] = _Written(was.path, code, was.language, was.purpose, was.origin)
+            for trial in [changed] + ([[p] for p in changed] if len(changed) > 1 else []):
+                was = {stored_at[p]: self.written[stored_at[p]] for p in trial}
+                for place in trial:
+                    w = self.written[stored_at[place]]
+                    self.written[stored_at[place]] = replace(w, code=mended[place], exports=None, read=False)
                 trial_output, trial_errors = self._assemble()
-                total = sum(_counts(agent._build_check(ctx, trial_output, cap=False))[0].values())
-                if total < current:
-                    current, output, errors = total, trial_output, trial_errors
-                    kept.add(place)
+                total, now_broken = self._tally(trial_output)
+                if total is not None and total < current and not (now_broken - broken):
+                    current, output, errors, broken = total, trial_output, trial_errors, now_broken
+                    kept.update(trial)
+                    if trial is changed:
+                        break
                 else:
-                    self.written[stored] = was
+                    self.written.update(was)
+            for place in kept:
+                self._judge(self.written[stored_at[place]])  # its own record, on its new code
             mine_made = [f for f in made if f.path in kept]
             if len(mine_made) < len(made):
                 log.info("%s: %d of the platform's wiring fixes didn't leave fewer problems; not kept.",
@@ -1055,7 +1072,7 @@ class _Run:
             self.mended += [f.as_dict() for f in mine_made]
             for f in mine_made:
                 activity.file(stored_at.get(f.path, f.path), "ok")
-            log.info("%s: the platform mended %d import(s) itself: %s", agent.title, len(mine_made),
+            log.info("%s: the platform mended %d import(s) itself, without a model: %s", agent.title, len(mine_made),
                      "; ".join(f"{f.path}: {f.note}" for f in mine_made))
             if build is None or build.status != BuildStatus.FAILED.value:
                 break

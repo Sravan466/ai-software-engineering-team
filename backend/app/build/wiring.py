@@ -59,10 +59,14 @@ class Fix:
 
 
 # ── a path one folder off ────────────────────────────────────────────────────
-def _relative(importer: str, target: str, keep_ext: bool) -> str:
-    """The specifier `importer` should write for `target`: `./x`, `../y/z`."""
-    stem = target if keep_ext else fixscope._module_path(target)  # noqa: SLF001 - one rule
-    rel = posixpath.relpath(stem, posixpath.dirname(importer))
+def _relative(importer: str, target: str, ext: str) -> str:
+    """The specifier `importer` should write for `target`: `./x`, `../y/z`, ending in `ext`
+    — the extension the import was written with, so TypeScript's NodeNext `./x.js` for
+    `x.ts` stays `.js`."""
+    stem = fixscope._module_path(target)  # noqa: SLF001 - one rule
+    if ext and stem != posixpath.splitext(target)[0]:
+        stem = posixpath.splitext(target)[0]  # an index file named by its folder keeps its name
+    rel = posixpath.relpath(stem, posixpath.dirname(importer)) + ext
     return rel if rel.startswith("../") else f"./{rel}"
 
 
@@ -113,8 +117,8 @@ def _path_fix(problem: Problem, files: dict[str, str], tree: set[str]) -> Option
     if python:
         new = _python_relative(problem.path, hit)
     else:
-        keep_ext = bool(posixpath.splitext(spec)[1]) and spec.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"))
-        new = _relative(problem.path, hit, keep_ext)
+        ext = posixpath.splitext(spec)[1]
+        new = _relative(problem.path, hit, ext if ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs") else "")
     if not new or new == spec:
         return None
     changed = _repoint(code, spec, new, python)
@@ -303,11 +307,13 @@ def apply_code_fixes(files: dict[str, str], fixes: Iterable[dict]) -> tuple[dict
     for path, list_ in edits.items():
         text = out[path]
         last = len(text) + 1
-        for e in sorted(list_, key=lambda e: int(e.get("start") or 0), reverse=True):
-            start, length = int(e.get("start") or 0), int(e.get("length") or 0)
-            if start + length > last or start < 0:
+        # The same fix asked for twice (two files importing one undeclared export) is one
+        # edit; anything else touching a span already edited is left out.
+        unique = {(int(e.get("start") or 0), int(e.get("length") or 0), str(e.get("text") or "")) for e in list_}
+        for start, length, new in sorted(unique, reverse=True):
+            if start < 0 or start + length > last or (start == last and length == 0 and last <= len(text)):
                 continue
-            text = text[:start] + str(e.get("text") or "") + text[start + length:]
+            text = text[:start] + new + text[start + length:]
             last = start
         if text != out[path]:
             out[path] = text
