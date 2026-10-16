@@ -48,8 +48,9 @@ and, since #76, what running QA's tests measured — never the model's own estim
 and, since #103, whether the crew's fix rounds on code converge:
 
   fix_rounds            code fix rounds the build took, across every phase
-  fix_trend             per code phase: the problems before the first round, then
-                        after each one — 3 → 6 → 4 is a loop that isn't converging
+  fix_trend             per code phase, its latest episode: the problems before the first
+                        round, then after each one — 3 → 6 → 4 is a loop that isn't
+                        converging
 """
 
 from __future__ import annotations
@@ -207,7 +208,8 @@ def fix_rounds(project: Project) -> dict:
 
     A round's problems are every problem the attempt before it had, so round n+1's are
     what round n left. After the last: what it stopped on, what a person accepted, or
-    none once the phase came back clean."""
+    none once the phase came back clean. The trend is the latest episode's: a problem
+    that came back after the phase was clean starts a new one."""
     from app.orchestration import autofix
 
     data = autofix.load(project)
@@ -218,11 +220,10 @@ def fix_rounds(project: Project) -> dict:
         if not name.startswith(autofix.BUILD_PREFIX) or not rounds:
             continue
         total += len(rounds)
-        counts: list = [len(r.get("problems") or []) for r in rounds]
-        last = rounds[-1]
-        if last.get("after") is not None:
-            counts.append(int(last["after"]))
-        elif t.get("stopped"):
+        episode = rounds[int(t.get("episode_start") or 0):] or rounds[-1:]
+        counts: list = [len(r.get("problems") or []) for r in episode]
+        last = episode[-1]
+        if t.get("stopped"):
             counts.append(int(t["stopped"].get("left") or 0))
         elif t.get("accepted"):
             counts.append(len(t["accepted"].get("keys") or []))

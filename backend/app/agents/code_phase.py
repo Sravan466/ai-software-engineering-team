@@ -179,7 +179,7 @@ class _Planner(BaseAgent):
     def own_checks(self, output: dict, ctx: AgentContext) -> tuple[dict, list[str]]:
         return output, self.owner.plan_problems(output, ctx)
 
-    def _build_check(self, ctx: AgentContext, output: dict):
+    def _build_check(self, ctx: AgentContext, output: dict, previous=None, cap: bool = True):
         return None  # a plan has no code to compile
 
     def merge_edit(self, base: dict, raw: object) -> dict:
@@ -340,6 +340,12 @@ class _Run:
         self.reverted: list[str] = []
         #: Files asked for in a fix call and not sent back.
         self.unanswered: list[str] = []
+        #: Each edited file -> every file its fix call wrote: reverted together (#103).
+        self.called_with: dict[str, frozenset] = {}
+        #: The attempt being fixed, checked without the prompt's caps: what "worse" is
+        #: measured against. Placed path -> problems; and the paths that didn't parse.
+        self.before: dict[str, int] = {}
+        self.unparsed: set[str] = set()
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -695,6 +701,9 @@ class _Run:
         own = {self.place_of[p]: w.code for p, w in self.written.items()}
         tree, _mine = phase_tree(ctx.prior_outputs, agent.key, base, ctx.charter)
         found = fixscope.scope(ctx.fixing, own, tree)
+        # The attempt as it was, every problem counted: the prompt's caps (five a file,
+        # twenty-four in all) would make a file past the cut look clean before the edit.
+        self.before, self.unparsed = _counts(agent._build_check(ctx, base, cap=False))
 
         self.plan = SimpleNamespace(
             output={k: v for k, v in base.items() if k != "files"},
@@ -756,16 +765,18 @@ class _Run:
             [e.path for e in self.edits], 1,
             note=f"Fixing {sent} problem{'' if sent == 1 else 's'} in {len(self.edits)} file{'' if len(self.edits) == 1 else 's'}",
         )
-        pairs = [(stored_at.get(a), stored_at.get(b)) for a, b in found.pairs]
-        for group in self._fix_groups(fixing, pairs):
-            claim.between_calls()
-            self._fix_group(group)
+        # Modules nobody wrote first: the files that import them are then edited
+        # against their real exports, rather than told the module doesn't exist.
         queue = list(news)
         while queue:
             claim.between_calls()
             batch, queue = queue[:1], queue[1:]
             queue = self._write(batch) + queue
             queue = [p for p in queue if p.path not in self.written]
+        pairs = [(stored_at.get(a), stored_at.get(b)) for a, b in found.pairs]
+        for group in self._fix_groups(fixing, pairs):
+            claim.between_calls()
+            self._fix_group(group)
 
         result = self._finish()
         changed = sorted(p for p in self.existing if p in self.written and self.written[p].code != self.existing[p])
@@ -795,6 +806,8 @@ class _Run:
                 "reverted": list(self.reverted),
                 "settled": list(found.settled),
                 "kept": len([p for p in self.existing if p not in changed]),
+                # None when every file was too long to show: the round tried nothing.
+                "calls": len(self.calls),
             },
         }
         return result
@@ -859,11 +872,22 @@ class _Run:
         return [group for files in together.values() for group in self._repair_groups(files)]
 
     def _fix_group(self, group: list[_Written]) -> None:
-        """One fix call: the files shown whole with their problems, written back whole."""
+        """One fix call: the files shown whole with their problems, written back whole.
+        A group the prompt it is sent in can't hold whole — rebuilt for a model with a
+        smaller window — goes one file at a time; a file that can't is left as it is."""
         for w in group:
             activity.file(w.path, "fixing")
         planned = [self._plan_entry(w.path) for w in group]
-        resp = self._call(lambda: self._messages(planned, fixing=group), planned, "fixing")
+        try:
+            resp = self._call(lambda: self._messages(planned, fixing=group), planned, "fixing")
+        except _NoRoom:
+            if len(group) > 1:
+                for w in group:
+                    self._fix_group([w])
+                return
+            self.too_long.append(group[0].path)
+            activity.file(group[0].path, "missing")
+            return
         cut = _cut(resp)
         self.truncated += 1 if cut else 0
         blocks = {path: block for path, block in self._match(resp, planned) if block.complete}
@@ -878,54 +902,64 @@ class _Run:
                 continue
             self._land(self._plan_entry(w.path), block.code, block.language)
             landed.append(w.path)
+        for path in landed:
+            self.called_with[path] = frozenset(landed)
         self._check(landed)
 
     def _keep_no_worse(
         self, build: Optional[BuildCheck], output: dict, errors: list[str], stack: list[str]
     ) -> tuple[Optional[BuildCheck], dict, list[str], list[str]]:
-        """Put back every edited file that now has more problems than it was sent with
-        (#103) — the edit made it worse, as SWE-agent's edit command judges one — and
-        check the tree again without them."""
+        """Put back every edit that left the build worse (#103), as SWE-agent's edit
+        command does: a file with more problems than it was sent with, or a module
+        whose edit broke a file nobody touched. Every file its call wrote goes back with
+        it — half of an importer and its module would disagree again — and the tree is
+        checked again until nothing kept is worse. Counted without the prompt's caps.
+
+        A file that didn't parse and now does is never worse: a parse error hides the
+        rest of a file's problems, and fixing it shows them."""
         from app.build import fixscope
 
         if build is None or build.status == BuildStatus.UNCHECKED.value:
             return build, output, errors, stack
-        before: dict[str, int] = {}
-        for p in self.ctx.fixing:
-            # The real build's problems aren't the tree check's to compare with.
-            if not p.get("step") and p.get("kind") != "stack":
-                path = layout.clean(str(p.get("path") or ""))
-                before[path] = before.get(path, 0) + 1
-        after: dict[str, int] = {}
-        for p in build.problems:
-            after[p.path] = after.get(p.path, 0) + 1
-        edited = {
-            self.place_of.get(path, path): path for path in self.existing
-            if path in self.written and self.written[path].code != self.existing[path]
-        }
-        worse: list[str] = []
-        for place in after:
-            if after[place] <= before.get(place, 0):
-                continue
-            if place in edited:
-                worse.append(edited[place])
-                continue
-            # A file nobody edited, worse now: the edited module its problems name broke it.
-            for p in build.problems:
-                if p.path == place:
-                    cause = fixscope.named(p.path, p.message, self.place_of.values())
-                    if cause in edited:
-                        worse.append(edited[cause])
-        worse = list(dict.fromkeys(worse))
-        if not worse:
+        reverted_any = False
+        for _ in range(len(self.called_with) + 1):
+            check = self.agent._build_check(self.ctx, output, cap=False)
+            if check is None or check.status == BuildStatus.UNCHECKED.value:
+                break
+            after, unparsed = _counts(check)
+            edited = {
+                self.place_of.get(path, path): path for path in self.existing
+                if path in self.written and self.written[path].code != self.existing[path]
+            }
+            worse: list[str] = []
+            for place, n in after.items():
+                if n <= self.before.get(place, 0) or (place in self.unparsed and place not in unparsed):
+                    continue
+                if place in edited:
+                    worse.append(edited[place])
+                    continue
+                # A file nobody edited, worse now: the edited module its problems name broke it.
+                for p in check.problems:
+                    if p.path == place:
+                        cause = fixscope.named(p.path, p.message, self.place_of.values())
+                        if cause in edited:
+                            worse.append(edited[cause])
+            undo = [path for w in dict.fromkeys(worse) for path in sorted(self.called_with.get(w, {w}))]
+            undo = [path for path in dict.fromkeys(undo) if path in self.existing and self.written[path].code != self.existing[path]]
+            if not undo:
+                break
+            for path in undo:
+                w = self.written[path]
+                self.written[path] = _Written(path, self.existing[path], w.language, w.purpose, w.origin)
+                if path not in self.reverted:
+                    self.reverted.append(path)
+                activity.file(path, "failed")
+            log.info("%s: put back %d edited file(s) that left the build worse: %s",
+                     self.agent.title, len(undo), ", ".join(undo))
+            output, errors = self._assemble()
+            reverted_any = True
+        if not reverted_any:
             return build, output, errors, stack
-        for path in worse:
-            w = self.written[path]
-            self.written[path] = _Written(path, self.existing[path], w.language, w.purpose, w.origin)
-            self.reverted.append(path)
-            activity.file(path, "failed")
-        log.info("%s: put back %d edited file(s) that came back worse: %s", self.agent.title, len(worse), ", ".join(worse))
-        output, errors = self._assemble()
         stack = charter_violations(self.ctx.charter, self.agent.key, output) if settings.enforce_stack_charter else []
         build = self.agent._build_check(self.ctx, output)
         self._take_exports(build)
@@ -1081,7 +1115,10 @@ class _Run:
         for w in failing:
             activity.file(w.path, "fixing")
         planned = [self._plan_entry(w.path) for w in failing]
-        resp = self._call(lambda: self._messages(planned, fixing=failing), planned, "fixing")
+        try:
+            resp = self._call(lambda: self._messages(planned, fixing=failing), planned, "fixing")
+        except _NoRoom:
+            return list(failing)  # a fix round shows a file whole or not at all (#103)
         self.truncated += 1 if _cut(resp) else 0
         blocks = {path: block for path, block in self._match(resp, planned) if block.complete}
         still: list[_Written] = []
@@ -1332,6 +1369,10 @@ class _Run:
         pool = int(left * self._echo_share())
         needs = {w.path: len(self._echo_source(w)) + 200 for w in fixing or []}
         total = sum(needs.values())
+        if self.fix_mode and fixing and total > pool:
+            # A fix round (#103) shows each file whole or not at all — checked against
+            # the prompt as it is really built, which a smaller fallback model shrinks.
+            raise _NoRoom(max(fixing, key=lambda w: needs[w.path]).path)
         for w in fixing or []:
             # A file that fits gets its whole need, frame included: a short file is shown
             # too, never dropped as too small to echo.
@@ -1598,7 +1639,9 @@ class _Run:
 
     def _bodies(self, batch: list[_Planned], room: int) -> str:
         """The code of written files this batch imports, whole, while they fit."""
-        wanted = [i for p in batch for i in p.imports if i in self.written]
+        mine = {p.path for p in batch}
+        # A file in this call is shown as itself, not again as something it imports.
+        wanted = [i for p in batch for i in p.imports if i in self.written and i not in mine]
         out: list[str] = []
         spent = 0
         for path in dict.fromkeys(wanted):
@@ -1858,6 +1901,17 @@ class _Run:
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+def _counts(check: Optional[BuildCheck]) -> tuple[dict[str, int], set[str]]:
+    """(problems per file, the files that don't parse) of a check."""
+    counts: dict[str, int] = {}
+    unparsed: set[str] = set()
+    for p in (check.problems if check is not None else []):
+        counts[p.path] = counts.get(p.path, 0) + 1
+        if p.kind == "syntax":
+            unparsed.add(p.path)
+    return counts, unparsed
+
+
 #: `_fix_build`'s answer when the tree it was given is still the one that ships.
 _UNCHANGED = object()
 

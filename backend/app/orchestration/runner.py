@@ -788,7 +788,10 @@ class PipelineRunner:
             # Broken differently from what a person accepted: a new problem.
             t["accepted"] = None
             autofix.settle(t)
-        autofix.close_round(t, keys)
+        closed = autofix.close_round(t, keys)
+        if closed is not None and ((row.handoff or {}).get("fix") or {}).get("calls") == 0:
+            # Every file the round had to fix was too long to show whole (#103).
+            t["rounds"][-1]["nothing_sent"] = True
         if not problems:
             autofix.settle(t)
             autofix.save(project, data)

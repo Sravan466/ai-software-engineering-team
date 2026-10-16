@@ -127,7 +127,13 @@ def next_step(t: dict) -> str:
     # Nor does a round whose re-check couldn't run at all (#76): it tried nothing that
     # anyone could judge, so it says nothing about progress — the limit still holds.
     last = judged[-1] if judged else None
-    if last and last.get("fixed") == [] and not last.get("handover") and not last.get("unjudged_all"):
+    # Nor does a code round that sent the model nothing (#103): every file it had to fix
+    # was too long to show whole, so it tried nothing — a later round on a larger model
+    # still might. The limit holds.
+    if (
+        last and last.get("fixed") == [] and not last.get("handover") and not last.get("unjudged_all")
+        and not last.get("nothing_sent")
+    ):
         return STOP_NO_PROGRESS
     if len(rounds) >= int(t.get("allowed") or 0):
         return STOP_LIMIT

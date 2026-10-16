@@ -683,7 +683,9 @@ class BaseAgent:
             errors = errors + build.messages()
         return output, errors
 
-    def _build_check(self, ctx: AgentContext, output: dict, previous: Optional[dict] = None) -> Optional[BuildCheck]:
+    def _build_check(
+        self, ctx: AgentContext, output: dict, previous: Optional[dict] = None, cap: bool = True
+    ) -> Optional[BuildCheck]:
         """Compile what this phase wrote, in the build it is joining. None if not code.
 
         Best effort by construction: a checker that crashes must not fail a phase that
@@ -698,7 +700,7 @@ class BaseAgent:
         if previous is None and ctx.editing:
             previous = {"output": ctx.base_output, "asked": ctx.change}
         try:
-            return check_phase(ctx.prior_outputs, self.key, output, ctx.charter, previous=previous)
+            return check_phase(ctx.prior_outputs, self.key, output, ctx.charter, previous=previous, cap=cap)
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure
             log.warning("%s: the compile check could not run: %s", self.title, e)
             return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")

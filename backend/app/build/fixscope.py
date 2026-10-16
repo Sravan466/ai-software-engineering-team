@@ -94,15 +94,50 @@ def _stem(path: str) -> str:
     return base.split(".", 1)[0].lower()
 
 
-def same_named(target: str, tree: Iterable[str]) -> list[str]:
-    """Files anywhere on the same side of the build with the name `target` asks for,
-    with or without its extension — the file an import one folder off meant."""
+def _module_path(path: str) -> str:
+    """`backend/app/models/__init__.py` -> `backend/app/models`; `x/index.ts` -> `x`."""
+    stem = posixpath.splitext(path)[0]
+    for tail in ("/index", "/__init__"):
+        if stem.endswith(tail):
+            return stem[: -len(tail)]
+    return stem
+
+
+def same_named(target: str, tree: Iterable[str], tail: Optional[str] = None) -> list[str]:
+    """Files on the same side of the build that are the module `target` asks for, one
+    folder off: the same name, and — given the import's own words, `tail` — ending in
+    them, so `./client/api` never means an unrelated `routes/api.js`."""
     side = layout.side_of(target)
     want = _stem(target)
+    end = "/" + tail.lower() if tail else None
     return sorted(
         p for p in tree
         if layout.side_of(p) == side and _stem(p) == want and not platform_owned(p)
+        and (end is None or ("/" + _module_path(p).lower()).endswith(end))
     )
+
+
+_SPEC = re.compile(r"imports `([^`]+)`")
+
+
+def _tail(problem: dict) -> Optional[str]:
+    """The import as its file wrote it, without the folders it climbs or its extension:
+    `../services/todo_service.js` -> `services/todo_service`, `.models` -> `models`."""
+    found = _SPEC.search(str(problem.get("message") or ""))
+    if not found:
+        return None
+    spec = found.group(1).strip()
+    if spec.startswith(".") and "/" not in spec and not spec.startswith(("./", "../")):
+        spec = spec.lstrip(".").replace(".", "/")  # a Python relative import
+    elif "/" not in spec and "." in spec and not spec.startswith("."):
+        spec = spec.replace(".", "/")  # a dotted Python module
+    parts = [s for s in spec.split("/") if s not in ("", ".", "..")]
+    if spec.startswith(("@/", "~/")):
+        parts = parts[1:]
+    if not parts:
+        return None
+    parts[-1] = posixpath.splitext(parts[-1])[0] if parts[-1].endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py")) else parts[-1]
+    return "/".join(parts)
 
 
 def _module_of(importer: str, spec: str, tree: set[str]) -> Optional[str]:
@@ -150,6 +185,11 @@ def _importers_of(name: str, own: dict[str, str]) -> list[str]:
     return out
 
 
+def _mentions(text: str, path: str) -> bool:
+    """`path` as a whole path in `text`: `index.ts` is not in `src/index.tsx`."""
+    return bool(path) and re.search(rf"(?:(?<=\./)|(?<![\w./-])){re.escape(path)}(?![\w-]|\.\w)", text) is not None
+
+
 def _as_problem(p: dict, path: str) -> Problem:
     line = p.get("line")
     return Problem(path, str(p.get("message") or "has a problem"), str(p.get("kind") or "build"),
@@ -176,15 +216,17 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
         if path and path in own:
             problem = _as_problem(p, path)
             target = _missing(p)
-            others = [o for o in same_named(target, everything) if o != path] if target else []
+            others = [o for o in same_named(target, everything, _tail(p)) if o != path] if target else []
             if others:
                 # The file exists, one folder off: the importer's path is what's wrong.
                 problem = Problem(problem.path, f"{problem.message} (This build has {', '.join(f'`{o}`' for o in others[:3])}.)",
                                   problem.kind, problem.line)
             elif target:
-                # Nothing of that name anywhere: the file the import wants is written.
+                # Nothing of that name anywhere: the file the import wants is written —
+                # and that answers the import, so the importer isn't asked about it.
                 new = target if posixpath.splitext(target)[1] else target + posixpath.splitext(path)[1]
                 out.new.setdefault(new, []).append(problem)
+                continue
             touch(path, problem)
             # The file the problem names, decided in the same call when it fits.
             module = next(iter(_MODULE.findall(str(p.get("message") or ""))), None)
@@ -211,9 +253,9 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
                 touch(user, _as_problem(p, user))
             if users:
                 continue
-        # Last: a file of this phase the message mentions by path.
+        # Last: a file of this phase the message mentions by its whole path.
         message = str(p.get("message") or "")
-        named = [f for f in own if f in message or layout.relative_to_side(f) in message]
+        named = [f for f in own if _mentions(message, f) or _mentions(message, layout.relative_to_side(f))]
         if named:
             for f in named:
                 touch(f, _as_problem(p, f))

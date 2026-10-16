@@ -447,9 +447,10 @@ def unfinished(path: str, content: str) -> list[Problem]:
 
 
 # ── the check ────────────────────────────────────────────────────────────────
-def check_tree(files: dict[str, str], report_on: Iterable[str], exports: bool = False) -> BuildCheck:
+def check_tree(files: dict[str, str], report_on: Iterable[str], exports: bool = False, cap: bool = True) -> BuildCheck:
     """Check `report_on` (placed paths) against the whole tree `files`. `exports`: also
-    say what each checked module exports (#101) — what a code phase's next call is told."""
+    say what each checked module exports (#101) — what a code phase's next call is told.
+    `cap=False` keeps every problem: a count to compare, not a repair prompt (#103)."""
     tree = set(files)
     dirs = {posixpath.dirname(p) for p in tree}
     # Every ancestor, so `backend/app` counts as a package when only
@@ -524,10 +525,10 @@ def check_tree(files: dict[str, str], report_on: Iterable[str], exports: bool = 
         # One line per missing name: `fireEvent` used on six lines is one fix.
         if any(q.message == p.message for q in bucket):
             continue
-        if len(bucket) < _PER_FILE:
+        if len(bucket) < _PER_FILE or not cap:
             bucket.append(p)
     flat = [p for path in targets for p in per_file.get(path, [])]
-    out.problems = flat[:_TOTAL]
+    out.problems = flat[:_TOTAL] if cap else flat
     if out.problems:
         out.status = BuildStatus.FAILED.value
     elif out.unchecked:
@@ -587,7 +588,8 @@ def phase_tree(
 
 
 def check_phase(
-    prior_outputs: dict, phase_key: str, output: dict, charter=None, previous: Optional[dict] = None
+    prior_outputs: dict, phase_key: str, output: dict, charter=None, previous: Optional[dict] = None,
+    cap: bool = True,
 ) -> BuildCheck:
     """`previous` (#101): the deliverable before an edit — `{output, asked, placeholders}`.
     An edit answers for what it wrote (`placeholders.edited`): files it kept, and
@@ -598,12 +600,13 @@ def check_phase(
     from app.build.scaffold import platform_owned
 
     targets = [p for p in mine if not platform_owned(p)]
-    out = check_tree(files, targets, exports=True)
+    out = check_tree(files, targets, exports=True, cap=cap)
+    total = _TOTAL if cap else None
     names = name_problems(files, targets, phase_key, prior_outputs) if settings.check_endpoint_references else []
     if names:
         # After the compile problems: a file that does not parse is fixed first, and
         # its calls are read again once it does.
-        out.problems = (out.problems + names)[:_TOTAL]
+        out.problems = (out.problems + names)[:total]
         out.status = BuildStatus.FAILED.value
     before: Optional[dict[str, str]] = None
     judged = settings.check_placeholders and (previous is None or previous.get("placeholders", True))
@@ -623,14 +626,14 @@ def check_phase(
         gone = {p.path for p in whole}
         broken = {p.path for p in out.problems if p.kind == "syntax"}
         rest = [p for p in stubs if p not in whole and p.path not in broken]
-        out.problems = (whole + [p for p in out.problems if p.path not in gone] + rest)[:_TOTAL]
+        out.problems = (whole + [p for p in out.problems if p.path not in gone] + rest)[:total]
         if whole or rest:
             out.status = BuildStatus.FAILED.value
     leaks = secret_leaks(files, targets, charter)
     if leaks:
         # Ahead of the compile problems: a key in the browser bundle is the one a
         # build must never ship, whatever else is wrong with it.
-        out.problems = (leaks + out.problems)[:_TOTAL]
+        out.problems = (leaks + out.problems)[:total]
         out.status = BuildStatus.FAILED.value
     return out
 

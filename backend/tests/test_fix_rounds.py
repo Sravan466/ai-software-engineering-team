@@ -98,7 +98,8 @@ def test_an_import_of_a_file_nobody_wrote_writes_it():
     own = {f["path"]: f["code"] for f in _files(**{"backend/server.js": server})}
     found = fixscope.scope(_problems(_files(**{"backend/server.js": server})), own, own)
     assert list(found.new) == ["backend/routes/todos.js"]
-    assert "backend/server.js" in found.touch
+    # Writing the module answers the import: the importer isn't asked about it.
+    assert "backend/server.js" not in found.touch
 
 
 def test_a_package_that_wont_install_edits_the_files_that_import_it():
@@ -248,3 +249,71 @@ def test_an_edit_that_breaks_a_file_it_didnt_touch_is_put_back(monkeypatch, stub
     code = {f["path"]: f["code"] for f in result.output["files"]}
     assert code["backend/services/todoService.js"] == SERVICE
     assert result.handoff["fix"]["reverted"] == ["backend/services/todoService.js"]
+
+
+# ── review of #109 ───────────────────────────────────────────────────────────
+def test_a_same_named_file_counts_only_when_it_ends_in_the_import_s_own_path():
+    own = {
+        "backend/src/services/api.js": "import { get } from './client/api';\nexport const x = get;\n",
+        "backend/src/routes/api.js": "export default function router() {}\n",
+    }
+    found = fixscope.scope(_problems([{"path": p, "code": c} for p, c in own.items()]), own, own)
+    # routes/api.js is not the `./client/api` the service meant: the module is written.
+    assert list(found.new) == ["backend/src/services/client/api.js"]
+
+
+def test_a_path_mention_is_a_whole_path():
+    own = {"backend/index.ts": "export const a = 1;\n", "backend/x.ts": "export const b = 2;\n"}
+    problems = [{"path": "frontend/package.json", "kind": "build", "step": "build",
+                 "message": "npm run build failed. Its last lines:\nat src/index.tsx:3"}]
+    assert not fixscope.scope(problems, own, own).touch
+
+
+def _parse_case():
+    broken = "import { listTodos } from './services/todoService.js'\nconst x = (;\n"
+    files = _files(**{"backend/server.js": broken})
+    # It parses now, and the checker can see the import of a name the module lacks.
+    parses = "import { listTodos } from './services/todoService.js';\nimport { nope } from './models/todo.js';\nexport const x = listTodos;\n"
+    return files, parses
+
+
+def test_a_parse_fix_is_never_called_worse(monkeypatch, stub_router):
+    files, parses = _parse_case()
+    problems = [p for p in _problems(files) if p["path"] == "backend/server.js"]
+    assert [p["kind"] for p in problems] == ["syntax"]
+    result, _asked = _fix(monkeypatch, files, [fenced({"backend/server.js": parses})], problems=problems)
+    code = {f["path"]: f["code"] for f in result.output["files"]}
+    assert code["backend/server.js"] == parses and not result.handoff["fix"]["reverted"]
+
+
+def test_an_importer_and_its_module_are_put_back_together(monkeypatch, stub_router):
+    files = _files()
+    # The call renames the module's export and follows it in the importer — and the
+    # module also gains a broken import, so it is worse and goes back. The importer,
+    # which now imports the new name, goes back with it.
+    module = "import { gone } from './nowhere.js';\nexport function allTodos() {\n  return gone;\n}\n"
+    server = SERVER.replace("listTodos", "allTodos")
+    result, _asked = _fix(monkeypatch, files, [fenced({"backend/services/todoService.js": module, "backend/server.js": server})])
+    code = {f["path"]: f["code"] for f in result.output["files"]}
+    assert code["backend/services/todoService.js"] == SERVICE and code["backend/server.js"] == SERVER
+    assert sorted(result.handoff["fix"]["reverted"]) == ["backend/server.js", "backend/services/todoService.js"]
+
+
+def test_an_uncapped_check_counts_every_problem_in_a_file():
+    from app.build.check import check_tree
+
+    code = "".join(f"import {{ n{i} }} from './missing{i}.js';\n" for i in range(8))
+    tree = {"backend/a.js": code}
+    assert len(check_tree(tree, ["backend/a.js"]).problems) == 5
+    assert len(check_tree(tree, ["backend/a.js"], cap=False).problems) == 8
+
+
+def test_a_round_that_sent_the_model_nothing_is_not_a_verdict():
+    from app.orchestration import autofix
+
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    autofix.start_round(t, "guided", ["backend_engineer"], [{"key": "a"}])
+    autofix.close_round(t, ["a"])
+    t["rounds"][-1]["nothing_sent"] = True
+    assert autofix.next_step(t) == "fix"
