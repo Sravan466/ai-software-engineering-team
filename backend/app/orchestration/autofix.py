@@ -127,7 +127,13 @@ def next_step(t: dict) -> str:
     # Nor does a round whose re-check couldn't run at all (#76): it tried nothing that
     # anyone could judge, so it says nothing about progress — the limit still holds.
     last = judged[-1] if judged else None
-    if last and last.get("fixed") == [] and not last.get("handover") and not last.get("unjudged_all"):
+    # Nor does a code round that sent the model nothing (#103): every file it had to fix
+    # was too long to show whole, so it tried nothing — a later round on a larger model
+    # still might. The limit holds.
+    if (
+        last and last.get("fixed") == [] and not last.get("handover") and not last.get("unjudged_all")
+        and not last.get("nothing_sent")
+    ):
         return STOP_NO_PROGRESS
     if len(rounds) >= int(t.get("allowed") or 0):
         return STOP_LIMIT
@@ -144,6 +150,9 @@ def start_round(
         "problems": problems,
         "fixed": None,
         "at": _now(),
+        # Which episode it belongs to (#103): `settle` moves the start past it once the
+        # problems are gone, and the record still says which rounds went together.
+        "episode": int(t.get("episode_start") or 0),
     }
     t["rounds"].append(record)
     t["stopped"] = None
@@ -294,6 +303,36 @@ def _build_problem(p: dict, phase: str) -> dict:
     if p.get("kind") in _UNFINISHED:
         out["problem"] = str(p["kind"])
     return out
+
+
+def fix_scope(row) -> list[dict]:
+    """The problems `code_problems` keys, as a fix round reads them (#103): the file,
+    the line, the checker's own kind and its words — what `fixscope` finds the files
+    to edit from."""
+    from app.build.fixscope import stack_path
+
+    out: list[dict] = []
+    for note in row.stack_note or []:
+        text = str(note).strip()
+        if text:
+            out.append({"path": stack_path(text), "line": None, "kind": "stack", "message": text})
+    if row.build_status == BuildStatus.FAILED.value:
+        for p in row.build_note or []:
+            if not isinstance(p, dict) or p.get("kind") == NOTE_KIND:
+                continue
+            message = str(p.get("message") or "does not compile")
+            # Said as what it is, as the round's note says it: unfinished, or what a
+            # real build step it broke — "does not parse" already says itself.
+            label = _UNFINISHED.get(str(p.get("kind") or "")) or _BROKE.get(str(p.get("step") or ""))
+            out.append({
+                "path": p.get("path") or None,
+                "line": p.get("line"),
+                "kind": p.get("kind") or "build",
+                "message": f"({label}) {message}" if label else message,
+                "step": p.get("step"),
+            })
+    # One entry per problem, as `code_problems` keys them: the same error twice is one.
+    return list({(p["path"], p["message"]): p for p in out}.values())
 
 
 def deploy_problems(problems: Iterable[dict], phase: str) -> list[dict]:
@@ -610,6 +649,7 @@ __all__ = [
     "code_note",
     "code_problems",
     "deploy_problems",
+    "fix_scope",
     "keep_trying",
     "load",
     "next_step",

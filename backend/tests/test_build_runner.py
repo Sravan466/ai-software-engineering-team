@@ -482,9 +482,9 @@ def test_a_type_error_next_build_rejects_is_fixed_before_the_ship_review(client,
     track = project["auto_fix"]["tracks"]["build:frontend_engineer"]
     [round_] = track["rounds"]
     assert round_["problems"][0]["step"] == "build" and round_["fixed"]
-    # The note the phase was re-run with carried next build's own words.
+    # The fix call (#103) carried next build's own words, under the file and line.
     note = next(p for p in model.prompts if "fails the build" in p)
-    assert "Type 'string' is not assignable to type 'number'" in note and "frontend/app/page.tsx:2" in note
+    assert "Type 'string' is not assignable to type 'number'" in note and "`frontend/app/page.tsx` line 2" in note
     # The sandbox built the fixed page.
     assert any("= 3;" in run.get("app/page.tsx", "") for run in engine.runs)
 

@@ -44,6 +44,13 @@ and, since #76, what running QA's tests measured — never the model's own estim
   tests_passed_pct      passed / tests that ran, across every suite; None if none ran
   coverage_lines_pct    line coverage the runner measured (the lowest suite's, when
                         there are two); None when nothing measured it
+
+and, since #103, whether the crew's fix rounds on code converge:
+
+  fix_rounds            code fix rounds the build took, across every phase
+  fix_trend             per code phase, its latest episode: the problems before the first
+                        round, then after each one — 3 → 6 → 4 is a loop that isn't
+                        converging
 """
 
 from __future__ import annotations
@@ -192,7 +199,41 @@ def score(db: Session, project: Project) -> dict:
         ),
         **generation(db, project, phases, code_paths, check),
         **tests(phases),
+        **fix_rounds(project),
     }
+
+
+def fix_rounds(project: Project) -> dict:
+    """How many code fix rounds the build took, and the problems left after each (#103).
+
+    A round's problems are every problem the attempt before it had, so round n+1's are
+    what round n left. After the last: what it stopped on, what a person accepted, or
+    none once the phase came back clean. The trend is the latest episode's: a problem
+    that came back after the phase was clean starts a new one."""
+    from app.orchestration import autofix
+
+    data = autofix.load(project)
+    trend: dict[str, list] = {}
+    total = 0
+    for name, t in data["tracks"].items():
+        rounds = t.get("rounds") or []
+        if not name.startswith(autofix.BUILD_PREFIX) or not rounds:
+            continue
+        total += len(rounds)
+        # The latest episode's rounds — still its own after `settle` moved the start on.
+        latest = rounds[-1].get("episode")
+        episode = [r for r in rounds if r.get("episode") == latest] if latest is not None else rounds
+        counts: list = [len(r.get("problems") or []) for r in episode]
+        last = episode[-1]
+        if t.get("stopped"):
+            counts.append(int(t["stopped"].get("left") or 0))
+        elif t.get("accepted"):
+            counts.append(len(t["accepted"].get("keys") or []))
+        elif last.get("fixed") is not None:
+            # Closed with nothing stopped or accepted: what it was sent and didn't fix.
+            counts.append(len(last.get("remaining") or []))
+        trend[name[len(autofix.BUILD_PREFIX):]] = counts
+    return {"fix_rounds": total, "fix_trend": trend}
 
 
 def tests(phases: list) -> dict:

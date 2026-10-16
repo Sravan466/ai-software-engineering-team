@@ -152,6 +152,14 @@ class AgentContext:
     base_output: Optional[dict] = None
     #: Paths the change is likely to touch, whose current code is shown in full.
     likely_files: tuple[str, ...] = ()
+    #: A fix round on a code phase (#103): what the checker found wrong with
+    #: `base_output`, each `{path, line, kind, message, step}`. With these the phase
+    #: edits the files they name and keeps every other file byte for byte, instead of
+    #: planning and writing the deliverable again.
+    fixing: tuple[dict, ...] = ()
+    #: What else the round is told beside the problems: a security fix this phase must
+    #: keep while it fixes them.
+    fix_note: str = ""
 
     @property
     def editing(self) -> bool:
@@ -675,7 +683,9 @@ class BaseAgent:
             errors = errors + build.messages()
         return output, errors
 
-    def _build_check(self, ctx: AgentContext, output: dict, previous: Optional[dict] = None) -> Optional[BuildCheck]:
+    def _build_check(
+        self, ctx: AgentContext, output: dict, previous: Optional[dict] = None, cap: bool = True
+    ) -> Optional[BuildCheck]:
         """Compile what this phase wrote, in the build it is joining. None if not code.
 
         Best effort by construction: a checker that crashes must not fail a phase that
@@ -690,7 +700,7 @@ class BaseAgent:
         if previous is None and ctx.editing:
             previous = {"output": ctx.base_output, "asked": ctx.change}
         try:
-            return check_phase(ctx.prior_outputs, self.key, output, ctx.charter, previous=previous)
+            return check_phase(ctx.prior_outputs, self.key, output, ctx.charter, previous=previous, cap=cap)
         except Exception as e:  # noqa: BLE001 - the gate must not become the failure
             log.warning("%s: the compile check could not run: %s", self.title, e)
             return BuildCheck(status=BuildStatus.UNCHECKED.value, reason=f"The compile check could not run: {e}")
