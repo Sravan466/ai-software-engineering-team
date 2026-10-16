@@ -788,12 +788,15 @@ class PipelineRunner:
             # Broken differently from what a person accepted: a new problem.
             t["accepted"] = None
             autofix.settle(t)
-        closed = autofix.close_round(t, keys, attempt=row.id)
+        closed = autofix.close_round(t, keys, attempt=row.id, net=True)
         sent = (row.handoff or {}).get("fix") or {}
         if closed is not None and sent.get("calls") == 0 and sent.get("too_long"):
             # Every file the round had to fix was too long to show whole (#103): it
             # tried nothing. A round that found nothing to edit at all did, and failed.
             t["rounds"][-1]["nothing_sent"] = True
+        if closed is not None:
+            # The run of it, kept on the track for the page (#103): one place says it.
+            t["trend"] = autofix.trend(t)
         if not problems:
             autofix.settle(t)
             autofix.save(project, data)
@@ -806,6 +809,7 @@ class PipelineRunner:
         if step != "fix":
             kept = self._keep_best(db, project, t, row)
             if kept is not None:
+                row = kept
                 problems = autofix.code_problems(kept)
                 keys = [p["key"] for p in problems]
             autofix.stop(t, step, keys, problems)
@@ -819,7 +823,11 @@ class PipelineRunner:
         n = len(t["rounds"]) + 1
         k = n - int(t.get("episode_start") or 0)
         strategy = remediation.strategy_for(k)
-        autofix.start_round(t, strategy, [row.phase], problems, attempt=row.id)
+        autofix.start_round(
+            t, strategy, [row.phase], problems, attempt=row.id,
+            # An attempt the loop put back says which round made it (#103).
+            from_round=((row.handoff or {}).get("kept_best") or {}).get("round"),
+        )
         autofix.save(project, data)
         db.commit()
         log.info(
@@ -866,25 +874,15 @@ class PipelineRunner:
         old = db.get(PhaseResult, best["attempt"])
         if old is None or old.project_id != project.id or old.phase != row.phase or not isinstance(old.output, dict):
             return None
-        fields = {name: getattr(old, name) for name in versions.SNAP_FIELDS if name not in ("phase", "agent")}
-        fields["handoff"] = {
-            **(old.handoff or {}),
-            "kept_best": {"from": old.id, "round": best["round"], "problems": best["problems"],
-                          "instead_of": best["instead_of"]},
-        }
-        copy = PhaseResult(
-            project_id=project.id,
-            phase=row.phase,
-            agent=old.agent or row.agent,
-            status=row.status,
-            feedback=old.feedback,
-            model_pick=old.model_pick,
-            completed_at=_now(),
-            **fields,
+        copy = versions.copy_row(
+            db, project, versions.snapshot_of(old), row.status, old.feedback,
+            {"kept_best": {"from": old.id, "round": best["round"], "problems": best["problems"],
+                           "instead_of": best["instead_of"]}},
         )
-        db.add(copy)
+        copy.model_pick = old.model_pick
         row.status = PhaseStatus.REJECTED.value
         db.flush()
+        db.expire(project, ["phases"])
         with _checkpoint_lock(project.id):
             claim.check()
             cfg = _config(project.id)
@@ -895,6 +893,9 @@ class PipelineRunner:
                 as_node=row.phase,
             )
         db.commit()
+        if row.phase == Phase.FRONTEND_ENGINEER.value and self._clear_generated_mockup(db, project.id):
+            # The front end the picture was drawn from isn't the one that ships now.
+            self._draw_mockup_later(project.id, copy.id)
         log.info(
             "Put back %s's attempt from round %d on %s: %d problem(s) instead of %d.",
             row.phase, best["round"], project.id, best["problems"], best["instead_of"],
@@ -1588,12 +1589,13 @@ class PipelineRunner:
             seen = autofix.trend(t) if name.startswith(autofix.BUILD_PREFIX) else []
             if len(seen) > 2:
                 # The whole run of it (#103): 3 → 6 → 4 is a loop that wasn't converging.
-                why += f" (problems: {' → '.join(str(n) for n in seen)})"
+                why += f" (problems: {autofix.said(seen)})"
             kept = t["stopped"].get("kept_best")
             if kept:
                 # Parked on the attempt that had the fewest problems, not the last one.
                 which = f"what round {kept['round']} made" if kept.get("round") else "the attempt before any round"
-                why += f". The build is back on {which}, with {kept['problems']} problems instead of {kept['instead_of']}"
+                n = int(kept["problems"])
+                why += f". The build is back on {which}, with {n} problem{'' if n == 1 else 's'} instead of {kept['instead_of']}"
             parts.append(f"The crew couldn't fix {what} — {why}.")
         return " ".join(parts) or (
             "A serious security finding is still open and was neither fixed nor waived."

@@ -8,6 +8,7 @@ import {
   type AutoFixTrack,
   type KeptBest,
   type Project,
+  type TrendPoint,
   type WaiveKind,
 } from "@/lib/api";
 import { PHASES } from "@/components/shell/phases";
@@ -124,18 +125,19 @@ function brokeOf(t: AutoFixTrack, i: number, code: boolean): number | undefined 
 }
 
 /**
- * The episode's problem counts (#103): what its first round was sent, then what each
- * round left, new problems included.
+ * The episode's problem counts (#103), one point per attempt. The backend records them
+ * as the loop runs; a build from before that has them read off its rounds here.
  */
-export function trendOf(name: string, t: AutoFixTrack): number[] {
+export function trendOf(name: string, t: AutoFixTrack): TrendPoint[] {
+  if (t.trend && t.trend.length > 1) return t.trend;
   const code = name.startsWith("build:");
   const start = t.episode_start ?? 0;
-  if (t.rounds.length <= start) return [];
-  const out = [t.rounds[start].problems.length];
+  if (!code || t.rounds.length <= start) return [];
+  const out: TrendPoint[] = [{ n: t.rounds[start].problems.length, round: 0, back: false }];
   for (let i = start; i < t.rounds.length; i++) {
     const after = afterOf(t, i, code);
     if (after === undefined) break;
-    out.push(after);
+    out.push({ n: after, round: i - start + 1, back: false });
   }
   return out.length > 1 ? out : [];
 }
@@ -147,26 +149,28 @@ function keptWhich(kept: KeptBest): string {
 
 /**
  * The trend as a run of numbers (#103): fewer than the step before reads as better,
- * more as worse, in words for a screen reader and in colour only as agreement. The
- * attempt the build was put back on is marked.
+ * more as worse — in words for a screen reader, in colour only as agreement. A step the
+ * loop put back reads "back to", and the attempt the build is on now is ringed.
  */
-function Trend({ counts, kept }: { counts: number[]; kept?: KeptBest | null }) {
-  if (counts.length < 2) return null;
-  const keptAt = kept ? kept.round : null;
+function Trend({ points, kept }: { points: TrendPoint[]; kept?: (KeptBest & { from?: string }) | null }) {
+  if (points.length < 2) return null;
+  const keptAt = kept?.from ? points.findIndex((p) => p.attempt === kept.from) : -1;
   const said =
-    `Problems: ${counts.join(", then ")}.` +
+    "Problems: " + points.map((p) => (p.back ? `back to ${p.n}` : String(p.n))).join(", then ") + "." +
     (kept ? ` The build is back on ${keptWhich(kept)}, with ${kept.problems}.` : "");
   return (
-    <p className="fix-trend" aria-label={said}>
+    <p className="fix-trend">
+      <span className="sr-only">{said}</span>
       <span className="fix-trend-label" aria-hidden="true">Problems</span>
       <span className="fix-trend-steps" aria-hidden="true">
-        {counts.map((n, i) => {
-          const dir = i === 0 ? undefined : n < counts[i - 1] ? "down" : n > counts[i - 1] ? "up" : "same";
+        {points.map((p, i) => {
+          const prev = points[i - 1];
+          const dir = !prev || p.back ? undefined : p.n < prev.n ? "down" : p.n > prev.n ? "up" : "same";
           return (
             <span key={i} className="fix-trend-step" style={{ ["--i" as string]: i }}>
-              {i > 0 && <span className="fix-trend-arrow">{Icon.arrowRight}</span>}
-              <span className="fix-trend-n" data-dir={dir} data-kept={keptAt === i || undefined}>
-                {n}
+              {i > 0 && <span className="fix-trend-arrow">{p.back ? Icon.undo : Icon.arrowRight}</span>}
+              <span className="fix-trend-n" data-dir={dir} data-back={p.back || undefined} data-kept={keptAt === i || undefined}>
+                {p.n}
               </span>
             </span>
           );
@@ -272,6 +276,17 @@ function Owner({ phase }: { phase: string }) {
   );
 }
 
+/** The trend so far, under "This round" while a fix runs (#103). */
+function FixingTrend({ name, track }: { name: string; track: AutoFixTrack }) {
+  const points = trendOf(name, track);
+  if (points.length < 2) return null;
+  return (
+    <div className="fixing-trend">
+      <Trend points={points} />
+    </div>
+  );
+}
+
 // ── while it runs ────────────────────────────────────────────────────────────
 export function FixingPanel({ project }: { project: Project }) {
   if (project.status !== "running") return null;
@@ -333,11 +348,7 @@ export function FixingPanel({ project }: { project: Project }) {
               <span className="fixing-approach-label">This round</span>
               {approach(name, round.strategy, round)}
             </p>
-            {trendOf(name, t).length > 1 && (
-              <div className="fixing-trend">
-                <Trend counts={trendOf(name, t)} />
-              </div>
-            )}
+            <FixingTrend name={name} track={t} />
             <ul className="fix-list">
               {round.problems.map((p) => (
                 <li key={p.key} className="fix-item">
@@ -439,7 +450,7 @@ export function NeedsHelp({
             What the crew tried on {trackLabel(name)}
             <span className="field-hint">{stoppedHint(t)}</span>
           </h3>
-          <Trend counts={trendOf(name, t)} kept={t.stopped?.kept_best} />
+          <Trend points={trendOf(name, t)} kept={t.stopped?.kept_best} />
           {t.stopped?.kept_best && (
             <p className="fix-kept">
               {Icon.undo}

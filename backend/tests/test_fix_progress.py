@@ -18,9 +18,13 @@ REAL = "def total(items):\n    return sum(items)\n"
 WEAK = "from app.services import total\n\n\ndef test_total{n}():\n    total([1, 2])\n"
 
 
-def _round(t: dict, sent: list[str], left: list[str], attempt: str, result: str) -> None:
-    autofix.start_round(t, "guided", ["backend_engineer"], [{"key": k} for k in sent], attempt=attempt)
-    autofix.close_round(t, left, attempt=result)
+def _round(t: dict, sent: list[str], left: list[str], attempt: str, result: str, from_round=None) -> None:
+    autofix.start_round(t, "guided", ["backend_engineer"], [{"key": k} for k in sent], attempt=attempt, from_round=from_round)
+    autofix.close_round(t, left, attempt=result, net=True)
+
+
+def _counts(t: dict) -> list:
+    return [("back " if p["back"] else "") + str(p["n"]) for p in autofix.trend(t)]
 
 
 # ── the record ───────────────────────────────────────────────────────────────
@@ -33,7 +37,7 @@ def test_a_round_that_fixed_some_and_broke_more_is_worse_and_stops_the_loop():
     # Judged by what went away, it fixed all three; judged net, it went backwards.
     assert autofix.next_step(t) == "fix"
     assert autofix.next_step(t, net=True) == autofix.STOP_NO_PROGRESS
-    assert autofix.trend(t) == [3, 6]
+    assert _counts(t) == ["3", "6"]
 
 
 def test_a_round_that_leaves_fewer_is_progress():
@@ -53,7 +57,7 @@ def test_the_best_attempt_is_the_one_with_the_fewest_problems_and_a_tie_keeps_th
     for n in range(5):
         _round(t, [f"k{n}-{i}" for i in range(counts[n])], [f"k{n + 1}-{i}" for i in range(counts[n + 1])],
                f"r{n}", f"r{n + 1}")
-    assert autofix.trend(t) == counts
+    assert _counts(t) == [str(n) for n in counts]
     best = autofix.best_attempt(t)
     # Attempt 5 (3 problems) beats the first (also 3): a tie keeps the later one.
     assert best == {"attempt": "r4", "problems": 3, "round": 4, "instead_of": 8}
@@ -111,3 +115,26 @@ def test_a_round_that_made_it_worse_parks_the_build_on_the_attempt_before_it(cli
     assert len(qa) == 1 and [f["path"] for f in qa[0]["output"]["test_files"]] == ["backend/tests/test_one.py"]
     assert qa[0]["handoff"]["kept_best"]["instead_of"] == 2
     assert "back on the attempt before any round" in project["gate_note"]
+
+
+def test_a_security_round_keeps_its_own_judgement():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.SECURITY)
+    autofix.start_round(t, "guided", ["backend_engineer"], [{"key": "a"}, {"key": "b"}])
+    autofix.close_round(t, ["c", "d", "e"])
+    assert "after" not in t["rounds"][-1] and autofix.trend(t) == []
+
+
+def test_after_a_put_back_the_next_round_starts_from_it_and_says_so():
+    """R1: 3 → 6, put back to the first attempt (a copy, c0). Keep trying: R2 sent c0
+    and left 5 — worse than 3 again. The trend says where R2 started, and the best is
+    still the first attempt, made by no round."""
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    t["allowed"] = 5
+    _round(t, ["a", "b", "c"], [f"x{i}" for i in range(6)], "r0", "r1")
+    _round(t, ["a", "b", "c"], [f"y{i}" for i in range(5)], "c0", "r2", from_round=0)
+    assert _counts(t) == ["3", "6", "back 3", "5"]
+    best = autofix.best_attempt(t)
+    assert best == {"attempt": "c0", "problems": 3, "round": 0, "instead_of": 5}
+    assert autofix.said(autofix.trend(t)) == "3 → 6 → back to 3 → 5"

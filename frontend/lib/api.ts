@@ -458,9 +458,14 @@ export type KeptBest = {
   instead_of: number;
 };
 
+/** One attempt in a code track's trend (#103). `back`: the loop put it back. */
+export type TrendPoint = { n: number; attempt?: string | null; round: number; back: boolean };
+
 export type AutoFixTrack = {
   allowed: number;
   rounds: AutoFixRound[];
+  /** The problems each attempt of the episode had, as the backend records it (#103). */
+  trend?: TrendPoint[];
   /** `unchecked` (#77): the scanners couldn't run again to check the fix. */
   stopped: {
     reason: "limit" | "no_progress" | "unchecked";
@@ -468,7 +473,7 @@ export type AutoFixTrack = {
     at: string;
     /** What is left, new problems included (#103). */
     problems?: AutoFixProblem[];
-    kept_best?: KeptBest | null;
+    kept_best?: (KeptBest & { from?: string }) | null;
   } | null;
   accepted: { kind: WaiveKind; reason: string; at: string } | null;
   resumed_after: number;

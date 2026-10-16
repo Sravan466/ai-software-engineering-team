@@ -220,6 +220,11 @@ def fix_rounds(project: Project) -> dict:
         if not name.startswith(autofix.BUILD_PREFIX) or not rounds:
             continue
         total += len(rounds)
+        points = autofix.trend(t)
+        if points:
+            # Recorded as it ran (#103): each attempt, new problems included.
+            trend[name[len(autofix.BUILD_PREFIX):]] = [p["n"] for p in points]
+            continue
         # The latest episode's rounds — still its own after `settle` moved the start on.
         latest = rounds[-1].get("episode")
         episode = [r for r in rounds if r.get("episode") == latest] if latest is not None else rounds
