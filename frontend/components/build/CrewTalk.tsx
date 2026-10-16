@@ -167,6 +167,7 @@ export function CrewTalk({
   embedded = false,
   text: heldText,
   setText: setHeldText,
+  decision,
 }: {
   project: Project;
   id: string;
@@ -175,6 +176,12 @@ export function CrewTalk({
   place: TalkPlace;
   /** Inside a card (the stuck one): the card's field, not a surface of its own. */
   embedded?: boolean;
+  /**
+   * On a stuck build (#102): whether the note is a decision about the app — the round may
+   * drop what it leaves out, and it stands for the rest of the build. The card holds it,
+   * because its Try again sends the draft too.
+   */
+  decision?: { value: boolean; set: (value: boolean) => void };
   /** The draft, when the card around the box needs to read it. */
   text?: string;
   setText?: (text: string) => void;
@@ -306,7 +313,25 @@ export function CrewTalk({
         examplesSend
         submitLabel={submitLabel}
         submitIcon={place === "stuck" && asks === false ? Icon.rotate : Icon.arrowRight}
-        onSend={(said) => act(() => api.sendMessage(id, said))}
+        onSend={(said) =>
+          act(() => api.sendMessage(id, said, decision && asks === false ? { decided: decision.value } : {}))
+        }
+        extra={
+          decision && asks === false ? (
+            <label className="talk-decide">
+              <input
+                type="checkbox"
+                checked={decision.value}
+                onChange={(e) => decision.set(e.target.checked)}
+                disabled={busy}
+              />
+              <span>
+                <b>Keep it as a decision.</b> The crew may drop what it leaves out instead of fixing it, and keeps to
+                it for the rest of the build.
+              </span>
+            </label>
+          ) : null
+        }
         hint={copy.hint}
       />
     </section>

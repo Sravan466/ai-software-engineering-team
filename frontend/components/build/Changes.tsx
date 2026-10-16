@@ -197,6 +197,7 @@ export function Composer({
   examplesSend = false,
   hint,
   className = "",
+  extra,
 }: {
   fieldId: string;
   label: ReactNode;
@@ -213,6 +214,8 @@ export function Composer({
   examplesSend?: boolean;
   hint?: ReactNode;
   className?: string;
+  /** Under the field, above the buttons: an option the send depends on. */
+  extra?: ReactNode;
 }) {
   const [sending, setSending] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
@@ -257,6 +260,7 @@ export function Composer({
         }}
         aria-describedby={hint ? hintId : undefined}
       />
+      {extra}
       <div className="finish-foot">
         <div className="examples finish-examples" role="group" aria-label={examplesSend ? "Quick questions" : "Examples"}>
           {examples.map((example) => (

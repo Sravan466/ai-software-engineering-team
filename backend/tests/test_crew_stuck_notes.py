@@ -88,6 +88,16 @@ def _stuck(client) -> str:
     ("No worries, keep trying", False),
     ("forget my last note, use bcrypt", False),
     ("skipping the cache is fine", False),
+    # Waving off a message, or a reply, isn't a decision either.
+    ("forget about that", False),
+    ("forget about it", False),
+    ("no luck", False),
+    ("no thanks", False),
+    ("No idea", False),
+    ("no change", False),
+    ("remove the duplicate route", False),
+    ("drop the extra brace", False),
+    ("remove the login page", True),
 ])
 def test_a_decision_is_told_from_a_hint_by_its_words(text, decided):
     assert crew_chat.is_decision(text) is decided
@@ -114,12 +124,10 @@ def test_a_decision_on_a_stuck_build_may_drop_what_it_leaves_out_and_stands(scri
     assert m["replies"][0]["text"] == (
         "Trying again with your note, up to 2 more rounds. I'll keep it as a decision for the rest of the build, "
         "and the round may drop what it leaves out instead of fixing it. "
-        "I'll also check whether it changes other finished work after this step."
+        "I'll also check whether it changes finished work after this round."
     )
-    # Read against finished work too — the round's own phase apart, which has it already.
     with SessionLocal() as db:
-        plan = db.get(CrewMessage, m["id"]).plan
-    assert plan.get("decided") and "backend_engineer" in (plan.get("exclude") or [])
+        assert db.get(CrewMessage, m["id"]).plan.get("decided")
     # It stands for the phases still to come.
     assert m["meant_for"] and "backend_engineer" not in m["meant_for"]
     fix_prompts = [c["prompt"] for c in script.calls[mark:] if c["role"] == "backend_engineer" and c["writes"]]
@@ -141,6 +149,14 @@ def test_the_cloud_button_with_a_draft_goes_through_the_conversation(monkeypatch
     r = client.post(f"/api/projects/{pid}/messages", json={"text": "skip voice input", "keep_trying": True, "model": "anthropic:claude-x"})
     assert r.status_code == 201, r.text
     assert seen == [{"note": "skip voice input", "model": "anthropic:claude-x", "decided": True}]
+    # The person's say beats the words.
+    seen.clear()
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        project.status, project.gate_kind = "awaiting_approval", "needs_help"
+        db.commit()
+    client.post(f"/api/projects/{pid}/messages", json={"text": "skip voice input", "keep_trying": True, "decided": False})
+    assert seen[0]["decided"] is False
     assert r.json()["message"]["status"] == "applied"
     assert runner is not None
 
@@ -158,13 +174,27 @@ def test_a_decision_with_no_phase_left_still_becomes_a_settled_decision(client):
 
 def test_the_person_words_and_the_decision_travel_apart():
     t = {"note": "skip voice input", "decided": True}
+    t = {"note": "skip voice input", "decision": "skip voice input"}
     said, ask, decided = autofix.take_person(t)
     assert said == "skip voice input" and ask == f"skip voice input\n{autofix.DECIDED}" and decided
-    assert "note" not in t and "decided" not in t
+    assert "note" not in t and t["decision"] == "skip voice input", "the decision stands for the episode"
     record: dict = {}
     autofix.mark_round(record, said, decided)
     assert record == {"note": "skip voice input", "decided": True}
-    # A round that never ran hands both back to the one that does.
-    t = {"rounds": [{**record, "fixed": None}]}
-    assert autofix.abandon_open_round(t)
-    assert t["note"] == "skip voice input" and t["decided"] is True
+    # The next round of the episode is told the decision too, in no new words of the person's.
+    said, ask, decided = autofix.take_person(t)
+    assert said is None and decided and ask == f"The person decided: skip voice input\n{autofix.DECIDED}"
+    # A new episode starts without it.
+    t["rounds"] = []
+    autofix.settle(t)
+    assert "decision" not in t and autofix.take_person(t) == (None, None, False)
+
+
+def test_the_box_asks_the_server_how_a_draft_reads(client):
+    pid = client.post("/api/projects", json={"idea": "A tiny app"}).json()["id"]
+    read = lambda text: client.post(f"/api/projects/{pid}/messages/read", json={"text": text}).json()
+    assert read("skip voice input") == {"kind": "note", "decided": True}
+    assert read("keep all the routes in one file") == {"kind": "note", "decided": False}
+    assert read("why is it stuck?") == {"kind": "question", "decided": False}
+    with SessionLocal() as db:
+        assert db.query(CrewMessage).filter_by(project_id=pid).count() == 0, "reading a draft kept it"

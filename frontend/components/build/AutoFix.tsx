@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   api,
@@ -571,11 +571,31 @@ export function NeedsHelp({
   // person saying so, and its label says it ("Try again with your note"). It goes as a
   // message, so the conversation shows it; a cloud round takes it along as before.
   const draftNote = !nothingToFix && note.trim() ? note.trim() : undefined;
+  // Whether the note is a decision about the app (#102): the server's reading of the words
+  // as the default, until the person says otherwise with the box.
+  const [suggested, setSuggested] = useState(false);
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!draftNote) {
+      setChosen(null);
+      setSuggested(false);
+      return;
+    }
+    let live = true;
+    const t = setTimeout(() => {
+      api.readMessage(id, draftNote).then((r) => live && setSuggested(r.decided)).catch(() => {});
+    }, 350);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [id, draftNote]);
+  const decided = chosen ?? suggested;
   const retry = async (model?: string) => {
     const ok = await act(() =>
       // With a draft, through the conversation — the cloud button too — so it's kept there
-      // and read as the person meant it (a decision about the app, #102).
-      draftNote ? api.sendMessage(id, draftNote, { keepTrying: true, model }) : api.keepTrying(id, { model }),
+      // with the person's say on whether it's a decision (#102).
+      draftNote ? api.sendMessage(id, draftNote, { keepTrying: true, model, decided }) : api.keepTrying(id, { model }),
     );
     if (ok && draftNote) setNote("");
   };
@@ -646,6 +666,7 @@ export function NeedsHelp({
           embedded
           text={note}
           setText={setNote}
+          decision={nothingToFix ? undefined : { value: decided, set: setChosen }}
         />
         <div className="decision-approve">
           <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>

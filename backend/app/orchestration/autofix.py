@@ -332,8 +332,6 @@ def abandon_open_round(t: dict) -> bool:
     # What the person asked of it (#103) waits for the round that does run.
     if record.get("note") and not t.get("note"):
         t["note"] = record["note"]
-        if record.get("decided"):
-            t["decided"] = True
     if record.get("asked_model") and not t.get("one_off"):
         t["one_off"] = record["asked_model"]
     return True
@@ -345,7 +343,7 @@ def settle(t: dict) -> None:
     # What the person asked for this episode (#103) — a note, a model they agreed to
     # send its code to — is not a standing order for the next one.
     t.pop("note", None)
-    t.pop("decided", None)
+    t.pop("decision", None)
     t.pop("one_off", None)
     if t.get("episode_start") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
         int(settings.auto_fix_max_rounds), 0
@@ -381,9 +379,8 @@ def keep_trying(
         if note and note.strip():
             t["note"] = note.strip()
             if decided:
-                t["decided"] = True
-            else:
-                t.pop("decided", None)
+                # Stands for the rest of the episode: every round in it is told (#102).
+                t["decision"] = note.strip()
         if model and name.startswith(BUILD_PREFIX) and model == offered:
             t["one_off"] = model
     return names
@@ -818,14 +815,15 @@ DECIDED = (
 
 
 def take_person(t: dict) -> tuple[Optional[str], Optional[str], bool]:
-    """What the person told this round, taken off the track: their words as the round
-    records them, as its prompt carries them — a decision with what it allows — and
-    whether it was one."""
+    """What the person told this round: their words as the round records them (taken off
+    the track — this round's only), as its prompt carries them, and whether a decision
+    stands. A decision (#102) stays on the track for the episode, so every round in it is
+    told it and what it allows — the first in the person's words, the rest as the decision."""
     said = t.pop("note", None)
-    decided = bool(t.pop("decided", None))
-    if not said:
-        return None, None, False
-    return said, (f"{said}\n{DECIDED}" if decided else said), decided
+    decision = t.get("decision")
+    if decision:
+        return said, f"{said or f'The person decided: {decision}'}\n{DECIDED}", True
+    return said, said, False
 
 
 def mark_round(record: dict, said: Optional[str], decided: bool) -> None:

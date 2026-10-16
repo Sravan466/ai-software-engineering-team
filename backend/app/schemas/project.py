@@ -174,6 +174,9 @@ class MessageCreate(BaseModel):
     keep_trying: bool = False
     #: With `keep_trying`: the cloud model the stuck card offered, for this round only.
     model: Optional[str] = Field(None, max_length=200)
+    #: On a stuck build (#102): the person says whether the note is a decision about the
+    #: app — the round may drop what it leaves out. Omitted, the words decide it.
+    decided: Optional[bool] = None
 
 
 class MessageCancel(BaseModel):

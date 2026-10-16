@@ -1138,10 +1138,20 @@ export const api = {
 
   // ── Talk to the crew while it builds (#102) ──
   /** `keepTrying`: the stuck card's Try again — this note must start the next fix round. */
-  sendMessage: (id: string, text: string, opts: { keepTrying?: boolean; model?: string } = {}) =>
+  sendMessage: (
+    id: string,
+    text: string,
+    opts: { keepTrying?: boolean; model?: string; decided?: boolean } = {},
+  ) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages`, {
       method: "POST",
-      body: JSON.stringify({ text, keep_trying: !!opts.keepTrying, model: opts.model ?? null }),
+      body: JSON.stringify({ text, keep_trying: !!opts.keepTrying, model: opts.model ?? null, decided: opts.decided ?? null }),
+    }),
+  /** How the crew would read a draft (#102): a question or a note, and a decision about the app or not. */
+  readMessage: (id: string, text: string) =>
+    req<{ kind: "question" | "note"; decided: boolean }>(`/api/projects/${id}/messages/read`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
     }),
   listMessages: (id: string) => req<{ messages: CrewMessage[] }>(`/api/projects/${id}/messages`),
   /** Take a note back while it waits — a change to finished work included, until it starts. */

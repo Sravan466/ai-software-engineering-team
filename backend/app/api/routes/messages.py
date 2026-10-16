@@ -59,7 +59,8 @@ def _something_to_fix(db: Session, project: Project) -> bool:
 
 
 def _keep_trying(
-    db: Session, project: Project, kind: str, text: str, *, must: bool = False, model: Optional[str] = None
+    db: Session, project: Project, kind: str, text: str, *, must: bool = False, model: Optional[str] = None,
+    decided: Optional[bool] = None,
 ) -> Optional[Kept]:
     """A note on a stuck build sets it going again with the note. Claimed before the
     message is kept: a refused claim keeps nothing, and a claim that went through is
@@ -67,7 +68,8 @@ def _keep_trying(
     message that then fails to save never leaves a claimed build that nothing drives."""
     if not must and (kind != crew_chat.NOTE or not _stuck(project) or not _something_to_fix(db, project)):
         return None
-    decided = crew_chat.is_decision(text)
+    # The person's say, when they gave one; the words otherwise.
+    decided = crew_chat.is_decision(text) if decided is None else decided
     more, names, token = start_keep_trying(db, project, note=text, model=model, decided=decided)
     db.commit()
     return more, names, token, decided
@@ -125,8 +127,10 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
             asked.plan = {"decided": True}
             said += " I'll keep it as a decision for the rest of the build, and the round may drop what it leaves out instead of fixing it."
             if crew_chat.checks_finished_work(db, project, asked.text):
-                crew_chat.start_check(asked, exclude=phases)
-                said += " I'll also check whether it changes other finished work after this step."
+                # The stuck phase included: the round fixes what's broken; what the decision
+                # drops elsewhere in its files changes after it, in edit mode, cancellable.
+                crew_chat.start_check(asked)
+                said += " I'll also check whether it changes finished work after this round."
         else:
             # For this fix round, which reads it (#103): not a standing note for every phase.
             asked.meant_for = []
@@ -212,7 +216,10 @@ def send_message(
     # The person's words reach a model: never a key they pasted by mistake.
     _refuse_credentials(text, project)
     kind = crew_chat.NOTE if payload.keep_trying else crew_chat.classify(text)
-    kept = _keep_trying(db, project, kind, text, must=payload.keep_trying, model=payload.model if payload.keep_trying else None)
+    kept = _keep_trying(
+        db, project, kind, text, must=payload.keep_trying,
+        model=payload.model if payload.keep_trying else None, decided=payload.decided,
+    )
     asked = CrewMessage(
         project_id=project.id,
         author=crew_chat.PERSON,
@@ -229,6 +236,16 @@ def send_message(
 @router.get("/{project_id}/messages")
 def list_messages(project: Project = Depends(get_project), db: Session = Depends(get_db)) -> dict:
     return {"messages": crew_chat.thread(db, project.id)}
+
+
+@router.post("/{project_id}/messages/read")
+def read_message(payload: MessageCreate, project: Project = Depends(get_project)) -> dict:
+    """How the crew would read a draft, before it's sent — no model, nothing kept: whether
+    it's a question, and whether its words read as a decision about the app (#102), for
+    the stuck box's "Keep it as a decision" default. One rule, the server's."""
+    text = payload.text.strip()
+    kind = crew_chat.classify(text) if text else crew_chat.NOTE
+    return {"kind": kind, "decided": kind == crew_chat.NOTE and crew_chat.is_decision(text)}
 
 
 @router.post("/{project_id}/messages/{message_id}/reread")

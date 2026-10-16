@@ -90,18 +90,26 @@ def classify(text: str) -> str:
 #: a decision missed is still the round's note, a hint mistaken for one deletes code.
 _OPENER = r"(?:(?:please|ok(?:ay)?|actually|just|no|so|then),?\s+|let'?s\s+)*"
 _DROPS = (
-    r"(?:skip|drop|remove|cut|leave\s+out|get\s+rid\s+of|forget(?:\s+about)?(?!\s+(?:my|that|it|this|what|the\s+last))"
+    r"(?:skip|drop|remove|cut|leave\s+out|get\s+rid\s+of"
+    # Not "forget about that / it / my last note": waving off a message isn't a decision.
+    r"|forget\s+about\s+(?!(?:my|that|it|this|what|the\s+last)\b)|forget\s+(?!(?:about|my|that|it|this|what|the\s+last)\b)"
     r"|don'?t\s+(?:add|include|build|need|bother\s+with|implement|make|offer|support)"
     r"|do\s+not\s+(?:add|include|build|need|implement|make|offer|support)"
     r"|we\s+don'?t\s+need|no\s+need\s+for|no\s+longer\s+(?:need|want|offer|support))\b"
 )
 _DECISION = re.compile(rf"^{_OPENER}{_DROPS}", re.I)
-#: "no login", "no dark mode": a bare "no" decides only as a short phrase.
-_BARE_NO = re.compile(r"^no\s+[a-z][a-z' -]{1,40}$", re.I)
+#: "no login", "no dark mode": a bare "no" decides only as a short phrase, and never as a
+#: reply ("no luck", "no thanks").
+_BARE_NO = re.compile(
+    r"^no\s+(?!(?:luck|thanks|thank|idea|change|changes|worries|problem|problems|way|wait|rush|matter|clue|good|"
+    r"more|fix|success|progress|improvement|difference|go|dice|joy|response|answer|reply)\b)[a-z][a-z' -]{1,40}$",
+    re.I,
+)
 #: Talk about the code itself — a fix hint, never a decision about the app.
 _CODE_TALK = re.compile(
     r"\b(?:import|imports|require|exports|export\s+(?:default|const|function|class)|file|files|module|modules|function|functions|class|variable|"
-    r"line|lines|test|tests|error|errors|bug|compile|syntax|type|types|cache|caching)\b|[\w-]+\.(?:js|jsx|ts|tsx|py|css|json)\b",
+    r"line|lines|test|tests|error|errors|bug|compile|syntax|type|types|cache|caching|duplicate|extra|unused|"
+    r"brace|braces|bracket|brackets|semicolon|typo|comma|indent|indentation|whitespace)\b|[\w-]+\.(?:js|jsx|ts|tsx|py|css|json)\b",
     re.I,
 )
 
@@ -1031,16 +1039,18 @@ def _still_checking(m: Optional[CrewMessage], token: object = ...) -> bool:
     return ok and (token is ... or (m.plan or {}).get("token") == token)
 
 
-def start_check(m: CrewMessage, exclude: Optional[list] = None) -> None:
-    """Mark a note as being checked against finished work, with this check's own token.
-    `exclude`: phases already handling it — a stuck build's round, told the decision."""
+#: What a note's plan keeps when a check replaces it: that it's a decision (#102 PR 4).
+_KEPT_THROUGH_A_CHECK = ("decided",)
+
+
+def start_check(m: CrewMessage) -> None:
+    """Mark a note as being checked against finished work, with this check's own token."""
     import uuid
 
     m.plan = {
-        **{k: v for k, v in (m.plan or {}).items() if k == "decided"},
+        **{k: v for k, v in (m.plan or {}).items() if k in _KEPT_THROUGH_A_CHECK},
         "state": CHECKING,
         "token": uuid.uuid4().hex,
-        **({"exclude": list(exclude)} if exclude else {}),
     }
 
 
@@ -1076,9 +1086,7 @@ def scope_note(project_id: str, message_id: str) -> None:
                 change=asked.text,
                 extra_context=runner._app_index(project, list(done.values())),  # noqa: SLF001 - the one app index
             )
-            # Phases already handling it are not read against it again (a stuck round).
-            owner, name = project.owner_id, project.name
-            finished = set(done) - set((asked.plan or {}).get("exclude") or [])
+            owner, name, finished = project.owner_id, project.name, set(done)
         if not finished:
             # Nothing finished has any output to read: no planner call for nothing.
             with lock_for(project_id), SessionLocal() as db:
@@ -1099,9 +1107,8 @@ def scope_note(project_id: str, message_id: str) -> None:
                 db.commit()
                 return  # taken back, or read as a question, meanwhile
             plan = touched_by(result.output, finished)
-            # What the note was before the check stays with it: a decision, and the phases
-            # a stuck round was already handling.
-            plan.update({k: v for k, v in (asked.plan or {}).items() if k in ("decided", "exclude")})
+            # What the note was before the check stays with it: a decision.
+            plan.update({k: v for k, v in (asked.plan or {}).items() if k in _KEPT_THROUGH_A_CHECK})
             touched = plan["touched"]
             if not touched and getattr(result, "schema_status", None) == "invalid":
                 # Unreadable even after its repair round: no answer is not "no change".
@@ -1122,7 +1129,10 @@ def scope_note(project_id: str, message_id: str) -> None:
             else:
                 asked.plan = plan
                 resolve(asked, NO_CHANGE)
-                if asked.meant_for:
+                if plan.get("decided"):
+                    # A stuck round took it already: nothing else finished needs it.
+                    reply(db, asked, "Checked: it doesn't change other finished work.")
+                elif asked.meant_for:
                     reply(db, asked, "Checked: it doesn't change finished work.")
                 else:
                     reply(db, asked, "Checked: it doesn't change finished work, and no agent is left to take it. Once the build is finished, ask for it as a change.")
