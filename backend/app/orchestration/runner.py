@@ -800,13 +800,16 @@ class PipelineRunner:
             basis = pick.get("basis")
             if basis in ("asked", "escalated") and str(pick.get("model") or "").split(":", 1)[-1] != row.model_used:
                 # The model the round was pinned to didn't answer — the usual one did
-                # (`asked_unreached`), or no call was made: nothing is claimed about it.
-                basis = ("asked_unreached" if basis == "asked" else None) if row.model_used else None
+                # (`…_unreached`), or no call was made: nothing is claimed about it.
+                basis = f"{basis}_unreached" if row.model_used else None
             t["rounds"][-1]["model"] = row.model_used
             t["rounds"][-1]["basis"] = basis
-            if ((row.handoff or {}).get("fix") or {}).get("person") == "dropped":
-                # The person's words didn't fit beside the files (#103): the card says so.
+            carried = ((row.handoff or {}).get("fix") or {}).get("person")
+            if carried in ("dropped", "unsent"):
+                # The person's words reached no model (#103): the card says so.
                 t["rounds"][-1]["note_sent"] = False
+            elif carried == "partly":
+                t["rounds"][-1]["note_sent"] = "partly"
         if closed is not None and autofix.platform_fixed(row):
             # What the platform mended itself on the attempt this round made (#103).
             t["rounds"][-1]["platform"] = autofix.platform_fixed(row)
@@ -911,13 +914,15 @@ class PipelineRunner:
         return routers.for_user(project.owner_id) if project.owner_id else current
 
     @classmethod
-    def _stronger(cls, project: Project, phase_key: str) -> Optional[str]:
+    def _stronger(cls, project: Project, phase_key: str, strict: bool = False) -> Optional[str]:
         """The most capable model this phase's routing reaches when it isn't already on
-        it (#103); None when nothing is, or nobody can tell."""
+        it (#103); None when nothing is, or — unless `strict` — nobody can tell."""
         try:
             mode = RoutingMode(project.routing_mode or RoutingMode.LOCAL_ONLY.value)
             return cls._router_for(project).strongest_for(mode, project.preferred_model, role=phase_key)
         except Exception as e:  # noqa: BLE001 - a stronger round is best effort
+            if strict:
+                raise
             log.info("Couldn't tell what a stronger fix could run on for %s: %s", project.id, e)
             return None
 
@@ -931,11 +936,12 @@ class PipelineRunner:
         adding one is the thing to do. Nothing is claimed when it couldn't be told."""
         out: dict = {"stronger": None, "cloud": None, "add_model": False}
         try:
-            r = cls._router_for(project)
+            out["stronger"] = cls._stronger(project, phase_key, strict=True)
+            cloud = cls._router_for(project).strongest_cloud()
             mode = RoutingMode(project.routing_mode or RoutingMode.LOCAL_ONLY.value)
-            out["stronger"] = r.strongest_for(mode, project.preferred_model, role=phase_key)
-            cloud = r.strongest_cloud()
-            if mode == RoutingMode.LOCAL_ONLY:
+            # Auto reaches the cloud by itself; a build held to local models, or to the
+            # model someone picked, is offered it for one fix — unless it is already on it.
+            if mode != RoutingMode.AUTO and out["stronger"] is None and cloud != project.preferred_model:
                 out["cloud"] = cloud
             out["add_model"] = out["stronger"] is None and cloud is None
         except Exception as e:  # noqa: BLE001 - what would help is advice, never a failure
@@ -1539,11 +1545,14 @@ class PipelineRunner:
         strategy = remediation.strategy_for(k, stronger)
         person = t.pop("note", None)
         notes = {
-            phase: autofix.with_person(remediation.fix_instruction(
+            phase: remediation.fix_instruction(
                 items, strategy=strategy, project=project, owner=phase, round_number=k
-            ), person)
+            )
             for phase, items in by_owner.items()
         }
+        # The person's words go to this round's asks only (#103): the notes kept with the
+        # round become the standing note later compile and test fixes carry.
+        asks = {phase: autofix.with_person(note, person) for phase, note in notes.items()}
         record = autofix.start_round(
             t,
             strategy,
@@ -1582,8 +1591,8 @@ class PipelineRunner:
             db,
             project,
             first,
-            notes[first],
-            extra_feedback={phase: notes[phase] for phase in rest},
+            asks[first],
+            extra_feedback={phase: asks[phase] for phase in rest},
             escalate=tuple(owners) if strategy == remediation.STRATEGY_STRONGER else (),
             continue_after=True,
             fix_track=autofix.SECURITY,
@@ -1809,6 +1818,8 @@ class PipelineRunner:
                 **(row.model_pick or {}), "model": pin, "basis": pin_basis,
                 "reason": "the person chose it for this fix" if pin_basis == "asked"
                 else "the strongest model it can reach, for the last fix round",
+                # The sample was the replaced model's record, not this one's.
+                "sample": 0,
             }
             db.commit()
 

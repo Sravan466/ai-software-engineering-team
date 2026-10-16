@@ -837,9 +837,13 @@ class _Run:
                 "lost_code": list(self.lost),
                 "reverted": list(self.reverted),
                 "unanswered": list(self.unanswered),
-                # The person's note (#103): "dropped" only when no call had room for it.
+                # The person's note (#103): "unsent" when the round made no call at all,
+                # "dropped" when no call had room for it, "partly" when only some did.
                 "person": (
-                    ("sent" if self.person_calls["sent"] else "dropped") if sum(self.person_calls.values()) else None
+                    "unsent" if not sum(self.person_calls.values())
+                    else "dropped" if not self.person_calls["sent"]
+                    else "partly" if self.person_calls["dropped"]
+                    else "sent"
                 ) if self.ctx.person_note else None,
                 "kept": len([p for p in self.existing if p not in changed]),
                 # Fix and write calls, the planner's aside: 0 when every file was too long

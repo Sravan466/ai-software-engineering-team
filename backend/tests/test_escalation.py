@@ -145,15 +145,19 @@ def test_the_cloud_offered_is_the_account_s_strongest_working_key(monkeypatch):
     assert model_router.strongest_cloud() == "anthropic:claude-x"
 
 
-def test_a_stronger_round_runs_on_the_model_it_is_called_for(client, monkeypatch):
+@pytest.mark.parametrize("reach", [True, False])
+def test_a_stronger_round_runs_on_the_model_it_is_called_for(client, monkeypatch, reach):
     # Every round counts as progress, so the loop reaches its third.
     monkeypatch.setattr(autofix, "next_step", lambda t, net=False: "fix" if len(t["rounds"]) < t["allowed"] else "limit")
-    pid, crew = _stuck(client, monkeypatch, stronger="ollama:a-bigger-model")
+    pid, crew = _stuck(client, monkeypatch, stronger="ollama:a-bigger-model", reach=reach)
     t = client.get(f"/api/projects/{pid}").json()["auto_fix"]["tracks"]["build:backend_engineer"]
     [third] = [r for r in t["rounds"] if r["strategy"] == "stronger_model"]
     # The model the runner found is the one the round was pinned to, and it says so.
     assert crew.pins and set(crew.pins) == {"ollama:a-bigger-model"}
-    assert (third["model"], third["basis"]) == ("a-bigger-model", "escalated")
+    # And when it didn't answer, the round doesn't claim it.
+    assert (third["model"], third["basis"]) == (
+        ("a-bigger-model", "escalated") if reach else ("mock-model", "escalated_unreached")
+    )
     assert t["stopped"]["add_model"] is False
 
 
@@ -201,3 +205,58 @@ def test_the_person_s_note_has_its_own_place_in_a_fix_and_the_round_says_if_it_d
     assert result.handoff["fix"]["person"] == record
     shown = any("# What the person asks you to try\n" in a for a in asked)
     assert shown == (record == "sent")
+
+
+def test_a_chosen_model_is_checked_again_when_it_is_clicked(client, monkeypatch):
+    pid, _crew = _stuck(client, monkeypatch, cloud="anthropic:claude-test")
+    # The key stopped working after the card offered it.
+    monkeypatch.setattr(ModelRouter, "strongest_cloud", lambda self: None)
+    assert client.post(f"/api/projects/{pid}/auto-fix/retry", json={"model": "anthropic:claude-test"}).status_code == 409
+
+
+@pytest.mark.parametrize("mode, preferred, offered", [
+    ("local_only", None, "anthropic:claude-x"),
+    ("manual", "ollama:qwen2.5:7b", "anthropic:claude-x"),
+    ("manual", "anthropic:claude-x", None),
+    ("auto", None, None),
+])
+def test_the_cloud_is_offered_where_the_build_wouldn_t_reach_it_by_itself(monkeypatch, mode, preferred, offered):
+    from types import SimpleNamespace
+
+    from app.orchestration.runner import PipelineRunner
+
+    monkeypatch.setattr(ModelRouter, "strongest_for", lambda self, *a, **k: None)
+    monkeypatch.setattr(ModelRouter, "strongest_cloud", lambda self: "anthropic:claude-x")
+    project = SimpleNamespace(id="p", owner_id=None, routing_mode=mode, preferred_model=preferred)
+    found = PipelineRunner._escalation(project, "backend_engineer")
+    assert found["cloud"] == offered and found["add_model"] is False
+
+
+def test_an_error_claims_nothing(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.orchestration.runner import PipelineRunner
+
+    def boom(self, *a, **k):
+        raise RuntimeError("runtime down")
+
+    monkeypatch.setattr(ModelRouter, "strongest_for", boom)
+    project = SimpleNamespace(id="p", owner_id=None, routing_mode="local_only", preferred_model=None)
+    assert PipelineRunner._escalation(project, "backend_engineer") == {"stronger": None, "cloud": None, "add_model": False}
+
+
+def test_a_note_on_a_round_that_made_no_call_is_unsent(monkeypatch, stub_router):
+    from app.agents.base import AgentContext
+    from app.agents.code_phase import _Run
+    from app.agents.backend_engineer import BackendEngineerAgent
+    from tests.test_fix_rounds import SERVER, _files
+
+    stub(monkeypatch, "complete", _fake_complete)
+    huge = SERVER + "".join(f"// line {i} of a very long file\n" for i in range(4000))
+    files = _files(**{"backend/server.js": huge})
+    problems = ({"path": "backend/server.js", "line": 2, "kind": "reference",
+                 "message": "uses `listTodos`, which is never imported or declared in this file."},)
+    ctx = AgentContext(idea="A todo API", base_output={"summary": "A todo API", "files": files},
+                       fixing=problems, person_note="keep it small")
+    result = _Run(BackendEngineerAgent(), ctx).fix()
+    assert result.handoff["fix"]["calls"] == 0 and result.handoff["fix"]["person"] == "unsent"

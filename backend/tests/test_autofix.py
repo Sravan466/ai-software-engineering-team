@@ -407,3 +407,16 @@ def test_a_standing_security_note_survives_every_compile_round():
     note = PipelineRunner._standing_fix_note(data, "backend_engineer")
     assert "MongoDB" in note
     assert "MongoDB" in autofix.code_note([{"key": "k", "title": "x", "kind": "build"}], 2, None, note)
+
+
+def test_the_person_s_note_goes_to_the_security_round_and_never_becomes_the_standing_note(client, monkeypatch):
+    """#103: a note for the next round rides that round's asks; the notes kept with the
+    round are what later compile and test fixes carry, so it isn't in them."""
+    pid, crew, _ = _build(client, monkeypatch, [[SECRET]])
+    r = client.post(f"/api/projects/{pid}/auto-fix/retry", json={"rounds": 1, "note": "Read it from process.env"})
+    assert r.status_code == 200
+    track = client.get(f"/api/projects/{pid}").json()["auto_fix"]["tracks"]["security"]
+    last = track["rounds"][-1]
+    assert last["note"] == "Read it from process.env"
+    assert all("The person says" not in n for n in (last.get("notes") or {}).values())
+    assert any("The person says: Read it from process.env" in n for n in _fix_notes(crew, "Backend Engineer"))

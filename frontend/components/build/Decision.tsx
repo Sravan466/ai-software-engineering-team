@@ -120,7 +120,7 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
   needs_help: {
     title: "The crew needs a hand",
     blurb: "The crew's fix rounds didn't get the build working.",
-    approve: "Keep trying",
+    approve: "Try again",
     after: "",
   },
   integrations: {

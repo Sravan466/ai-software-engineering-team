@@ -448,13 +448,15 @@ export type AutoFixRound = {
   episode?: number;
   /** What the round ran on, and why (#103): `escalated` — the strongest model the
    * router could reach; `asked` — the person chose it for this fix; `asked_unreached`
-   * — they did, and it didn't answer, so the usual model ran. */
+   * — they did, and it didn't answer, so the usual model ran; `escalated_unreached` —
+   * the stronger model didn't answer. */
   model?: string | null;
   basis?: string | null;
   /** What the person told the crew to try for this round, in their words (#103), and
-   * false when it didn't fit beside the code, so the model never saw it. */
+   * false when no model saw it (no room beside the code, or no call), "partly" when
+   * only some of the round's calls carried it. */
   note?: string;
-  note_sent?: boolean;
+  note_sent?: boolean | "partly";
   /** What the platform mended itself, without a model (#103): on the attempt this round
    * made, and — on an episode's first round — on the attempt before it. */
   platform?: PlatformFixed;

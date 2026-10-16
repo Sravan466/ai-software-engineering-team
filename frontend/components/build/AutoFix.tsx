@@ -79,6 +79,7 @@ export function approach(track: string, strategy: AutoFixRound["strategy"], roun
   const base = track === "tests" ? testApproach(strategy, round) : (track === "security" ? STRATEGY : CODE_STRATEGY)[strategy];
   if (round?.basis === "asked") return `${base.split(",")[0]}, on the model you chose for this fix`;
   if (round?.basis === "asked_unreached") return `${base.split(",")[0]}. The model you chose couldn't be reached`;
+  if (round?.basis === "escalated_unreached") return `${base.split(",")[0]}. The stronger model couldn't be reached`;
   return base;
 }
 
@@ -400,7 +401,8 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               {r.note && (
                 <span className="ledger-note">
                   You said: “{r.note}”
-                  {r.note_sent === false && " It didn't fit beside the code in this model's window, so the model didn't see it."}
+                  {r.note_sent === false && " The model didn't see it: there was no room beside the code."}
+                  {r.note_sent === "partly" && " Only some of this round's calls had room for it."}
                 </span>
               )}
             </div>

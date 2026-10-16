@@ -1018,9 +1018,17 @@ def keep_trying(
     data = autofix.load(project)
     model = payload.model if payload else None
     if model:
-        offered = {(data["tracks"][n].get("stopped") or {}).get("cloud") for n in autofix.stuck(data)}
-        if model not in offered:
+        offered = [n for n in autofix.stuck(data) if (data["tracks"][n].get("stopped") or {}).get("cloud") == model]
+        if not offered:
             raise HTTPException(400, "That model isn't one offered for this fix.")
+        # Still so now, not only when the loop stopped (#103): the key works, and the
+        # build's routing is still one that asks for a yes before code goes there.
+        if not any(
+            runner._escalation(project, n[len(autofix.BUILD_PREFIX):])["cloud"] == model for n in offered
+        ):
+            raise HTTPException(
+                409, "That model can't be used for this fix any more. Check its key in Settings, then try again."
+            )
     names = autofix.keep_trying(data, more, note=note or None, model=model)
     token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
     if not token:
