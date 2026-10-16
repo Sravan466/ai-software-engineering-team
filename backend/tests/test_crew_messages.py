@@ -297,11 +297,15 @@ def test_a_note_waits_for_the_agents_that_havent_started(calls, client):
     pid = _running_backend(client)
     m = _say(client, pid, "make it purple")
     assert m["kind"] == "note" and m["status"] == "queued"
+    # Backend is between two files, so it reads the note before its next one (#102).
     assert m["replies"][0]["text"] == (
-        "Got it. Frontend Engineer and the 4 after it haven't started, so they get this note when they start."
+        "Got it. Backend Engineer reads this before its next file, and Frontend Engineer and the 4 after it "
+        "get it when they start."
     )
-    assert m["replies"][0]["agent"] == "frontend_engineer"
-    assert m["meant_for"] == ["frontend_engineer", "qa_engineer", "security_engineer", "devops_engineer", "cost_estimation"]
+    assert m["replies"][0]["agent"] == "backend_engineer"
+    assert m["meant_for"] == [
+        "backend_engineer", "frontend_engineer", "qa_engineer", "security_engineer", "devops_engineer", "cost_estimation",
+    ]
     assert calls == []
 
 
@@ -313,6 +317,34 @@ def test_a_note_on_a_build_stopped_mid_phase_goes_to_that_phase_first(calls, cli
     m = _say(client, pid, "use a simpler layout")
     assert m["replies"][0]["text"] == "Got it. The build is stopped, so Backend Engineer gets this note when it resumes."
     assert m["meant_for"][:2] == ["backend_engineer", "frontend_engineer"]
+
+
+def test_no_promise_of_the_next_file_during_a_fix_round_or_on_the_last_file(calls, client):
+    pid = _running_backend(client)
+    with SessionLocal() as db:
+        data = {"tracks": {}}
+        t = autofix.track(data, "build:backend_engineer")
+        autofix.start_round(t, "with_code", ["backend_engineer"], [{"key": "a"}])
+        db.get(Project, pid).auto_fix = data
+        db.commit()
+    assert _say(client, pid, "keep it small")["replies"][0]["text"].startswith("Got it. Frontend Engineer")
+    pid = _running_backend(client)
+    with inflight.building(pid):
+        for path in ("lib/0.js", "lib/1.js", "lib/2.js", "lib/3.js"):
+            activity.file(path, "ok")
+        activity.file("lib/4.js", "writing")  # the last file, already in flight
+    assert _say(client, pid, "keep it small")["replies"][0]["text"].startswith("Got it. Frontend Engineer")
+
+
+def test_a_note_naming_a_phase_in_a_fix_round_waits(calls, client):
+    pid = _running_backend(client)
+    with SessionLocal() as db:
+        data = {"tracks": {}}
+        autofix.start_round(autofix.track(data, "build:backend_engineer"), "with_code", ["backend_engineer"], [{"key": "a"}])
+        db.get(Project, pid).auto_fix = data
+        db.commit()
+    text = _say(client, pid, "backend: keep it small")["replies"][0]["text"]
+    assert text.startswith("Backend Engineer has already started, so this note waits"), text
 
 
 def test_a_note_for_one_agent_says_so(calls, client):
@@ -341,6 +373,7 @@ def test_a_note_on_a_stuck_build_is_keep_trying_with_it(calls, client):
     finally:
         monkey.undo()
     assert m["status"] == "applied" and m["applied_to"] == ["backend_engineer"]
+    assert m["meant_for"] == [], "a note for one fix round became a standing note"
     assert m["replies"][0]["text"] == "Trying again with your note, up to 2 more rounds."
     assert driven == [pid]
     with SessionLocal() as db:
@@ -392,6 +425,18 @@ def test_a_stalled_build_never_says_an_agent_is_working(calls, client):
         db.commit()
     text = _say(client, pid, "is the backend done?")["replies"][0]["text"]
     assert text.startswith("Nothing is driving this build")
+
+
+def test_a_note_with_no_agent_left_to_take_it_says_so(calls, client):
+    pid = _build(client, status=PipelineStatus.RUNNING.value, current_phase="cost_estimation",
+                 heartbeat_at=datetime.now(timezone.utc))
+    for phase in ("product_manager", "system_design", "backend_engineer", "frontend_engineer", "qa_engineer",
+                  "security_engineer", "devops_engineer"):
+        _row(pid, phase, PhaseStatus.APPROVED.value)
+    _row(pid, "cost_estimation", PhaseStatus.RUNNING.value)
+    m = _say(client, pid, "add dark mode")
+    assert m["status"] == "declined" and m["meant_for"] == []
+    assert m["replies"][0]["text"].startswith("Every agent has started on this build, so no one is left")
 
 
 def test_a_note_on_a_finished_build_points_at_the_change_box(calls, client):

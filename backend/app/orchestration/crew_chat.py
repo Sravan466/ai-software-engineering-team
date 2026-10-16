@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session, object_session
 
 from app.core.constants import PHASE_LABELS, PHASE_ORDER, GateKind, PhaseStatus, PipelineStatus
 from app.core.logging import get_logger
-from app.db.models import CrewMessage, Project
+from app.db.models import CrewMessage, Project, _aware
 
 log = get_logger(__name__)
 
@@ -501,14 +501,14 @@ def status_answer(project: Project, text: str, rows: Optional[dict] = None) -> t
 def _iso(value: Optional[datetime]) -> Optional[str]:
     if value is None:
         return None
-    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+    return _aware(value).isoformat()
 
 
 def _reply_out(m: CrewMessage) -> dict:
     return {"id": m.id, "agent": m.agent, "text": m.text, "status": m.status, "created_at": _iso(m.created_at)}
 
 
-def out(m: CrewMessage, replies: Iterable[CrewMessage] = ()) -> dict:
+def out(m: CrewMessage, replies: Iterable[CrewMessage] = (), since: Optional[datetime] = None) -> dict:
     """A person's message as the page reads it, with the crew's replies to it."""
     return {
         "id": m.id,
@@ -516,6 +516,9 @@ def out(m: CrewMessage, replies: Iterable[CrewMessage] = ()) -> dict:
         "kind": m.kind,
         "status": m.status,
         "agent": m.agent,
+        # A note a phase of this run can still be handed (#102): what the crew floor's
+        # "Got your note" shows, judged here once rather than again on the page.
+        "standing": standing(m, since),
         "meant_for": list(m.meant_for or []),
         "applied_to": list(m.applied_to or []),
         "change_request_id": m.change_request_id,
@@ -545,7 +548,8 @@ def thread(db: Session, project_id: str, limit: Optional[int] = None) -> list[di
     by: dict[str, list[CrewMessage]] = {}
     for r in replies:
         by.setdefault(r.reply_to or "", []).append(r)
-    return [out(m, by.get(m.id, [])) for m in asked]
+    since = run_began(db, project_id)
+    return [out(m, by.get(m.id, []), since) for m in asked]
 
 
 def recent(project: Project) -> list[dict]:
@@ -579,9 +583,8 @@ def now() -> datetime:
 def _later_than(m: CrewMessage) -> datetime:
     """Now, and never at or before `m` — a reply written in the same instant still sorts after it."""
     at = now()
-    base = m.created_at
+    base = _aware(m.created_at)
     if base is not None:
-        base = base if base.tzinfo else base.replace(tzinfo=timezone.utc)
         if at <= base:
             at = base + timedelta(microseconds=1)
     return at
@@ -592,30 +595,45 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
     """What happens to a note, said plainly; who it's for. A note waits, `queued`."""
     rows = _rows(project)
     ahead = not_started(project, rows)
-    named = addressed_to(text)
-    if named:
-        state = phase_state(project, named, rows)
-        if state == "not_started":
-            return f"Got it. {title(named)} hasn't started, so it gets this note when it starts.", named, [named]
-        if state == "working" and named in CODE_PHASES:
-            return f"Got it. {title(named)} is writing its files now; it reads this note before the next one.", named, [named]
-        return (
-            f"{title(named)} has already {'started' if state == 'working' else 'finished'}. This note "
-            "waits with the build, and the crew checks whether it changes that work after this step.",
-            named,
-            [named],
-        )
     stopped = project.status in (
         PipelineStatus.CANCELLED.value, PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value
     ) or (project.status == PipelineStatus.RUNNING.value and project.stalled)
     current = project.current_phase
-    if stopped and current in _ORDER and current not in ahead:
-        row = rows.get(current)
-        if row is not None and getattr(row, "status", "") == PhaseStatus.RUNNING.value:
-            # Stopped mid-phase: that phase runs again when the build resumes.
-            ahead = [current, *ahead]
+    row = rows.get(current or "")
+    # Stopped mid-phase: that phase runs again when the build resumes.
+    rerun = stopped and row is not None and getattr(row, "status", "") == PhaseStatus.RUNNING.value
+    named = addressed_to(text)
+    if named:
+        state = phase_state(project, named, rows)
+        if rerun and named == current:
+            return f"Got it. The build is stopped, so {title(named)} gets this note when it resumes.", named, [named]
+        if state == "not_started":
+            return f"Got it. {title(named)} hasn't started, so it gets this note when it starts.", named, [named]
+        if named == current and not stopped and _writing_files(project, rows):
+            return f"Got it. {title(named)} is writing its files now; it reads this note before the next one.", named, [named]
+        return (
+            f"{title(named)} has already {'started' if state == 'working' else 'finished'}, so this note "
+            "waits for the next time that work is sent back.",
+            named,
+            [named],
+        )
+    if rerun and current in _ORDER and current not in ahead:
+        ahead = [current, *ahead]
+    if not stopped and _writing_files(project, rows):
+        # A code phase between two files reads it before the next one (#102).
+        later = list(ahead)
+        ahead = [current, *ahead]
+        said = f"Got it. {title(current)} reads this before its next file"
+        if not later:
+            return f"{said}.", current, ahead
+        if len(later) == 1:
+            return f"{said}, and {title(later[0])} gets it when it starts.", current, ahead
+        return f"{said}, and {title(later[0])} and the {len(later) - 1} after it get it when they start.", current, ahead
     if not ahead:
-        return "Every phase has started, so this note waits with the build until the crew can act on it.", None, []
+        return (
+            "Every agent has started on this build, so no one is left to take this note. Once it's "
+            "finished, ask for it as a change."
+        ), None, []
     first = ahead[0]
     if stopped:
         return f"Got it. The build is stopped, so {title(first)} gets this note when it resumes.", first, ahead
@@ -627,6 +645,156 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
     else:
         said = f"{title(first)} and the {len(rest)} after it haven't started, so they get this note when they start."
     return f"Got it. {said}", first, ahead
+
+
+def _writing_files(project: Project, rows: dict) -> bool:
+    """Whether the phase working now is a code phase that will read a note before another
+    file: files still planned, and not a fix round — whose prompts don't carry notes."""
+    current = project.current_phase
+    if current not in CODE_PHASES or phase_state(project, current, rows) != "working":
+        return False
+    found = project.activity or {}
+    # `fixing` here is one file's in-loop repair; a whole fix round is caught below.
+    if found.get("ended") or found.get("stage") not in ("planning", "writing", "fixing"):
+        return False
+    from app.orchestration import autofix
+
+    track = (autofix.load(project)["tracks"]).get(autofix.build_track(current))
+    if track and autofix.open_round(track) is not None:
+        return False
+    files = found.get("files") or []
+    # The file being written is already in flight: only one still planned comes after.
+    return not files or any(f.get("state") == "planned" for f in files)
+
+
+# ── notes reach the phases they're for ────────────────────────────────────────
+_HANDED = (QUEUED, APPLIED)
+#: Said over a phase's notes: two notes can disagree, and the slot's budget cuts the end.
+_NEWEST_FIRST = "Newest first; where two disagree, the newer one stands."
+
+
+def _note_filter(project_id):
+    """Which messages are notes a phase may be handed — one definition, for the notes
+    taken and for what `claim.between_calls` reads, so the two can't drift apart."""
+    return (
+        CrewMessage.project_id == project_id,
+        CrewMessage.author == PERSON,
+        CrewMessage.kind == NOTE,
+        CrewMessage.status.in_(_HANDED),
+    )
+
+
+def _notes(db: Session, project_id: str) -> list[CrewMessage]:
+    return list(db.execute(select(CrewMessage).where(*_note_filter(project_id)).order_by(CrewMessage.created_at)).scalars())
+
+
+def notes_signature():
+    """Two scalar subqueries — how many notes the build holds, and when the newest was
+    sent — for `claim.between_calls`, which reads them in the read it already makes before
+    every file. A note added, or one taken back, moves one or the other."""
+    from sqlalchemy import func
+
+    return (
+        select(func.count()).select_from(CrewMessage).where(*_note_filter(Project.id)).scalar_subquery(),
+        select(func.max(CrewMessage.created_at)).where(*_note_filter(Project.id)).scalar_subquery(),
+    )
+
+
+def signature_of(count: int, newest) -> tuple:
+    """The pair `notes_signature` reads, in one comparable form — the time as UTC ISO,
+    whether it came back from the database's MAX() or off a loaded note."""
+    if isinstance(newest, str):
+        try:
+            newest = datetime.fromisoformat(newest)
+        except ValueError:
+            pass
+    if isinstance(newest, datetime):
+        newest = _aware(newest).isoformat()
+    return (int(count or 0), newest)
+
+
+def for_phase(m: CrewMessage, phase: str) -> bool:
+    """A note is for the phases it named or that hadn't started when it was sent. One for
+    no phase — sent through Keep trying, for that fix round only, or left with no phase to
+    reach (`[]`, or NULL from before notes said) — is handed to none."""
+    return phase in (m.meant_for or [])
+
+
+def run_began(db: Session, project_id: str):
+    """When the build's current run began, for its notes: a note sent before the build was
+    last finished belongs to that run, and is in its settled decisions now."""
+    from sqlalchemy import func
+
+    from app.db.models import Version
+
+    return db.execute(select(func.max(Version.created_at)).where(Version.project_id == project_id)).scalar()
+
+
+def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
+    """Every note for `phase`, as its prompt carries them (one a line, oldest first), and
+    the signature of the notes the build held when they were read.
+
+    At a phase's start (the graph node, a redo) and between two of a code phase's files.
+    Each note handed over is marked handed to `phase`; the first phase to take a note says
+    so in the thread. Taken again on a re-run — a resume, a redo — so a note stands for the
+    whole build. None when they couldn't be read: the caller keeps what it had, and a note
+    that can't be read never stops a build."""
+    from app.db.base import SessionLocal
+
+    try:
+        with SessionLocal() as db:
+            held = _notes(db, project_id)
+            since = run_began(db, project_id)
+            mine = [m for m in held if for_phase(m, phase) and _this_run(m, since)]
+            for m in mine:
+                given = list(m.applied_to or [])
+                if phase in given:
+                    continue
+                m.applied_to = [*given, phase]
+                if m.status == QUEUED:
+                    m.status = APPLIED
+                    m.applied_at = now()
+                    m.agent = phase
+                    reply(db, m, f"Got your note. {title(phase)} is working with it now.", phase)
+            db.commit()
+            newest = max((m.created_at for m in held if m.created_at is not None), default=None)
+            # Newest first: a window too small for every note cuts the oldest.
+            lines = [f"- {' '.join(m.text.split())}" for m in reversed(mine)]
+            text = "\n".join([_NEWEST_FIRST, *lines]) if len(lines) > 1 else "\n".join(lines)
+            return text, signature_of(len(held), newest)
+    except Exception:  # noqa: BLE001
+        log.exception("Couldn't read the notes for %s on %s", phase, project_id)
+        return None
+
+
+#: "Asked during the build" lines kept with the stack line: every reader takes the tail.
+ASKED_DECISIONS = 5
+
+
+def asked_during(db: Session, project_id: str, label: str = "the build", this_run: bool = False) -> list[str]:
+    """What the person asked for while a run went on, for the app's settled decisions: the
+    notes a phase took, the newest few. Not a Keep-trying note, which was for one fix round.
+    The first build's are set when it finishes; a kept change's (`this_run`) with it."""
+    since = run_began(db, project_id) if this_run else None
+    return [
+        f"Asked during {label}: {' '.join(m.text.split())[:200]}"
+        for m in _notes(db, project_id)
+        if m.applied_to and m.meant_for and _this_run(m, since)
+    ][-ASKED_DECISIONS:]
+
+
+def _this_run(m: CrewMessage, since: Optional[datetime]) -> bool:
+    return since is None or m.created_at is None or _aware(m.created_at) > _aware(since)
+
+
+def standing(m: CrewMessage, since: Optional[datetime]) -> bool:
+    """Whether a phase of this run could still be handed this note."""
+    return (
+        m.author == PERSON and m.kind == NOTE and m.status in _HANDED and bool(m.meant_for) and _this_run(m, since)
+    )
+
+
+
 
 
 # ── questions only a model can answer ─────────────────────────────────────────
@@ -659,7 +827,9 @@ def _context(db: Session, project: Project) -> str:
     if done:
         lines.append("# Finished\n" + ", ".join(title(p) for p in done))
     if project.decisions:
-        lines.append("# Settled\n" + "\n".join(f"- {d}" for d in list(project.decisions)[-10:]))
+        from app.orchestration.changes import settled
+
+        lines.append("# Settled\n" + "\n".join(f"- {d}" for d in settled(list(project.decisions), 10)))
     from app.orchestration.runner import runner
 
     index = runner._app_index(project, list(rows.values()))  # noqa: SLF001 - the one app index
@@ -737,7 +907,8 @@ def _reason(e: Exception) -> str:
 
 
 def settle_orphans(db: Session) -> int:
-    """At startup: questions the last run of this server was answering when it stopped.
+    """At startup: questions the last run of this server was answering when it stopped, and
+    notes kept for no phase before notes said who they were for — waiting for nobody.
 
     The app is one process — a build's run is a thread in it, and so is every answer
     (`activity` and the claim make the same assumption) — so at startup none is live."""
@@ -749,9 +920,21 @@ def settle_orphans(db: Session) -> int:
     for m in found:
         reply(db, m, "The server restarted before the crew could answer. Ask again.")
         m.status = DECLINED
-    if found:
+    # In Python: a JSON column keeps None as JSON `null`, which `IS NULL` doesn't match.
+    stranded = [
+        m for m in db.execute(
+            select(CrewMessage).where(
+                CrewMessage.author == PERSON, CrewMessage.kind == NOTE, CrewMessage.status == QUEUED
+            )
+        ).scalars()
+        if m.meant_for is None
+    ]
+    for m in stranded:
+        reply(db, m, "No agent was left to take this note. Once the build is finished, ask for it as a change.")
+        m.status = DECLINED
+    if found or stranded:
         db.commit()
-    return len(found)
+    return len(found) + len(stranded)
 
 
 __all__ = [
@@ -766,6 +949,11 @@ __all__ = [
     "QUEUED",
     "SCHEDULED",
     "addressed_to",
+    "asked_during",
+    "for_phase",
+    "notes_signature",
+    "signature_of",
+    "take_notes",
     "ask_model",
     "classify",
     "is_status",

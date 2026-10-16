@@ -58,7 +58,7 @@ from app.db.models import ChangeRequest, DebateRecord, PhaseResult, PreviewRevis
 from app.preview import app_state
 from app.preview import history as preview_history
 from app.memory.store import memory_store
-from app.orchestration import activity, autofix, changes, claim, connectors, remediation, versions
+from app.orchestration import activity, autofix, changes, claim, connectors, crew_chat, remediation, versions
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import Charter, binding_on
 from app.orchestration.graph import connectors_note, graph, gather_skills
@@ -1164,7 +1164,7 @@ class PipelineRunner:
             "number": found.number,
             "text": found.text,
             "plan": plan,
-            "decisions": list(project.decisions or changes.first_decisions(project)),
+            "decisions": list(project.decisions or changes.first_decisions(project, db)),
             "edit": edit,
             "base": {phase: rows[phase].output for phase in edit},
             "done": [],
@@ -1253,7 +1253,7 @@ class PipelineRunner:
                 lines.append(f"- {path}" + (f" — {purpose[:100]}" if purpose else ""))
         notes = project.decisions or changes.first_decisions(project)
         if notes:
-            lines += ["", "Already settled:"] + [f"- {n}" for n in notes[-10:]]
+            lines += ["", "Already settled:"] + [f"- {n}" for n in changes.settled(notes, 10)]
         return "\n".join(lines)
 
     def _change_rewind(
@@ -1428,11 +1428,16 @@ class PipelineRunner:
                 self._close_failed(project, found, "The change stopped before anything was changed.")
                 found = None
         if found is not None:
+            # What the person asked for while the change ran (#102), kept with it — read
+            # before the version is recorded, which dates the next run from here.
+            asked = crew_chat.asked_during(db, project.id, f"change #{found.number}", this_run=True)
             version = versions.record(db, project, found.text, versions.CHANGE, change_id=found.id)
             found.status = changes.DONE
             found.version_id = version.id
             found.finished_at = _now()
             changes.remember(project, f"v{version.number}: {found.text}")
+            for line in asked:
+                changes.remember(project, line)
             return True
         current = versions.current(db, project)
         if current is None:
@@ -1440,7 +1445,7 @@ class PipelineRunner:
             if not existing:
                 versions.record(db, project, "First build", versions.FIRST_BUILD)
                 if not project.decisions:
-                    project.decisions = changes.first_decisions(project) or None
+                    project.decisions = changes.first_decisions(project, db) or None
                 return False
             # The pointer was lost: the newest version, if that is what the build holds.
             current = existing[-1]
@@ -1875,6 +1880,12 @@ class PipelineRunner:
                         revising=revise is not None,
                         pin_model=pin,
                     )
+                    if fix is None:
+                        # The person's notes (#102), on a redo as at any start. Not on a
+                        # fix round: its prompt carries the problems and their note only.
+                        from app.orchestration.graph import take_asked
+
+                        take_asked(ctx, project.id, phase_key)
                     if editing:
                         # Its own work, not stripped: what it delivered is what it
                         # changes (#79) — on a fix round, the change's own attempt.

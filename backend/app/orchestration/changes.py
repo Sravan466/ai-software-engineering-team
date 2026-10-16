@@ -240,7 +240,7 @@ def note_for(change: dict, phase: str) -> str:
     decisions = change.get("decisions") or []
     if decisions:
         lines.append("Already settled in this app (keep these unless the change says otherwise):")
-        lines += [f"- {d}" for d in decisions[-8:]]
+        lines += [f"- {d}" for d in settled(decisions, 8)]
     return "\n".join(lines)
 
 
@@ -271,13 +271,28 @@ def _belongs(path: str, phase: str) -> bool:
 
 
 # ── what the app has settled on ───────────────────────────────────────────────
-def first_decisions(project: Project) -> list[str]:
-    """The decisions note a build starts with: its stack, from the charter."""
+def first_decisions(project: Project, db: Optional[Session] = None) -> list[str]:
+    """The decisions note a build starts with: its stack, from the charter — and what the
+    person asked for while it ran (#102), so a later change keeps to "no login" too."""
+    from app.orchestration import crew_chat
     from app.orchestration.charter import Charter
 
     charter = Charter.from_dict(project.charter)
     line = charter.summary_line() if charter is not None else ""
-    return [f"Stack — {line}"] if line else []
+    out = [f"Stack — {line}"] if line else []
+    db = db if db is not None else object_session(project)
+    if db is not None:
+        out += crew_chat.asked_during(db, project.id)
+    return out
+
+
+def settled(decisions: list, n: int) -> list:
+    """The newest `n` of what an app has settled on — its stack line always among them:
+    every reader takes the tail, and the stack is the first line."""
+    notes = [str(d) for d in decisions or []]
+    stack = [d for d in notes[:1] if d.startswith("Stack — ")]
+    rest = notes[len(stack):]
+    return stack + rest[-max(n - len(stack), 0):] if n > len(stack) else stack[:n]
 
 
 def remember(project: Project, line: str) -> None:
@@ -286,4 +301,4 @@ def remember(project: Project, line: str) -> None:
     line = " ".join(line.split())[:240]
     if line and line not in notes:
         notes.append(line)
-    project.decisions = notes[-30:]
+    project.decisions = settled(notes, 30)

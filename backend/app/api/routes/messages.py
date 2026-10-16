@@ -115,6 +115,8 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         crew_chat.reply(db, asked, f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}.", agent)
         asked.status = crew_chat.APPLIED
         asked.agent = agent
+        # For this fix round, which reads it (#103): not a standing note for every phase.
+        asked.meant_for = []
         asked.applied_to = phases or None
         asked.applied_at = crew_chat.now()
         return
@@ -125,8 +127,9 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         return
     text, agent, meant_for = crew_chat.note_reply(project, asked.text)
     crew_chat.reply(db, asked, text, agent)
-    asked.status = crew_chat.QUEUED
-    asked.meant_for = meant_for or None
+    # No phase left to take it: said so, and not kept waiting for nobody.
+    asked.status = crew_chat.QUEUED if meant_for else crew_chat.DECLINED
+    asked.meant_for = list(meant_for)
     # Who it waits for, as it is read now — a reread's earlier reply named someone else.
     asked.agent = agent
 
@@ -238,4 +241,4 @@ def _one(db: Session, asked: CrewMessage) -> dict:
     replies = db.execute(
         select(CrewMessage).where(CrewMessage.reply_to == asked.id).order_by(CrewMessage.created_at)
     ).scalars().all()
-    return crew_chat.out(asked, replies)
+    return crew_chat.out(asked, replies, crew_chat.run_began(db, asked.project_id))

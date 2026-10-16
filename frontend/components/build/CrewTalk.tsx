@@ -29,7 +29,7 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
     label: "Talk to the crew",
     placeholder: "Ask what they're doing, or tell them what you want",
     quick: ["What are you doing?", "Who's next?"],
-    hint: "The crew answers questions straight away. A note waits for the agents that haven't started.",
+    hint: "The crew answers questions straight away. A note goes to every agent still to work, or to the one you name first: \u201cFrontend: use a grid\u201d.",
   },
   stuck: {
     label: "Tell the crew what to try",
@@ -100,8 +100,12 @@ function stateOf(m: CrewMessage): { word: string; tone: "ok" | "run" | "warn" | 
     return { word: "Answered", tone: "ok" };
   }
   switch (m.status) {
-    case "applied":
-      return { word: m.applied_to.length ? `Applied to ${listOf(m.applied_to.map(roleOf))}` : "Applied", tone: "ok" };
+    case "applied": {
+      // Each agent it's for takes it in turn (#102): the first few by name, then a count.
+      const roles = m.applied_to.map(roleOf);
+      const named = roles.length > 3 ? `${roles.slice(0, 2).join(", ")} and ${roles.length - 2} more` : listOf(roles);
+      return { word: roles.length ? `Applied to ${named}` : "Applied", tone: "ok" };
+    }
     case "scheduled":
       return { word: "Change after this step", tone: "warn" };
     case "cancelled":

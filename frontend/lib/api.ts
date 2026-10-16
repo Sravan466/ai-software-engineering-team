@@ -660,6 +660,8 @@ export type CrewMessage = {
   meant_for: string[];
   /** The phases a note was handed to. */
   applied_to: string[];
+  /** A note a phase of this run can still be handed — the server's judgement, for the floor. */
+  standing?: boolean;
   change_request_id: string | null;
   created_at: string | null;
   applied_at: string | null;

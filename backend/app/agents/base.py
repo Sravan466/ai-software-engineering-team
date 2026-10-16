@@ -162,6 +162,12 @@ class AgentContext:
     fix_note: str = ""
     #: What the person told the crew to try on this round (#103), in their words.
     person_note: str = ""
+    #: What the person asked for while the build ran (#102), one note a line: a standing
+    #: instruction for this phase, carried in the feedback slot and its budget.
+    asked: str = ""
+    #: The notes the build held when `asked` was read (`crew_chat.signature_of`): a code
+    #: phase takes them again between files only once that has moved.
+    asked_seen: Optional[tuple] = None
 
     @property
     def editing(self) -> bool:
@@ -1025,11 +1031,8 @@ class BaseAgent:
                 )
             )
             parts.append(_CHANGE_FRAME.format(body=_clip(ctx.change, budget.get("change", 0))))
-        if ctx.feedback:
-            parts.append(
-                "# Reviewer feedback on your previous attempt — address it directly\n"
-                f"{_clip(ctx.feedback, budget['feedback'])}\n"
-            )
+        if ctx.feedback or ctx.asked:
+            parts.append(f"{feedback_frame(ctx)}{_clip(feedback_text(ctx), budget['feedback'])}\n")
 
         parts.append(self._task_for(ctx))
         if keys and not ctx.editing:
@@ -1344,10 +1347,30 @@ def _finished_fields(text: str) -> dict:
 _TRUNCATED = "… [cut here to fit this model's context window]\n"
 
 
+#: The feedback slot's heading: a reviewer's note on an attempt, or — on a phase's first
+#: run — only what the person asked for while the build ran (#102).
+_FEEDBACK_FRAME = "# Reviewer feedback on your previous attempt — address it directly\n"
+_ASKED_FRAME = "# What the person asked for — keep to it\n"
+
+
+def feedback_frame(ctx: AgentContext) -> str:
+    return _FEEDBACK_FRAME if ctx.feedback else _ASKED_FRAME
+
+
+def feedback_text(ctx: AgentContext) -> str:
+    """What the feedback slot carries: the reviewer's note, then what the person asked for
+    during the build (#102). One slot and one budget, never a section of its own; the
+    reason a phase was sent back comes first, so the window never cuts it for a note."""
+    asked = (ctx.asked or "").strip()
+    if asked and ctx.feedback:
+        return f"{ctx.feedback}\n\nThe person also asked for this during the build:\n{asked}"
+    return ctx.feedback or asked
+
+
 def _written(ctx: AgentContext) -> dict[str, str]:
     """The person's own words in a prompt, by section (`_PERSON_SHARE`)."""
     return {
-        "idea": ctx.idea, "feedback": ctx.feedback or "", "extra": ctx.extra_context or "",
+        "idea": ctx.idea, "feedback": feedback_text(ctx), "extra": ctx.extra_context or "",
         "scan": ctx.scan_context or "", "change": ctx.change if ctx.editing else "",
     }
 
