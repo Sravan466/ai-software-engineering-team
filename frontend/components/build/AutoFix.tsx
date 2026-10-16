@@ -6,6 +6,7 @@ import {
   type AutoFixProblem,
   type AutoFixRound,
   type AutoFixTrack,
+  type KeptBest,
   type Project,
   type WaiveKind,
 } from "@/lib/api";
@@ -81,6 +82,114 @@ export function trackEntries(project: Project): [string, AutoFixTrack][] {
 function openRound(t: AutoFixTrack): AutoFixRound | null {
   const last = t.rounds[t.rounds.length - 1];
   return last && last.fixed === null ? last : null;
+}
+
+/**
+ * What a round left, new problems included (#103). Recorded since #103; for a code
+ * round before that, read off the round after it — each was sent every problem the
+ * attempt before it had — or off what the loop stopped on.
+ */
+function afterOf(t: AutoFixTrack, i: number, code: boolean): number | undefined {
+  const r = t.rounds[i];
+  if (r.fixed === null) return undefined;
+  if (r.after !== undefined) return r.after;
+  if (!code) return undefined;
+  const next = sameEpisodeNext(t, i);
+  if (next) return next.problems.length;
+  return t.stopped && i === t.rounds.length - 1 ? t.stopped.left : undefined;
+}
+
+/** The round after round `i`, when it carried on the same problems — not the first
+ * round of a fresh episode after the phase came back clean. */
+function sameEpisodeNext(t: AutoFixTrack, i: number): AutoFixRound | undefined {
+  const r = t.rounds[i];
+  const next = t.rounds[i + 1];
+  if (!next) return undefined;
+  if (r.episode !== undefined && next.episode !== undefined) return r.episode === next.episode ? next : undefined;
+  // Recorded before rounds carried their episode: only the current one is known.
+  return i >= (t.episode_start ?? 0) ? next : undefined;
+}
+
+/**
+ * The problems a code round made that weren't there before it (#103): everything its
+ * re-check found, less what it was sent and didn't fix.
+ */
+function brokeOf(t: AutoFixTrack, i: number, code: boolean): number | undefined {
+  const r = t.rounds[i];
+  if (r.broke !== undefined) return r.broke;
+  const after = afterOf(t, i, code);
+  if (after === undefined || r.fixed === null) return undefined;
+  const left = r.remaining?.length ?? r.problems.length - r.fixed.length;
+  return Math.max(after - left, 0);
+}
+
+/**
+ * The episode's problem counts (#103): what its first round was sent, then what each
+ * round left, new problems included.
+ */
+export function trendOf(name: string, t: AutoFixTrack): number[] {
+  const code = name.startsWith("build:");
+  const start = t.episode_start ?? 0;
+  if (t.rounds.length <= start) return [];
+  const out = [t.rounds[start].problems.length];
+  for (let i = start; i < t.rounds.length; i++) {
+    const after = afterOf(t, i, code);
+    if (after === undefined) break;
+    out.push(after);
+  }
+  return out.length > 1 ? out : [];
+}
+
+/** Which attempt the build was put back on, in words. */
+function keptWhich(kept: KeptBest): string {
+  return kept.round > 0 ? `what round ${kept.round} made` : "the attempt before any round";
+}
+
+/**
+ * The trend as a run of numbers (#103): fewer than the step before reads as better,
+ * more as worse, in words for a screen reader and in colour only as agreement. The
+ * attempt the build was put back on is marked.
+ */
+function Trend({ counts, kept }: { counts: number[]; kept?: KeptBest | null }) {
+  if (counts.length < 2) return null;
+  const keptAt = kept ? kept.round : null;
+  const said =
+    `Problems: ${counts.join(", then ")}.` +
+    (kept ? ` The build is back on ${keptWhich(kept)}, with ${kept.problems}.` : "");
+  return (
+    <p className="fix-trend" aria-label={said}>
+      <span className="fix-trend-label" aria-hidden="true">Problems</span>
+      <span className="fix-trend-steps" aria-hidden="true">
+        {counts.map((n, i) => {
+          const dir = i === 0 ? undefined : n < counts[i - 1] ? "down" : n > counts[i - 1] ? "up" : "same";
+          return (
+            <span key={i} className="fix-trend-step" style={{ ["--i" as string]: i }}>
+              {i > 0 && <span className="fix-trend-arrow">{Icon.arrowRight}</span>}
+              <span className="fix-trend-n" data-dir={dir} data-kept={keptAt === i || undefined}>
+                {n}
+              </span>
+            </span>
+          );
+        })}
+      </span>
+    </p>
+  );
+}
+
+/** A round's result, net (#103): what it fixed and what it broke, not "fixed 3 of 3". */
+function roundResult(name: string, t: AutoFixTrack, i: number): { text: string; tone: "ok" | "bad" | "warn" | "plain" } {
+  const r = t.rounds[i];
+  const code = name.startsWith("build:");
+  const sent = r.problems.length;
+  const fixed = r.fixed?.length ?? 0;
+  if (r.fixed === null) return { text: "Not re-checked", tone: "plain" };
+  if (r.unjudged && fixed === 0) return { text: "Couldn't re-check", tone: "warn" };
+  if (r.nothing_sent) return { text: "Too long to show", tone: "warn" };
+  const after = afterOf(t, i, code);
+  if (after === undefined) return { text: `Fixed ${fixed} of ${sent}`, tone: fixed > 0 ? "ok" : "plain" };
+  const broke = brokeOf(t, i, code) ?? 0;
+  const text = broke > 0 ? `Fixed ${fixed}, broke ${broke}` : `Fixed ${fixed} of ${sent}`;
+  return { text, tone: after < sent ? "ok" : after > sent ? "bad" : "plain" };
 }
 
 /** What a build problem broke, by the step that found it (#75). */
@@ -224,6 +333,11 @@ export function FixingPanel({ project }: { project: Project }) {
               <span className="fixing-approach-label">This round</span>
               {approach(name, round.strategy, round)}
             </p>
+            {trendOf(name, t).length > 1 && (
+              <div className="fixing-trend">
+                <Trend counts={trendOf(name, t)} />
+              </div>
+            )}
             <ul className="fix-list">
               {round.problems.map((p) => (
                 <li key={p.key} className="fix-item">
@@ -266,12 +380,12 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
   }
   return (
     <ol className="ledger">
-      {track.rounds.map((r) => {
+      {track.rounds.map((r, i) => {
         const sent = r.problems.length;
-        const fixed = r.fixed?.length ?? 0;
         const who = r.phases.map((p) => AGENT_BY_KEY[p]?.codename ?? p).join(", ");
+        const result = roundResult(name, track, i);
         return (
-          <li key={r.n} className="ledger-row" data-progress={fixed > 0 || undefined}>
+          <li key={r.n} className="ledger-row" data-progress={result.tone === "ok" || undefined} data-worse={result.tone === "bad" || undefined}>
             <span className="ledger-n mono">R{r.n}</span>
             <div className="ledger-body">
               <span className="ledger-what">
@@ -280,14 +394,10 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               <span className="ledger-how">{approach(name, r.strategy, r)}</span>
             </div>
             <span
-              className={`badge ${r.unjudged && fixed === 0 ? "badge-warn" : fixed > 0 ? "badge-ok" : "badge"}`}
+              className={`badge${result.tone === "plain" ? "" : ` badge-${result.tone}`}`}
               title={r.unjudged}
             >
-              {r.fixed === null
-                ? "Not re-checked"
-                : r.unjudged && fixed === 0
-                  ? "Couldn't re-check"
-                  : `Fixed ${fixed} of ${sent}`}
+              {result.text}
             </span>
           </li>
         );
@@ -327,14 +437,19 @@ export function NeedsHelp({
         <div key={name} className="help-track">
           <h3 className="help-title">
             What the crew tried on {trackLabel(name)}
-            <span className="field-hint">
-              {t.stopped?.reason === "no_progress"
-                ? "Stopped early. The last round fixed nothing."
-                : t.stopped?.reason === "unchecked"
-                  ? "Stopped. The scanners couldn't run again to check the fix."
-                  : `Stopped after ${t.rounds.length - (t.episode_start ?? 0)} round${t.rounds.length - (t.episode_start ?? 0) === 1 ? "" : "s"}.`}
-            </span>
+            <span className="field-hint">{stoppedHint(t)}</span>
           </h3>
+          <Trend counts={trendOf(name, t)} kept={t.stopped?.kept_best} />
+          {t.stopped?.kept_best && (
+            <p className="fix-kept">
+              {Icon.undo}
+              <span>
+                Back on {keptWhich(t.stopped.kept_best)}: {t.stopped.kept_best.problems} problem
+                {t.stopped.kept_best.problems === 1 ? "" : "s"}, not {t.stopped.kept_best.instead_of}. The rounds after
+                it made things worse.
+              </span>
+            </p>
+          )}
           <RoundLedger name={name} track={t} />
           {name !== "security" && <CodeLeft track={t} />}
         </div>
@@ -424,11 +539,26 @@ export function NeedsHelp({
   );
 }
 
+/** Why the loop stopped, in a line. */
+function stoppedHint(t: AutoFixTrack): string {
+  const last = t.rounds[t.rounds.length - 1];
+  if (t.stopped?.reason === "unchecked") return "Stopped. The scanners couldn't run again to check the fix.";
+  if (t.stopped?.reason === "no_progress") {
+    // Net (#103): it fixed some, and left as many or more.
+    if (last?.after !== undefined && (last.fixed?.length ?? 0) > 0) {
+      return `Stopped early. The last round left ${last.after} where it started with ${last.problems.length}.`;
+    }
+    return "Stopped early. The last round fixed nothing.";
+  }
+  const n = t.rounds.length - (t.episode_start ?? 0);
+  return `Stopped after ${n} round${n === 1 ? "" : "s"}.`;
+}
+
 function CodeLeft({ track }: { track: AutoFixTrack }) {
   const last = track.rounds[track.rounds.length - 1];
-  const left = last
-    ? last.problems.filter((p) => (last.remaining ?? []).includes(p.key))
-    : [];
+  // What is left, new problems included (#103); older records only kept what was sent.
+  const left = track.stopped?.problems
+    ?? (last ? last.problems.filter((p) => (last.remaining ?? []).includes(p.key)) : []);
   if (left.length === 0) return null;
   return (
     <ul className="fix-list">

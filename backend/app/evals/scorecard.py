@@ -225,7 +225,10 @@ def fix_rounds(project: Project) -> dict:
         episode = [r for r in rounds if r.get("episode") == latest] if latest is not None else rounds
         counts: list = [len(r.get("problems") or []) for r in episode]
         last = episode[-1]
-        if t.get("stopped"):
+        if last.get("after") is not None:
+            # What its re-check found, new problems included (#103).
+            counts.append(int(last["after"]))
+        elif t.get("stopped"):
             counts.append(int(t["stopped"].get("left") or 0))
         elif t.get("accepted"):
             counts.append(len(t["accepted"].get("keys") or []))

@@ -8,7 +8,9 @@ crew fixes it, re-checks, and goes again. That loop needs two things to be safe:
   **A stopping rule based on progress.** Self-repair gains most in its first two or
   three attempts, and a round that fixed nothing will not be rescued by an identical
   one. The loop stops at `auto_fix_max_rounds`, or earlier when a round's re-check
-  finds that nothing it was sent to fix went away.
+  finds that nothing it was sent to fix went away. On code (#103) progress is counted
+  net: a round that fixed 3 problems and made 6 new ones went backwards, and the loop
+  stops there and puts back the attempt with the fewest problems.
 
   **No silent shipping.** When the loop stops with something still wrong, the build
   parks as "needs help" — never "complete" — and says what was tried in each round.
@@ -102,23 +104,33 @@ def open_round(t: dict) -> Optional[dict]:
     return last if last is not None and last.get("fixed") is None else None
 
 
-def close_round(t: dict, remaining: Iterable[str]) -> Optional[list[str]]:
-    """Record what the re-check found fixed. Returns those keys, or None if no round
-    was waiting on a re-check."""
+def close_round(t: dict, remaining: Iterable[str], attempt: Optional[str] = None) -> Optional[list[str]]:
+    """Record what the re-check found: which problems the round was sent are gone, and
+    every problem it found now, new ones included (#103). `attempt` is the attempt the
+    re-check read, so the best one can be put back. Returns the keys fixed, or None if
+    no round was waiting on a re-check."""
     last = open_round(t)
     if last is None:
         return None
-    left = set(remaining)
+    left = list(dict.fromkeys(remaining))
     sent = [p["key"] for p in last.get("problems", [])]
-    fixed = [k for k in sent if k not in left]
+    fixed = [k for k in sent if k not in set(left)]
     last["fixed"] = fixed
-    last["remaining"] = [k for k in sent if k in left]
+    last["remaining"] = [k for k in sent if k in set(left)]
+    # Net, not just what went away: "fixed 3, broke 6" is a round that made it worse.
+    last["after"] = len(left)
+    last["broke"] = len([k for k in left if k not in set(sent)])
+    if attempt:
+        last["result"] = attempt
     last["checked_at"] = _now()
     return fixed
 
 
-def next_step(t: dict) -> str:
-    """"fix" to run another round, or the reason to stop and ask for help."""
+def next_step(t: dict, net: bool = False) -> str:
+    """"fix" to run another round, or the reason to stop and ask for help.
+
+    `net` (#103, code): a round that didn't leave fewer problems than it was sent made
+    no progress, whatever it fixed on the way."""
     rounds = t.get("rounds") or []
     judged = rounds[int(t.get("resumed_after") or 0) :]
     # A round that only asked the code's owners to fix failing tests hands what it
@@ -135,13 +147,18 @@ def next_step(t: dict) -> str:
         and not last.get("nothing_sent")
     ):
         return STOP_NO_PROGRESS
+    if (
+        net and last and last.get("after") is not None and not last.get("nothing_sent")
+        and int(last["after"]) >= len(last.get("problems") or [])
+    ):
+        return STOP_NO_PROGRESS
     if len(rounds) >= int(t.get("allowed") or 0):
         return STOP_LIMIT
     return "fix"
 
 
 def start_round(
-    t: dict, strategy: str, phases: list[str], problems: list[dict]
+    t: dict, strategy: str, phases: list[str], problems: list[dict], attempt: Optional[str] = None
 ) -> dict:
     record = {
         "n": len(t["rounds"]) + 1,
@@ -154,13 +171,56 @@ def start_round(
         # problems are gone, and the record still says which rounds went together.
         "episode": int(t.get("episode_start") or 0),
     }
+    if attempt:
+        # The attempt the round was sent, with every one of `problems` (#103).
+        record["attempt"] = attempt
     t["rounds"].append(record)
     t["stopped"] = None
     return record
 
 
-def stop(t: dict, reason: str, keys: list[str]) -> None:
+def stop(t: dict, reason: str, keys: list[str], problems: Optional[list[dict]] = None) -> None:
     t["stopped"] = {"reason": reason, "left": len(keys), "keys": list(keys), "at": _now()}
+    if problems is not None:
+        # What is left, new problems included (#103): the last round's own list only
+        # holds the ones it was sent.
+        t["stopped"]["problems"] = problems
+
+
+def trend(t: dict) -> list[int]:
+    """The episode's problem counts: what its first round was sent, then what each
+    round left — 3 → 6 → 4 is a loop going nowhere (#103)."""
+    rounds = (t.get("rounds") or [])[int(t.get("episode_start") or 0):]
+    if not rounds:
+        return []
+    out = [len(rounds[0].get("problems") or [])]
+    for r in rounds:
+        if r.get("after") is None:
+            break
+        out.append(int(r["after"]))
+    return out
+
+
+def best_attempt(t: dict) -> Optional[dict]:
+    """The episode's attempt with the fewest problems, when it isn't the latest (#103):
+    `{"attempt", "problems", "round"}` — `round` 0 is the attempt the first round was
+    sent. A tie keeps the latest."""
+    rounds = (t.get("rounds") or [])[int(t.get("episode_start") or 0):]
+    seen: list[tuple[int, int, str]] = []
+    for r in rounds:
+        if r.get("attempt"):
+            seen.append((len(r.get("problems") or []), int(r.get("n") or 0) - 1, r["attempt"]))
+        if r.get("result") and r.get("after") is not None:
+            seen.append((int(r["after"]), int(r.get("n") or 0), r["result"]))
+    if not seen:
+        return None
+    latest = seen[-1]
+    best = min(seen, key=lambda s: (s[0], -s[1]))
+    if best[0] >= latest[0] or best[2] == latest[2]:
+        return None
+    # Counted within the episode, as the card counts rounds: 0 is the attempt before any.
+    return {"attempt": best[2], "problems": best[0], "round": max(best[1] - int(t.get("episode_start") or 0), 0),
+            "instead_of": latest[0]}
 
 
 def abandon_open_round(t: dict) -> bool:
@@ -644,6 +704,7 @@ __all__ = [
     "WAIVE_KINDS",
     "accept",
     "accepted",
+    "best_attempt",
     "build_track",
     "close_round",
     "code_note",
@@ -659,4 +720,5 @@ __all__ = [
     "stop",
     "stuck",
     "track",
+    "trend",
 ]

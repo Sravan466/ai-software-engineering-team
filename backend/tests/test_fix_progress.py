@@ -1,0 +1,113 @@
+"""Fix rounds count real progress, and the build keeps its best attempt (#103).
+
+A round used to be judged by which of the problems it was sent went away, so a round
+that fixed 3 and broke 6 read "Fixed 3 of 3" and the loop went on. Now each round
+records every problem its re-check found, the loop stops on the first round that
+doesn't leave fewer than it started with, and the attempt with the fewest problems is
+the one the build is parked on.
+"""
+from __future__ import annotations
+
+import json
+
+from app.orchestration import autofix
+from tests.conftest import _fake_complete, asked_files, fenced, stub, through_question_gates
+
+MAIN = "from app.services import total\n\n\ndef main():\n    return total([1, 2])\n"
+REAL = "def total(items):\n    return sum(items)\n"
+WEAK = "from app.services import total\n\n\ndef test_total{n}():\n    total([1, 2])\n"
+
+
+def _round(t: dict, sent: list[str], left: list[str], attempt: str, result: str) -> None:
+    autofix.start_round(t, "guided", ["backend_engineer"], [{"key": k} for k in sent], attempt=attempt)
+    autofix.close_round(t, left, attempt=result)
+
+
+# ── the record ───────────────────────────────────────────────────────────────
+def test_a_round_that_fixed_some_and_broke_more_is_worse_and_stops_the_loop():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    _round(t, ["a", "b", "c"], ["d", "e", "f", "g", "h", "i"], "r0", "r1")
+    last = t["rounds"][-1]
+    assert (last["fixed"], last["after"], last["broke"]) == (["a", "b", "c"], 6, 6)
+    # Judged by what went away, it fixed all three; judged net, it went backwards.
+    assert autofix.next_step(t) == "fix"
+    assert autofix.next_step(t, net=True) == autofix.STOP_NO_PROGRESS
+    assert autofix.trend(t) == [3, 6]
+
+
+def test_a_round_that_leaves_fewer_is_progress():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    _round(t, ["a", "b", "c"], ["b", "x"], "r0", "r1")
+    assert autofix.next_step(t, net=True) == "fix"
+    assert autofix.best_attempt(t) is None  # the latest is the best
+
+
+def test_the_best_attempt_is_the_one_with_the_fewest_problems_and_a_tie_keeps_the_latest():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    # The issue's build: 3 → 6 → 4 → 4 → 3 → 8.
+    counts = [3, 6, 4, 4, 3, 8]
+    t["allowed"] = 10
+    for n in range(5):
+        _round(t, [f"k{n}-{i}" for i in range(counts[n])], [f"k{n + 1}-{i}" for i in range(counts[n + 1])],
+               f"r{n}", f"r{n + 1}")
+    assert autofix.trend(t) == counts
+    best = autofix.best_attempt(t)
+    # Attempt 5 (3 problems) beats the first (also 3): a tie keeps the later one.
+    assert best == {"attempt": "r4", "problems": 3, "round": 4, "instead_of": 8}
+
+
+# ── through the loop ─────────────────────────────────────────────────────────
+class Suite:
+    """QA writes one test that asserts nothing, then — on its fix round — two."""
+
+    def __init__(self) -> None:
+        self.qa = 0
+
+    def __call__(self, messages, **kwargs):
+        resp = _fake_complete(messages, **kwargs)
+        system = messages[0].content
+        schema = getattr(kwargs.get("options"), "json_schema", None)
+        if system.startswith("You are the QA Engineer"):
+            self.qa += 1
+            files = [{"path": "backend/tests/test_one.py", "framework": "pytest", "targets": "backend/app/services.py",
+                      "code": WEAK.format(n=1)}]
+            if self.qa > 1:
+                files.append({"path": "backend/tests/test_two.py", "framework": "pytest",
+                              "targets": "backend/app/services.py", "code": WEAK.format(n=2)})
+            payload = json.loads(resp.text)
+            payload["test_files"] = files
+            return resp.model_copy(update={"text": json.dumps(payload)})
+        if system.startswith("You are the Backend Engineer"):
+            if schema:
+                payload = json.loads(resp.text)
+                if "files" in payload:
+                    payload["files"] = [{"path": "main.py", "purpose": "entry"}, {"path": "app/services.py", "purpose": "totals"}]
+                return resp.model_copy(update={"text": json.dumps(payload)})
+            code = {"backend/main.py": MAIN, "backend/app/services.py": REAL}
+            return resp.model_copy(update={"text": fenced({p: code[p] for p in asked_files(messages)})})
+        return resp
+
+
+def test_a_round_that_made_it_worse_parks_the_build_on_the_attempt_before_it(client, monkeypatch):
+    suite = Suite()
+    stub(monkeypatch, "complete", suite)
+    pid = client.post("/api/projects", json={"idea": "A totals service", "routing_mode": "local_only",
+                                             "approval_mode": "unattended"}).json()["id"]
+    client.post(f"/api/projects/{pid}/run")
+    through_question_gates(client, pid)
+    project = client.get(f"/api/projects/{pid}").json()
+
+    assert project["status"] == "awaiting_approval" and project["gate_kind"] == "needs_help"
+    t = project["auto_fix"]["tracks"]["build:qa_engineer"]
+    # One round: it was sent 1 and left 2, so the loop stopped there — no second round.
+    assert [(len(r["problems"]), r["after"], r["broke"]) for r in t["rounds"]] == [(1, 2, 1)]
+    assert t["stopped"]["reason"] == "no_progress" and t["stopped"]["left"] == 1
+    assert t["stopped"]["kept_best"]["round"] == 0
+    # The build is on QA's first suite again: one weak test, not two.
+    qa = [p for p in project["phases"] if p["phase"] == "qa_engineer" and p["status"] != "rejected"]
+    assert len(qa) == 1 and [f["path"] for f in qa[0]["output"]["test_files"]] == ["backend/tests/test_one.py"]
+    assert qa[0]["handoff"]["kept_best"]["instead_of"] == 2
+    assert "back on the attempt before any round" in project["gate_note"]
