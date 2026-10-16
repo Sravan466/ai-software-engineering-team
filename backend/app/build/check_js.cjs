@@ -5,6 +5,12 @@
 // exports: [{group, path, default, named, types}]} — the second is what each reported
 // module really exports (#101), from the same program, re-exports followed.
 //
+// With `codefixes: true` it also writes `fixes` (#103): TypeScript's own code fixes for
+// the diagnostics it has one for, from an allow-list — a name declared but not exported
+// (2459) — each as the text edits it makes. Nothing that writes new logic is ever on
+// the list. (A misspelt import, 2724, is mended in Python instead: TypeScript's
+// `fixSpelling` renames the import and leaves every use of the old name broken.)
+//
 // Nothing is written to disk and nothing is installed: the files live in memory under
 // a virtual root, and only TypeScript's own lib files are read from disk. Packages are
 // therefore unresolved — which is the point. The platform checks bare imports against
@@ -22,6 +28,7 @@ const ts = require(input.typescript);
 // build that cannot run: the scaffold's next.config tells Next not to fail on them.
 const KEEP = new Set([
   2304, // Cannot find name 'X'.
+  2459, // Module '"./x"' declares 'Y' locally, but it is not exported.
   2552, // Cannot find name 'X'. Did you mean 'Y'?
   2305, // Module '"./x"' has no exported member 'Y'.
   2724, // '"./x"' has no exported member named 'Y'. Did you mean 'Z'?
@@ -39,6 +46,13 @@ const AMBIENT = new Set([
 
 const VIRTUAL = '/__build__';
 
+// The only code fixes the platform applies without a model (#103), by the diagnostic
+// each answers and the fix TypeScript names it: an `export` keyword, nothing that
+// writes code that wasn't there.
+const CODEFIXES = new Map([
+  [2459, new Set(['fixImportNonExportedMember'])],
+]);
+
 function scriptKind(file) {
   if (file.endsWith('.tsx')) return ts.ScriptKind.TSX;
   if (file.endsWith('.ts') || file.endsWith('.mts') || file.endsWith('.cts')) return ts.ScriptKind.TS;
@@ -52,6 +66,7 @@ function text(message) {
 
 const out = [];
 const exported = [];
+const fixes = [];
 
 // A module's exports, as the next file's write call is told them: the default's local
 // name ("" when it has none), named values, and types apart from values.
@@ -148,6 +163,44 @@ for (const group of input.groups) {
     out.push({ group: group.name, path: null, line: null, code: 0, message: String(err), syntactic: false, crashed: true });
     continue;
   }
+  if (input.codefixes) {
+    try {
+      const service = ts.createLanguageService({
+        getScriptFileNames: () => rootNames,
+        getScriptVersion: () => '1',
+        getScriptSnapshot: (f) => {
+          const text = host.readFile(f);
+          return text === undefined ? undefined : ts.ScriptSnapshot.fromString(text);
+        },
+        getCurrentDirectory: () => root,
+        getCompilationSettings: () => options,
+        getDefaultLibFileName: (o) => ts.getDefaultLibFilePath(o),
+        fileExists: host.fileExists,
+        readFile: host.readFile,
+        directoryExists: host.directoryExists,
+        getDirectories: host.getDirectories,
+      }, ts.createDocumentRegistry());
+      const relOf = (f) => (f.startsWith(`${root}/`) ? f.slice(root.length + 1) : null);
+      for (const rel of group.report) {
+        const file = `${root}/${rel}`;
+        if (!files.has(file)) continue;
+        for (const d of service.getSemanticDiagnostics(file)) {
+          const allowed = CODEFIXES.get(d.code);
+          if (!allowed || d.start === undefined) continue;
+          const actions = service.getCodeFixesAtPosition(file, d.start, d.start + (d.length || 0), [d.code], {}, {});
+          const action = actions.find((a) => allowed.has(a.fixName) || allowed.has(a.fixId));
+          if (!action) continue;
+          const changes = action.changes
+            .map((c) => ({ path: relOf(c.fileName), edits: c.textChanges.map((t) => ({ start: t.span.start, length: t.span.length, text: t.newText })) }))
+            .filter((c) => c.path !== null);
+          if (changes.length) fixes.push({ group: group.name, path: rel, code: d.code, fix: action.fixName, description: action.description, changes });
+        }
+      }
+    } catch (err) {
+      // A fix the service can't offer is a problem left for the model, never a crash.
+    }
+  }
+  if (input.fixesOnly) continue;
   let checker = null;
   for (const rel of group.report) {
     const sf = program.getSourceFile(`${root}/${rel}`);
@@ -184,4 +237,4 @@ for (const group of input.groups) {
   }
 }
 
-process.stdout.write(JSON.stringify({ diagnostics: out, exports: exported }));
+process.stdout.write(JSON.stringify({ diagnostics: out, exports: exported, fixes }));

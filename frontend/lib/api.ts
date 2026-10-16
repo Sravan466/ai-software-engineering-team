@@ -446,9 +446,16 @@ export type AutoFixRound = {
   nothing_sent?: boolean;
   /** Which episode of the track it belongs to (#103). */
   episode?: number;
+  /** What the platform mended itself, without a model (#103): on the attempt this round
+   * made, and — on an episode's first round — on the attempt before it. */
+  platform?: PlatformFixed;
+  platform_before?: PlatformFixed;
   at: string;
   checked_at?: string;
 };
+
+/** Import paths and imports the platform corrected itself (#103). */
+export type PlatformFixed = { paths?: number; imports?: number };
 
 /** The attempt the loop put the build back on when it stopped (#103). */
 export type KeptBest = {

@@ -789,6 +789,9 @@ class PipelineRunner:
             t["accepted"] = None
             autofix.settle(t)
         closed = autofix.close_round(t, keys, attempt=row.id, net=True)
+        if closed is not None and autofix.platform_fixed(row):
+            # What the platform mended itself on the attempt this round made (#103).
+            t["rounds"][-1]["platform"] = autofix.platform_fixed(row)
         sent = (row.handoff or {}).get("fix") or {}
         if closed is not None and sent.get("calls") == 0 and sent.get("too_long"):
             # Every file the round had to fix was too long to show whole (#103): it
@@ -825,11 +828,14 @@ class PipelineRunner:
         k = n - int(t.get("episode_start") or 0)
         strategy = remediation.strategy_for(k)
         kept_now = t.get("kept") or {}
-        autofix.start_round(
+        record = autofix.start_round(
             t, strategy, [row.phase], problems, attempt=row.id,
             # An attempt the loop put back says which round made it (#103).
             from_round=kept_now.get("round") if kept_now.get("attempt") == row.id else None,
         )
+        if k == 1 and autofix.platform_fixed(row):
+            # What the platform mended on the attempt before any round (#103).
+            record["platform_before"] = autofix.platform_fixed(row)
         autofix.save(project, data)
         db.commit()
         log.info(

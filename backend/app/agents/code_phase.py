@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 from pydantic import BaseModel
@@ -348,6 +348,10 @@ class _Run:
         self.unparsed: set[str] = set()
         #: Whether the attempt before could be checked: without that, nothing is "worse".
         self.compared = False
+        #: What the platform mended itself, without a model (#103): `wiring.Fix.as_dict()`.
+        self.mended: list[dict] = []
+        #: Every file as the round's own calls left it, before the platform's mends.
+        self.edited: dict[str, str] = {}
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -784,7 +788,7 @@ class _Run:
             self._fix_group(group)
 
         result = self._finish()
-        changed = sorted(p for p in self.existing if p in self.written and self.written[p].code != self.existing[p])
+        changed = sorted(p for p in self.existing if p in self.edited and self.edited[p] != self.existing[p])
         added = sorted(p.path for p in self.planned if p.path not in self.existing and p.path in self.written)
         generation = dict((result.handoff or {}).get("generation") or {})
         generation.update(
@@ -996,6 +1000,88 @@ class _Run:
         stack = charter_violations(self.ctx.charter, self.agent.key, output) if settings.enforce_stack_charter else []
         build = self.agent._build_check(self.ctx, output)
         self._take_exports(build)
+        return build, output, errors, stack
+
+    def _tally(self, output: dict) -> tuple[Optional[int], set[str]]:
+        """(problems in the tree, counted uncapped; the files that don't parse) — or None
+        when the check couldn't run, which says nothing either way."""
+        check = self.agent._build_check(self.ctx, output, cap=False)
+        if check is None or check.status == BuildStatus.UNCHECKED.value:
+            return None, set()
+        counts, unparsed = _counts(check)
+        return sum(counts.values()), unparsed
+
+    def _mend(
+        self, build: Optional[BuildCheck], output: dict, errors: list[str], stack: list[str]
+    ) -> tuple[Optional[BuildCheck], dict, list[str], list[str]]:
+        """The platform's own wiring fixes (#103), before any model round: an import path
+        one folder off, a default import of a named export or the other way round, a
+        misspelt import kept under its old name, and TypeScript's own not-exported fix
+        (`app.build.wiring`). Up to two passes, since a corrected path can show a name the
+        module doesn't export. A fix is kept only when the tree then has fewer problems —
+        counted uncapped — and every file that parsed still parses; the record says what
+        was changed."""
+        from app.build import wiring
+        from app.build.check import CODEFIX_CODES, code_fixes, phase_tree
+
+        agent, ctx = self.agent, self.ctx
+        if not settings.platform_wiring_fixes or build is None or build.status != BuildStatus.FAILED.value:
+            return build, output, errors, stack
+        current: Optional[int] = None
+        broken: set[str] = set()
+        for _ in range(2):
+            stored_at = {self.place_of.get(p, p): p for p in self.written}
+            tree, mine = phase_tree(ctx.prior_outputs, agent.key, output, ctx.charter)
+            own = {p: tree[p] for p in mine if p in stored_at}
+            mended, made = wiring.mend(build.problems, own, tree.keys(), build.exports or {})
+            if any(p.code in CODEFIX_CODES for p in build.problems):
+                fixes = code_fixes({**tree, **mended}, [p.path for p in build.problems if p.code in CODEFIX_CODES])
+                mended, more = wiring.apply_code_fixes(mended, fixes)
+                made += more
+            if not made:
+                break
+            if current is None:
+                current, broken = self._tally(output)
+            if current is None:
+                break  # nothing to compare against: nothing is kept
+            changed = [p for p, code in mended.items() if code != own.get(p)]
+            # Everything at once first; file by file only when that didn't leave fewer
+            # problems — so one wrong answer can't sink the right ones, and the usual
+            # case costs one check.
+            kept: set[str] = set()
+            for trial in [changed] + ([[p] for p in changed] if len(changed) > 1 else []):
+                was = {stored_at[p]: self.written[stored_at[p]] for p in trial}
+                for place in trial:
+                    w = self.written[stored_at[place]]
+                    self.written[stored_at[place]] = replace(w, code=mended[place], exports=None, read=False)
+                trial_output, trial_errors = self._assemble()
+                total, now_broken = self._tally(trial_output)
+                if total is not None and total < current and not (now_broken - broken):
+                    current, output, errors, broken = total, trial_output, trial_errors, now_broken
+                    kept.update(trial)
+                    if trial is changed:
+                        break
+                else:
+                    self.written.update(was)
+            for place in kept:
+                self._judge(self.written[stored_at[place]])  # its own record, on its new code
+            mine_made = [f for f in made if f.path in kept]
+            if len(mine_made) < len(made):
+                log.info("%s: %d of the platform's wiring fixes didn't leave fewer problems; not kept.",
+                         agent.title, len(made) - len(mine_made))
+            if not kept:
+                break
+            stack = charter_violations(ctx.charter, agent.key, output) if settings.enforce_stack_charter else []
+            build = agent._build_check(ctx, output)
+            self._take_exports(build)
+            self.mended += [f.as_dict() for f in mine_made]
+            still = {p.path for p in (build.problems if build is not None else [])}
+            for f in mine_made:
+                activity.file(stored_at.get(f.path, f.path), "failed" if f.path in still else "ok")
+            log.info("%s: the platform mended %d import(s) itself, without a model: %s", agent.title, len(mine_made),
+                     "; ".join(f"{f.path}: {f.note}" for f in mine_made))
+            if build is None or build.status != BuildStatus.FAILED.value:
+                break
         return build, output, errors, stack
 
     def _existing(self, path: str, known: dict[str, str]) -> Optional[str]:
@@ -1747,7 +1833,17 @@ class _Run:
             # A fix round is one pass (#103): what its edits left is the next round's,
             # with the problems found afresh — not the same files sent straight back.
             build, output, errors, stack = self._keep_no_worse(build, output, errors, stack)
-        elif build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
+        # What the round's own edits did, before the platform mends anything (#103): its
+        # record credits the model with its own changes, not the platform's.
+        self.edited = {p: w.code for p, w in self.written.items()}
+        # What the platform can mend without a model, before any model round (#103).
+        build, output, errors, stack = self._mend(build, output, errors, stack)
+        if (
+            not self.fix_mode
+            and build is not None
+            and build.status == BuildStatus.FAILED.value
+            and settings.schema_repair_rounds > 0
+        ):
             build, output, errors, stack, _ = self._fix_build(build, output, errors, stack)
         # Once it parses, for real (#75): installed, built and started in a sandbox —
         # and one round on the files that build names, before the fix loop sees it.
@@ -1798,6 +1894,8 @@ class _Run:
         mode = "batch" if self.largest > 1 else "one"
         record = {
             **(plan.handoff or {}),
+            # What the platform mended itself before any model round (#103).
+            **({"wiring": list(self.mended)} if self.mended else {}),
             "truncated_replies": self.truncated,
             "generation": {
                 "mode": mode,

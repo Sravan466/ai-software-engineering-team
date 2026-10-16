@@ -225,13 +225,48 @@ function Owner({ phase }: { phase: string }) {
   );
 }
 
+/** What the platform fixed itself across the episode, without a model (#103). */
+function platformFixed(t: AutoFixTrack): { paths: number; imports: number } {
+  const out = { paths: 0, imports: 0 };
+  // Only what the build is on now: after a put-back, the rounds after the kept attempt
+  // were set aside, their mends with them.
+  const kept = t.stopped?.kept_best?.round;
+  t.rounds.slice(t.episode_start ?? 0).forEach((r, i) => {
+    const counted = i === 0 ? [r.platform_before] : [];
+    if (kept === undefined || kept === null || i + 1 <= kept) counted.push(r.platform);
+    for (const p of counted) {
+      out.paths += p?.paths ?? 0;
+      out.imports += p?.imports ?? 0;
+    }
+  });
+  return out;
+}
+
+/** "The platform fixed 3 import paths and 1 import itself, without a model." */
+function PlatformLine({ track }: { track: AutoFixTrack }) {
+  const { paths, imports } = platformFixed(track);
+  if (paths + imports === 0) return null;
+  const parts = [
+    paths ? `${paths} import path${paths === 1 ? "" : "s"}` : "",
+    imports ? `${imports} import${imports === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return (
+    <p className="fix-kept fix-platform">
+      {Icon.check}
+      <span>The platform fixed {parts.join(" and ")} itself, without a model.</span>
+    </p>
+  );
+}
+
 /** The trend so far, under "This round" while a fix runs (#103). */
 function FixingTrend({ name, track }: { name: string; track: AutoFixTrack }) {
   const points = trendOf(name, track);
-  if (points.length < 2) return null;
+  const { paths, imports } = platformFixed(track);
+  if (points.length < 2 && paths + imports === 0) return null;
   return (
     <div className="fixing-trend">
       <Trend points={points} />
+      <PlatformLine track={track} />
     </div>
   );
 }
@@ -400,6 +435,7 @@ export function NeedsHelp({
             <span className="field-hint">{stoppedHint(t)}</span>
           </h3>
           <Trend points={trendOf(name, t)} kept={t.stopped?.kept_best} />
+          <PlatformLine track={t} />
           {t.stopped?.kept_best && (
             <p className="fix-kept">
               {Icon.undo}

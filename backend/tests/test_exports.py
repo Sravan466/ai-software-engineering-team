@@ -124,6 +124,11 @@ def test_a_python_module_is_shown_with_its_real_names(monkeypatch):
 def test_a_repair_after_the_tree_check_sees_the_checkers_exports(monkeypatch):
     """`export *` the light reader can't follow, the checker can: the repair of a page
     importing a name the index doesn't have is told what the index really has."""
+    from app.core.config import settings
+
+    # The platform would mend this one itself since #103 (`TodoListView` is a near miss
+    # of `TodoList`): this is about what a repair is shown when one runs.
+    monkeypatch.setattr(settings, "platform_wiring_fixes", False)
     plan = [
         {"path": "components/TodoList.tsx", "purpose": "the list"},
         {"path": "components/index.ts", "purpose": "barrel", "imports": ["components/TodoList.tsx"]},
