@@ -93,7 +93,11 @@ class Scripted:
 
 
 def _files(n: int, ext: str = "py") -> list[dict]:
-    return [{"path": f"app/mod{i}.{ext}", "purpose": f"module {i}"} for i in range(1, n + 1)]
+    """A plan of n modules, each using the one before it — as a plan must say (#103)."""
+    return [
+        {"path": f"app/mod{i}.{ext}", "purpose": f"module {i}", **({"imports": [f"app/mod{i - 1}.{ext}"]} if i > 1 else {})}
+        for i in range(1, n + 1)
+    ]
 
 
 def _run(monkeypatch, phase: str, model: Scripted, profile: ModelProfile, ctx: Optional[AgentContext] = None):
@@ -293,9 +297,11 @@ def test_a_planned_file_imported_before_it_is_written_is_not_a_problem(stub_rout
         "backend/main.py": "from models import Item\n\nITEMS = [Item('a')]\n",
         "backend/models.py": "class Item:\n    def __init__(self, name):\n        self.name = name\n",
     }
+    # The plan has main.py first and says nothing about what it uses — only that
+    # models.py follows it — so main.py is written before the file it imports.
     model = Scripted(
         "Backend Engineer",
-        [{"path": "main.py", "purpose": "entry"}, {"path": "models.py", "purpose": "models"}],
+        [{"path": "main.py", "purpose": "entry"}, {"path": "models.py", "purpose": "models", "imports": ["main.py"]}],
         code=code,
     )
     result = _run(monkeypatch, "backend_engineer", model, SMALL)

@@ -246,6 +246,15 @@ class CodePhaseAgent(BaseAgent):
                 f"`files` — {len(files)} files is more than this build may plan "
                 f"({settings.code_max_files}); merge the small ones"
             ]
+        listed = [f for f in files if isinstance(f, dict)]
+        if len(listed) >= 3 and not any(_strings(f.get("imports")) for f in listed):
+            # The plan never says which file uses which (#103): the entry file is then
+            # written first and blind, guessing names the files after it never export.
+            entry = next((str(f.get("path")) for f in listed if _layer(str(f.get("path") or "")) == _ENTRY), None)
+            return [
+                "`files` — no file lists its `imports`. Give each file the plan paths it imports"
+                + (f", `{entry}` most of all: it uses the others" if entry else "")
+            ]
         return []
 
     # ── the run ──────────────────────────────────────────────────────────────
@@ -1646,9 +1655,7 @@ class _Run:
                     "Change only what the problems need. Keep everything else in each file exactly as "
                     "it is: the other files import from it."
                 )
-        instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
-        if instruction:
-            lines.append(instruction)
+        lines += self._instructions()
         lines.append("Answer with `### path` and one fenced block per file — nothing else.")
         return "\n".join(lines) + "\n"
 
@@ -1672,11 +1679,24 @@ class _Run:
                 if p.imports:
                     line += f". Imports: {', '.join(p.imports[:8])}"
                 lines.append(line)
-        instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
-        if instruction:
-            lines.append(instruction)
+        lines += self._instructions()
         lines.append("Answer with `### path` and one fenced block per file — nothing else.")
         return "\n".join(lines) + "\n"
+
+    def _instructions(self) -> list[str]:
+        """The phase's own write instruction, and the module format the stack fixed (#103)."""
+        out = []
+        instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
+        if instruction:
+            out.append(instruction)
+        fmt = getattr(self.ctx.charter, "module_format", None) if self.ctx.charter is not None else None
+        if fmt and self.agent.key == "backend_engineer":
+            out.append(
+                "Write CommonJS: `require(...)` and `module.exports`, never `import` or `export`."
+                if fmt == "commonjs" else
+                "Write ES modules: `import` and `export`, never `require` or `module.exports`."
+            )
+        return out
 
     def _fix_new_now(self, batch: list[_Planned]) -> str:
         """The ask for a file a fix round writes new (#103): what imports it, and how."""
@@ -1686,9 +1706,7 @@ class _Run:
             for problem in self.needed_by.get(p.path, [])[:4]:
                 lines.append(f"  - needed by: {problem.text()}")
         lines.append("Write it with exactly what those files import from it.")
-        instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
-        if instruction:
-            lines.append(instruction)
+        lines += self._instructions()
         lines.append("Answer with `### path` and one fenced block per file — nothing else.")
         return "\n".join(lines) + "\n"
 
@@ -2095,8 +2113,50 @@ def _strings(value: object) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
+#: Layers by folder or name, used where the plan never says which file uses which (#103):
+#: what a file is called says, near enough, what it may import. The entry file is last.
+_LAYERS = (
+    ("config", "configs", "constants", "types", "type", "models", "model", "schemas", "schema",
+     "entities", "entity", "dto", "dtos"),
+    ("db", "database", "data", "repositories", "repository", "repos", "repo", "dal", "store", "stores",
+     "utils", "util", "helpers", "helper", "lib"),
+    ("services", "service", "providers", "provider", "hooks", "hook", "api", "clients", "client"),
+    ("controllers", "controller", "handlers", "handler", "middleware", "middlewares", "components", "component"),
+    ("routes", "route", "routers", "router", "views", "view", "pages", "page", "app"),
+)
+_ENTRY = len(_LAYERS)
+_ENTRY_NAMES = ("main", "index", "app", "server")
+
+
+def _layer(path: str) -> int:
+    """Where a file sits in the order a backend's files use each other: models first,
+    the entry file (`main`, `index`, `app`, `server` at a side's root) last."""
+    parts = [p.lower() for p in layout.relative_to_side(layout.clean(path)).split("/")]
+    stem = parts[-1].split(".")[0] if parts else ""
+    folders = parts[:-1]
+    if stem in _ENTRY_NAMES and all(f in ("src", "app") for f in folders):
+        return _ENTRY
+    for folder in reversed(folders):
+        for i, names in enumerate(_LAYERS):
+            if folder in names:
+                return i
+    # `todo_service.js`, `userRoutes.js`: the layer is in the name.
+    words = re.findall(r"[a-z]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", parts[-1] if parts else "").lower())
+    for word in reversed(words[:-1] if len(words) > 1 else words):
+        for i, names in enumerate(_LAYERS):
+            if word in names:
+                return i
+    return 2
+
+
 def _ordered(files: list[_Planned]) -> list[_Planned]:
-    """Each file after the plan files it imports, where a cycle allows; else plan order."""
+    """Each file after the plan files it imports, where a cycle allows; else plan order.
+
+    A plan that lists no imports at all is ordered by layer instead (#103): models,
+    then data access, services, controllers, routes, and the entry file last — so every
+    file is written after the files it most likely uses, and is shown their real exports."""
+    if files and not any(p.imports for p in files):
+        return sorted(files, key=lambda p: _layer(p.path))
     out: list[_Planned] = []
     done: set[str] = set()
     pending = list(files)
