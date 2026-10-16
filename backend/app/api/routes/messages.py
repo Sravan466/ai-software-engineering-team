@@ -111,14 +111,10 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
     if kept is not None:
         more, names, _token = kept
         phases = [n[len(autofix.BUILD_PREFIX):] for n in names if n.startswith(autofix.BUILD_PREFIX)]
-        crew_chat.reply(
-            db,
-            asked,
-            f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}.",
-            phases[0] if phases else project.current_phase,
-        )
+        agent = phases[0] if phases else project.current_phase
+        crew_chat.reply(db, asked, f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}.", agent)
         asked.status = crew_chat.APPLIED
-        asked.agent = phases[0] if phases else project.current_phase
+        asked.agent = agent
         asked.applied_to = phases or None
         asked.applied_at = crew_chat.now()
         return
@@ -149,6 +145,15 @@ def _settle(
             ask_model = False
             _note(db, project, asked, kept)
             db.commit()
+        # Read back inside the guard too: whatever fails before the response is sent
+        # leaves a claimed build driven all the same.
+        out = {
+            "message": _one(db, asked),
+            "messages": crew_chat.thread(db, project.id, crew_chat.RECENT),
+            # What a control's answer carries, so the page's badge moves on the click.
+            "status": project.status,
+            "current_phase": project.current_phase,
+        }
     except Exception:
         db.rollback()
         # A build claimed for Keep trying is driven whether or not its message was kept —
@@ -160,7 +165,7 @@ def _settle(
         background.add_task(_drive, project.id, kept[2])
     if ask_model:
         crew_chat.spawn(crew_chat.ask_model, project.id, asked.id)
-    return {"message": _one(db, asked), "messages": crew_chat.thread(db, project.id, crew_chat.RECENT)}
+    return out
 
 
 @router.post("/{project_id}/messages", status_code=201)
@@ -224,6 +229,8 @@ def reread_message(
         raise HTTPException(409, "The crew has already acted on this note.")
     kept = _keep_trying(db, project, payload.kind, asked.text)
     asked.kind = payload.kind
+    if asked.kind == crew_chat.QUESTION:
+        asked.meant_for = None  # a question is for no phase
     return _settle(db, project, asked, kept, background)
 
 

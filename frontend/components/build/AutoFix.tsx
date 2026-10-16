@@ -18,7 +18,7 @@ import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
 import SecurityFindings, { ruleName } from "./SecurityFindings";
 import { ReasonKinds } from "./ReasonKinds";
-import { CrewTalk, readsAsQuestion } from "./CrewTalk";
+import { CrewTalk } from "./CrewTalk";
 
 /**
  * The crew fixing its own serious problems (#50).
@@ -566,10 +566,10 @@ export function NeedsHelp({
   // Only when the record says adding a model is what would help: nothing stronger to
   // reach and no cloud key at all. A build stopped before this was recorded says nothing.
   const nothingStronger = !cloud && codeTracks.some(([, t]) => t.stopped?.add_model === true);
-  // The box's draft goes with Try again only when it reads as a note: a half-typed
-  // question is not an instruction for the next round. A note goes as a message, so the
-  // conversation shows it was sent; a cloud round takes it along as before.
-  const draftNote = !nothingToFix && note.trim() && !readsAsQuestion(note) ? note.trim() : undefined;
+  // Try again takes the box's draft along as the next round's note — pressing it is the
+  // person saying so, and its label says it ("Try again with your note"). It goes as a
+  // message, so the conversation shows it; a cloud round takes it along as before.
+  const draftNote = !nothingToFix && note.trim() ? note.trim() : undefined;
   const retry = async (model?: string) => {
     const ok = await act(() =>
       draftNote && !model
@@ -650,7 +650,7 @@ export function NeedsHelp({
           <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}
             {nothingToFix ? Icon.arrowRight : Icon.rotate}
-            {nothingToFix ? "Continue the build" : "Try again"}
+            {nothingToFix ? "Continue the build" : draftNote ? "Try again with your note" : "Try again"}
           </button>
           {cloud && (
             <button className="btn btn-lg btn-ghost" disabled={busy} onClick={() => retry(cloud)}>

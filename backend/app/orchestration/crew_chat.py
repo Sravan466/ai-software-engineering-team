@@ -64,9 +64,17 @@ _NOT_A_REQUEST = (
 _REQUEST = re.compile(rf"^(can|could|will|would)\s+(you|we|the crew)\s+(?!(?:{'|'.join(_NOT_A_REQUEST)})\b)[a-z]")
 
 
+def plain(text: str) -> str:
+    """Typographic apostrophes and quotes as straight ones: "What’s next?" is "What's next?"."""
+    return text.translate(_STRAIGHT)
+
+
+_STRAIGHT = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"'})
+
+
 def classify(text: str) -> str:
     """`question` or `note`, from the words alone."""
-    said = text.strip()
+    said = plain(text).strip()
     low = said.lower()
     if _REQUEST.match(low):
         return NOTE
@@ -182,7 +190,7 @@ def _doing(project: Project, rows: dict) -> Optional[str]:
     files = found.get("files") or []
     done, total = int(found.get("done") or 0), int(found.get("total") or 0)
     if stage in ("writing", "fixing", "changing") and files:
-        verb = {"writing": "writing", "fixing": "fixing", "changing": "changing"}[stage]
+        verb = stage
         live = [f["path"] for f in files if f.get("state") in ("writing", "fixing")]
         if len(live) == 1:
             return f"{who} is {verb} `{live[0]}`, file {min(done + 1, total)} of {total}."
@@ -342,7 +350,7 @@ _STATUS = re.compile(
             r"\bwhere (are|is) (you|we|it|things|the build)\b",
             r"\bhow (long (will|until|till|before|left|is (it|this|the build)|does (it|this|the build))|much longer)\b",
             r"\bwhen (will|does|do|is) (it|you|this|the build|the crew)\b",
-            r"\b(who|what)('?s| is) next\b|\bwho('?s| is) (working|on it)\b",
+            r"\b(who|what)('?s| is| comes) next\b|\bwho('?s| is) (working|on it)\b",
             r"\bwaiting (for|on)\b",
             r"\b(which|what) (ai |local |cloud )?models?\b",
             r"\bwhy (did|has|is|does) (it|the build|you|the crew|everything) (stop|stopped|fail|failed|failing|pause|paused|slow|stuck)\b",
@@ -369,7 +377,7 @@ def _words(text: str) -> set[str]:
 
 def is_status(text: str) -> bool:
     """Whether the build's own record answers this question."""
-    low = text.lower()
+    low = plain(text).lower()
     return bool(_STATUS.search(low)) or (named_phase(text) is not None and bool(_PHASE_STATE.search(low)))
 
 
@@ -413,8 +421,14 @@ def _phase_answer(project: Project, phase: str, rows: dict) -> str:
         files = len(list(artifacts.iter_files(row.output if isinstance(getattr(row, "output", None), dict) else {})))
         return f"{who} is finished" + (f": {files} file{'' if files == 1 else 's'}." if files else ".")
     ahead = [p for p in _ORDER if phase_state(project, p, rows) == "not_started"]
-    if project.status == PipelineStatus.RUNNING.value and project.current_phase in _ORDER and phase in ahead:
-        between = _ORDER.index(phase) - _ORDER.index(project.current_phase) - 1
+    current = project.current_phase
+    if (
+        project.status == PipelineStatus.RUNNING.value
+        and current in _ORDER
+        and phase in ahead
+        and _ORDER.index(phase) > _ORDER.index(current)
+    ):
+        between = _ORDER.index(phase) - _ORDER.index(current) - 1
         return f"{who} hasn't started yet. " + (
             f"{title(project.current_phase)} is working now, and {who} is next."
             if between <= 0
@@ -423,9 +437,10 @@ def _phase_answer(project: Project, phase: str, rows: dict) -> str:
     return f"{who} hasn't started yet."
 
 
-def status_answer(project: Project, text: str) -> tuple[str, Optional[str]]:
+def status_answer(project: Project, text: str, rows: Optional[dict] = None) -> tuple[str, Optional[str]]:
     """The answer to a status question, and the agent who gives it. Never calls a model."""
-    rows = _rows(project)
+    rows = rows if rows is not None else _rows(project)
+    text = plain(text)
     words = _words(text)
     status = project.status
     asks_stuck = bool(words & _STUCK_WORDS)
@@ -445,6 +460,8 @@ def status_answer(project: Project, text: str) -> tuple[str, Optional[str]]:
     phase = named_phase(text)
     if phase and not asks_model and not asks_stuck:
         return _phase_answer(project, phase, rows), phase
+    if status == PipelineStatus.RUNNING.value and project.current_phase not in _ORDER:
+        return f"The build is starting. {title(_ORDER[0])} goes first.", _ORDER[0]
     if status == PipelineStatus.RUNNING.value:
         if asks_model:
             return (_model_line(project, rows) or "The model hasn't answered yet, so I can't name it."), project.current_phase
@@ -636,7 +653,7 @@ def _context(db: Session, project: Project) -> str:
     charter = Charter.from_dict(project.charter)
     if charter:
         lines.append(charter.prompt_block())
-    said, _ = status_answer(project, "status")
+    said, _ = status_answer(project, "status", rows)
     lines.append(f"# Where the build is\n{said}")
     done = [p for p in _ORDER if phase_state(project, p, rows) in ("done", "waiting")]
     if done:

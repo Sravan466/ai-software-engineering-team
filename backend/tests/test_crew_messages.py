@@ -145,6 +145,10 @@ def test_the_page_reads_a_message_by_the_same_words_as_the_server():
     ("How long do login sessions last?", False),
     ("Can you add dark mode now?", False),
     ("will it work on phones?", False),
+    # Typed with smart punctuation.
+    ("What\u2019s next?", True),
+    ("How\u2019s it going", True),
+    ("What comes next?", True),
 ])
 def test_only_a_question_about_the_build_is_answered_from_its_record(text, status):
     assert crew_chat.is_status(text) is status
@@ -184,6 +188,12 @@ def test_who_is_next_and_how_long_get_answers_of_their_own(calls, client):
     assert text.startswith("Backend Engineer has just started. It's phase 3 of 8, and 5 more phases after it.")
     assert "no finish time" in text
     assert calls == []
+
+
+def test_a_build_that_has_just_started_says_who_goes_first(calls, client):
+    pid = _build(client, status=PipelineStatus.RUNNING.value, heartbeat_at=datetime.now(timezone.utc))
+    for asked in ("What are you doing?", "Who's next?"):
+        assert _say(client, pid, asked)["replies"][0]["text"] == "The build is starting. Product Manager goes first."
 
 
 def test_which_model_is_running(calls, client):
@@ -394,6 +404,8 @@ def test_that_was_a_question_reads_a_note_again(calls, client):
     assert r.status_code == 200, r.text
     again = r.json()["message"]
     assert again["kind"] == "question" and again["status"] == "answered"
+    assert again["meant_for"] == [], "a question is for no phase"
+    assert r.json()["status"] == "running", "the answer carries the build's status, as a control's does"
     assert "Backend Engineer is writing `routes/todos.js`" in again["replies"][-1]["text"]
     assert client.post(f"/api/projects/{pid}/messages/{m['id']}/reread", json={"kind": "question"}).status_code == 409
 
