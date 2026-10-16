@@ -206,7 +206,8 @@ def test_the_loop_fixes_in_place_and_never_plans_again(client, monkeypatch):
         if getattr(kwargs.get("options"), "json_schema", None):
             calls["plan"] += 1
             payload = json.loads(resp.text)
-            payload["files"] = [{"path": "main.py", "purpose": "app"}, {"path": "app/services.py", "purpose": "totals"},
+            payload["files"] = [{"path": "main.py", "purpose": "app", "imports": ["app/services.py"]},
+                                {"path": "app/services.py", "purpose": "totals"},
                                 {"path": "app/models.py", "purpose": "models"}]
             return resp.model_copy(update={"text": json.dumps(payload)})
         text = messages[-1].content
@@ -234,8 +235,10 @@ def test_the_loop_fixes_in_place_and_never_plans_again(client, monkeypatch):
     assert backend["handoff"]["fix"]["changed"] == ["backend/main.py"]
     code = {f["path"]: f["code"] for f in backend["output"]["files"]}
     assert code["backend/app/services.py"] == "def total(xs):\n    return sum(xs)\n"
-    assert [f["path"] for f in backend["output"]["files"]] == ["backend/main.py", "backend/app/services.py",
-                                                                "backend/app/models.py"]
+    # The order it was written in (models first, main.py after the service it imports,
+    # #103), unchanged by the fix.
+    assert [f["path"] for f in backend["output"]["files"]] == ["backend/app/models.py", "backend/app/services.py",
+                                                                "backend/main.py"]
 
 
 def test_an_edit_that_breaks_a_file_it_didnt_touch_is_put_back(monkeypatch, stub_router):

@@ -26,6 +26,7 @@ nothing settled has no entry, and nothing is enforced for it.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
 
@@ -135,6 +136,10 @@ class Charter:
     #: The app connectors this build uses — `stripe`, `resend`, … (#59). Their
     #: variable names are in `env` beside the database's. Names only, like `env`.
     integrations: tuple[str, ...] = ()
+    #: A Node backend's module format, fixed with the stack (#103): `commonjs` or
+    #: `esm`. A backend that mixes `import` and `require` doesn't start, and nothing
+    #: told the model which to write. None for a backend that isn't Node.
+    module_format: Optional[str] = None
 
     # ── construction ─────────────────────────────────────────────────────────
     @classmethod
@@ -178,14 +183,20 @@ class Charter:
             else _env(token, provider, used)
         )
         frozen = data.get("database_provider_frozen")
-        return cls(choices, provider, names, frozen if isinstance(frozen, str) and frozen else provider, used)
+        fmt = data.get("module_format")
+        return cls(
+            choices, provider, names, frozen if isinstance(frozen, str) and frozen else provider, used,
+            # A charter from before formats were fixed has none: the scaffold reads the code.
+            fmt if isinstance(fmt, str) and fmt in MODULE_FORMATS else None,
+        )
 
     def with_provider(self, provider: str) -> "Charter":
         """The same stack, hosted somewhere else — and so read from other names."""
         database = self.choices.get("database")
         token = database.token if database else None
         return Charter(
-            self.choices, provider, _env(token, provider, self.integrations), self.frozen_provider, self.integrations
+            self.choices, provider, _env(token, provider, self.integrations), self.frozen_provider, self.integrations,
+            self.module_format,
         )
 
     def with_integrations(self, used: tuple[str, ...]) -> "Charter":
@@ -198,6 +209,7 @@ class Charter:
             _env(token, self.database_provider, used),
             self.frozen_provider,
             tuple(used),
+            self.module_format,
         )
 
     @property
@@ -218,6 +230,8 @@ class Charter:
             out["integrations"] = list(self.integrations)
             # Derived, for the page: which of `env` is the database's. Never read back.
             out["database_env"] = list(self.database_env)
+        if self.module_format:
+            out["module_format"] = self.module_format
         return out
 
     def __bool__(self) -> bool:
@@ -242,6 +256,8 @@ class Charter:
             for category, _ in stack.CATEGORIES
             if category in self.choices
         ]
+        if self.module_format:
+            lines.append(f"- Backend module format: {MODULE_FORMATS[self.module_format]}")
         return (
             "STACK CHARTER — frozen when the architecture was approved, and binding "
             "on every phase after it:\n"
@@ -304,6 +320,60 @@ class Charter:
             for category, _ in stack.CATEGORIES
             if category in self.choices
         )
+
+
+# ── a Node backend's module format (#103) ───────────────────────────────────
+#: What each format means, as the charter tells the backend.
+MODULE_FORMATS = {
+    "commonjs": "CommonJS — `require(...)` and `module.exports`; never `import` or `export`",
+    "esm": "ES modules — `import` and `export`; never `require` or `module.exports`",
+}
+
+
+#: Backend frameworks that run on Node as a server; and ones that are route files.
+_NODE_FRAMEWORKS = frozenset({"express", "nestjs"})
+_ROUTE_FRAMEWORKS = frozenset({"nextjs"})
+
+
+def format_instruction(fmt: Optional[str]) -> str:
+    """The line every backend write ask ends with (#103), from the charter's own words."""
+    return f"Write {MODULE_FORMATS[fmt]}." if fmt in MODULE_FORMATS else ""
+
+
+def module_format_for(language: Optional[str]) -> Optional[str]:
+    """CommonJS for a JavaScript backend, ES modules for a TypeScript one.
+
+    Node runs a plain JavaScript backend as written, and in ES-module mode it resolves a
+    relative import only with its `.js` on — which small models leave off — so CommonJS
+    is the format a JavaScript backend starts in. TypeScript is written with `import`
+    whatever runs it. Anything else is not a Node backend."""
+    if language == "javascript":
+        return "commonjs"
+    if language == "typescript":
+        return "esm"
+    return None
+
+
+_ESM = re.compile(r"^\s*(?:import\s[^;=]*?\bfrom\s|import\s*['\"]|export\s)", re.MULTILINE)
+_CJS = re.compile(r"(?<![\w.])require\(\s*['\"]|\bmodule\.exports\b|^\s*exports\.\w+\s*=", re.MULTILINE)
+_COMMENTS = re.compile(r"/\*.*?\*/|(?<![:'\"\w])//[^\n]*", re.DOTALL)
+#: Ways an ES module or TypeScript file loads CommonJS on purpose: not a mix.
+_ON_PURPOSE = re.compile(r"\bimport\s+\w+\s*=\s*require\(|\bcreateRequire\(")
+
+
+def module_format_of(content: str) -> Optional[str]:
+    """`esm` or `commonjs` for a file written in one of them, `mixed` for one using both
+    — the file that stops a backend starting — and None for neither. Comments don't
+    count, and an ES module that loads CommonJS on purpose (`createRequire`, TypeScript's
+    `import x = require(…)`) isn't a mix."""
+    code = _COMMENTS.sub("", content or "")
+    esm = bool(_ESM.search(code))
+    cjs = bool(_CJS.search(code)) and not (esm and _ON_PURPOSE.search(code))
+    if esm and cjs:
+        return "mixed"
+    if esm or cjs:
+        return "esm" if esm else "commonjs"
+    return None
 
 
 # ── freezing one ─────────────────────────────────────────────────────────────
@@ -444,7 +514,28 @@ def freeze(
         )
     token = database.token if database else None
     used = tuple(dict.fromkeys(i for i in integrations if integration_registry.get(i)))
-    charter = Charter(chosen, provider, _env(token, provider, used), provider, used)
+    language = chosen.get("language")
+    framework = chosen.get("backend_framework")
+    # The backend's own language, or a Node framework's: a language some other choice
+    # implied (Next.js implies TypeScript) says nothing about a backend's modules.
+    # A Next.js backend is API routes, written `export default` whatever the language —
+    # named as the backend, or the only server a Next.js app has.
+    front = chosen.get("frontend_framework")
+    routes_only = bool(framework and framework.token in _ROUTE_FRAMEWORKS) or (
+        framework is None and bool(front and front.token in _ROUTE_FRAMEWORKS)
+    )
+    node_backend = not routes_only and (
+        bool(framework and framework.token in _NODE_FRAMEWORKS) or bool(language and language.source != SOURCE_IMPLIED)
+    )
+    # A Node framework with no language named still has one: Express is JavaScript,
+    # NestJS is TypeScript.
+    spoken = language.token if language else {"express": "javascript", "nestjs": "typescript"}.get(
+        framework.token if framework else ""
+    )
+    charter = Charter(
+        chosen, provider, _env(token, provider, used), provider, used,
+        module_format_for(spoken if node_backend else None),
+    )
     log.info(
         "Stack charter frozen — %s%s",
         charter.summary_line(),
@@ -497,7 +588,41 @@ def violations(charter: Optional[Charter], phase_key: str, output: object) -> li
                 f" ({_SOURCE_PHRASE.get(expected.source, 'agreed for this build')}). "
                 f"Rewrite it, and every other file like it, against {expected.label}."
             )
+    if phase_key == Phase.BACKEND_ENGINEER.value and charter.module_format:
+        found += _wrong_format(charter.module_format, output)
     return found
+
+
+def _wrong_format(expected: str, output: object) -> list[str]:
+    """One problem per backend file written in the other module format (#103): a file,
+    not every import in it, is what has to change."""
+    from app.build.scaffold import _is_test  # noqa: PLC0415 - scaffold imports this module
+    from app.core.artifacts import iter_files
+
+    other = "esm" if expected == "commonjs" else "commonjs"
+    said = {"esm": "`import`/`export`", "commonjs": "`require`/`module.exports`"}
+    name = MODULE_FORMATS[expected].split(" — ")[0]
+    # TypeScript compiles `import` away, so only JavaScript is held to CommonJS.
+    held = (".js",) if expected == "commonjs" else (".js", ".ts")
+    out = []
+    for path, content, _lang in iter_files(output if isinstance(output, dict) else {}):
+        # Config files too: Node loads every `.js` file by the package's `type`.
+        if not path.endswith(held) or _is_test(path):
+            continue
+        found = module_format_of(content)
+        if found == other:
+            out.append(
+                f"`{path}` — uses {said[other]} where the stack charter says the backend is "
+                f"{name} ({said[expected]}). Rewrite its imports and exports in {said[expected]}; "
+                "a backend that mixes the two doesn't start."
+            )
+        elif found == "mixed":
+            out.append(
+                f"`{path}` — uses both {said['esm']} and {said['commonjs']}, and the stack charter says "
+                f"the backend is {name}. Write all of it in {said[expected]}: a file that mixes the two "
+                "doesn't start."
+            )
+    return out
 
 
 #: Always allowed in a web build's test suite. Every frontend framework this

@@ -964,16 +964,38 @@ def _python_entry(files: dict[str, str], framework: Optional[str]) -> Optional[s
 _JS_ENTRIES = ("server.js", "index.js", "app.js", "main.js", "src/server.js", "src/index.js", "src/app.js", "src/main.js")
 
 
-def _scaffold_node_backend(sc: Scaffold, files: dict[str, str], slug: str, database: Optional[str], with_migrations: bool) -> None:
+def _scaffold_node_backend(
+    sc: Scaffold, files: dict[str, str], slug: str, database: Optional[str], with_migrations: bool,
+    module_format: Optional[str] = None,
+) -> None:
     be = lambda rel: f"{BACKEND}/{rel}"  # noqa: E731
+    from app.orchestration.charter import module_format_of  # charter reads this module
+
     code = {p: c for p, c in files.items() if p.endswith(_JS_EXT)}
-    esm = any(re.search(r"^\s*import\s.+\sfrom\s|^\s*export\s", c, re.MULTILINE) for p, c in code.items() if not _is_test(p))
-    cjs = any(re.search(r"\brequire\(|module\.exports", c) for p, c in code.items() if not _is_test(p))
-    module_type = "module" if esm and not cjs else "commonjs"
+    # The same reading of a file the stack charter's check makes (#103).
+    found = [module_format_of(c) for p, c in code.items() if not _is_test(p)]
+    esm = any(f in ("esm", "mixed") for f in found)
+    cjs = any(f in ("commonjs", "mixed") for f in found)
+    if module_format in ("esm", "commonjs"):
+        # The format the stack fixed (#103), not a guess from what the files happen to
+        # use: a file in the other one is the code's problem, and the check says so.
+        module_type = "module" if module_format == "esm" else "commonjs"
+    else:
+        module_type = "module" if esm and not cjs else "commonjs"
     if esm and cjs:
         sc.notes.append(
-            "The backend mixes `require` and `import`; it is set up as CommonJS, so files "
-            "using `import` will need converting."
+            "The backend mixes `require` and `import`; it is set up as "
+            + ("ES modules, so files using `require` will need converting." if module_type == "module"
+               else "CommonJS, so files using `import` will need converting.")
+        )
+    elif module_format in ("esm", "commonjs") and (esm if module_type == "commonjs" else cjs):
+        # The code is all in the other format: the charter still decides (#103), and
+        # each of those files is a stack problem the fix loop names — said here too.
+        sc.notes.append(
+            "The backend is set up as "
+            + ("CommonJS, as the stack fixed, but its files use `import`: they need converting before it starts."
+               if module_type == "commonjs" else
+               "ES modules, as the stack fixed, but its files use `require`: they need converting before it starts.")
         )
     base = {}
     framework = sc.backend_framework
@@ -1266,7 +1288,9 @@ def build(
     elif language in ("javascript", "typescript"):
         if language == "typescript":
             sc.notes.append("The backend is TypeScript; its build script checks only the JavaScript files.")
-        _scaffold_node_backend(sc, backend_files, slug, database, with_migrations)
+        _scaffold_node_backend(
+            sc, backend_files, slug, database, with_migrations, getattr(charter, "module_format", None)
+        )
 
     if with_migrations and entities:
         sql = initial_migration(entities, dialect)
