@@ -263,6 +263,11 @@ class Project(Base):
     change_requests: Mapped[list["ChangeRequest"]] = relationship(
         cascade="all, delete-orphan", order_by="ChangeRequest.number"
     )
+    # Deleted with the build (#102). Read through `orchestration.crew_chat`, which asks
+    # for the newest few, never through this collection.
+    crew_messages: Mapped[list["CrewMessage"]] = relationship(
+        cascade="all, delete-orphan", order_by="CrewMessage.created_at"
+    )
 
     # ── derived state ────────────────────────────────────────────────────────
     @property
@@ -589,6 +594,42 @@ class ChangeRequest(Base):
     created_by: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CrewMessage(Base):
+    """One line of the conversation with the crew while it builds (#102).
+
+    The person's message, or the crew's reply to it. A question is answered from what
+    the build already knows, with no model call, or by a model once the step in hand is
+    done; a note waits for the agents it is for. Kept with the build, deleted with it.
+    """
+
+    __tablename__ = "crew_messages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    #: `person` | `crew`.
+    author: Mapped[str] = mapped_column(String(8), nullable=False)
+    #: The phase that answered it or picked it up. Null on the person's own message, and
+    #: on a reply no one agent gave ("the build is stopped").
+    agent: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: `question` | `note`: how the person's message was read. A reply carries its message's.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: What happened to the person's message: `answered` | `queued` | `applied` |
+    #: `scheduled` | `cancelled` | `declined`. A reply is `answered`.
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: The person's message a crew reply answers. Null on the person's own messages.
+    reply_to: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    #: The phases a note is for, decided when it was sent: the ones it names, or every
+    #: phase that hadn't started then.
+    meant_for: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    #: The phases a note was handed to.
+    applied_to: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    #: The change request a note that changes finished work became.
+    change_request_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DebateRecord(Base):

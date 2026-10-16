@@ -25,6 +25,9 @@ export function pollMsFor(project: Project | null): number {
     !!project.current_phase &&
     latestRow(project, project.current_phase)?.status === "running";
   if ((project.status === "running" && !project.stalled) || finishing) return 2500;
+  // A question to the crew waiting on a model (#102) is answered whatever the build is
+  // doing, a stopped one included: watch for the answer.
+  if (project.messages?.some((m) => m.kind === "question" && m.status === "queued")) return 2500;
   if (project.status === "running" || project.status === "awaiting_approval") return 10000;
   // Paused for the user's computer: it resumes by itself when the connector is
   // back, so keep watching, slowly, to show that happening.

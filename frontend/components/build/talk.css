@@ -1,0 +1,174 @@
+/* ===========================================================================
+   TALK TO THE CREW WHILE IT BUILDS (#102)
+
+   The build page's one box, in every state: the conversation above, the composer
+   (the same one as "What should change?") under it, one border round both. Your
+   words sit on the right in a raised bubble; each reply sits on the left under the
+   agent who gave it, in that agent's colour. A line that arrives opens its own
+   height, the way a step does in the running phase's row (#86), so nothing jumps.
+   =========================================================================== */
+
+.talk {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  transition: border-color var(--tr), box-shadow var(--tr-slow);
+}
+.talk:focus-within { border-color: var(--accent-line); box-shadow: var(--shadow-2); }
+
+/* Inside the stuck card it's the card's field, not a card of its own: a frame for
+   the words, no lift. */
+.talk.is-embedded {
+  border-radius: var(--r);
+  background: var(--bg-raised);
+  box-shadow: none;
+}
+.talk.is-embedded:focus-within { box-shadow: none; }
+.decision-act .talk.is-embedded { margin-bottom: 12px; }
+.talk.is-embedded .finish-label { padding-top: 13px; font-size: var(--t-base); }
+
+/* ── the conversation ── */
+.talk-thread {
+  list-style: none;
+  margin: 0;
+  padding: 14px 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: min(44vh, 380px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-bottom: 1px solid var(--line);
+  scroll-padding-bottom: 12px;
+}
+.talk-turn { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+
+/* A line opens its own height while its words rise and come into focus. */
+.talk-row { display: grid; grid-template-rows: 1fr; min-width: 0; }
+.talk-row-in { min-width: 0; min-height: 0; }
+.talk-row.is-new { animation: talk-grow 520ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.talk-row.is-new > .talk-row-in {
+  overflow: hidden;
+  animation: talk-rise 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes talk-grow { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
+@keyframes talk-rise {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+@keyframes talk-fade { from { opacity: 0; } }
+
+/* Yours: right, raised, the tail toward you. */
+.talk-you {
+  margin: 0 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  max-width: min(86%, 62ch);
+}
+.talk-you-text {
+  padding: 7px 12px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 12px 12px 4px 12px;
+  background: var(--bg-raised);
+  color: var(--ink);
+  font-size: var(--t-md);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.talk.is-embedded .talk-you-text { background: var(--bg-panel); }
+.talk-time { font-size: var(--t-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+/* The crew's: left, under whoever said it. */
+.talk-reply {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  max-width: 68ch;
+}
+.talk-face {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--accent);
+}
+.talk-face svg { width: 15px; height: 15px; }
+.talk-said {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: var(--t-base);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.talk-name {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--agent, var(--accent));
+}
+.talk-said code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+  color: var(--ink);
+  font-size: 0.92em;
+}
+
+/* What happened to it, and how it was read. */
+.talk-meta {
+  margin: 0;
+  padding-left: 30px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.talk-state { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.talk-state.tone-ok { color: var(--ok); }
+.talk-state.tone-run { color: var(--run); }
+.talk-state.tone-warn { color: var(--warn); }
+.talk-state.tone-plain { color: var(--ink-3); }
+.talk-reread {
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--accent-line);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color var(--tr), text-decoration-color var(--tr);
+}
+.talk-reread:hover { text-decoration-color: var(--accent); }
+.talk-reread:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.talk-reread:disabled { color: var(--ink-3); cursor: not-allowed; text-decoration-color: var(--line-3); }
+
+/* The composer under it: the same box as "What should change?". */
+.talk-box .finish-label { padding-top: 14px; }
+
+@media (max-width: 640px) {
+  .talk-thread { padding: 12px 14px 10px; max-height: min(52vh, 420px); }
+  .talk-you { max-width: 92%; }
+  .talk-meta { padding-left: 0; }
+  /* A quick question sends on a tap: a full touch target, like every button here. */
+  .talk .finish-examples .example { min-height: 44px; }
+  .talk-reread { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .talk-row.is-new,
+  .talk-row.is-new > .talk-row-in { animation-name: talk-fade; }
+  .talk-thread { scroll-behavior: auto; }
+}

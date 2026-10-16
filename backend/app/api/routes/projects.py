@@ -40,7 +40,7 @@ from app.core.constants import (
 from app.core.logging import get_logger
 from app.db.base import SessionLocal, get_db
 from app.db.models import Project, SecurityDisposition, User
-from app.orchestration import autofix, claim, remediation
+from app.orchestration import autofix, claim, crew_chat, remediation
 from app.orchestration.runner import runner
 from app.router.router import router as model_router
 from app.schemas.project import (
@@ -217,7 +217,7 @@ def update_project(
 
 # The list leaves out what each running phase was handed (#91): only the build
 # page and the crew floor read it, from the build itself.
-@router.get("", response_model=list[ProjectOut], response_model_exclude={"__all__": {"given"}})
+@router.get("", response_model=list[ProjectOut], response_model_exclude={"__all__": {"given", "messages"}})
 def list_projects(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[Project]:
     found = list(
         db.execute(
@@ -234,8 +234,12 @@ def list_projects(user: User = Depends(current_user), db: Session = Depends(get_
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
-def get_one(project: Project = Depends(get_project)) -> Project:
-    return project
+def get_one(project: Project = Depends(get_project)) -> ProjectOut:
+    out = ProjectOut.model_validate(project)
+    # The conversation with the crew (#102), newest few: the page's poll shows a reply
+    # without a request of its own. Here only — the list would pay two queries a build.
+    out.messages = crew_chat.recent(project)
+    return out
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -1008,15 +1012,42 @@ def keep_trying(
     Also how a build moves on once every serious finding it stopped on has been
     waived: with nothing left to fix, the loop finds nothing and the run continues.
     """
+    more, _names, token = start_keep_trying(
+        db,
+        project,
+        rounds=payload.rounds if payload else None,
+        note=payload.note if payload else None,
+        model=payload.model if payload else None,
+    )
+    db.commit()
+    background.add_task(_drive, project.id, token)
+    return RunResponse(
+        project_id=project.id,
+        status=project.status,
+        current_phase=project.current_phase,
+        message=f"Trying again — up to {more} more round{'' if more == 1 else 's'}.",
+    )
+
+
+def start_keep_trying(
+    db: Session,
+    project: Project,
+    *,
+    rounds: Optional[int] = None,
+    note: Optional[str] = None,
+    model: Optional[str] = None,
+) -> tuple[int, list[str], str]:
+    """Keep trying, up to the claim: `(rounds given, tracks, claim token)`. The caller
+    commits and hands the token to `_drive` — and may add to the commit first: a message
+    to the crew on a stuck build is Keep trying with its words as the note (#102)."""
     _require_needs_help(project, "retry")
     _require_models(project)
-    more = (payload.rounds if payload and payload.rounds else None) or settings.auto_fix_retry_rounds
-    note = (payload.note or "").strip() if payload else ""
+    more = rounds or settings.auto_fix_retry_rounds
+    note = (note or "").strip()
     if note:
         # The person's words reach a model: never a key they pasted by mistake.
         _refuse_credentials(note, project)
     data = autofix.load(project)
-    model = payload.model if payload else None
     if model:
         offered = [n for n in autofix.stuck(data) if (data["tracks"][n].get("stopped") or {}).get("cloud") == model]
         if not offered:
@@ -1034,15 +1065,8 @@ def keep_trying(
     if not token:
         raise _conflict(project, "retry")
     autofix.save(project, data)
-    db.commit()
     log.info("Keep trying on %s: %s, %d more round(s)", project.id, names, more)
-    background.add_task(_drive, project.id, token)
-    return RunResponse(
-        project_id=project.id,
-        status=project.status,
-        current_phase=project.current_phase,
-        message=f"Trying again — up to {more} more round{'' if more == 1 else 's'}.",
-    )
+    return more, names, token
 
 
 @router.post("/{project_id}/auto-fix/accept", response_model=RunResponse)

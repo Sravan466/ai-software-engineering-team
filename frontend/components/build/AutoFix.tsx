@@ -18,6 +18,7 @@ import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
 import SecurityFindings, { ruleName } from "./SecurityFindings";
 import { ReasonKinds } from "./ReasonKinds";
+import { CrewTalk } from "./CrewTalk";
 
 /**
  * The crew fixing its own serious problems (#50).
@@ -565,8 +566,18 @@ export function NeedsHelp({
   // Only when the record says adding a model is what would help: nothing stronger to
   // reach and no cloud key at all. A build stopped before this was recorded says nothing.
   const nothingStronger = !cloud && codeTracks.some(([, t]) => t.stopped?.add_model === true);
-  const retry = (model?: string) =>
-    act(() => api.keepTrying(id, { note: note.trim() || undefined, model }));
+  // Try again takes the box's draft along as the next round's note — pressing it is the
+  // person saying so, and its label says it ("Try again with your note"). It goes as a
+  // message, so the conversation shows it; a cloud round takes it along as before.
+  const draftNote = !nothingToFix && note.trim() ? note.trim() : undefined;
+  const retry = async (model?: string) => {
+    const ok = await act(() =>
+      draftNote && !model
+        ? api.sendMessage(id, draftNote, { keepTrying: true })
+        : api.keepTrying(id, { note: draftNote, model }),
+    );
+    if (ok && draftNote) setNote("");
+  };
 
   return (
     <div className="help">
@@ -623,27 +634,23 @@ export function NeedsHelp({
       )}
 
       <div className="decision-act">
-        {!nothingToFix && (
-          <div className="field help-note">
-            <label htmlFor="help-note">
-              Tell the crew what to try <span className="field-hint">(optional)</span>
-            </label>
-            <textarea
-              id="help-note"
-              className="textarea"
-              rows={2}
-              maxLength={2000}
-              placeholder="For example, keep all the routes in one file"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </div>
-        )}
+        {/* The build page's one box (#102): a note here starts the next round with it,
+            a question is answered straight away. The cloud button sends the draft too. */}
+        <CrewTalk
+          project={project}
+          id={id}
+          busy={busy}
+          act={act}
+          place={nothingToFix ? "gate" : "stuck"}
+          embedded
+          text={note}
+          setText={setNote}
+        />
         <div className="decision-approve">
           <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}
             {nothingToFix ? Icon.arrowRight : Icon.rotate}
-            {nothingToFix ? "Continue the build" : "Try again"}
+            {nothingToFix ? "Continue the build" : draftNote ? "Try again with your note" : "Try again"}
           </button>
           {cloud && (
             <button className="btn btn-lg btn-ghost" disabled={busy} onClick={() => retry(cloud)}>

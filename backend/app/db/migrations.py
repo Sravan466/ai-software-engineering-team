@@ -98,6 +98,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     ),
     # Nullable (#79): a version recorded before it was counted is counted when listed.
     "versions": ("file_count",),
+    # Nullable (#102): a message from before notes recorded who they were for is for no one
+    # in particular, and the phases read it as a note for every phase still to start.
+    "crew_messages": ("meant_for",),
     "phase_results": (
         # Nullable (#63): only a phase that fell back past a refused key has one.
         "fallback_note",

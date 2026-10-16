@@ -4,6 +4,7 @@ import "@/components/crew/crew.css";
 import "@/components/build/build.css";
 import "@/components/build/progress.css";
 import "@/components/build/changes.css";
+import "@/components/build/talk.css";
 import "@/components/models/models.css";
 import "@/components/setup/setup.css";
 import "@/components/deploy/deploy.css";
