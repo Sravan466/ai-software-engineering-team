@@ -179,3 +179,13 @@ def test_a_put_back_s_round_is_forgotten_when_the_episode_settles():
     autofix.close_round(t, [], net=True)
     autofix.settle(t)
     assert "kept" not in t
+
+
+def test_a_build_from_before_episodes_were_recorded_keeps_its_old_rounds_in_the_trend():
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    t["allowed"] = 5
+    t["rounds"] = [{"n": n, "problems": [{"key": "a"}, {"key": "b"}, {"key": "c"}], "fixed": [], "remaining": ["a", "b", "c"],
+                    "strategy": "guided", "phases": ["backend_engineer"]} for n in (1, 2)]
+    _round(t, ["a", "b", "c"], ["a", "b", "c"], "r2", "r3")
+    assert [p["n"] for p in autofix.trend(t)] == [3, 3, 3, 3]

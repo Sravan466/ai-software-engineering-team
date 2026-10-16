@@ -204,9 +204,13 @@ def episode(t: dict) -> list[dict]:
     if not rounds:
         return []
     latest = rounds[-1].get("episode")
-    if latest is not None:
-        return [r for r in rounds if r.get("episode") == latest]
-    return rounds[int(t.get("episode_start") or 0):]
+    start = int(t.get("episode_start") or 0)
+    # Rounds from before episodes were recorded belong to it when they are past its
+    # start: a build from before #103 that was sent round after round, and kept trying.
+    return [
+        r for i, r in enumerate(rounds)
+        if (latest is not None and r.get("episode") == latest) or (r.get("episode") is None and i >= start)
+    ]
 
 
 def _carried_on(t: dict, i: int) -> bool:
