@@ -383,3 +383,11 @@ def test_a_note_left_for_no_phase_before_notes_said_is_settled_at_startup(client
         m = db.get(CrewMessage, mid)
         assert m.status == "declined"
         assert db.query(CrewMessage).filter_by(reply_to=mid).count() == 1
+
+
+def test_a_signature_reads_the_same_from_the_database_and_from_a_note():
+    from datetime import datetime, timezone
+
+    at = datetime(2026, 10, 16, 12, 0, 0, 123456)
+    assert crew_chat.signature_of(2, at) == crew_chat.signature_of(2, "2026-10-16 12:00:00.123456")
+    assert crew_chat.signature_of(2, at) == crew_chat.signature_of(2, at.replace(tzinfo=timezone.utc))

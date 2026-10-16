@@ -701,8 +701,16 @@ def notes_signature():
 
 
 def signature_of(count: int, newest) -> tuple:
-    """The pair `notes_signature` reads, in one comparable form."""
-    return (int(count or 0), str(newest) if newest is not None else None)
+    """The pair `notes_signature` reads, in one comparable form — the time as UTC ISO,
+    whether it came back from the database's MAX() or off a loaded note."""
+    if isinstance(newest, str):
+        try:
+            newest = datetime.fromisoformat(newest)
+        except ValueError:
+            pass
+    if isinstance(newest, datetime):
+        newest = _aware(newest).isoformat()
+    return (int(count or 0), newest)
 
 
 def for_phase(m: CrewMessage, phase: str) -> bool:
