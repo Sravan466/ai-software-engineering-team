@@ -85,3 +85,46 @@ def test_every_backend_write_is_told_the_format():
     assert any("Write CommonJS" in line for line in run._instructions())
     plain = _Run(BackendEngineerAgent(), AgentContext(idea="x"))
     assert not any("CommonJS" in line for line in plain._instructions())
+
+
+# ── review of #112 ───────────────────────────────────────────────────────────
+def test_a_file_that_mixes_the_formats_is_a_stack_problem():
+    output = {"files": [{"path": "backend/app/routes/todos.js",
+                         "code": "import express from 'express';\nconst r = express.Router();\nmodule.exports = r;\n"}]}
+    [found] = violations(JS, "backend_engineer", output)
+    assert "uses both" in found and "`backend/app/routes/todos.js`" in found
+
+
+def test_layers_read_names_as_written_and_app_is_a_package_not_a_layer():
+    assert _layer("backend/src/userRoutes.js") == 4 and _layer("backend/src/todoController.js") == 3
+    fastapi = ["backend/app/main.py", "backend/app/crud.py", "backend/app/database.py", "backend/app/models.py"]
+    ordered = [p.path for p in _ordered([_Planned(path=p) for p in fastapi])]
+    assert ordered[0] == "backend/app/models.py" and ordered[-1] == "backend/app/main.py"
+
+
+def test_one_stray_import_doesn_t_put_the_entry_file_first():
+    planned = [_Planned(path="backend/main.js"), _Planned(path="backend/app/routes/todos.js"),
+               _Planned(path="backend/app/models/todo.js", imports=["backend/app/routes/todos.js"])]
+    assert [p.path for p in _ordered(planned)][-1] == "backend/main.js"
+
+
+def test_typescript_and_config_files_aren_t_held_to_commonjs():
+    output = {"files": [
+        {"path": "backend/src/types.ts", "code": "export interface Todo { id: string }\n"},
+        {"path": "backend/jest.config.js", "code": "export default {};\n"},
+    ]}
+    assert violations(JS, "backend_engineer", output) == []
+    esm = Charter.from_dict({**JS.as_dict(), "module_format": "esm"})
+    assert violations(esm, "backend_engineer", {"files": [{"path": "backend/knexfile.js", "code": "module.exports = {};\n"}]}) == []
+
+
+def test_a_language_implied_by_the_frontend_fixes_no_backend_format():
+    design = {"tech_stack": {"backend": ["Fastify"], "frontend": ["Next.js"]}}
+    assert freeze(design).module_format is None
+
+
+def test_the_ask_again_names_a_source_file_as_the_entry():
+    agent = BackendEngineerAgent()
+    plan = {"files": [{"path": "index.html"}, {"path": "src/index.css"}, {"path": "src/main.tsx"}, {"path": "src/App.tsx"}]}
+    [problem] = agent.plan_problems(plan, AgentContext(idea="x"))
+    assert "`src/main.tsx`" in problem and "index.html" not in problem

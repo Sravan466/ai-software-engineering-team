@@ -984,6 +984,15 @@ def _scaffold_node_backend(
             + ("ES modules, so files using `require` will need converting." if module_type == "module"
                else "CommonJS, so files using `import` will need converting.")
         )
+    elif module_format in ("esm", "commonjs") and (esm if module_type == "commonjs" else cjs):
+        # The code is all in the other format: the charter still decides (#103), and
+        # each of those files is a stack problem the fix loop names — said here too.
+        sc.notes.append(
+            "The backend is set up as "
+            + ("CommonJS, as the stack fixed, but its files use `import`: they need converting before it starts."
+               if module_type == "commonjs" else
+               "ES modules, as the stack fixed, but its files use `require`: they need converting before it starts.")
+        )
     base = {}
     framework = sc.backend_framework
     if framework == "express":

@@ -235,9 +235,10 @@ def test_the_loop_fixes_in_place_and_never_plans_again(client, monkeypatch):
     assert backend["handoff"]["fix"]["changed"] == ["backend/main.py"]
     code = {f["path"]: f["code"] for f in backend["output"]["files"]}
     assert code["backend/app/services.py"] == "def total(xs):\n    return sum(xs)\n"
-    # The plan's own order (main.py after the service it imports, #103), unchanged by the fix.
-    assert [f["path"] for f in backend["output"]["files"]] == ["backend/app/services.py", "backend/main.py",
-                                                                "backend/app/models.py"]
+    # The order it was written in (models first, main.py after the service it imports,
+    # #103), unchanged by the fix.
+    assert [f["path"] for f in backend["output"]["files"]] == ["backend/app/models.py", "backend/app/services.py",
+                                                                "backend/main.py"]
 
 
 def test_an_edit_that_breaks_a_file_it_didnt_touch_is_put_back(monkeypatch, stub_router):

@@ -330,6 +330,10 @@ MODULE_FORMATS = {
 }
 
 
+#: Backend frameworks that run on Node.
+_NODE_FRAMEWORKS = frozenset({"express", "nestjs"})
+
+
 def module_format_for(language: Optional[str]) -> Optional[str]:
     """CommonJS for a JavaScript backend, ES modules for a TypeScript one.
 
@@ -349,11 +353,18 @@ _CJS = re.compile(r"\brequire\(\s*['\"]|\bmodule\.exports\b|^\s*exports\.\w+\s*=
 
 
 def module_format_of(content: str) -> Optional[str]:
-    """`esm` or `commonjs` for a file written in one of them; None for neither (or both)."""
+    """`esm` or `commonjs` for a file written in one of them, `mixed` for one using both
+    — the file that stops a backend starting — and None for neither."""
     esm, cjs = bool(_ESM.search(content or "")), bool(_CJS.search(content or ""))
-    if esm == cjs:
-        return None
-    return "esm" if esm else "commonjs"
+    if esm and cjs:
+        return "mixed"
+    if esm or cjs:
+        return "esm" if esm else "commonjs"
+    return None
+
+
+#: Config files the tools read in their own format, whatever the backend's.
+_CONFIG = re.compile(r"(^|/)(\.[^/]+|[^/]+\.config\.[a-z]+|knexfile\.[a-z]+|gulpfile\.[a-z]+|gruntfile\.[a-z]+)$", re.I)
 
 
 # ── freezing one ─────────────────────────────────────────────────────────────
@@ -495,9 +506,15 @@ def freeze(
     token = database.token if database else None
     used = tuple(dict.fromkeys(i for i in integrations if integration_registry.get(i)))
     language = chosen.get("language")
+    framework = chosen.get("backend_framework")
+    # The backend's own language, or a Node framework's: a language some other choice
+    # implied (Next.js implies TypeScript) says nothing about a backend's modules.
+    node_backend = bool(framework and framework.token in _NODE_FRAMEWORKS) or bool(
+        language and language.source != SOURCE_IMPLIED
+    )
     charter = Charter(
         chosen, provider, _env(token, provider, used), provider, used,
-        module_format_for(language.token if language else None),
+        module_format_for(language.token if language and node_backend else None),
     )
     log.info(
         "Stack charter frozen — %s%s",
@@ -564,15 +581,25 @@ def _wrong_format(expected: str, output: object) -> list[str]:
 
     other = "esm" if expected == "commonjs" else "commonjs"
     said = {"esm": "`import`/`export`", "commonjs": "`require`/`module.exports`"}
+    name = MODULE_FORMATS[expected].split(" — ")[0]
+    # TypeScript compiles `import` away, so only JavaScript is held to CommonJS.
+    held = (".js",) if expected == "commonjs" else (".js", ".ts")
     out = []
     for path, content, _lang in iter_files(output if isinstance(output, dict) else {}):
-        if not path.endswith((".js", ".ts")) or _is_test(path):
+        if not path.endswith(held) or _is_test(path) or _CONFIG.search(path):
             continue
-        if module_format_of(content) == other:
+        found = module_format_of(content)
+        if found == other:
             out.append(
                 f"`{path}` — uses {said[other]} where the stack charter says the backend is "
-                f"{MODULE_FORMATS[expected].split(' — ')[0]} ({said[expected]}). Rewrite its "
-                f"imports and exports in {said[expected]}; a backend that mixes the two doesn't start."
+                f"{name} ({said[expected]}). Rewrite its imports and exports in {said[expected]}; "
+                "a backend that mixes the two doesn't start."
+            )
+        elif found == "mixed":
+            out.append(
+                f"`{path}` — uses both {said['esm']} and {said['commonjs']}, and the stack charter says "
+                f"the backend is {name}. Write all of it in {said[expected]}: a file that mixes the two "
+                "doesn't start."
             )
     return out
 

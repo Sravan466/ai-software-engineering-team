@@ -59,7 +59,7 @@ from app.build import layout, placeholders
 from app.build.check import BuildCheck, Problem, file_problems
 from app.core.artifacts import NOTE_KIND
 from app.core.config import settings
-from app.core.constants import BuildStatus, SchemaStatus
+from app.core.constants import BuildStatus, Phase, SchemaStatus
 from app.core.logging import get_logger
 from app.core.reading import CodeBlock, code_blocks, json_object
 from app.orchestration import activity, claim
@@ -250,7 +250,11 @@ class CodePhaseAgent(BaseAgent):
         if len(listed) >= 3 and not any(_strings(f.get("imports")) for f in listed):
             # The plan never says which file uses which (#103): the entry file is then
             # written first and blind, guessing names the files after it never export.
-            entry = next((str(f.get("path")) for f in listed if _layer(str(f.get("path") or "")) == _ENTRY), None)
+            entry = next(
+                (str(f.get("path")) for f in listed
+                 if str(f.get("path") or "").endswith(_SOURCE_EXT) and _layer(str(f.get("path") or "")) == _ENTRY),
+                None,
+            )
             return [
                 "`files` — no file lists its `imports`. Give each file the plan paths it imports"
                 + (f", `{entry}` most of all: it uses the others" if entry else "")
@@ -1689,8 +1693,8 @@ class _Run:
         instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
         if instruction:
             out.append(instruction)
-        fmt = getattr(self.ctx.charter, "module_format", None) if self.ctx.charter is not None else None
-        if fmt and self.agent.key == "backend_engineer":
+        fmt = getattr(self.ctx.charter, "module_format", None)
+        if fmt and self.agent.key == Phase.BACKEND_ENGINEER.value:
             out.append(
                 "Write CommonJS: `require(...)` and `module.exports`, never `import` or `export`."
                 if fmt == "commonjs" else
@@ -2122,8 +2126,10 @@ _LAYERS = (
      "utils", "util", "helpers", "helper", "lib"),
     ("services", "service", "providers", "provider", "hooks", "hook", "api", "clients", "client"),
     ("controllers", "controller", "handlers", "handler", "middleware", "middlewares", "components", "component"),
-    ("routes", "route", "routers", "router", "views", "view", "pages", "page", "app"),
+    ("routes", "route", "routers", "router", "views", "view", "pages", "page"),
 )
+#: What a plan names that is code, for the entry file an ask-again points at.
+_SOURCE_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py")
 _ENTRY = len(_LAYERS)
 _ENTRY_NAMES = ("main", "index", "app", "server")
 
@@ -2131,7 +2137,8 @@ _ENTRY_NAMES = ("main", "index", "app", "server")
 def _layer(path: str) -> int:
     """Where a file sits in the order a backend's files use each other: models first,
     the entry file (`main`, `index`, `app`, `server` at a side's root) last."""
-    parts = [p.lower() for p in layout.relative_to_side(layout.clean(path)).split("/")]
+    written = layout.relative_to_side(layout.clean(path)).split("/")
+    parts = [p.lower() for p in written]
     stem = parts[-1].split(".")[0] if parts else ""
     folders = parts[:-1]
     if stem in _ENTRY_NAMES and all(f in ("src", "app") for f in folders):
@@ -2140,8 +2147,8 @@ def _layer(path: str) -> int:
         for i, names in enumerate(_LAYERS):
             if folder in names:
                 return i
-    # `todo_service.js`, `userRoutes.js`: the layer is in the name.
-    words = re.findall(r"[a-z]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", parts[-1] if parts else "").lower())
+    # `todo_service.js`, `userRoutes.js`: the layer is in the name, as it was written.
+    words = re.findall(r"[a-z]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", written[-1] if written else "").lower())
     for word in reversed(words[:-1] if len(words) > 1 else words):
         for i, names in enumerate(_LAYERS):
             if word in names:
@@ -2150,19 +2157,19 @@ def _layer(path: str) -> int:
 
 
 def _ordered(files: list[_Planned]) -> list[_Planned]:
-    """Each file after the plan files it imports, where a cycle allows; else plan order.
+    """Each file after the plan files it imports, where a cycle allows.
 
-    A plan that lists no imports at all is ordered by layer instead (#103): models,
-    then data access, services, controllers, routes, and the entry file last — so every
-    file is written after the files it most likely uses, and is shown their real exports."""
-    if files and not any(p.imports for p in files):
-        return sorted(files, key=lambda p: _layer(p.path))
+    Where the plan doesn't say — no imports at all, or a file it says nothing about —
+    the layer decides (#103): models, then data access, services, controllers, routes,
+    and the entry file last, so every file is written after the files it most likely
+    uses, and is shown their real exports. Plan order breaks a tie."""
+    rank = {p.path: (_layer(p.path), i) for i, p in enumerate(files)}
     out: list[_Planned] = []
     done: set[str] = set()
     pending = list(files)
     while pending:
-        ready = next((p for p in pending if all(i in done for i in p.imports)), None)
-        nxt = ready or pending[0]
+        ready = [p for p in pending if all(i in done for i in p.imports)]
+        nxt = min(ready or pending, key=lambda p: rank[p.path])
         pending.remove(nxt)
         out.append(nxt)
         done.add(nxt.path)
