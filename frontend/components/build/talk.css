@@ -26,6 +26,7 @@
   box-shadow: none;
 }
 .talk.is-embedded:focus-within { box-shadow: none; }
+.decision-act .talk.is-embedded { margin-bottom: 12px; }
 .talk.is-embedded .finish-label { padding-top: 13px; font-size: var(--t-base); }
 
 /* ── the conversation ── */
@@ -161,6 +162,9 @@
   .talk-thread { padding: 12px 14px 10px; max-height: min(52vh, 420px); }
   .talk-you { max-width: 92%; }
   .talk-meta { padding-left: 0; }
+  /* A quick question sends on a tap: a full touch target, like every button here. */
+  .talk .finish-examples .example { min-height: 44px; }
+  .talk-reread { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

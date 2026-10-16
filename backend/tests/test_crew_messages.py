@@ -97,9 +97,32 @@ def _say(client, pid: str, text: str) -> dict:
     ("skip voice input", "note"),
     ("Whatever you do, keep it simple", "note"),
     ("frontend: use a purple theme", "note"),
+    # Asking for something to be done is a note, question mark or not…
+    ("Can you keep all the routes in one file", "note"),
+    ("could you make it purple?", "note"),
+    # …unless what it asks for is to be told something.
+    ("can you tell me what's left", "question"),
 ])
 def test_a_message_is_a_question_by_its_words_alone(text, kind):
     assert crew_chat.classify(text) == kind
+
+
+@pytest.mark.parametrize("text,status", [
+    ("what are you doing?", True),
+    ("Why did it stop?", True),
+    ("Who's next?", True),
+    ("What are you waiting for?", True),
+    ("how long will it take?", True),
+    ("has the frontend started?", True),
+    ("which model are you on?", True),
+    # About the app, not the build: a model answers, with the build's record beside it.
+    ("What file has the login form?", False),
+    ("How long do login sessions last?", False),
+    ("Can you add dark mode now?", False),
+    ("will it work on phones?", False),
+])
+def test_only_a_question_about_the_build_is_answered_from_its_record(text, status):
+    assert crew_chat.is_status(text) is status
 
 
 # ── questions answered at once ───────────────────────────────────────────────
@@ -203,6 +226,14 @@ def test_a_model_that_fails_says_so_and_the_question_is_declined(monkeypatch, ca
     assert "Connection refused" in last["replies"][-1]["text"]
 
 
+def test_three_questions_can_wait_on_a_model_and_a_fourth_is_turned_away(monkeypatch, client):
+    monkeypatch.setattr(crew_chat, "spawn", lambda fn, *args: None)  # the model never gets to them
+    pid = _running_backend(client)
+    said = [_say(client, pid, f"will it work on phone {i}?") for i in range(4)]
+    assert [m["status"] for m in said] == ["queued", "queued", "queued", "declined"]
+    assert "still on your last questions" in said[-1]["replies"][0]["text"]
+
+
 def test_questions_left_by_a_restart_are_settled(client):
     pid = _build(client, status=PipelineStatus.RUNNING.value)
     with SessionLocal() as db:
@@ -227,9 +258,9 @@ def test_a_note_waits_for_the_agents_that_havent_started(calls, client):
 
 def test_a_note_for_one_agent_says_so(calls, client):
     pid = _running_backend(client)
-    assert _say(client, pid, "frontend: use a purple theme")["replies"][0]["text"] == (
-        "Got it. Frontend Engineer hasn't started, so it gets this note when it starts."
-    )
+    m = _say(client, pid, "frontend: use a purple theme")
+    assert m["replies"][0]["text"] == "Got it. Frontend Engineer hasn't started, so it gets this note when it starts."
+    assert m["agent"] == "frontend_engineer", "who it waits for is kept on the message"
 
 
 def test_a_note_on_a_stuck_build_is_keep_trying_with_it(calls, client):
@@ -257,6 +288,25 @@ def test_a_note_on_a_stuck_build_is_keep_trying_with_it(calls, client):
         project = db.get(Project, pid)
         assert project.status == PipelineStatus.RUNNING.value
         assert project.auto_fix["tracks"]["build:backend_engineer"]["note"] == "keep all the routes in one file"
+
+
+def test_a_note_with_nothing_left_to_fix_waits_like_any_other(calls, client):
+    # Stuck on security, with every serious finding waived: the card says "Continue the
+    # build", and no fix round would read a note.
+    data = {"tracks": {"security": {
+        "allowed": 3, "resumed_after": 0, "episode_start": 0, "accepted": None,
+        "rounds": [{"n": 1, "strategy": "with_code", "phases": ["backend_engineer"], "episode": 0,
+                    "problems": [{"key": "a"}], "fixed": [], "remaining": ["a"]}],
+        "stopped": {"reason": autofix.STOP_NO_PROGRESS, "left": 1, "keys": ["a"]},
+    }}}
+    pid = _build(client, status=PipelineStatus.AWAITING_APPROVAL.value, gate_kind=GateKind.NEEDS_HELP.value,
+                 current_phase="cost_estimation", auto_fix=data)
+    m = _say(client, pid, "use postgres")
+    assert m["status"] == "queued"
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        assert project.status == PipelineStatus.AWAITING_APPROVAL.value, "a note claimed a round nobody runs"
+        assert "note" not in project.auto_fix["tracks"]["security"]
 
 
 def test_a_note_on_a_finished_build_points_at_the_change_box(calls, client):

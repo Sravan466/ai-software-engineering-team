@@ -18,7 +18,7 @@ import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
 import SecurityFindings, { ruleName } from "./SecurityFindings";
 import { ReasonKinds } from "./ReasonKinds";
-import { CrewTalk } from "./CrewTalk";
+import { CrewTalk, readsAsQuestion } from "./CrewTalk";
 
 /**
  * The crew fixing its own serious problems (#50).
@@ -566,8 +566,16 @@ export function NeedsHelp({
   // Only when the record says adding a model is what would help: nothing stronger to
   // reach and no cloud key at all. A build stopped before this was recorded says nothing.
   const nothingStronger = !cloud && codeTracks.some(([, t]) => t.stopped?.add_model === true);
-  const retry = (model?: string) =>
-    act(() => api.keepTrying(id, { note: note.trim() || undefined, model }));
+  // The box's draft goes with Try again only when it reads as a note: a half-typed
+  // question is not an instruction for the next round. A note goes as a message, so the
+  // conversation shows it was sent; a cloud round takes it along as before.
+  const draftNote = !nothingToFix && note.trim() && !readsAsQuestion(note) ? note.trim() : undefined;
+  const retry = async (model?: string) => {
+    const ok = await act(() =>
+      draftNote && !model ? api.sendMessage(id, draftNote) : api.keepTrying(id, { note: draftNote, model }),
+    );
+    if (ok && draftNote) setNote("");
+  };
 
   return (
     <div className="help">
@@ -626,7 +634,16 @@ export function NeedsHelp({
       <div className="decision-act">
         {/* The build page's one box (#102): a note here starts the next round with it,
             a question is answered straight away. The cloud button sends the draft too. */}
-        <CrewTalk project={project} id={id} busy={busy} act={act} place="stuck" text={note} setText={setNote} />
+        <CrewTalk
+          project={project}
+          id={id}
+          busy={busy}
+          act={act}
+          place={nothingToFix ? "gate" : "stuck"}
+          embedded
+          text={note}
+          setText={setNote}
+        />
         <div className="decision-approve">
           <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}

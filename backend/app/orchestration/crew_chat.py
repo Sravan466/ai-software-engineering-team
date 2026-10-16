@@ -48,14 +48,20 @@ TEXT_MAX = 2000
 RECENT = 12
 
 _ASKS = frozenset({"what", "why", "when", "how", "where", "who", "is", "are", "can", "will", "status"})
+#: "Can you keep all the routes in one file" asks for something to be done: a note, with
+#: or without a question mark — unless what it asks for is to be told something.
+_REQUEST = re.compile(r"^(can|could|will|would)\s+(you|we|the crew)\s+(?!tell|explain|say|show|describe|confirm|check|let me know)\w")
 
 
 def classify(text: str) -> str:
     """`question` or `note`, from the words alone."""
     said = text.strip()
+    low = said.lower()
+    if _REQUEST.match(low):
+        return NOTE
     if said.endswith("?"):
         return QUESTION
-    first = re.match(r"[a-z]+", said.lower())
+    first = re.match(r"[a-z]+", low)
     return QUESTION if first and first.group(0) in _ASKS else NOTE
 
 
@@ -309,18 +315,35 @@ def why_stuck(project: Project) -> Optional[str]:
 
 
 # ── the answer ────────────────────────────────────────────────────────────────
-#: Words that make a question one about the build's progress, answered from its record.
-_STATUS_WORDS = frozenset({
-    "doing", "status", "progress", "happening", "working", "going", "now", "step", "phase", "file", "files",
-    "done", "finished", "finish", "left", "round", "rounds", "slow", "update", "next", "after", "long", "longer",
-    "eta", "soon", "waiting", "wait", "stopped", "paused", "stuck", "wrong", "problem", "problems", "error",
-    "errors", "fail", "failed", "failing", "broken", "fix", "fixing", "model", "models", "llm", "started", "start",
-})
+#: What makes a question one about the build itself, answered from its record. Phrases,
+#: not single words: "What file has the login form?" is about the app, and a question
+#: about the app goes to a model, which is given the same record besides.
+_STATUS = re.compile(
+    "|".join(
+        (
+            r"\b(status|progress|eta|stuck)\b",
+            r"\b(doing|happening|going on|working on|up to|writing)\b",
+            r"\bwhat'?s up\b",
+            r"\bhow('?s| is| are) (it|things|the build|everything)( going)?\b",
+            r"\bwhere (are|is) (you|we|it|things|the build)\b",
+            r"\bhow (long (will|until|till|before|left|is (it|this|the build)|does (it|this|the build))|much longer)\b",
+            r"\bwhen (will|does|do|is) (it|you|this|the build|the crew)\b",
+            r"\b(who|what)('?s| is) next\b|\bwho('?s| is) (working|on it)\b",
+            r"\bwaiting (for|on)\b",
+            r"\b(which|what) (ai |local |cloud )?models?\b",
+            r"\bwhy (did|has|is|does) (it|the build|you|the crew|everything) (stop|stopped|fail|failed|failing|pause|paused|slow|stuck)\b",
+            r"\bwhat (went|is|'s) wrong\b|\bwhat'?s wrong\b",
+            r"\b(is|are) (it|you|the build|the crew) (done|finished|ready|running|working|stuck|stopped)\b",
+            r"\bfix (round|rounds)\b|\bwhich round\b",
+        )
+    )
+)
+#: The same, about one agent: "has the frontend started?", "is the backend done?".
+_PHASE_STATE = re.compile(r"\b(start|started|starting|finish|finished|done|ready|running|working|begun)\b")
 _STUCK_WORDS = frozenset({
     "stuck", "wrong", "problem", "problems", "error", "errors", "fail", "failed", "failing", "broken", "fix",
     "fixing",
 })
-_STATUS_PHRASES = re.compile(r"\bwhat'?s up\b|\bup to\b|\bwhere (are|is) (you|we|it|things)\b|\bhow('?s| is| are) (it|things)\b")
 
 
 def _words(text: str) -> set[str]:
@@ -329,7 +352,8 @@ def _words(text: str) -> set[str]:
 
 def is_status(text: str) -> bool:
     """Whether the build's own record answers this question."""
-    return bool(_words(text) & _STATUS_WORDS) or bool(_STATUS_PHRASES.search(text.lower()))
+    low = text.lower()
+    return bool(_STATUS.search(low)) or (named_phase(text) is not None and bool(_PHASE_STATE.search(low)))
 
 
 _GATE_WAIT = {
@@ -553,10 +577,6 @@ ASK_NOW = "Asking the crew."
 #: returns at once; tests run it inline.
 spawn: Callable[..., None] = lambda fn, *args: threading.Thread(target=fn, args=args, daemon=True, name="crew-answer").start()
 
-#: Questions being answered by this process, so a restart's leftovers can be told apart.
-_asking: set[str] = set()
-_asking_lock = threading.Lock()
-
 _SYSTEM = (
     "You are the crew of an AI software engineering team, building the app described "
     "below for the person you're talking to. Answer their question in two or three plain "
@@ -598,8 +618,6 @@ def ask_model(project_id: str, message_id: str) -> None:
     from app.router.router import router
     from app.schemas.llm import ChatMessage, GenerationOptions
 
-    with _asking_lock:
-        _asking.add(message_id)
     db = SessionLocal()
     try:
         project = db.get(Project, project_id)
@@ -644,8 +662,6 @@ def ask_model(project_id: str, message_id: str) -> None:
         except Exception:  # noqa: BLE001
             db.rollback()
     finally:
-        with _asking_lock:
-            _asking.discard(message_id)
         db.close()
 
 
@@ -659,24 +675,21 @@ def _reason(e: Exception) -> str:
 
 
 def settle_orphans(db: Session) -> int:
-    """Questions a previous run of this server was answering when it stopped: say so."""
-    with _asking_lock:
-        live = set(_asking)
+    """At startup: questions the last run of this server was answering when it stopped.
+
+    The app is one process — a build's run is a thread in it, and so is every answer
+    (`activity` and the claim make the same assumption) — so at startup none is live."""
     found = db.execute(
         select(CrewMessage).where(
             CrewMessage.author == PERSON, CrewMessage.kind == QUESTION, CrewMessage.status == QUEUED
         )
     ).scalars().all()
-    n = 0
     for m in found:
-        if m.id in live:
-            continue
         reply(db, m, "The server restarted before the crew could answer. Ask again.")
         m.status = DECLINED
-        n += 1
-    if n:
+    if found:
         db.commit()
-    return n
+    return len(found)
 
 
 __all__ = [

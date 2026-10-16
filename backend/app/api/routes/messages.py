@@ -21,7 +21,7 @@ from app.api.routes.projects import _drive, _refuse_credentials, start_keep_tryi
 from app.core.constants import GateKind, PipelineStatus
 from app.db.base import get_db
 from app.db.models import CrewMessage, Project
-from app.orchestration import autofix, crew_chat
+from app.orchestration import autofix, crew_chat, remediation
 from app.schemas.project import MessageCreate, MessageReread
 
 router = APIRouter(prefix="/api/projects", tags=["messages"])
@@ -41,15 +41,27 @@ def _stuck(project: Project) -> bool:
     )
 
 
+def _something_to_fix(db: Session, project: Project) -> bool:
+    """Whether a fix round would read a note: a stuck code or test track, or a security
+    one with a serious finding still open. With every finding waived the card says
+    "Continue the build" — a note then waits like any other."""
+    data = autofix.load(project)
+    for name in autofix.stuck(data):
+        if name != autofix.SECURITY or remediation.unresolved(db, project, serious=True):
+            return True
+    return False
+
+
 def _keep_trying(db: Session, project: Project, kind: str, text: str) -> Optional[Kept]:
     """A note on a stuck build sets it going again with the note — claimed before the
     message is kept, because the claim commits: one that's refused keeps nothing."""
-    if kind != crew_chat.NOTE or not _stuck(project):
+    if kind != crew_chat.NOTE or not _stuck(project) or not _something_to_fix(db, project):
         return None
     return start_keep_trying(db, project, note=text)
 
 
-def _waiting_on_model(db: Session, project: Project) -> int:
+def _waiting_on_model(db: Session, project: Project, besides: str) -> int:
+    """Questions already waiting on a model — not counting the one being asked."""
     return int(
         db.execute(
             select(func.count()).select_from(CrewMessage).where(
@@ -57,6 +69,7 @@ def _waiting_on_model(db: Session, project: Project) -> int:
                 CrewMessage.author == crew_chat.PERSON,
                 CrewMessage.kind == crew_chat.QUESTION,
                 CrewMessage.status == crew_chat.QUEUED,
+                CrewMessage.id != besides,
             )
         ).scalar()
         or 0
@@ -69,16 +82,18 @@ def _question(db: Session, project: Project, asked: CrewMessage) -> bool:
         text, agent = crew_chat.status_answer(project, asked.text)
         crew_chat.reply(db, asked, text, agent)
         asked.status = crew_chat.ANSWERED
+        asked.agent = agent
         return False
-    if _waiting_on_model(db, project) >= MAX_WAITING:
+    if _waiting_on_model(db, project, besides=asked.id) >= MAX_WAITING:
         crew_chat.reply(db, asked, "The crew is still on your last questions. Ask this one once they're answered.")
         asked.status = crew_chat.DECLINED
+        asked.agent = None
         return False
     busy = project.status == PipelineStatus.RUNNING.value and not project.stalled
-    crew_chat.reply(
-        db, asked, crew_chat.WAIT_FOR_MODEL if busy else crew_chat.ASK_NOW, project.current_phase if busy else None
-    )
+    agent = project.current_phase if busy else None
+    crew_chat.reply(db, asked, crew_chat.WAIT_FOR_MODEL if busy else crew_chat.ASK_NOW, agent)
     asked.status = crew_chat.QUEUED
+    asked.agent = agent
     return True
 
 
@@ -94,16 +109,20 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
             phases[0] if phases else project.current_phase,
         )
         asked.status = crew_chat.APPLIED
+        asked.agent = phases[0] if phases else project.current_phase
         asked.applied_to = phases or None
         asked.applied_at = crew_chat.now()
         return
     if project.status == PipelineStatus.COMPLETED.value:
         crew_chat.reply(db, asked, "The build is finished. Say what should change, and the crew edits the app.")
         asked.status = crew_chat.DECLINED
+        asked.agent = None
         return
     text, agent, _for = crew_chat.note_reply(project, asked.text)
     crew_chat.reply(db, asked, text, agent)
     asked.status = crew_chat.QUEUED
+    # Who it waits for, as it is read now — a reread's earlier reply named someone else.
+    asked.agent = agent
 
 
 def _settle(

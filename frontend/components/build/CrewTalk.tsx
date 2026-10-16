@@ -52,12 +52,16 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
 };
 
 const ASKS = new Set(["what", "why", "when", "how", "where", "who", "is", "are", "can", "will", "status"]);
+/** "Can you keep all the routes in one file" asks for something done: a note. */
+const REQUEST = /^(can|could|will|would)\s+(you|we|the crew)\s+(?!tell|explain|say|show|describe|confirm|check|let me know)\w/;
 
-/** How the crew will read it — the server's rule, for the button's word. */
+/** How the crew will read it — the server's rule (`crew_chat.classify`), for the button's word. */
 export function readsAsQuestion(text: string): boolean {
   const said = text.trim();
+  const low = said.toLowerCase();
+  if (REQUEST.test(low)) return false;
   if (said.endsWith("?")) return true;
-  const first = /^[a-z]+/.exec(said.toLowerCase());
+  const first = /^[a-z]+/.exec(low);
   return !!first && ASKS.has(first[0]);
 }
 
@@ -96,7 +100,8 @@ function stateOf(m: CrewMessage): { word: string; tone: "ok" | "run" | "warn" | 
     case "declined":
       return { word: "Not sent", tone: "plain" };
     default: {
-      const who = m.replies.find((r) => r.agent)?.agent;
+      // Who it waits for as it's read now; the newest reply's, for a message from before that was kept.
+      const who = m.agent ?? [...m.replies].reverse().find((r) => r.agent)?.agent;
       return { word: who ? `Waiting for ${roleOf(who)}` : "Waiting", tone: "run" };
     }
   }
@@ -138,6 +143,7 @@ export function CrewTalk({
   busy,
   act,
   place,
+  embedded = false,
   text: heldText,
   setText: setHeldText,
 }: {
@@ -146,6 +152,8 @@ export function CrewTalk({
   busy: boolean;
   act: Act;
   place: TalkPlace;
+  /** Inside a card (the stuck one): the card's field, not a surface of its own. */
+  embedded?: boolean;
   /** The draft, when the card around the box needs to read it. */
   text?: string;
   setText?: (text: string) => void;
@@ -177,7 +185,7 @@ export function CrewTalk({
   const submitLabel = asks === null ? "Send" : asks ? "Ask" : place === "stuck" ? "Try again with this note" : "Send note";
 
   return (
-    <section className={`talk${place === "stuck" ? " is-embedded" : ""}`} aria-label="Talk to the crew">
+    <section className={`talk${embedded ? " is-embedded" : ""}`} aria-label="Talk to the crew">
       {thread.length > 0 && (
         <ol ref={list} className="talk-thread" aria-live="polite" aria-relevant="additions" aria-label="Your messages to the crew">
           {thread.map((m) => {

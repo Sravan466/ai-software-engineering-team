@@ -1759,9 +1759,6 @@ a.finding-cwe:focus-visible,
 /* What the person told the crew to try, on the round it went to. */
 .ledger-note { font-size: var(--t-xs); color: var(--ink-2); overflow-wrap: anywhere; }
 .ledger-model { color: var(--ink-2); font-size: var(--t-xs); overflow-wrap: anywhere; }
-/* "Tell the crew what to try": a real label, room for a sentence or two. */
-.help-note { display: flex; flex-direction: column; gap: 6px; max-width: 72ch; margin-bottom: 12px; }
-.help-note .textarea { min-height: 64px; }
 .help-model { padding: 0 18px; }
 .help-model a { color: var(--accent); text-underline-offset: 3px; }
 .help-more-body { animation: rise var(--tr-slow) both; }
