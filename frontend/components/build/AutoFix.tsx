@@ -80,6 +80,12 @@ export function approach(track: string, strategy: AutoFixRound["strategy"], roun
   if (round?.basis === "asked") return `${base.split(",")[0]}, on the model you chose for this fix`;
   if (round?.basis === "asked_unreached") return `${base.split(",")[0]}. The model you chose couldn't be reached`;
   if (round?.basis === "escalated_unreached") return `${base.split(",")[0]}. The stronger model couldn't be reached`;
+  if (strategy === "stronger_model" && track.startsWith("build:") && round && round.fixed != null && !("basis" in round)) {
+    // A code round closed before rounds said what they ran on (#103): it was sent for
+    // a stronger model, and on a one-model account it ran on the same one. Say what
+    // the loop asked for, not what it can't know ran.
+    return `${base.split(",")[0]}, sent for a stronger model (which one ran wasn't recorded)`;
+  }
   return base;
 }
 
