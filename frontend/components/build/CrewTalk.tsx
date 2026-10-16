@@ -99,6 +99,13 @@ function stateOf(m: CrewMessage): { word: string; tone: "ok" | "run" | "warn" | 
     if (m.status === "declined") return { word: "Not answered", tone: "plain" };
     return { word: "Answered", tone: "ok" };
   }
+  // What it does to finished work comes first while it's pending; once it's made (or not),
+  // the note's delivery says the rest.
+  if (m.change === "checking") return { word: "Checking finished work", tone: "run" };
+  if (m.change === "scheduled") {
+    const who = (m.touched ?? []).map(roleOf);
+    return { word: who.length ? `Changes ${listOf(who)} after this step` : "Change after this step", tone: "warn" };
+  }
   switch (m.status) {
     case "applied": {
       // Each agent it's for takes it in turn (#102): the first few by name, then a count.
@@ -106,16 +113,11 @@ function stateOf(m: CrewMessage): { word: string; tone: "ok" | "run" | "warn" | 
       const named = roles.length > 3 ? `${roles.slice(0, 2).join(", ")} and ${roles.length - 2} more` : listOf(roles);
       return { word: roles.length ? `Applied to ${named}` : "Applied", tone: "ok" };
     }
-    case "scheduled": {
-      const who = (m.touched ?? []).map(roleOf);
-      return { word: who.length ? `Changes ${listOf(who)} after this step` : "Change after this step", tone: "warn" };
-    }
     case "cancelled":
       return { word: "Cancelled", tone: "plain" };
     case "declined":
       return { word: "Not sent", tone: "plain" };
     default: {
-      if (m.checking) return { word: "Checking finished work", tone: "run" };
       // Who it waits for as it's read now; the newest reply's, for a message from before that was kept.
       const who = m.agent ?? [...m.replies].reverse().find((r) => r.agent)?.agent;
       return { word: who ? `Waiting for ${roleOf(who)}` : "Waiting", tone: "run" };
@@ -249,14 +251,24 @@ export function CrewTalk({
                     {state.word}
                   </span>
                   <span className="talk-read">Read as a {m.kind}</span>
-                  {m.kind === "note" && (m.status === "scheduled" || m.status === "queued") && (
+                  {m.kind === "note" && m.change === "scheduled" && (
+                    <button
+                      type="button"
+                      className="talk-reread talk-cancel"
+                      disabled={busy}
+                      onClick={() => act(() => api.cancelMessage(id, m.id, { change: true }))}
+                    >
+                      Cancel the change
+                    </button>
+                  )}
+                  {m.kind === "note" && m.status === "queued" && (
                     <button
                       type="button"
                       className="talk-reread talk-cancel"
                       disabled={busy}
                       onClick={() => act(() => api.cancelMessage(id, m.id))}
                     >
-                      {m.status === "scheduled" ? "Cancel the change" : "Take back"}
+                      Take back
                     </button>
                   )}
                   {canReread && (

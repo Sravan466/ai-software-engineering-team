@@ -92,10 +92,10 @@ def _thread(client, pid: str) -> list[dict]:
 def _schedule(pid: str, text: str = NOTE) -> str:
     """A note the planner already read: it changes the Backend's finished work."""
     with SessionLocal() as db:
-        m = CrewMessage(project_id=pid, author="person", text=text, kind="note", status="scheduled", meant_for=[],
+        m = CrewMessage(project_id=pid, author="person", text=text, kind="note", status="queued", meant_for=[],
                         plan={"summary": "Take login out", "phases": ["backend_engineer"],
                               "files_likely": ["backend/app/routes.py"], "needs_design": False,
-                              "needs_db_change": False, "touched": ["backend_engineer"]})
+                              "needs_db_change": False, "touched": ["backend_engineer"], "state": "scheduled"})
         db.add(m)
         db.commit()
         return m.id
@@ -127,7 +127,7 @@ def test_a_note_that_changes_the_backend_edits_it_after_the_frontend_and_the_bui
     assert "qa_engineer" in roles[edit_at:], "the build didn't carry on after the change"
 
     [m] = _thread(client, pid)
-    assert m["status"] == "applied" and "backend_engineer" in m["applied_to"]
+    assert m["change"] == "applied" and "backend_engineer" in m["applied_to"]
     assert m["replies"][-1]["text"] == "Changing it now: Backend Engineer starts on its finished work."
     with SessionLocal() as db:
         assert db.get(Project, pid).status == PipelineStatus.COMPLETED.value
@@ -140,7 +140,7 @@ def test_a_change_taken_back_before_it_starts_changes_nothing(script, client):
     def during_frontend(role, wanted):
         if role == "frontend_engineer" and wanted and script.before:
             mid = _schedule(pid)
-            r = client.post(f"/api/projects/{pid}/messages/{mid}/cancel")
+            r = client.post(f"/api/projects/{pid}/messages/{mid}/cancel", json={"change": True})
             assert r.status_code == 200, r.text
             script.before = None
 
@@ -149,8 +149,8 @@ def test_a_change_taken_back_before_it_starts_changes_nothing(script, client):
     through_question_gates(client, pid)
     assert not any(c["edit_plan"] for c in script.calls), "a cancelled change still ran"
     [m] = _thread(client, pid)
-    assert m["status"] == "cancelled" and m["replies"][-1]["text"] == "Cancelled. Nothing was changed."
-    assert client.post(f"/api/projects/{pid}/messages/{m['id']}/cancel").status_code == 409
+    assert m["change"] == "cancelled" and m["replies"][-1]["text"] == "Cancelled the change. Nothing finished was changed."
+    assert client.post(f"/api/projects/{pid}/messages/{m['id']}/cancel", json={"change": True}).status_code == 409
 
 
 # ── reading a note against finished work ─────────────────────────────────────
@@ -174,7 +174,9 @@ def test_a_note_that_touches_finished_work_is_scheduled_after_this_step(script, 
     m = client.post(f"/api/projects/{pid}/messages", json={"text": NOTE}).json()["message"]
     assert m["replies"][0]["text"].endswith("I'll also check whether it changes finished work after this step.")
     [m] = _thread(client, pid)
-    assert m["status"] == "scheduled" and m["touched"] == ["backend_engineer"] and not m["checking"]
+    assert m["change"] == "scheduled" and m["touched"] == ["backend_engineer"]
+    # Delivered to the phases still to come all the same: the change is apart from that.
+    assert m["status"] == "queued" and m["meant_for"]
     assert m["replies"][-1]["text"] == "Backend Engineer has already done that part, so it changes it after this step."
     [plan_call] = [c for c in script.calls if c["role"] == "planner"]
     assert NOTE in plan_call["prompt"] and "backend/app/routes.py" in plan_call["prompt"]
@@ -185,7 +187,7 @@ def test_a_note_about_work_still_to_come_changes_nothing_finished(script, client
     pid = _running_frontend(client)
     client.post(f"/api/projects/{pid}/messages", json={"text": "make it purple"})
     [m] = _thread(client, pid)
-    assert m["status"] == "queued" and m["touched"] == []
+    assert m["status"] == "queued" and m["change"] == "none" and m["touched"] == []
     assert m["replies"][-1]["text"] == "Checked: it doesn't change finished work."
 
 
@@ -206,3 +208,84 @@ def test_the_planner_naming_nothing_finished_is_not_guessed_into_a_change():
     by_file = crew_chat.touched_by({"phases": [], "files_likely": ["backend/app/controllers/bookController.js"]}, finished)
     assert by_file["touched"] == ["backend_engineer"]
     assert crew_chat.touched_by({"files_likely": ["frontend/pages/index.jsx"]}, finished)["touched"] == []
+
+
+# ── the change apart from the delivery ───────────────────────────────────────
+def test_the_check_holds_after_a_later_phase_has_taken_the_note(script, client):
+    pid = _running_frontend(client)
+    with SessionLocal() as db:
+        m = CrewMessage(project_id=pid, author="person", text=NOTE, kind="note", status="applied",
+                        meant_for=["frontend_engineer"], applied_to=["frontend_engineer"], plan={"state": "checking"})
+        db.add(m)
+        db.commit()
+        mid = m.id
+    crew_chat.scope_note(pid, mid)
+    with SessionLocal() as db:
+        assert crew_chat.change_state(db.get(CrewMessage, mid)) == "scheduled", "taken by Frontend, its change was dropped"
+
+
+def test_a_change_whose_first_edit_never_lands_waits_again(monkeypatch, script, client):
+    from app.router.base import ProviderError
+
+    pid = _project(client)
+    real = script.__call__
+
+    def failing(messages, **kwargs):
+        props = (getattr(kwargs.get("options"), "json_schema", None) or {}).get("properties") or {}
+        if kwargs.get("role") == "backend_engineer" and "deleted" in props:
+            raise ProviderError("Ollama failed: connection refused")
+        return real(messages, **kwargs)
+
+    stub(monkeypatch, "complete", failing)
+    sent: list[str] = []
+
+    def during_frontend(role, wanted):
+        if role == "frontend_engineer" and wanted and not sent:
+            sent.append(_schedule(pid))
+
+    script.before = during_frontend
+    client.post(f"/api/projects/{pid}/run")
+    project = through_question_gates(client, pid)
+    assert project["status"] == "failed"
+    [m] = _thread(client, pid)
+    assert m["change"] == "scheduled", "a change that never started was lost"
+    assert m["replies"][-1]["text"] == "The build stopped before the change was made. It's made when the build goes on."
+
+
+def test_a_change_still_waiting_when_the_build_finishes_is_missed(client):
+    pid = _project(client)
+    mid = _schedule(pid)
+    with SessionLocal() as db:
+        crew_chat.settle_unchanged(db, pid)
+        m = db.get(CrewMessage, mid)
+        assert crew_chat.change_state(m) == "missed"
+
+
+def test_a_notes_change_stops_being_live_once_its_edits_are_done():
+    from app.orchestration.runner import runner
+
+    held = {"note": ["x"], "edit": ["backend_engineer"], "done": []}
+    assert runner._live_change(None, held) is held
+    assert runner._live_change(None, {**held, "done": ["backend_engineer"]}) is None
+
+
+def test_a_check_cut_off_by_a_restart_says_so(client):
+    pid = _project(client)
+    with SessionLocal() as db:
+        m = CrewMessage(project_id=pid, author="person", text=NOTE, kind="note", status="queued", meant_for=[],
+                        plan={"state": "checking"})
+        db.add(m)
+        db.commit()
+        mid = m.id
+        crew_chat.settle_orphans(db)
+        m = db.get(CrewMessage, mid)
+        assert crew_chat.change_state(m) == "unchecked" and m.status == "declined"
+
+
+def test_taking_a_note_back_cancels_its_change_too(script, client):
+    pid = _running_frontend(client)
+    mid = _schedule(pid)
+    r = client.post(f"/api/projects/{pid}/messages/{mid}/cancel")
+    assert r.status_code == 200, r.text
+    m = r.json()["message"]
+    assert m["status"] == "cancelled" and m["change"] == "cancelled"

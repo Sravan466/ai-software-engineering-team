@@ -421,52 +421,44 @@ class PipelineRunner:
         carries on, the phases after it edited, re-run or re-checked as a change's rewind
         decides. No change request and no version: the build isn't finished. True when it
         started one (the redo has driven the run on)."""
-        due = crew_chat.scheduled(db, project.id)
-        if not due or changes.open_change(db, project) is not None:
+        if changes.open_change(db, project) is not None:
             return False
         with _checkpoint_lock(project.id):
             held = dict(graph.get_state(_config(project.id)).values).get("change")
-        if held and not (held.get("note") and set(held.get("edit") or []) <= set(held.get("done") or [])):
+        if held and self._live_change(db, held) is not None:
             return False  # a change is under way: these wait for it
-        done = crew_chat.finished_rows(db, project)
-        plan = changes.merge_plans([m.plan or {} for m in due])
-        first = changes.first_phase(plan, set(done))
-        if first is None:
+        with crew_chat.lock:
+            # Read, merged and claimed together: a Cancel is either before this or too late.
+            due = crew_chat.scheduled(db, project.id)
+            if not due:
+                return False
+            done = crew_chat.finished_rows(db, project)
+            plan = changes.merge_plans([m.plan or {} for m in due])
+            first = changes.first_phase(plan, set(done))
+            if first is None:
+                for m in due:
+                    m.plan = {**(m.plan or {}), "state": crew_chat.NO_CHANGE}
+                    crew_chat.reply(db, m, "Nothing finished writes what this changes, so nothing was changed.")
+                db.commit()
+                return False
+            edit = changes.edit_phases(plan, set(done))
             for m in due:
-                m.status = crew_chat.QUEUED if m.meant_for else crew_chat.DECLINED
-                crew_chat.reply(db, m, "Nothing finished writes what this changes, so nothing was changed.")
+                m.plan = {**(m.plan or {}), "state": crew_chat.APPLIED_CHANGE}
+                m.applied_to = list(dict.fromkeys([*(m.applied_to or []), *edit]))
+                crew_chat.reply(db, m, f"Changing it now: {crew_chat.title(first)} starts on its finished work.", first)
             db.commit()
-            return False
         ids = [m.id for m in due]
-        # Conditional, against a Cancel landing in the same moment.
-        claimed = db.execute(
-            update(CrewMessage)
-            .where(CrewMessage.id.in_(ids), CrewMessage.status == crew_chat.SCHEDULED)
-            .values(status=crew_chat.APPLIED, applied_at=_now())
-        ).rowcount
-        db.commit()
-        if not claimed:
-            return False
-        for m in due:
-            db.refresh(m)
-        # The ones this claimed: a Cancel may have taken some back first.
-        taken = [m for m in due if m.status == crew_chat.APPLIED]
-        edit = changes.edit_phases(plan, set(done))
         record = {
             "id": None,
-            "note": [m.id for m in taken],
+            "note": ids,
             "number": None,
-            "text": "\n".join(" ".join(m.text.split()) for m in taken),
+            "text": "\n".join(" ".join(m.text.split()) for m in due),
             "plan": plan,
             "decisions": changes.settled(list(project.decisions or changes.first_decisions(project, db)), 30),
             "edit": edit,
             "base": {phase: done[phase].output for phase in edit},
             "done": [],
         }
-        for m in taken:
-            m.applied_to = list(dict.fromkeys([*(m.applied_to or []), *edit]))
-            crew_chat.reply(db, m, f"Changing it now: {crew_chat.title(first)} starts on its finished work.", first)
-        db.commit()
         log.info("Note change on %s: %s first; editing %s", project.id, first, ", ".join(edit))
         self.redo(
             db,
@@ -477,6 +469,20 @@ class PipelineRunner:
             continue_after=True,
             start_change=record,
         )
+        db.refresh(project)
+        if project.status in (PipelineStatus.FAILED.value, PipelineStatus.CANCELLED.value, PipelineStatus.PAUSED.value):
+            with _checkpoint_lock(project.id):
+                landed = dict(graph.get_state(_config(project.id)).values).get("change") or {}
+            if landed.get("note") != ids or not landed.get("done"):
+                # The first edit never landed — a model error, a Stop. Waiting again, it is
+                # made when the build goes on.
+                with crew_chat.lock:
+                    for m in due:
+                        db.refresh(m)
+                        if crew_chat.change_state(m) == crew_chat.APPLIED_CHANGE:
+                            m.plan = {**(m.plan or {}), "state": crew_chat.SCHEDULED_CHANGE}
+                            crew_chat.reply(db, m, "The build stopped before the change was made. It's made when the build goes on.")
+                    db.commit()
         return True
 
     # ── the crew fixing its own serious problems ──────────────────────────────
@@ -1374,7 +1380,9 @@ class PipelineRunner:
         made to finished work mid-build (#102) has no request of its own: it stays until
         the build finishes, or the next note's change replaces it."""
         if held and held.get("note"):
-            return held
+            # Live until its own edits are done: a later fix round or redo of the same
+            # phase is not this note's change, and must not edit with its note again.
+            return None if set(held.get("edit") or []) <= set(held.get("done") or []) else held
         if not held or not held.get("id"):
             return None
         found = db.get(ChangeRequest, held["id"])
@@ -2973,6 +2981,8 @@ class PipelineRunner:
         with versions.writing(project.id):
             kept_change = self._version_on_finish(db, project)
             db.commit()
+        # A note's change still waiting for a step that won't come now (#102): missed.
+        crew_chat.settle_unchanged(db, project.id)
         if kept_change or (values.get("change") or {}).get("note"):
             # The change is over: the next one starts from this version, told nothing
             # of this one but what `decisions` keeps — a note's change (#102) too.

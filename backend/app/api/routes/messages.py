@@ -14,7 +14,7 @@ import threading
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_project
@@ -23,7 +23,7 @@ from app.core.constants import GateKind, PipelineStatus
 from app.db.base import get_db
 from app.db.models import CrewMessage, Project
 from app.orchestration import autofix, crew_chat, remediation
-from app.schemas.project import MessageCreate, MessageReread
+from app.schemas.project import MessageCancel, MessageCreate, MessageReread
 
 router = APIRouter(prefix="/api/projects", tags=["messages"])
 
@@ -132,7 +132,7 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
     # No phase left to take it and nothing to check: said so, not kept waiting for nobody.
     asked.status = crew_chat.QUEUED if (meant_for or check) else crew_chat.DECLINED
     asked.meant_for = list(meant_for)
-    asked.plan = {"checking": True} if check else None
+    asked.plan = {"state": crew_chat.CHECKING} if check else None
     # Who it waits for, as it is read now — a reread's earlier reply named someone else.
     asked.agent = agent
 
@@ -152,7 +152,7 @@ def _settle(
             ask_model = False
             _note(db, project, asked, kept)
             db.commit()
-            scope = bool((asked.plan or {}).get("checking"))
+            scope = crew_chat.change_state(asked) == crew_chat.CHECKING
         # Read back inside the guard too: whatever fails before the response is sent
         # leaves a claimed build driven all the same.
         out = {
@@ -248,35 +248,40 @@ def reread_message(
 @router.post("/{project_id}/messages/{message_id}/cancel")
 def cancel_message(
     message_id: str,
+    payload: Optional[MessageCancel] = None,
     project: Project = Depends(get_project),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Take a note back while it waits — a change to finished work included, until it starts."""
-    asked = db.get(CrewMessage, message_id)
-    if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
-        raise HTTPException(404, "There's no such message on this build.")
-    if asked.kind != crew_chat.NOTE:
-        raise HTTPException(409, "Only a note can be taken back.")
-    was = asked.status
-    # Conditional, against the runner starting the change in the same moment.
-    taken = db.execute(
-        update(CrewMessage)
-        .where(CrewMessage.id == asked.id, CrewMessage.status.in_((crew_chat.QUEUED, crew_chat.SCHEDULED)))
-        .values(status=crew_chat.CANCELLED)
-    ).rowcount
-    db.commit()
-    db.refresh(asked)
-    if not taken:
-        raise HTTPException(
-            409,
-            "The crew has already started on it." if asked.status == crew_chat.APPLIED else f"It's already {asked.status}.",
-        )
-    crew_chat.reply(
-        db, asked,
-        "Cancelled. Nothing was changed." if was == crew_chat.SCHEDULED else "Taken back. No agent gets this note now.",
-        asked.agent,
-    )
-    db.commit()
+    """Take a note back while it waits — or, with `change`, only the change it makes to
+    finished work, until that starts (#102 PR 3): the note still reaches the phases to come."""
+    only_change = bool(payload and payload.change)
+    with crew_chat.lock:
+        asked = db.get(CrewMessage, message_id)
+        if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
+            raise HTTPException(404, "There's no such message on this build.")
+        if asked.kind != crew_chat.NOTE:
+            raise HTTPException(409, "Only a note can be taken back.")
+        db.refresh(asked)
+        state = crew_chat.change_state(asked)
+        if only_change:
+            if state != crew_chat.SCHEDULED_CHANGE:
+                raise HTTPException(
+                    409,
+                    "The change has already started." if state in (crew_chat.APPLYING, crew_chat.APPLIED_CHANGE)
+                    else "There's no change waiting to cancel.",
+                )
+            asked.plan = {**(asked.plan or {}), "state": crew_chat.CANCELLED_CHANGE}
+            crew_chat.reply(db, asked, "Cancelled the change. Nothing finished was changed.", asked.agent)
+        else:
+            if asked.status not in (crew_chat.QUEUED, crew_chat.APPLIED) or state in (crew_chat.APPLYING, crew_chat.APPLIED_CHANGE):
+                raise HTTPException(409, "The crew has already acted on it." if asked.status == crew_chat.APPLIED else f"It's already {asked.status}.")
+            if asked.status == crew_chat.APPLIED:
+                raise HTTPException(409, "An agent has already taken this note.")
+            asked.status = crew_chat.CANCELLED
+            if state in (crew_chat.SCHEDULED_CHANGE, crew_chat.CHECKING):
+                asked.plan = {**(asked.plan or {}), "state": crew_chat.CANCELLED_CHANGE}
+            crew_chat.reply(db, asked, "Taken back. No agent gets this note now, and nothing finished changes for it.", asked.agent)
+        db.commit()
     return {
         "message": _one(db, asked),
         "messages": crew_chat.thread(db, project.id, crew_chat.RECENT),
