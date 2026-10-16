@@ -36,6 +36,7 @@ import { DatabasePanel } from "@/components/build/DatabaseConnect";
 import { IntegrationsPanel } from "@/components/connectors/Integrations";
 import { connectorsLabel, connectorsUnconnected } from "@/lib/connectors";
 import { FixingPanel } from "@/components/build/AutoFix";
+import { CrewTalk } from "@/components/build/CrewTalk";
 import ReviewPolicy from "@/components/build/ReviewPolicy";
 import RunControls from "@/components/build/RunControls";
 import PhaseSteps from "@/components/build/PhaseSteps";
@@ -834,6 +835,19 @@ function BuildTab({
           to be open. */}
       {state === "awaiting_approval" && (
         <Decision project={project} id={id} busy={busy} act={act} />
+      )}
+
+      {/* The box to talk to the crew (#102), in the same slot in every state: under the
+          live work, under a stop, under a review. A stuck build has it inside its card;
+          a finished one has "What should change?" instead. */}
+      {(state === "running" || interrupted || (state === "awaiting_approval" && project.gate_kind !== "needs_help")) && (
+        <CrewTalk
+          project={project}
+          id={id}
+          busy={busy}
+          act={act}
+          place={state === "running" ? "running" : interrupted ? "stopped" : "gate"}
+        />
       )}
 
       {/* The same slot, for the one ending that isn't a dead end — and the start of

@@ -631,6 +631,37 @@ export type Project = {
    * records the same as `handoff.deps`. Null until its prompt is built.
    */
   given?: { phase: string; deps: HandoffDep[] } | null;
+  /** The conversation with the crew (#102): the newest few, oldest first. Only on the build's own read. */
+  messages?: CrewMessage[];
+};
+
+/** What happened to a message to the crew (#102). */
+export type CrewMessageStatus = "answered" | "queued" | "applied" | "scheduled" | "cancelled" | "declined";
+
+/** One reply from the crew, under the message it answers. */
+export type CrewReply = {
+  id: string;
+  /** The phase that gave it; null when no one agent did ("the build is stopped"). */
+  agent: string | null;
+  text: string;
+  status: CrewMessageStatus;
+  created_at: string | null;
+};
+
+/** A message to the crew while it builds (#102), with the crew's replies to it. */
+export type CrewMessage = {
+  id: string;
+  text: string;
+  /** How it was read: a question answered now, or a note for later. */
+  kind: "question" | "note";
+  status: CrewMessageStatus;
+  agent: string | null;
+  /** The phases a note was handed to. */
+  applied_to: string[];
+  change_request_id: string | null;
+  created_at: string | null;
+  applied_at: string | null;
+  replies: CrewReply[];
 };
 
 /** One agent's record across the account's builds (#91), from `/api/analytics/crew`. */
@@ -1090,6 +1121,19 @@ export const api = {
     const qs = q.toString();
     return `${BASE}/api/projects/${id}/download${qs ? `?${qs}` : ""}`;
   },
+
+  // ── Talk to the crew while it builds (#102) ──
+  sendMessage: (id: string, text: string) =>
+    req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  listMessages: (id: string) => req<{ messages: CrewMessage[] }>(`/api/projects/${id}/messages`),
+  rereadMessage: (id: string, messageId: string, kind: CrewMessage["kind"]) =>
+    req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages/${messageId}/reread`, {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    }),
 
   // ── Keep talking after a build (#79) ──
   startChange: (id: string, text: string) =>

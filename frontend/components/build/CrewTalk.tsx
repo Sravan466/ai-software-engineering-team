@@ -1,0 +1,243 @@
+"use client";
+
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { api, type CrewMessage, type CrewReply, type Project } from "@/lib/api";
+import { AGENT_BY_KEY } from "@/components/agents/personas";
+import AgentSprite from "@/components/agents/AgentSprite";
+import { Icon } from "@/components/shell/icons";
+import { ago, useNow } from "@/components/setup/parts";
+import { listOf } from "@/lib/text";
+import { Composer } from "./Changes";
+
+/**
+ * Talk to the crew while it builds (#102).
+ *
+ * The build page's one box, in the slot that holds whatever needs you: the same
+ * composer as "What should change?", with the conversation above it. A question is
+ * answered from the build's own record at once; a note waits for the agents it's for.
+ * On a stuck build the box is the stuck card's "Tell the crew what to try", and a note
+ * sent there starts the next fix round with it.
+ */
+
+type Act = (fn: () => Promise<unknown>) => Promise<boolean>;
+
+/** Where the box sits, which decides its words. */
+export type TalkPlace = "running" | "stuck" | "stopped" | "gate";
+
+const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: string[]; hint: string }> = {
+  running: {
+    label: "Talk to the crew",
+    placeholder: "Ask what they're doing, or tell them what you want",
+    quick: ["What are you doing?", "Who's next?"],
+    hint: "Questions are answered straight away. A note waits for the agents that haven't started.",
+  },
+  stuck: {
+    label: "Tell the crew what to try",
+    placeholder: "For example, keep all the routes in one file. Or ask why it's stuck.",
+    quick: ["Why is it stuck?"],
+    hint: "A note starts the next fix round with your words. Questions are answered straight away.",
+  },
+  stopped: {
+    label: "Talk to the crew",
+    placeholder: "Ask what happened, or leave a note for when it resumes",
+    quick: ["Why did it stop?"],
+    hint: "Notes wait with the build and reach the crew when it resumes.",
+  },
+  gate: {
+    label: "Talk to the crew",
+    placeholder: "Ask something, or leave a note for the work still to come",
+    quick: ["What are you waiting for?"],
+    hint: "Notes wait for the agents that haven't started.",
+  },
+};
+
+const ASKS = new Set(["what", "why", "when", "how", "where", "who", "is", "are", "can", "will", "status"]);
+
+/** How the crew will read it — the server's rule, for the button's word. */
+export function readsAsQuestion(text: string): boolean {
+  const said = text.trim();
+  if (said.endsWith("?")) return true;
+  const first = /^[a-z]+/.exec(said.toLowerCase());
+  return !!first && ASKS.has(first[0]);
+}
+
+/** "Frontend", "Backend", "QA": an agent's role, short. */
+function roleOf(phase: string): string {
+  return (AGENT_BY_KEY[phase]?.role ?? phase).replace(/ Engineer$/, "");
+}
+
+/** `routes/todos.js` in a reply is a file: set in code. */
+function withCode(text: string): ReactNode[] {
+  return text.split(/(`[^`]+`)/g).map((part, i) =>
+    part.startsWith("`") && part.endsWith("`") && part.length > 2 ? (
+      <code key={i} className="mono">
+        {part.slice(1, -1)}
+      </code>
+    ) : (
+      part
+    ),
+  );
+}
+
+/** What happened to the message, in a few words, and its tone. */
+function stateOf(m: CrewMessage): { word: string; tone: "ok" | "run" | "warn" | "plain" } {
+  if (m.kind === "question") {
+    if (m.status === "queued") return { word: "Answering after this step", tone: "run" };
+    if (m.status === "declined") return { word: "Not answered", tone: "plain" };
+    return { word: "Answered", tone: "ok" };
+  }
+  switch (m.status) {
+    case "applied":
+      return { word: m.applied_to.length ? `Applied to ${listOf(m.applied_to.map(roleOf))}` : "Applied", tone: "ok" };
+    case "scheduled":
+      return { word: "Change after this step", tone: "warn" };
+    case "cancelled":
+      return { word: "Cancelled", tone: "plain" };
+    case "declined":
+      return { word: "Not sent", tone: "plain" };
+    default: {
+      const who = m.replies.find((r) => r.agent)?.agent;
+      return { word: who ? `Waiting for ${roleOf(who)}` : "Waiting", tone: "run" };
+    }
+  }
+}
+
+/** Arrived since the box was first drawn, and still settling in: it opens its own height. */
+function useFresh(ids: string[]): (id: string) => boolean {
+  const born = useRef<Map<string, number> | null>(null);
+  const now = Date.now();
+  if (born.current === null) born.current = new Map(ids.map((i) => [i, 0]));
+  for (const i of ids) if (!born.current.has(i)) born.current.set(i, now);
+  return (i) => now - (born.current?.get(i) ?? 0) < 700;
+}
+
+function Reply({ reply, fresh }: { reply: CrewReply; fresh: boolean }) {
+  const agent = reply.agent ? AGENT_BY_KEY[reply.agent] : undefined;
+  return (
+    <div className={`talk-row${fresh ? " is-new" : ""}`}>
+      <div className="talk-row-in">
+        <div className="talk-reply" style={agent ? ({ "--agent": agent.accent } as React.CSSProperties) : undefined}>
+          <span className="talk-face" aria-hidden="true">
+            {agent ? <AgentSprite agent={agent} size={20} state="queued" /> : Icon.sparkle}
+          </span>
+          <p className="talk-said">
+            <b className="talk-name" title={agent?.role}>
+              {agent ? agent.codename : "Crew"}
+            </b>{" "}
+            {withCode(reply.text)}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function CrewTalk({
+  project,
+  id,
+  busy,
+  act,
+  place,
+  text: heldText,
+  setText: setHeldText,
+}: {
+  project: Project;
+  id: string;
+  busy: boolean;
+  act: Act;
+  place: TalkPlace;
+  /** The draft, when the card around the box needs to read it. */
+  text?: string;
+  setText?: (text: string) => void;
+}) {
+  const [ownText, setOwnText] = useState("");
+  const text = heldText ?? ownText;
+  const setText = setHeldText ?? setOwnText;
+  const thread = project.messages ?? [];
+  const copy = COPY[place];
+  const now = useNow(30000);
+  const list = useRef<HTMLOListElement>(null);
+  const fresh = useFresh(thread.flatMap((m) => [m.id, ...m.replies.map((r) => r.id)]));
+  const count = thread.reduce((n, m) => n + 1 + m.replies.length, 0);
+  const newest = thread[thread.length - 1];
+
+  // A new line scrolls into view, unless the person scrolled up to read.
+  const lastCount = useRef(count);
+  useLayoutEffect(() => {
+    const el = list.current;
+    if (el && count > lastCount.current) {
+      const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+      const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (near || lastCount.current === 0) el.scrollTo({ top: el.scrollHeight, behavior: still ? "auto" : "smooth" });
+    }
+    lastCount.current = count;
+  }, [count]);
+
+  const asks = text.trim() ? readsAsQuestion(text) : null;
+  const submitLabel = asks === null ? "Send" : asks ? "Ask" : place === "stuck" ? "Try again with this note" : "Send note";
+
+  return (
+    <section className={`talk${place === "stuck" ? " is-embedded" : ""}`} aria-label="Talk to the crew">
+      {thread.length > 0 && (
+        <ol ref={list} className="talk-thread" aria-live="polite" aria-relevant="additions" aria-label="Your messages to the crew">
+          {thread.map((m) => {
+            const state = stateOf(m);
+            const canReread =
+              m.id === newest?.id && (m.status === "answered" || m.status === "queued" || m.status === "declined");
+            return (
+              <li key={m.id} className="talk-turn" data-kind={m.kind}>
+                <div className={`talk-row${fresh(m.id) ? " is-new" : ""}`}>
+                  <div className="talk-row-in">
+                    <p className="talk-you">
+                      <span className="talk-you-text">{m.text}</span>
+                      <time className="talk-time" dateTime={m.created_at ?? undefined}>
+                        {ago(m.created_at, now)}
+                      </time>
+                    </p>
+                  </div>
+                </div>
+                {m.replies.map((r) => (
+                  <Reply key={r.id} reply={r} fresh={fresh(r.id)} />
+                ))}
+                <p className="talk-meta">
+                  <span className={`talk-state tone-${state.tone}`}>
+                    {state.tone === "run" && <span className="dot dot-run dot-pulse" aria-hidden="true" />}
+                    {state.word}
+                  </span>
+                  <span className="talk-read">Read as a {m.kind}</span>
+                  {canReread && (
+                    <button
+                      type="button"
+                      className="talk-reread"
+                      disabled={busy}
+                      onClick={() =>
+                        act(() => api.rereadMessage(id, m.id, m.kind === "question" ? "note" : "question"))
+                      }
+                    >
+                      {m.kind === "question" ? "That was a note" : "That was a question"}
+                    </button>
+                  )}
+                </p>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      <Composer
+        fieldId={`talk-${place}`}
+        className="talk-box"
+        label={copy.label}
+        placeholder={copy.placeholder}
+        text={text}
+        setText={setText}
+        busy={busy}
+        examples={copy.quick}
+        examplesSend
+        submitLabel={submitLabel}
+        submitIcon={place === "stuck" && asks === false ? Icon.rotate : Icon.arrowRight}
+        onSend={(said) => act(() => api.sendMessage(id, said))}
+        hint={copy.hint}
+      />
+    </section>
+  );
+}

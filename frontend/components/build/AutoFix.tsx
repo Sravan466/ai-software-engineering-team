@@ -18,6 +18,7 @@ import AgentSprite from "@/components/agents/AgentSprite";
 import { Icon } from "@/components/shell/icons";
 import SecurityFindings, { ruleName } from "./SecurityFindings";
 import { ReasonKinds } from "./ReasonKinds";
+import { CrewTalk } from "./CrewTalk";
 
 /**
  * The crew fixing its own serious problems (#50).
@@ -623,22 +624,9 @@ export function NeedsHelp({
       )}
 
       <div className="decision-act">
-        {!nothingToFix && (
-          <div className="field help-note">
-            <label htmlFor="help-note">
-              Tell the crew what to try <span className="field-hint">(optional)</span>
-            </label>
-            <textarea
-              id="help-note"
-              className="textarea"
-              rows={2}
-              maxLength={2000}
-              placeholder="For example, keep all the routes in one file"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </div>
-        )}
+        {/* The build page's one box (#102): a note here starts the next round with it,
+            a question is answered straight away. The cloud button sends the draft too. */}
+        <CrewTalk project={project} id={id} busy={busy} act={act} place="stuck" text={note} setText={setNote} />
         <div className="decision-approve">
           <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}

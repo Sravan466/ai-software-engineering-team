@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   api,
   type ChangePlan,
@@ -81,9 +81,7 @@ export function Finished({
   onDeliver: (intent?: "deploy" | "github") => void;
 }) {
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
   const [history, setHistory] = useState<ChangeRequest[] | null>(null);
-  const field = useRef<HTMLTextAreaElement>(null);
   const version = project.current_version;
   const now = useNow(30000);
 
@@ -97,22 +95,6 @@ export function Finished({
       live = false;
     };
   }, [id, version?.number, project.updated_at]);
-
-  async function send(e?: FormEvent) {
-    e?.preventDefault();
-    const ask = text.trim();
-    if (!ask || sending || busy) return;
-    setSending(true);
-    const ok = await act(() => api.startChange(id, ask));
-    setSending(false);
-    // Kept on a refusal, so nothing typed is lost to a 409 from another tab.
-    if (ok) setText("");
-  }
-
-  function pick(example: string) {
-    setText(example);
-    field.current?.focus();
-  }
 
   const recent = (history ?? []).slice(0, 5);
 
@@ -147,54 +129,23 @@ export function Finished({
         </div>
       </div>
 
-      <form className="finish-ask" onSubmit={send}>
-        <label htmlFor="change-text" className="finish-label">
-          What should change?
-        </label>
-        <textarea
-          id="change-text"
-          ref={field}
-          rows={2}
-          maxLength={2000}
-          placeholder="e.g. add a dark mode toggle to the header"
-          value={text}
-          disabled={sending}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send();
-          }}
-          aria-describedby="change-hint"
-        />
-        <div className="finish-foot">
-          <div className="examples finish-examples" role="group" aria-label="Examples">
-            {EXAMPLES.map((example) => (
-              <button
-                key={example}
-                type="button"
-                className="example"
-                onClick={() => pick(example)}
-                disabled={sending}
-              >
-                {example}
-              </button>
-            ))}
-          </div>
-          <div className="composer-submit">
-            <span className="composer-hint" aria-hidden="true">
-              ⌘↵
-            </span>
-            <button className="btn btn-primary" type="submit" disabled={!text.trim() || sending || busy}>
-              {sending && <span className="btn-spinner" aria-hidden="true" />}
-              {sending ? "Sending…" : "Make this change"}
-              {!sending && Icon.arrowRight}
-            </button>
-          </div>
-        </div>
-        <p id="change-hint" className="field-hint finish-hint">
-          The crew edits the files it wrote, then builds, tests and scans the result.
-          {version ? ` v${version.number} keeps shipping until you keep the change.` : ""}
-        </p>
-      </form>
+      <Composer
+        fieldId="change-text"
+        label="What should change?"
+        placeholder="e.g. add a dark mode toggle to the header"
+        text={text}
+        setText={setText}
+        busy={busy}
+        examples={EXAMPLES}
+        submitLabel="Make this change"
+        onSend={(ask) => act(() => api.startChange(id, ask))}
+        hint={
+          <>
+            The crew edits the files it wrote, then builds, tests and scans the result.
+            {version ? ` v${version.number} keeps shipping until you keep the change.` : ""}
+          </>
+        }
+      />
 
       {recent.length > 0 && (
         <div className="finish-ledger">
@@ -222,6 +173,121 @@ export function Finished({
         </div>
       )}
     </section>
+  );
+}
+
+// ── the box ──────────────────────────────────────────────────────────────────
+/**
+ * The one box the build page takes words in (#79, #102): what should change once the
+ * build is finished, and a message to the crew while it works. The parent holds the
+ * text, so a card can read the draft (the stuck card's cloud button sends it along).
+ * Kept on a refusal, so nothing typed is lost to a 409 from another tab.
+ */
+export function Composer({
+  fieldId,
+  label,
+  placeholder,
+  text,
+  setText,
+  busy,
+  onSend,
+  submitLabel,
+  submitIcon = Icon.arrowRight,
+  examples = [],
+  examplesSend = false,
+  hint,
+  className = "",
+}: {
+  fieldId: string;
+  label: ReactNode;
+  placeholder: string;
+  text: string;
+  setText: (text: string) => void;
+  busy: boolean;
+  /** Resolves true when it went through; the field is cleared then. */
+  onSend: (text: string) => Promise<boolean>;
+  submitLabel: string;
+  submitIcon?: ReactNode;
+  examples?: string[];
+  /** An example is sent as it is (a quick question), instead of filling the field. */
+  examplesSend?: boolean;
+  hint?: ReactNode;
+  className?: string;
+}) {
+  const [sending, setSending] = useState(false);
+  const field = useRef<HTMLTextAreaElement>(null);
+  const hintId = `${fieldId}-hint`;
+
+  async function sendText(ask: string, fromField: boolean) {
+    const said = ask.trim();
+    if (!said || sending || busy) return;
+    setSending(true);
+    const ok = await onSend(said);
+    setSending(false);
+    if (ok && fromField) setText("");
+  }
+
+  function send(e?: FormEvent) {
+    e?.preventDefault();
+    void sendText(text, true);
+  }
+
+  function pick(example: string) {
+    if (examplesSend) return void sendText(example, false);
+    setText(example);
+    field.current?.focus();
+  }
+
+  return (
+    <form className={`finish-ask ${className}`} onSubmit={send}>
+      <label htmlFor={fieldId} className="finish-label">
+        {label}
+      </label>
+      <textarea
+        id={fieldId}
+        ref={field}
+        rows={2}
+        maxLength={2000}
+        placeholder={placeholder}
+        value={text}
+        disabled={sending}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send();
+        }}
+        aria-describedby={hint ? hintId : undefined}
+      />
+      <div className="finish-foot">
+        <div className="examples finish-examples" role="group" aria-label={examplesSend ? "Quick questions" : "Examples"}>
+          {examples.map((example) => (
+            <button
+              key={example}
+              type="button"
+              className="example"
+              onClick={() => pick(example)}
+              disabled={sending || (examplesSend && busy)}
+            >
+              {example}
+            </button>
+          ))}
+        </div>
+        <div className="composer-submit">
+          <span className="composer-hint" aria-hidden="true">
+            ⌘↵
+          </span>
+          <button className="btn btn-primary" type="submit" disabled={!text.trim() || sending || busy}>
+            {sending && <span className="btn-spinner" aria-hidden="true" />}
+            {sending ? "Sending…" : submitLabel}
+            {!sending && submitIcon}
+          </button>
+        </div>
+      </div>
+      {hint && (
+        <p id={hintId} className="field-hint finish-hint">
+          {hint}
+        </p>
+      )}
+    </form>
   );
 }
 

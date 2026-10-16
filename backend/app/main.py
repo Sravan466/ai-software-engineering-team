@@ -19,6 +19,15 @@ async def lifespan(app: FastAPI):
     log.info("Starting AI Software Engineering Team (env=%s)", settings.app_env)
     init_db()
     log.info("Database initialised. Default routing mode: %s", settings.default_routing_mode)
+    # Questions to the crew (#102) a previous run of this server never got to answer.
+    from app.db.base import SessionLocal as _Session
+    from app.orchestration import crew_chat
+
+    try:
+        with _Session() as db:
+            crew_chat.settle_orphans(db)
+    except Exception:  # noqa: BLE001 - never block startup on this
+        log.exception("Couldn't settle the crew's unanswered questions")
     # Keys saved in plain text before they were encrypted are encrypted in place —
     # after init_db, whose accounts migration may have just moved a file.
     from app.core import secrets_store
@@ -132,6 +141,7 @@ from app.api.routes import (  # noqa: E402
     devices,
     github,
     integrations as integrations_routes,
+    messages as messages_routes,
     models,
     preview,
     projects,
@@ -143,6 +153,7 @@ from app.api.routes import (  # noqa: E402
 app.include_router(auth_routes.router)
 app.include_router(projects.router)
 app.include_router(changes_routes.router)
+app.include_router(messages_routes.router)
 app.include_router(database_routes.router)
 app.include_router(integrations_routes.router)
 app.include_router(connectors_routes.router)

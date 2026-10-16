@@ -164,6 +164,18 @@ class ChangeCreate(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000, description="What should change.")
 
 
+class MessageCreate(BaseModel):
+    """A message to the crew while it builds (#102): a question, or a note for later."""
+
+    text: str = Field(..., min_length=1, max_length=2000, description="What to ask or tell the crew.")
+
+
+class MessageReread(BaseModel):
+    """"That was a question": read a message the other way."""
+
+    kind: str = Field(..., pattern="^(question|note)$")
+
+
 class DiscardRequest(BaseModel):
     """Why a change is being thrown away — optional, kept with it."""
 
@@ -361,7 +373,10 @@ class ProjectOut(BaseModel):
     #: What the running phase was handed (#91): `{phase, deps: [{phase, digest, full,
     #: omitted}]}`, before its row records the same as `handoff.deps`.
     given: Optional[dict] = None
-
+    #: The conversation with the crew (#102), newest few, oldest first: `[{id, text,
+    #: kind, status, agent, applied_to, created_at, replies: [{id, agent, text, status,
+    #: created_at}]}]`. Filled by the build's own read only.
+    messages: list[dict] = []
 
     model_config = {"from_attributes": True, "populate_by_name": True}
 
