@@ -174,6 +174,12 @@ class MessageCreate(BaseModel):
     keep_trying: bool = False
 
 
+class MessageCancel(BaseModel):
+    """Take a note back — or, with `change`, only the change it makes to finished work."""
+
+    change: bool = False
+
+
 class MessageReread(BaseModel):
     """"That was a question": read a message the other way."""
 

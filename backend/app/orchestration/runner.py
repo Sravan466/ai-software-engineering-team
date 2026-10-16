@@ -54,7 +54,7 @@ from app.core.constants import (
 )
 from app.core.logging import get_logger
 from app.db.base import SessionLocal
-from app.db.models import ChangeRequest, DebateRecord, PhaseResult, PreviewRevision, Project, Version
+from app.db.models import ChangeRequest, CrewMessage, _aware, DebateRecord, PhaseResult, PreviewRevision, Project, Version
 from app.preview import app_state
 from app.preview import history as preview_history
 from app.memory.store import memory_store
@@ -364,6 +364,11 @@ class PipelineRunner:
                     row.status = PhaseStatus.APPROVED.value
                     db.commit()
 
+                # Between two phases: finished work a note asked to change (#102) changes
+                # now, before the next phase starts — the step in hand is done.
+                if self._note_change(db, project):
+                    return project
+
                 started, next_node = self._graph_position(project.id)
                 if started and next_node is None:
                     # Never "complete" over a serious finding nobody fixed or waived —
@@ -406,6 +411,130 @@ class PipelineRunner:
             else:
                 self._fail(db, project, str(e), kind=e.kind, provider=e.provider)
             return project
+
+    # ── a note that changes finished work (#102) ──────────────────────────────
+    def _note_change(self, db: Session, project: Project) -> bool:
+        """Change the finished work the person's notes asked to change, between phases.
+
+        Every note scheduled so far goes in one change: the earliest phase it touches is
+        redone in #79's edit mode — its files edited, not written again — and the run
+        carries on, the phases after it edited, re-run or re-checked as a change's rewind
+        decides. No change request and no version: the build isn't finished. True when it
+        started one (the redo has driven the run on)."""
+        self._report_note_change(db, project)
+        if not crew_chat.scheduled(db, project.id) or changes.open_change(db, project) is not None:
+            return False
+        with _checkpoint_lock(project.id):
+            held = dict(graph.get_state(_config(project.id)).values).get("change")
+        if held and self._live_change(db, held) is not None:
+            return False  # a change is under way: these wait for it
+        # The finished work, read and fingerprinted before the lock: no other note of this
+        # build waits on the code being hashed.
+        done = crew_chat.finished_rows(db, project)
+        prints = {phase: crew_chat.fingerprint(row.output) for phase, row in done.items()}
+        with crew_chat.lock_for(project.id):
+            # Read, merged and claimed together, fresh from the database — the session's own
+            # copies are from before the lock: a Cancel is either before this or too late.
+            db.expire_all()
+            due = crew_chat.scheduled(db, project.id)
+            if not due:
+                return False
+            plan = changes.merge_plans([m.plan or {} for m in due])
+            first = changes.first_phase(plan, set(done))
+            if first is None:
+                for m in due:
+                    crew_chat.resolve(m, crew_chat.NO_CHANGE)
+                    crew_chat.reply(db, m, "Nothing finished writes what this changes, so nothing was changed.")
+                db.commit()
+                return False
+            edit = changes.edit_phases(plan, set(done))
+            # Each phase's files as they are now, to say afterwards what the change did.
+            before = {phase: prints[phase] for phase in edit if phase in prints}
+            for m in due:
+                crew_chat.resolve(m, crew_chat.APPLIED_CHANGE, edit)
+                m.plan = {**(m.plan or {}), "before": before}
+                crew_chat.reply(db, m, f"Changing it now: {crew_chat.title(first)} starts on its finished work.", first)
+            db.commit()
+        ids = [m.id for m in due]
+        record = {
+            "id": None,
+            "note": ids,
+            "number": None,
+            "text": "\n".join(" ".join(m.text.split()) for m in due),
+            "plan": plan,
+            "decisions": changes.settled(list(project.decisions or changes.first_decisions(project, db)), 30),
+            "edit": edit,
+            "base": {phase: done[phase].output for phase in edit},
+            "done": [],
+        }
+        claimed_at = _now()
+        log.info("Note change on %s: %s first; editing %s", project.id, first, ", ".join(edit))
+        try:
+            self.redo(
+                db,
+                project,
+                first,
+                changes.note_for(record, first),
+                extra_feedback={p: changes.note_for(record, p) for p in edit if p != first},
+                continue_after=True,
+                start_change=record,
+            )
+        finally:
+            # Read off the first phase's own rows — not the checkpoint, which a later note's
+            # change may hold by now: a new attempt since the claim that didn't fail landed.
+            try:
+                db.rollback()
+                newest = self.latest_row(db, project, first)
+                started = _aware(getattr(newest, "created_at", None))
+                landed = (
+                    newest is not None and started is not None and started >= claimed_at
+                    and newest.status not in (PhaseStatus.FAILED.value, PhaseStatus.REJECTED.value)
+                )
+                if not landed:
+                    # The first edit never landed — a model error, a Stop. Waiting again, it is
+                    # made when the build goes on.
+                    with crew_chat.lock_for(project.id):
+                        for m in due:
+                            db.refresh(m)
+                            if crew_chat.change_state(m) == crew_chat.APPLIED_CHANGE:
+                                crew_chat.unclaim(m)
+                                crew_chat.reply(db, m, "The build stopped before the change was made. It's made when the build goes on.")
+                        db.commit()
+            except Exception:  # noqa: BLE001 - never mask what the redo raised
+                log.exception("Couldn't check whether the note change on %s started", project.id)
+        return True
+
+    def _report_note_change(self, db: Session, project: Project) -> None:
+        """Say what a note's change did once each phase it edits has edited (#102): the files
+        it changed, or that they came back as they were — a small model's edit can leave
+        them so, and "changing it now" must not be the last word. Read off each phase's own
+        rows — its newest attempt since the claim — never the checkpoint, which a later
+        redo may have cleared."""
+        waiting = crew_chat.unreported(db, project.id)
+        if not waiting:
+            return
+        with crew_chat.lock_for(project.id):
+            for m in waiting:
+                db.refresh(m)
+                plan = m.plan or {}
+                claimed = _aware(datetime.fromisoformat(plan["claimed_at"])) if plan.get("claimed_at") else None
+                told = list(plan.get("reported") or [])
+                for phase in [p for p in plan.get("edit") or [] if p not in told]:
+                    row = self.latest_row(db, project, phase)
+                    made = _aware(getattr(row, "created_at", None))
+                    if row is None or claimed is None or made is None or made < claimed:
+                        continue
+                    if row.status not in (PhaseStatus.APPROVED.value, PhaseStatus.PENDING_APPROVAL.value):
+                        continue  # still at it, or sent back: said once it lands
+                    changed = crew_chat.files_changed((plan.get("before") or {}).get(phase), row.output)
+                    if changed:
+                        names = ", ".join(f"`{p}`" for p in changed[:4]) + (f" and {len(changed) - 4} more" if len(changed) > 4 else "")
+                        crew_chat.reply(db, m, f"{crew_chat.title(phase)} changed {len(changed)} file{'' if len(changed) == 1 else 's'}: {names}.", phase)
+                    else:
+                        crew_chat.reply(db, m, f"{crew_chat.title(phase)} couldn't make this change: its files came back as they were.", phase)
+                    told.append(phase)
+                m.plan = {**plan, "reported": told}
+            db.commit()
 
     # ── the crew fixing its own serious problems ──────────────────────────────
     def gate_for(self, project: Project, row: PhaseResult) -> Optional[Gate]:
@@ -1298,7 +1427,13 @@ class PipelineRunner:
 
     @staticmethod
     def _live_change(db: Session, held: Optional[dict]) -> Optional[dict]:
-        """The checkpoint's change record, while that change is still open."""
+        """The checkpoint's change record, while that change is still open. A change a note
+        made to finished work mid-build (#102) has no request of its own: it stays until
+        the build finishes, or the next note's change replaces it."""
+        if held and held.get("note"):
+            # Live until its own edits are done: a later fix round or redo of the same
+            # phase is not this note's change, and must not edit with its note again.
+            return None if changes.note_change_over(held) else held
         if not held or not held.get("id"):
             return None
         found = db.get(ChangeRequest, held["id"])
@@ -2897,9 +3032,11 @@ class PipelineRunner:
         with versions.writing(project.id):
             kept_change = self._version_on_finish(db, project)
             db.commit()
-        if kept_change:
+        # A note's change still waiting for a step that won't come now (#102): missed.
+        crew_chat.settle_unchanged(db, project.id)
+        if kept_change or (values.get("change") or {}).get("note"):
             # The change is over: the next one starts from this version, told nothing
-            # of this one but what `decisions` keeps.
+            # of this one but what `decisions` keeps — a note's change (#102) too.
             with _checkpoint_lock(project.id):
                 graph.update_state(
                     _config(project.id), {"change": None, "feedback": {}}, as_node=versions.phase_order_last()

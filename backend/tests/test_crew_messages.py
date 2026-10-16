@@ -298,6 +298,7 @@ def test_a_note_waits_for_the_agents_that_havent_started(calls, client):
     m = _say(client, pid, "make it purple")
     assert m["kind"] == "note" and m["status"] == "queued"
     # Backend is between two files, so it reads the note before its next one (#102).
+    # Planning here wrote nothing to read against, so nothing is checked (#102 PR 3).
     assert m["replies"][0]["text"] == (
         "Got it. Backend Engineer reads this before its next file, and Frontend Engineer and the 4 after it "
         "get it when they start."
@@ -315,7 +316,7 @@ def test_a_note_on_a_build_stopped_mid_phase_goes_to_that_phase_first(calls, cli
         db.get(Project, pid).status = PipelineStatus.CANCELLED.value
         db.commit()
     m = _say(client, pid, "use a simpler layout")
-    assert m["replies"][0]["text"] == "Got it. The build is stopped, so Backend Engineer gets this note when it resumes."
+    assert m["replies"][0]["text"].startswith("Got it. The build is stopped, so Backend Engineer gets this note when it resumes.")
     assert m["meant_for"][:2] == ["backend_engineer", "frontend_engineer"]
 
 
@@ -344,7 +345,7 @@ def test_a_note_naming_a_phase_in_a_fix_round_waits(calls, client):
         db.get(Project, pid).auto_fix = data
         db.commit()
     text = _say(client, pid, "backend: keep it small")["replies"][0]["text"]
-    assert text.startswith("Backend Engineer has already started, so this note waits"), text
+    assert text == "Backend Engineer has already started, so this note waits for the next time that work is sent back.", text
 
 
 def test_a_note_for_one_agent_says_so(calls, client):
@@ -430,13 +431,19 @@ def test_a_stalled_build_never_says_an_agent_is_working(calls, client):
 def test_a_note_with_no_agent_left_to_take_it_says_so(calls, client):
     pid = _build(client, status=PipelineStatus.RUNNING.value, current_phase="cost_estimation",
                  heartbeat_at=datetime.now(timezone.utc))
-    for phase in ("product_manager", "system_design", "backend_engineer", "frontend_engineer", "qa_engineer",
+    for phase in ("product_manager", "system_design", "frontend_engineer", "qa_engineer",
                   "security_engineer", "devops_engineer"):
         _row(pid, phase, PhaseStatus.APPROVED.value)
+    # Finished work to read the note against (#102 PR 3).
+    _row(pid, "backend_engineer", PhaseStatus.APPROVED.value,
+         output={"files": [{"path": "backend/main.py", "code": "x = 1\n"}]})
     _row(pid, "cost_estimation", PhaseStatus.RUNNING.value)
     m = _say(client, pid, "add dark mode")
-    assert m["status"] == "declined" and m["meant_for"] == []
-    assert m["replies"][0]["text"].startswith("Every agent has started on this build, so no one is left")
+    assert m["meant_for"] == []
+    # Every agent has started, but some work is finished: it's read against that first.
+    assert m["replies"][0]["text"] == f"Every agent has started on this build. {crew_chat.CHECK_AFTER}"
+    [last] = client.get(f"/api/projects/{pid}/messages").json()["messages"][-1:]
+    assert last["status"] == "declined", "nothing changed and no agent left: not kept waiting"
 
 
 def test_a_note_on_a_finished_build_points_at_the_change_box(calls, client):

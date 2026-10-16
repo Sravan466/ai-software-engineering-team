@@ -23,7 +23,7 @@ from app.core.constants import GateKind, PipelineStatus
 from app.db.base import get_db
 from app.db.models import CrewMessage, Project
 from app.orchestration import autofix, crew_chat, remediation
-from app.schemas.project import MessageCreate, MessageReread
+from app.schemas.project import MessageCancel, MessageCreate, MessageReread
 
 router = APIRouter(prefix="/api/projects", tags=["messages"])
 
@@ -125,11 +125,18 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         asked.status = crew_chat.DECLINED
         asked.agent = None
         return
-    text, agent, meant_for = crew_chat.note_reply(project, asked.text)
+    # Some work is done: the planner reads the note against it once the slot is free (PR 3).
+    rows = crew_chat.rows_of(project)
+    check = crew_chat.checks_finished_work(db, project, asked.text, rows)
+    text, agent, meant_for = crew_chat.note_reply(project, asked.text, check, rows)
     crew_chat.reply(db, asked, text, agent)
-    # No phase left to take it: said so, and not kept waiting for nobody.
-    asked.status = crew_chat.QUEUED if meant_for else crew_chat.DECLINED
+    # No phase left to take it and nothing to check: said so, not kept waiting for nobody.
+    asked.status = crew_chat.QUEUED if (meant_for or check) else crew_chat.DECLINED
     asked.meant_for = list(meant_for)
+    if check:
+        crew_chat.start_check(asked)
+    else:
+        asked.plan = None
     # Who it waits for, as it is read now — a reread's earlier reply named someone else.
     asked.agent = agent
 
@@ -138,6 +145,7 @@ def _settle(
     db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept], background: BackgroundTasks
 ) -> dict:
     """Answer or keep `asked`, commit, then start whatever it set going."""
+    scope = False
     try:
         if asked.kind == crew_chat.QUESTION:
             # Counted and kept under one lock, so two sends at once can't both be the third.
@@ -148,6 +156,7 @@ def _settle(
             ask_model = False
             _note(db, project, asked, kept)
             db.commit()
+            scope = crew_chat.change_state(asked) == crew_chat.CHECKING
         # Read back inside the guard too: whatever fails before the response is sent
         # leaves a claimed build driven all the same.
         out = {
@@ -168,6 +177,8 @@ def _settle(
         background.add_task(_drive, project.id, kept[2])
     if ask_model:
         crew_chat.spawn(crew_chat.ask_model, project.id, asked.id)
+    if scope:
+        crew_chat.spawn(crew_chat.scope_note, project.id, asked.id)
     return out
 
 
@@ -213,9 +224,16 @@ def reread_message(
     db: Session = Depends(get_db),
 ) -> dict:
     """"That was a question" (or a note): read the message the other way, and answer it so."""
+    with crew_chat.lock_for(project.id):
+        return _reread(message_id, payload, background, project, db)
+
+
+def _reread(message_id: str, payload: MessageReread, background: BackgroundTasks, project: Project, db: Session) -> dict:
     asked = db.get(CrewMessage, message_id)
     if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
         raise HTTPException(404, "There's no such message on this build.")
+    if crew_chat.change_state(asked) in (crew_chat.SCHEDULED_CHANGE, crew_chat.APPLIED_CHANGE):
+        raise HTTPException(409, "The crew is already acting on this note.")
     if asked.kind == payload.kind:
         raise HTTPException(409, f"It's already read as a {payload.kind}.")
     newest = db.execute(
@@ -234,7 +252,51 @@ def reread_message(
     asked.kind = payload.kind
     if asked.kind == crew_chat.QUESTION:
         asked.meant_for = None  # a question is for no phase
+        asked.plan = None  # nor read against finished work
     return _settle(db, project, asked, kept, background)
+
+
+@router.post("/{project_id}/messages/{message_id}/cancel")
+def cancel_message(
+    message_id: str,
+    payload: Optional[MessageCancel] = None,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Take a note back while it waits — or, with `change`, only the change it makes to
+    finished work, until that starts (#102 PR 3): the note still reaches the phases to come."""
+    only_change = bool(payload and payload.change)
+    with crew_chat.lock_for(project.id):
+        asked = db.get(CrewMessage, message_id)
+        if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
+            raise HTTPException(404, "There's no such message on this build.")
+        if asked.kind != crew_chat.NOTE:
+            raise HTTPException(409, "Only a note can be taken back.")
+        db.refresh(asked)
+        state = crew_chat.change_state(asked)
+        if state == crew_chat.APPLIED_CHANGE:
+            raise HTTPException(409, "The change has already started.")
+        if only_change:
+            if state != crew_chat.SCHEDULED_CHANGE:
+                raise HTTPException(409, "There's no change waiting to cancel.")
+            crew_chat.resolve(asked, crew_chat.CANCELLED_CHANGE)
+            crew_chat.reply(db, asked, "Cancelled the change. Nothing finished was changed.", asked.agent)
+        else:
+            if asked.status != crew_chat.QUEUED:
+                raise HTTPException(
+                    409, "An agent has already taken this note." if asked.status == crew_chat.APPLIED else f"It's already {asked.status}."
+                )
+            asked.status = crew_chat.CANCELLED
+            if state in (crew_chat.SCHEDULED_CHANGE, crew_chat.CHECKING):
+                asked.plan = {**(asked.plan or {}), "state": crew_chat.CANCELLED_CHANGE}
+            crew_chat.reply(db, asked, "Taken back. No agent gets this note now, and nothing finished changes for it.", asked.agent)
+        db.commit()
+    return {
+        "message": _one(db, asked),
+        "messages": crew_chat.thread(db, project.id, crew_chat.RECENT),
+        "status": project.status,
+        "current_phase": project.current_phase,
+    }
 
 
 def _one(db: Session, asked: CrewMessage) -> dict:

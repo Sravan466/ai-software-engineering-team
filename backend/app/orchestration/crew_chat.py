@@ -519,6 +519,10 @@ def out(m: CrewMessage, replies: Iterable[CrewMessage] = (), since: Optional[dat
         # A note a phase of this run can still be handed (#102): what the crew floor's
         # "Got your note" shows, judged here once rather than again on the page.
         "standing": standing(m, since),
+        # Checked against finished work (#102 PR 3): still reading it, or which finished
+        # phases it changes after this step.
+        "change": change_state(m),
+        "touched": list((m.plan or {}).get("touched") or []),
         "meant_for": list(m.meant_for or []),
         "applied_to": list(m.applied_to or []),
         "change_request_id": m.change_request_id,
@@ -591,9 +595,24 @@ def _later_than(m: CrewMessage) -> datetime:
 
 
 # ── a note, for now ───────────────────────────────────────────────────────────
-def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[str]]:
-    """What happens to a note, said plainly; who it's for. A note waits, `queued`."""
-    rows = _rows(project)
+#: Said of a note that may change work already done (#102 PR 3), until the planner has read it.
+CHECK_AFTER = "I'll check whether this changes finished work after this step."
+
+
+def note_reply(
+    project: Project, text: str, check: bool = False, rows: Optional[dict] = None
+) -> tuple[str, Optional[str], list[str]]:
+    """What happens to a note, said plainly; who it's for. A note waits, `queued`.
+
+    `check`: some work is finished, and the note is read against it once the generation
+    slot is free (`scope_note`) — the reply says so."""
+    said, agent, meant_for = _note_reply(project, text, check, rows if rows is not None else _rows(project))
+    if check and meant_for and CHECK_AFTER not in said:
+        said = f"{said} I'll also check whether it changes finished work after this step."
+    return said, agent, meant_for
+
+
+def _note_reply(project: Project, text: str, check: bool, rows: dict) -> tuple[str, Optional[str], list[str]]:
     ahead = not_started(project, rows)
     stopped = project.status in (
         PipelineStatus.CANCELLED.value, PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value
@@ -611,6 +630,8 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
             return f"Got it. {title(named)} hasn't started, so it gets this note when it starts.", named, [named]
         if named == current and not stopped and _writing_files(project, rows):
             return f"Got it. {title(named)} is writing its files now; it reads this note before the next one.", named, [named]
+        if check:
+            return f"{title(named)} has already {'started' if state == 'working' else 'finished'}. {CHECK_AFTER}", named, [named]
         return (
             f"{title(named)} has already {'started' if state == 'working' else 'finished'}, so this note "
             "waits for the next time that work is sent back.",
@@ -630,6 +651,8 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
             return f"{said}, and {title(later[0])} gets it when it starts.", current, ahead
         return f"{said}, and {title(later[0])} and the {len(later) - 1} after it get it when they start.", current, ahead
     if not ahead:
+        if check:
+            return f"Every agent has started on this build. {CHECK_AFTER}", None, []
         return (
             "Every agent has started on this build, so no one is left to take this note. Once it's "
             "finished, ask for it as a change."
@@ -742,7 +765,7 @@ def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
     from app.db.base import SessionLocal
 
     try:
-        with SessionLocal() as db:
+        with lock_for(project_id), SessionLocal() as db:
             held = _notes(db, project_id)
             since = run_began(db, project_id)
             mine = [m for m in held if for_phase(m, phase) and _this_run(m, since)]
@@ -795,6 +818,299 @@ def standing(m: CrewMessage, since: Optional[datetime]) -> bool:
 
 
 
+
+
+# ── notes that change finished work (#102 PR 3) ───────────────────────────────
+# A note sent once some work is done is read against it. Whether it changes that work is
+# the note's *change*, kept in `plan.state` apart from its delivery (`status`): a note can
+# be handed to the phases still to come and change a finished one too.
+#
+#   checking → scheduled → applied                     the change, after the step in hand
+#            ↘ none | cancelled | missed | unchecked     no change, taken back, too late
+CHECKING, SCHEDULED_CHANGE, APPLIED_CHANGE = "checking", "scheduled", "applied"
+NO_CHANGE, CANCELLED_CHANGE, MISSED, UNCHECKED = "none", "cancelled", "missed", "unchecked"
+
+#: Every change of a build's notes — their delivery or their change — happens under that
+#: build's lock: the runner, the planner's thread and the routes each read a note and write
+#: it back, and a Cancel must never be undone by a write that read the note a moment
+#: before. One per build, so one build's notes never wait on another's. One process, as
+#: the run threads and `activity` assume.
+_locks: dict[str, threading.RLock] = {}
+_locks_guard = threading.Lock()
+
+
+def lock_for(project_id: str) -> threading.RLock:
+    with _locks_guard:
+        found = _locks.get(project_id)
+        if found is None:
+            found = _locks[project_id] = threading.RLock()
+        return found
+
+_FINISHED_ROW = (PhaseStatus.APPROVED.value, PhaseStatus.PENDING_APPROVAL.value)
+#: Where a note can be checked against finished work and changed after the step in hand.
+_CHECKABLE = (
+    PipelineStatus.RUNNING.value, PipelineStatus.AWAITING_APPROVAL.value, PipelineStatus.CANCELLED.value,
+    PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value,
+)
+
+
+def change_state(m: CrewMessage) -> Optional[str]:
+    return (m.plan or {}).get("state")
+
+
+def finished_rows(db: Session, project: Project) -> dict:
+    """The phases whose work is done, by phase: the attempt that counts, with output."""
+    from app.orchestration import versions
+
+    return {
+        r.phase: r for r in versions.current_rows(db, project)
+        if r.status in _FINISHED_ROW and isinstance(r.output, dict) and r.output
+    }
+
+
+def rows_of(project: Project) -> dict:
+    """The attempt that counts for each phase — read once per message, passed along."""
+    return _rows(project)
+
+
+def checks_finished_work(db: Session, project: Project, text: str, rows: Optional[dict] = None) -> bool:
+    """Whether a note is read against the work already done: some is (with output to read),
+    the build isn't finished (a change request is how that's changed), no change request is
+    open, and a note addressed to one phase names a finished one — the planner reads only
+    finished work, so a note to the phase at work now waits for its next rework instead."""
+    from app.orchestration import changes
+
+    rows = rows if rows is not None else _rows(project)
+    finished = [
+        p for p, r in rows.items()
+        if getattr(r, "status", "") in _FINISHED_ROW and isinstance(getattr(r, "output", None), dict) and r.output
+    ]
+    if project.status not in _CHECKABLE or not finished:
+        return False
+    if changes.open_change(db, project) is not None:
+        return False
+    named = addressed_to(text)
+    return not named or named in finished
+
+
+def scheduled(db: Session, project_id: str) -> list[CrewMessage]:
+    """Notes whose change to finished work waits for the step in hand to end. In Python:
+    the state is inside a JSON column."""
+    found = db.execute(
+        select(CrewMessage)
+        .where(
+            CrewMessage.project_id == project_id,
+            CrewMessage.author == PERSON,
+            CrewMessage.kind == NOTE,
+            CrewMessage.status.in_(_HANDED),
+        )
+        .order_by(CrewMessage.created_at)
+    ).scalars()
+    return [m for m in found if change_state(m) == SCHEDULED_CHANGE]
+
+
+def touched_by(raw: object, finished: set[str]) -> dict:
+    """What the planner said, held to the work that's done — no guessing: a plan naming
+    only phases still to come (or nothing) changes no finished work."""
+    from app.orchestration import changes
+
+    data = raw if isinstance(raw, dict) else {}
+    wanted = {str(p).strip() for p in data.get("phases") or [] if isinstance(p, str)}
+    likely = [str(p).strip() for p in data.get("files_likely") or [] if isinstance(p, str) and str(p).strip()][:20]
+    # A file it names is its word too: a small model often lists the file and not the phase.
+    sides = {"backend": "backend_engineer", "frontend": "frontend_engineer"}
+    wanted |= {sides[h] for h in (p.lstrip("/").split("/", 1)[0].lower() for p in likely) if h in sides}
+    editors = [p for p in changes.EDITORS if p in wanted and p in finished]
+    design = (bool(data.get("needs_design")) or bool(data.get("needs_db_change"))) and "system_design" in finished
+    return {
+        "summary": str(data.get("summary") or "").strip()[:300],
+        "phases": editors,
+        "files_likely": likely,
+        "needs_design": design,
+        "needs_db_change": bool(data.get("needs_db_change")),
+        "touched": [p for p in _ORDER if p in editors or (design and p == "system_design")],
+    }
+
+
+def _who(phases: list[str]) -> str:
+    names = [title(p) for p in phases]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+
+
+def resolve(m: CrewMessage, state: str, edit: Optional[list] = None) -> None:
+    """Settle a note's change. A note kept only for its change (no phase to deliver to)
+    ends with it: made → `applied`, taken back → `cancelled`, anything else → `declined`."""
+    plan = {**(m.plan or {}), "state": state}
+    if state == APPLIED_CHANGE and edit is not None:
+        # The change's own phases — never `applied_to`, which is the note's delivery: a
+        # phase it changes still takes it as a note, and says so.
+        plan["edit"] = list(edit)
+        plan["reported"] = []
+        plan["claimed_at"] = now().isoformat()
+    m.plan = plan
+    if not m.meant_for and m.status == QUEUED:
+        m.status = APPLIED if state == APPLIED_CHANGE else CANCELLED if state == CANCELLED_CHANGE else DECLINED
+
+
+def unclaim(m: CrewMessage) -> None:
+    """Back to waiting: a change whose first edit never landed leaves no trace of the claim."""
+    plan = {k: v for k, v in (m.plan or {}).items() if k not in ("edit", "reported", "claimed_at", "before")}
+    m.plan = {**plan, "state": SCHEDULED_CHANGE}
+    if m.status == APPLIED and not m.meant_for:
+        m.status = QUEUED
+
+
+def unreported(db: Session, project_id: str) -> list[CrewMessage]:
+    """Notes whose change was made and isn't yet reported for every phase it edits."""
+    found = db.execute(
+        select(CrewMessage).where(CrewMessage.project_id == project_id, CrewMessage.author == PERSON, CrewMessage.kind == NOTE)
+    ).scalars()
+    return [
+        m for m in found
+        if change_state(m) == APPLIED_CHANGE
+        and set((m.plan or {}).get("edit") or []) - set((m.plan or {}).get("reported") or [])
+    ]
+
+
+def fingerprint(output: object) -> dict:
+    """Each file of a deliverable by a short hash of its code: enough to tell afterwards
+    which files a change touched, without keeping a copy of the code with the note."""
+    import hashlib
+
+    from app.core import artifacts
+
+    return {
+        p: hashlib.sha1((c or "").encode("utf-8")).hexdigest()[:16]
+        for p, c, _ in artifacts.iter_files(output if isinstance(output, dict) else {})
+    }
+
+
+def files_changed(before: Optional[dict], after: object) -> list[str]:
+    """The paths whose code differs from `before` (a `fingerprint`), added or removed included."""
+    a, b = before or {}, fingerprint(after)
+    return sorted(p for p in set(a) | set(b) if a.get(p) != b.get(p))
+
+
+def _still_checking(m: Optional[CrewMessage], token: object = ...) -> bool:
+    """Still waiting on this check — the one started with `token`, when one is given."""
+    ok = m is not None and m.kind == NOTE and m.status in _HANDED and change_state(m) == CHECKING
+    return ok and (token is ... or (m.plan or {}).get("token") == token)
+
+
+def start_check(m: CrewMessage) -> None:
+    """Mark a note as being checked against finished work, with this check's own token."""
+    import uuid
+
+    m.plan = {"state": CHECKING, "token": uuid.uuid4().hex}
+
+
+def scope_note(project_id: str, message_id: str) -> None:
+    """Read a note against the work already done, once the generation slot is free: the
+    change planner (role `planner`) names who changes what, and the finished phases it
+    names change after the step in hand (`runner._note_change`). Never raises."""
+    from app.agents.base import AgentContext
+    from app.agents.change_planner import planner
+    from app.analytics import tracker
+    from app.core import identity
+    from app.core.constants import RoutingMode
+    from app.db.base import SessionLocal
+    from app.orchestration.charter import Charter
+    from app.orchestration.runner import runner
+    from app.router import inflight
+
+    token: object = ...  # any check, until this one's own is read
+    try:
+        with SessionLocal() as db:
+            project = db.get(Project, project_id)
+            asked = db.get(CrewMessage, message_id)
+            if project is None or not _still_checking(asked):
+                return
+            # This check's own: a reread that starts another makes this one's answer stale.
+            token = (asked.plan or {}).get("token")
+            done = finished_rows(db, project)
+            ctx = AgentContext(
+                idea=project.idea,
+                routing_mode=RoutingMode(project.routing_mode or "local_only"),
+                preferred_model=project.preferred_model,
+                charter=Charter.from_dict(project.charter),
+                change=asked.text,
+                extra_context=runner._app_index(project, list(done.values())),  # noqa: SLF001 - the one app index
+            )
+            owner, name, finished = project.owner_id, project.name, set(done)
+        if not finished:
+            # Nothing finished has any output to read: no planner call for nothing.
+            with lock_for(project_id), SessionLocal() as db:
+                asked = db.get(CrewMessage, message_id)
+                if _still_checking(asked, token):
+                    resolve(asked, NO_CHANGE)
+                    reply(db, asked, "Checked: it doesn't change finished work." if asked.meant_for else
+                          "Checked: it doesn't change finished work, and no agent is left to take it. Once the build is finished, ask for it as a change.")
+                    db.commit()
+            return
+        with identity.acting_as(owner), inflight.building(project_id, name), inflight.agent("Change planner"):
+            result = planner.run(ctx)
+        with lock_for(project_id), SessionLocal() as db:
+            tracker.record(db, response=result.response, project_id=project_id, phase="crew_note_plan", commit=False)
+            asked = db.get(CrewMessage, message_id)
+            project = db.get(Project, project_id)
+            if project is None or not _still_checking(asked, token):
+                db.commit()
+                return  # taken back, or read as a question, meanwhile
+            plan = touched_by(result.output, finished)
+            touched = plan["touched"]
+            if not touched and getattr(result, "schema_status", None) == "invalid":
+                # Unreadable even after its repair round: no answer is not "no change".
+                resolve(asked, UNCHECKED)
+                reply(db, asked, "I couldn't tell whether this changes finished work: the planner's answer wasn't readable. Send it again to check.")
+                db.commit()
+                return
+            if touched and project.status in _CHECKABLE:
+                # What it changes, as it is now — to say afterwards what the change did.
+                asked.plan = {**plan, "state": SCHEDULED_CHANGE}
+                they = "it changes" if len(touched) == 1 else "they change"
+                has = "has" if len(touched) == 1 else "have"
+                reply(db, asked, f"{_who(touched)} {has} already done that part, so {they} it after this step.", touched[0])
+            elif touched:
+                asked.plan = plan
+                resolve(asked, MISSED)
+                reply(db, asked, "The build finished first, so nothing was changed. Ask for this as a change.")
+            else:
+                asked.plan = plan
+                resolve(asked, NO_CHANGE)
+                if asked.meant_for:
+                    reply(db, asked, "Checked: it doesn't change finished work.")
+                else:
+                    reply(db, asked, "Checked: it doesn't change finished work, and no agent is left to take it. Once the build is finished, ask for it as a change.")
+            db.commit()
+    except Exception as e:  # noqa: BLE001 - a note must never take anything down
+        log.warning("Checking a note against finished work failed for %s: %s", project_id, e)
+        try:
+            with lock_for(project_id), SessionLocal() as db:
+                asked = db.get(CrewMessage, message_id)
+                if _still_checking(asked, token):
+                    resolve(asked, UNCHECKED)
+                    reply(db, asked, f"I couldn't check whether this changes finished work: {_reason(e)}")
+                    db.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("Couldn't record that checking a note failed for %s", project_id)
+
+
+def settle_unchanged(db: Session, project_id: str) -> None:
+    """The build finished: a change still waiting for a step that won't come was missed, and
+    a check still running never finished. Under the build's lock, so a check that ends after
+    this sees the finished build."""
+    with lock_for(project_id):
+        for m in db.execute(
+            select(CrewMessage).where(CrewMessage.project_id == project_id, CrewMessage.author == PERSON, CrewMessage.kind == NOTE)
+        ).scalars():
+            state = change_state(m)
+            if state == SCHEDULED_CHANGE:
+                resolve(m, MISSED)
+                reply(db, m, "The build finished first, so nothing was changed. Ask for this as a change.")
+            elif state == CHECKING:
+                resolve(m, UNCHECKED)
+                reply(db, m, "The build finished before I could check this. If it still matters, ask for it as a change.")
+        db.commit()
 
 
 # ── questions only a model can answer ─────────────────────────────────────────
@@ -932,9 +1248,19 @@ def settle_orphans(db: Session) -> int:
     for m in stranded:
         reply(db, m, "No agent was left to take this note. Once the build is finished, ask for it as a change.")
         m.status = DECLINED
-    if found or stranded:
+    # A check against finished work the restart cut off (#102 PR 3).
+    unchecked = [
+        m for m in db.execute(
+            select(CrewMessage).where(CrewMessage.author == PERSON, CrewMessage.kind == NOTE, CrewMessage.status.in_(_HANDED))
+        ).scalars()
+        if change_state(m) == CHECKING
+    ]
+    for m in unchecked:
+        resolve(m, UNCHECKED)
+        reply(db, m, "I couldn't check whether this changes finished work: the server restarted. Send it again to check.")
+    if found or stranded or unchecked:
         db.commit()
-    return len(found) + len(stranded)
+    return len(found) + len(stranded) + len(unchecked)
 
 
 __all__ = [
@@ -948,7 +1274,21 @@ __all__ = [
     "QUESTION",
     "QUEUED",
     "SCHEDULED",
+    "CHECK_AFTER",
     "addressed_to",
+    "checks_finished_work",
+    "finished_rows",
+    "scheduled",
+    "lock_for",
+    "resolve",
+    "rows_of",
+    "start_check",
+    "scope_note",
+    "unreported",
+    "files_changed",
+    "fingerprint",
+    "settle_unchanged",
+    "touched_by",
     "asked_during",
     "for_phase",
     "notes_signature",

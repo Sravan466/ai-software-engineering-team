@@ -202,6 +202,22 @@ def normalise_plan(raw: object, text: str, has: set[str]) -> dict:
     }
 
 
+def merge_plans(plans: list[dict]) -> dict:
+    """Several notes' plans as one change (#102): every phase and file any of them names."""
+    phases: list[str] = []
+    files: list[str] = []
+    for plan in plans:
+        phases += [p for p in plan.get("phases") or [] if p not in phases]
+        files += [f for f in plan.get("files_likely") or [] if f not in files]
+    return {
+        "summary": "; ".join(s for s in (str(p.get("summary") or "").strip() for p in plans) if s)[:300],
+        "phases": [p for p in EDITORS if p in phases],
+        "files_likely": files[:20],
+        "needs_design": any(p.get("needs_design") for p in plans),
+        "needs_db_change": any(p.get("needs_db_change") for p in plans),
+    }
+
+
 def edit_phases(plan: dict, has: set[str]) -> list[str]:
     """Every phase that edits its own deliverable in this change, in pipeline order."""
     from app.core.constants import PHASE_ORDER
@@ -226,7 +242,11 @@ def first_phase(plan: dict, has: set[str]) -> Optional[str]:
 def note_for(change: dict, phase: str) -> str:
     """What one phase is told the change is: the request, the plan, the app's past."""
     plan = change.get("plan") or {}
-    lines = [f"Change request #{change.get('number')}: {change.get('text', '').strip()}"]
+    lines = [
+        f"The person asked for this while the build ran, and it changes work you already did: {change.get('text', '').strip()}"
+        if change.get("note")
+        else f"Change request #{change.get('number')}: {change.get('text', '').strip()}"
+    ]
     if plan.get("summary"):
         lines.append(f"Plan: {plan['summary']}")
     likely = [p for p in plan.get("files_likely") or [] if _belongs(p, phase)]
@@ -245,8 +265,18 @@ def note_for(change: dict, phase: str) -> str:
 
 
 def editing(change: Optional[dict], phase: str) -> bool:
-    """Whether `phase` edits its own deliverable in the change the checkpoint holds."""
-    return bool(change) and phase in (change.get("edit") or [])
+    """Whether `phase` edits its own deliverable in the change the checkpoint holds. A
+    note's change (#102) is over once its own edits are done: a later re-run of one of its
+    phases is the build's, not the note's."""
+    if not change or phase not in (change.get("edit") or []):
+        return False
+    return not note_change_over(change)
+
+
+def note_change_over(change: Optional[dict]) -> bool:
+    """Whether a change a note made mid-build (#102) has done every edit it was for — the
+    one rule for "it's over", read by `editing` and by `runner._live_change`."""
+    return bool(change and change.get("note")) and set(change.get("edit") or []) <= set(change.get("done") or [])
 
 
 def landed(change: dict, phase: str, output: object) -> dict:
