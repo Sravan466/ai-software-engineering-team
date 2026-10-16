@@ -99,7 +99,8 @@ def test_a_note_from_the_person_goes_to_the_next_round_and_is_recorded(client, m
     noted = [x for x in t["rounds"] if x.get("note")]
     assert [x["note"] for x in noted] == ["Use plain functions, no classes"]
     # It reached the model, in the fix call itself, in a section of its own.
-    assert any("# What the person asks you to try\nUse plain functions, no classes" in p for p in crew.prompts[before:])
+    fixes = [p for p in crew.prompts[before:] if "# What the person asks you to try" in p]
+    assert fixes and all(p.count("Use plain functions, no classes") == 1 for p in fixes)
     assert all(x.get("note_sent") is not False for x in noted)
 
 

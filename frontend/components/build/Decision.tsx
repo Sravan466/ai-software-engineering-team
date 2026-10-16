@@ -56,7 +56,7 @@ import { ChangeDiff, DiscardChange, planSentence } from "./Changes";
  *              first; failing tests ship only with a waiver and its reason.
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
  *   needs_help — the crew could not fix a serious problem by itself. Not a judgement
- *              call: Keep trying or Stop, with waiving as the exception.
+ *              call: Try again or Stop, with waiving as the exception.
  *   database — Atlas picked a database that needs credentials: paste them, or carry
  *              on and add them later. Its own card, in `DatabaseConnect`.
  *

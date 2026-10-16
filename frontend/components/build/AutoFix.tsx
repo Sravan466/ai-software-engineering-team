@@ -29,7 +29,7 @@ import { ReasonKinds } from "./ReasonKinds";
  *   FixingPanel — while the loop runs: which round, who is on which file, and where
  *                 each problem is on its way from queued to fixed.
  *   NeedsHelp   — when the loop stopped with something still wrong: what every round
- *                 tried, what is left, Keep trying first. Waiving is the exception,
+ *                 tried, what is left, Try again first. Waiving is the exception,
  *                 behind More, with a reason kind on the record.
  */
 
