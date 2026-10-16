@@ -235,14 +235,26 @@ def test_a_keep_trying_note_is_for_its_round_not_every_phase(client):
         assert crew_chat.asked_during(db, pid) == [], "a round's note became a settled decision"
 
 
-def test_only_the_notes_handed_over_are_marked(client):
+def test_every_note_is_handed_over_newest_first(client):
+    """No note is left waiting: all of them, newest first, so a small window cuts the oldest."""
     pid = _project(client)
-    ids = [_note(pid, f"note {i}", meant_for=["backend_engineer"]) for i in range(crew_chat.NOTES_MAX + 2)]
+    ids = [_note(pid, f"note {i}", meant_for=["backend_engineer"]) for i in range(10)]
     text, _seen = crew_chat.take_notes(pid, "backend_engineer")
-    assert "note 0" not in text and f"note {crew_chat.NOTES_MAX + 1}" in text
+    lines = text.splitlines()
+    assert lines[0] == "Newest first; where two disagree, the newer one stands."
+    assert lines[1:] == [f"- note {i}" for i in reversed(range(10))]
     with SessionLocal() as db:
-        assert db.get(CrewMessage, ids[0]).applied_to is None, "a note left out of the prompt was marked handed over"
-        assert db.get(CrewMessage, ids[-1]).applied_to == ["backend_engineer"]
+        assert all(db.get(CrewMessage, i).applied_to == ["backend_engineer"] for i in ids)
+
+
+def test_a_few_notes_are_settled_decisions_after_the_stack(client):
+    pid = _project(client)
+    for i in range(8):
+        mid = _note(pid, f"note {i}", meant_for=["backend_engineer"])
+    crew_chat.take_notes(pid, "backend_engineer")
+    with SessionLocal() as db:
+        kept = crew_chat.asked_during(db, pid)
+    assert kept == [f"Asked during the build: note {i}" for i in range(3, 8)]
 
 
 def test_a_note_added_and_one_taken_back_still_moves_the_signature(client):
@@ -327,3 +339,12 @@ def test_only_a_code_phase_between_files_pays_for_the_notes_read(client):
     with inflight.building(pid):
         assert claim.between_calls() is None
         assert claim.between_calls(notes=True) == (0, None)
+
+
+def test_the_page_is_told_which_notes_still_stand(client):
+    pid = _project(client)
+    standing = _note(pid, "use a grid", meant_for=["frontend_engineer"])
+    _note(pid, "stub the API for this round", meant_for=[])
+    thread = {m["text"]: m["standing"] for m in client.get(f"/api/projects/{pid}/messages").json()["messages"]}
+    assert thread == {"use a grid": True, "stub the API for this round": False}
+    assert standing

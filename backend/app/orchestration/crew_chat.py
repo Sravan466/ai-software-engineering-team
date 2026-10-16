@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session, object_session
 
 from app.core.constants import PHASE_LABELS, PHASE_ORDER, GateKind, PhaseStatus, PipelineStatus
 from app.core.logging import get_logger
-from app.db.models import CrewMessage, Project
+from app.db.models import CrewMessage, Project, _aware
 
 log = get_logger(__name__)
 
@@ -501,14 +501,14 @@ def status_answer(project: Project, text: str, rows: Optional[dict] = None) -> t
 def _iso(value: Optional[datetime]) -> Optional[str]:
     if value is None:
         return None
-    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+    return _aware(value).isoformat()
 
 
 def _reply_out(m: CrewMessage) -> dict:
     return {"id": m.id, "agent": m.agent, "text": m.text, "status": m.status, "created_at": _iso(m.created_at)}
 
 
-def out(m: CrewMessage, replies: Iterable[CrewMessage] = ()) -> dict:
+def out(m: CrewMessage, replies: Iterable[CrewMessage] = (), since: Optional[datetime] = None) -> dict:
     """A person's message as the page reads it, with the crew's replies to it."""
     return {
         "id": m.id,
@@ -516,6 +516,9 @@ def out(m: CrewMessage, replies: Iterable[CrewMessage] = ()) -> dict:
         "kind": m.kind,
         "status": m.status,
         "agent": m.agent,
+        # A note a phase of this run can still be handed (#102): what the crew floor's
+        # "Got your note" shows, judged here once rather than again on the page.
+        "standing": standing(m, since),
         "meant_for": list(m.meant_for or []),
         "applied_to": list(m.applied_to or []),
         "change_request_id": m.change_request_id,
@@ -545,7 +548,8 @@ def thread(db: Session, project_id: str, limit: Optional[int] = None) -> list[di
     by: dict[str, list[CrewMessage]] = {}
     for r in replies:
         by.setdefault(r.reply_to or "", []).append(r)
-    return [out(m, by.get(m.id, [])) for m in asked]
+    since = run_began(db, project_id)
+    return [out(m, by.get(m.id, []), since) for m in asked]
 
 
 def recent(project: Project) -> list[dict]:
@@ -579,9 +583,8 @@ def now() -> datetime:
 def _later_than(m: CrewMessage) -> datetime:
     """Now, and never at or before `m` — a reply written in the same instant still sorts after it."""
     at = now()
-    base = m.created_at
+    base = _aware(m.created_at)
     if base is not None:
-        base = base if base.tzinfo else base.replace(tzinfo=timezone.utc)
         if at <= base:
             at = base + timedelta(microseconds=1)
     return at
@@ -609,8 +612,8 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
         if named == current and not stopped and _writing_files(project, rows):
             return f"Got it. {title(named)} is writing its files now; it reads this note before the next one.", named, [named]
         return (
-            f"{title(named)} has already {'started' if state == 'working' else 'finished'}. This note "
-            "waits with the build, and the crew checks whether it changes that work after this step.",
+            f"{title(named)} has already {'started' if state == 'working' else 'finished'}, so this note "
+            "waits for the next time that work is sent back.",
             named,
             [named],
         )
@@ -627,7 +630,10 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
             return f"{said}, and {title(later[0])} gets it when it starts.", current, ahead
         return f"{said}, and {title(later[0])} and the {len(later) - 1} after it get it when they start.", current, ahead
     if not ahead:
-        return "Every phase has started, so this note waits with the build until the crew can act on it.", None, []
+        return (
+            "Every agent has started on this build, so no one is left to take this note. Once it's "
+            "finished, ask for it as a change."
+        ), None, []
     first = ahead[0]
     if stopped:
         return f"Got it. The build is stopped, so {title(first)} gets this note when it resumes.", first, ahead
@@ -661,9 +667,9 @@ def _writing_files(project: Project, rows: dict) -> bool:
 
 
 # ── notes reach the phases they're for ────────────────────────────────────────
-#: The notes a phase's prompt carries, newest kept when there are more.
-NOTES_MAX = 8
 _HANDED = (QUEUED, APPLIED)
+#: Said over a phase's notes: two notes can disagree, and the slot's budget cuts the end.
+_NEWEST_FIRST = "Newest first; where two disagree, the newer one stands."
 
 
 def _note_filter(project_id):
@@ -705,7 +711,7 @@ def for_phase(m: CrewMessage, phase: str) -> bool:
     return phase in (m.meant_for or [])
 
 
-def _since(db: Session, project_id: str):
+def run_began(db: Session, project_id: str):
     """When the build's current run began, for its notes: a note sent before the build was
     last finished belongs to that run, and is in its settled decisions now."""
     from sqlalchemy import func
@@ -729,11 +735,8 @@ def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
     try:
         with SessionLocal() as db:
             held = _notes(db, project_id)
-            since = _since(db, project_id)
-            mine = [
-                m for m in held
-                if for_phase(m, phase) and (since is None or m.created_at is None or _utc(m.created_at) > _utc(since))
-            ][-NOTES_MAX:]
+            since = run_began(db, project_id)
+            mine = [m for m in held if for_phase(m, phase) and _this_run(m, since)]
             for m in mine:
                 given = list(m.applied_to or [])
                 if phase in given:
@@ -746,24 +749,43 @@ def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
                     reply(db, m, f"Got your note. {title(phase)} is working with it now.", phase)
             db.commit()
             newest = max((m.created_at for m in held if m.created_at is not None), default=None)
-            return "\n".join(f"- {' '.join(m.text.split())}" for m in mine), signature_of(len(held), newest)
+            # Newest first: a window too small for every note cuts the oldest.
+            lines = [f"- {' '.join(m.text.split())}" for m in reversed(mine)]
+            text = "\n".join([_NEWEST_FIRST, *lines]) if len(lines) > 1 else "\n".join(lines)
+            return text, signature_of(len(held), newest)
     except Exception:  # noqa: BLE001
         log.exception("Couldn't read the notes for %s on %s", phase, project_id)
         return None
 
 
+#: "Asked during the build" lines kept with the stack line: every reader takes the tail.
+ASKED_DECISIONS = 5
+
+
 def asked_during(db: Session, project_id: str) -> list[str]:
-    """What the person asked for while the build ran, for the app's settled decisions: the
-    notes a phase took. Not a Keep-trying note, which was for one fix round."""
+    """What the person asked for while the first build ran, for the app's settled decisions
+    (set once, when it finishes): the notes a phase took, the newest few. Not a Keep-trying
+    note, which was for one fix round. A change run hands notes to no phase — every one
+    has started — so it has none to add."""
     return [
         f"Asked during the build: {' '.join(m.text.split())[:200]}"
         for m in _notes(db, project_id)
         if m.applied_to and m.meant_for
-    ]
+    ][-ASKED_DECISIONS:]
 
 
-def _utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+def _this_run(m: CrewMessage, since: Optional[datetime]) -> bool:
+    return since is None or m.created_at is None or _aware(m.created_at) > _aware(since)
+
+
+def standing(m: CrewMessage, since: Optional[datetime]) -> bool:
+    """Whether a phase of this run could still be handed this note."""
+    return (
+        m.author == PERSON and m.kind == NOTE and m.status in _HANDED and bool(m.meant_for) and _this_run(m, since)
+    )
+
+
+
 
 
 # ── questions only a model can answer ─────────────────────────────────────────

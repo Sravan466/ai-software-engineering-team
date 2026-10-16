@@ -109,18 +109,11 @@ export function sentBack(project: Project, key: string): PhaseResult | null {
 
 /**
  * The newest note the person sent this agent in this run (#102), once the agent has taken
- * it and while it still stands — its first line, for the crew floor's "Got your note"
- * bubble. A note from before the build was last finished belongs to that run.
+ * it and while it still stands — its first line, for the crew floor's "Got your note" bubble.
  */
 export function noteTaken(project: Project, key: string): string {
-  const since = project.current_version?.created_at ?? null;
-  const taken = (project.messages ?? []).filter(
-    (m) =>
-      m.kind === "note" &&
-      (m.status === "applied" || m.status === "queued") &&
-      m.applied_to.includes(key) &&
-      (!since || !m.created_at || Date.parse(m.created_at) > Date.parse(since)),
-  );
+  // Whether it still stands is the server's call (`crew_chat.standing`), not worked out twice.
+  const taken = (project.messages ?? []).filter((m) => m.standing && m.applied_to.includes(key));
   return taken.length ? firstLine(taken[taken.length - 1].text) : "";
 }
 

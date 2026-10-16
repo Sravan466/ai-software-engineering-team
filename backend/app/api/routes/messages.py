@@ -127,7 +127,8 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         return
     text, agent, meant_for = crew_chat.note_reply(project, asked.text)
     crew_chat.reply(db, asked, text, agent)
-    asked.status = crew_chat.QUEUED
+    # No phase left to take it: said so, and not kept waiting for nobody.
+    asked.status = crew_chat.QUEUED if meant_for else crew_chat.DECLINED
     asked.meant_for = list(meant_for)
     # Who it waits for, as it is read now — a reread's earlier reply named someone else.
     asked.agent = agent
@@ -240,4 +241,4 @@ def _one(db: Session, asked: CrewMessage) -> dict:
     replies = db.execute(
         select(CrewMessage).where(CrewMessage.reply_to == asked.id).order_by(CrewMessage.created_at)
     ).scalars().all()
-    return crew_chat.out(asked, replies)
+    return crew_chat.out(asked, replies, crew_chat.run_began(db, asked.project_id))

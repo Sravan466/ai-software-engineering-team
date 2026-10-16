@@ -344,7 +344,7 @@ def test_a_note_naming_a_phase_in_a_fix_round_waits(calls, client):
         db.get(Project, pid).auto_fix = data
         db.commit()
     text = _say(client, pid, "backend: keep it small")["replies"][0]["text"]
-    assert text.startswith("Backend Engineer has already started."), text
+    assert text.startswith("Backend Engineer has already started, so this note waits"), text
 
 
 def test_a_note_for_one_agent_says_so(calls, client):
@@ -425,6 +425,18 @@ def test_a_stalled_build_never_says_an_agent_is_working(calls, client):
         db.commit()
     text = _say(client, pid, "is the backend done?")["replies"][0]["text"]
     assert text.startswith("Nothing is driving this build")
+
+
+def test_a_note_with_no_agent_left_to_take_it_says_so(calls, client):
+    pid = _build(client, status=PipelineStatus.RUNNING.value, current_phase="cost_estimation",
+                 heartbeat_at=datetime.now(timezone.utc))
+    for phase in ("product_manager", "system_design", "backend_engineer", "frontend_engineer", "qa_engineer",
+                  "security_engineer", "devops_engineer"):
+        _row(pid, phase, PhaseStatus.APPROVED.value)
+    _row(pid, "cost_estimation", PhaseStatus.RUNNING.value)
+    m = _say(client, pid, "add dark mode")
+    assert m["status"] == "declined" and m["meant_for"] == []
+    assert m["replies"][0]["text"].startswith("Every agent has started on this build, so no one is left")
 
 
 def test_a_note_on_a_finished_build_points_at_the_change_box(calls, client):
