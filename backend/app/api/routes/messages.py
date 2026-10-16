@@ -14,7 +14,7 @@ import threading
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_project
@@ -125,11 +125,14 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         asked.status = crew_chat.DECLINED
         asked.agent = None
         return
-    text, agent, meant_for = crew_chat.note_reply(project, asked.text)
+    # Some work is done: the planner reads the note against it once the slot is free (PR 3).
+    check = crew_chat.checks_finished_work(db, project, asked.text)
+    text, agent, meant_for = crew_chat.note_reply(project, asked.text, check)
     crew_chat.reply(db, asked, text, agent)
-    # No phase left to take it: said so, and not kept waiting for nobody.
-    asked.status = crew_chat.QUEUED if meant_for else crew_chat.DECLINED
+    # No phase left to take it and nothing to check: said so, not kept waiting for nobody.
+    asked.status = crew_chat.QUEUED if (meant_for or check) else crew_chat.DECLINED
     asked.meant_for = list(meant_for)
+    asked.plan = {"checking": True} if check else None
     # Who it waits for, as it is read now — a reread's earlier reply named someone else.
     asked.agent = agent
 
@@ -138,6 +141,7 @@ def _settle(
     db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept], background: BackgroundTasks
 ) -> dict:
     """Answer or keep `asked`, commit, then start whatever it set going."""
+    scope = False
     try:
         if asked.kind == crew_chat.QUESTION:
             # Counted and kept under one lock, so two sends at once can't both be the third.
@@ -148,6 +152,7 @@ def _settle(
             ask_model = False
             _note(db, project, asked, kept)
             db.commit()
+            scope = bool((asked.plan or {}).get("checking"))
         # Read back inside the guard too: whatever fails before the response is sent
         # leaves a claimed build driven all the same.
         out = {
@@ -168,6 +173,8 @@ def _settle(
         background.add_task(_drive, project.id, kept[2])
     if ask_model:
         crew_chat.spawn(crew_chat.ask_model, project.id, asked.id)
+    if scope:
+        crew_chat.spawn(crew_chat.scope_note, project.id, asked.id)
     return out
 
 
@@ -234,7 +241,48 @@ def reread_message(
     asked.kind = payload.kind
     if asked.kind == crew_chat.QUESTION:
         asked.meant_for = None  # a question is for no phase
+        asked.plan = None  # nor read against finished work
     return _settle(db, project, asked, kept, background)
+
+
+@router.post("/{project_id}/messages/{message_id}/cancel")
+def cancel_message(
+    message_id: str,
+    project: Project = Depends(get_project),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Take a note back while it waits — a change to finished work included, until it starts."""
+    asked = db.get(CrewMessage, message_id)
+    if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
+        raise HTTPException(404, "There's no such message on this build.")
+    if asked.kind != crew_chat.NOTE:
+        raise HTTPException(409, "Only a note can be taken back.")
+    was = asked.status
+    # Conditional, against the runner starting the change in the same moment.
+    taken = db.execute(
+        update(CrewMessage)
+        .where(CrewMessage.id == asked.id, CrewMessage.status.in_((crew_chat.QUEUED, crew_chat.SCHEDULED)))
+        .values(status=crew_chat.CANCELLED)
+    ).rowcount
+    db.commit()
+    db.refresh(asked)
+    if not taken:
+        raise HTTPException(
+            409,
+            "The crew has already started on it." if asked.status == crew_chat.APPLIED else f"It's already {asked.status}.",
+        )
+    crew_chat.reply(
+        db, asked,
+        "Cancelled. Nothing was changed." if was == crew_chat.SCHEDULED else "Taken back. No agent gets this note now.",
+        asked.agent,
+    )
+    db.commit()
+    return {
+        "message": _one(db, asked),
+        "messages": crew_chat.thread(db, project.id, crew_chat.RECENT),
+        "status": project.status,
+        "current_phase": project.current_phase,
+    }
 
 
 def _one(db: Session, asked: CrewMessage) -> dict:

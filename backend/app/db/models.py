@@ -628,6 +628,10 @@ class CrewMessage(Base):
     applied_to: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     #: The change request a note that changes finished work became.
     change_request_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    #: What the change planner made of a note sent once some work was finished (#102):
+    #: `{"checking": true}` while it reads it, then `{summary, phases, files_likely,
+    #: needs_design, touched}` — `touched`, the finished phases it changes after this step.
+    plan: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

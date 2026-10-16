@@ -100,7 +100,9 @@ ADDITIVE_COLUMNS: dict[str, tuple[str, ...]] = {
     "versions": ("file_count",),
     # Nullable (#102): a message from before notes recorded who they were for is for no
     # phase — a Keep-trying note, which was for its fix round only.
-    "crew_messages": ("meant_for",),
+    # Nullable (#102 PR 3): a note from before notes were checked against finished work
+    # was never checked, and an empty plan would claim it changed nothing.
+    "crew_messages": ("meant_for", "plan"),
     "phase_results": (
         # Nullable (#63): only a phase that fell back past a refused key has one.
         "fallback_note",

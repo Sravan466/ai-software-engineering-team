@@ -29,7 +29,7 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
     label: "Talk to the crew",
     placeholder: "Ask what they're doing, or tell them what you want",
     quick: ["What are you doing?", "Who's next?"],
-    hint: "The crew answers questions straight away. A note goes to every agent still to work, or to the one you name first: \u201cFrontend: use a grid\u201d.",
+    hint: "The crew answers questions straight away. A note goes to every agent still to work, or to the one you name first (\u201cFrontend: use a grid\u201d). If it changes work already done, that work changes after the step in hand.",
   },
   stuck: {
     label: "Tell the crew what to try",
@@ -106,13 +106,16 @@ function stateOf(m: CrewMessage): { word: string; tone: "ok" | "run" | "warn" | 
       const named = roles.length > 3 ? `${roles.slice(0, 2).join(", ")} and ${roles.length - 2} more` : listOf(roles);
       return { word: roles.length ? `Applied to ${named}` : "Applied", tone: "ok" };
     }
-    case "scheduled":
-      return { word: "Change after this step", tone: "warn" };
+    case "scheduled": {
+      const who = (m.touched ?? []).map(roleOf);
+      return { word: who.length ? `Changes ${listOf(who)} after this step` : "Change after this step", tone: "warn" };
+    }
     case "cancelled":
       return { word: "Cancelled", tone: "plain" };
     case "declined":
       return { word: "Not sent", tone: "plain" };
     default: {
+      if (m.checking) return { word: "Checking finished work", tone: "run" };
       // Who it waits for as it's read now; the newest reply's, for a message from before that was kept.
       const who = m.agent ?? [...m.replies].reverse().find((r) => r.agent)?.agent;
       return { word: who ? `Waiting for ${roleOf(who)}` : "Waiting", tone: "run" };
@@ -246,6 +249,16 @@ export function CrewTalk({
                     {state.word}
                   </span>
                   <span className="talk-read">Read as a {m.kind}</span>
+                  {m.kind === "note" && (m.status === "scheduled" || m.status === "queued") && (
+                    <button
+                      type="button"
+                      className="talk-reread talk-cancel"
+                      disabled={busy}
+                      onClick={() => act(() => api.cancelMessage(id, m.id))}
+                    >
+                      {m.status === "scheduled" ? "Cancel the change" : "Take back"}
+                    </button>
+                  )}
                   {canReread && (
                     <button
                       type="button"

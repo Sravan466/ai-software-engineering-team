@@ -154,6 +154,9 @@
 .talk-reread:hover { text-decoration-color: var(--accent); }
 .talk-reread:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .talk-reread:disabled { color: var(--ink-3); cursor: not-allowed; text-decoration-color: var(--line-3); }
+/* Taking a note back undoes something the person set going: quieter than the accent. */
+.talk-cancel { color: var(--ink-2); text-decoration-color: var(--line-3); }
+.talk-cancel:hover { color: var(--bad); text-decoration-color: var(--bad); }
 
 /* The composer under it: the same box as "What should change?". */
 .talk-box .finish-label { padding-top: 14px; }

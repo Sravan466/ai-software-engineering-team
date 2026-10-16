@@ -662,6 +662,10 @@ export type CrewMessage = {
   applied_to: string[];
   /** A note a phase of this run can still be handed — the server's judgement, for the floor. */
   standing?: boolean;
+  /** Being read against the work already done (#102 PR 3). */
+  checking?: boolean;
+  /** The finished phases it changes after the step in hand. */
+  touched?: string[];
   change_request_id: string | null;
   created_at: string | null;
   applied_at: string | null;
@@ -1134,6 +1138,11 @@ export const api = {
       body: JSON.stringify({ text, keep_trying: !!opts.keepTrying }),
     }),
   listMessages: (id: string) => req<{ messages: CrewMessage[] }>(`/api/projects/${id}/messages`),
+  /** Take a note back while it waits — a change to finished work included, until it starts. */
+  cancelMessage: (id: string, messageId: string) =>
+    req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages/${messageId}/cancel`, {
+      method: "POST",
+    }),
   rereadMessage: (id: string, messageId: string, kind: CrewMessage["kind"]) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages/${messageId}/reread`, {
       method: "POST",
