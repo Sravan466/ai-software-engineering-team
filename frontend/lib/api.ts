@@ -457,6 +457,8 @@ export type AutoFixRound = {
    * only some of the round's calls carried it. */
   note?: string;
   note_sent?: boolean | "partly";
+  /** The note was a decision about the app (#102): it stands, and the round may drop what it leaves out. */
+  decided?: boolean;
   /** What the platform mended itself, without a model (#103): on the attempt this round
    * made, and — on an episode's first round — on the attempt before it. */
   platform?: PlatformFixed;

@@ -84,6 +84,25 @@ def classify(text: str) -> str:
     return QUESTION if first and first.group(0) in _ASKS else NOTE
 
 
+#: A note that settles something about the app rather than hinting at a fix (#102): it
+#: drops or leaves out a feature. On a stuck build it stands for the rest of the build, and
+#: the fix round may remove what it drops instead of fixing it again.
+_DECISION = re.compile(
+    r"^(?:please\s+|ok(?:ay)?,?\s+|actually,?\s+)?"
+    r"(?:skip|drop|remove|cut|forget(?:\s+about)?|leave\s+out|get\s+rid\s+of|no\s+longer|"
+    r"don'?t\s+(?:add|include|build|need|bother|implement|make|offer|support|have)|"
+    r"do\s+not\s+(?:add|include|build|need|implement|make|offer|support|have)|"
+    r"we\s+don'?t\s+need|no\s+need\s+for|without|no\s+(?!,)[a-z])",
+    re.I,
+)
+
+
+def is_decision(text: str) -> bool:
+    """Whether a note decides something about the app — "skip voice input", "no login" —
+    from its words, as a question is told from a note."""
+    return bool(_DECISION.match(plain(text).strip()))
+
+
 # ── who is who ────────────────────────────────────────────────────────────────
 _ORDER = [p.value for p in PHASE_ORDER]
 #: The phases that write their files one call at a time, and can read a note between two.
@@ -802,7 +821,8 @@ def asked_during(db: Session, project_id: str, label: str = "the build", this_ru
     return [
         f"Asked during {label}: {' '.join(m.text.split())[:200]}"
         for m in _notes(db, project_id)
-        if m.applied_to and m.meant_for and _this_run(m, since)
+        # A decision sent on a stuck build counts even with no phase left to hand it to.
+        if m.applied_to and (m.meant_for or (m.plan or {}).get("decided")) and _this_run(m, since)
     ][-ASKED_DECISIONS:]
 
 
@@ -1296,6 +1316,7 @@ __all__ = [
     "take_notes",
     "ask_model",
     "classify",
+    "is_decision",
     "is_status",
     "named_phase",
     "not_started",

@@ -408,6 +408,7 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               {r.note && (
                 <span className="ledger-note">
                   You said: “{r.note}”
+                  {r.decided && " Kept as a decision, so this round could drop what it leaves out."}
                   {r.note_sent === false && " The model didn't see it: there was no room beside the code."}
                   {r.note_sent === "partly" && " Only some of this round's calls had room for it."}
                 </span>

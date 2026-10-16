@@ -64,7 +64,7 @@ def _keep_trying(db: Session, project: Project, kind: str, text: str, *, must: b
     message that then fails to save never leaves a claimed build that nothing drives."""
     if not must and (kind != crew_chat.NOTE or not _stuck(project) or not _something_to_fix(db, project)):
         return None
-    kept = start_keep_trying(db, project, note=text)
+    kept = start_keep_trying(db, project, note=text, decided=crew_chat.is_decision(text))
     db.commit()
     return kept
 
@@ -112,11 +112,23 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         more, names, _token = kept
         phases = [n[len(autofix.BUILD_PREFIX):] for n in names if n.startswith(autofix.BUILD_PREFIX)]
         agent = phases[0] if phases else project.current_phase
-        crew_chat.reply(db, asked, f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}.", agent)
+        said = f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}."
+        decided = crew_chat.is_decision(asked.text)
+        if decided:
+            # A decision about the app stands for the rest of the build (#102): the phases
+            # still to come take it too, and it joins what the app has settled on.
+            ahead = crew_chat.not_started(project)
+            asked.meant_for = ahead
+            asked.plan = {"decided": True}
+            said += " I'll keep it as a decision for the rest of the build" + (
+                ", and the round may drop what it leaves out instead of fixing it." if phases else "."
+            )
+        else:
+            # For this fix round, which reads it (#103): not a standing note for every phase.
+            asked.meant_for = []
+        crew_chat.reply(db, asked, said, agent)
         asked.status = crew_chat.APPLIED
         asked.agent = agent
-        # For this fix round, which reads it (#103): not a standing note for every phase.
-        asked.meant_for = []
         asked.applied_to = phases or None
         asked.applied_at = crew_chat.now()
         return

@@ -35,7 +35,7 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
     label: "Tell the crew what to try",
     placeholder: "Keep all the routes in one file, for example, or ask why it's stuck",
     quick: ["Why is it stuck?"],
-    hint: "A note starts the next fix round with your words. The crew answers questions straight away.",
+    hint: "A note starts the next fix round with your words. Say what to leave out (\u201cskip voice input\u201d) and the round can drop it instead. The crew answers questions straight away.",
   },
   stopped: {
     label: "Talk to the crew",

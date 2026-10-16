@@ -332,6 +332,8 @@ def abandon_open_round(t: dict) -> bool:
     # What the person asked of it (#103) waits for the round that does run.
     if record.get("note") and not t.get("note"):
         t["note"] = record["note"]
+        if record.get("decided"):
+            t["decided"] = True
     if record.get("asked_model") and not t.get("one_off"):
         t["one_off"] = record["asked_model"]
     return True
@@ -343,6 +345,7 @@ def settle(t: dict) -> None:
     # What the person asked for this episode (#103) — a note, a model they agreed to
     # send its code to — is not a standing order for the next one.
     t.pop("note", None)
+    t.pop("decided", None)
     t.pop("one_off", None)
     if t.get("episode_start") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
         int(settings.auto_fix_max_rounds), 0
@@ -360,10 +363,14 @@ def stuck(data: dict) -> list[str]:
     return [name for name, t in data["tracks"].items() if t.get("stopped") and not t.get("accepted")]
 
 
-def keep_trying(data: dict, more: int, note: Optional[str] = None, model: Optional[str] = None) -> list[str]:
+def keep_trying(
+    data: dict, more: int, note: Optional[str] = None, model: Optional[str] = None, decided: bool = False
+) -> list[str]:
     """Give every stuck track `more` rounds, and forget why it stopped. `note` (#103) is
     what the person told the crew to try, for each track's next round; `model` a model
-    they chose for the next round of each code track it was offered for, once."""
+    they chose for the next round of each code track it was offered for, once. `decided`
+    (#102): the note is a decision about the app ("skip voice input"), and the round may
+    remove what it drops instead of fixing it."""
     names = stuck(data)
     for name in names:
         t = data["tracks"][name]
@@ -373,6 +380,10 @@ def keep_trying(data: dict, more: int, note: Optional[str] = None, model: Option
         t["stopped"] = None
         if note and note.strip():
             t["note"] = note.strip()
+            if decided:
+                t["decided"] = True
+            else:
+                t.pop("decided", None)
         if model and name.startswith(BUILD_PREFIX) and model == offered:
             t["one_off"] = model
     return names
@@ -799,6 +810,31 @@ def code_note(
     )
 
 
+#: Said to a fix round beside a note that is a decision about the app (#102).
+DECIDED = (
+    "This is the person's decision about the app, not just a hint: where a problem is in "
+    "something it drops, remove that code (and what uses it) instead of fixing it."
+)
+
+
+def take_person(t: dict) -> tuple[Optional[str], Optional[str]]:
+    """What the person told this round, taken off the track: their words as the round
+    records them, and as its prompt carries them — a decision with what it allows."""
+    said = t.pop("note", None)
+    decided = bool(t.pop("decided", None))
+    if not said:
+        return None, None
+    return said, f"{said}\n{DECIDED}" if decided else said
+
+
+def mark_round(record: dict, said: Optional[str], decided: bool) -> None:
+    """Keep the person's words on the round, and whether they were a decision."""
+    if said:
+        record["note"] = said
+        if decided:
+            record["decided"] = True
+
+
 def said_by_person(note: Optional[str]) -> str:
     """What the person told the crew to try (#103), in one line."""
     text = " ".join(str(note or "").split())
@@ -855,6 +891,9 @@ __all__ = [
     "platform_fixed",
     "said",
     "said_by_person",
+    "take_person",
+    "mark_round",
+    "DECIDED",
     "with_person",
     "view",
     "track",
