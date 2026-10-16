@@ -1151,6 +1151,8 @@ class _Run:
         try:
             resp = self._call(lambda: self._messages(planned, fixing=failing), planned, "fixing")
         except _NoRoom:
+            if not self.fix_mode:
+                raise
             return list(failing)  # a fix round shows a file whole or not at all (#103)
         self.truncated += 1 if _cut(resp) else 0
         blocks = {path: block for path, block in self._match(resp, planned) if block.complete}
