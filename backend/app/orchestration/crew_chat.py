@@ -977,6 +977,14 @@ def scope_note(project_id: str, message_id: str) -> None:
                 return  # taken back, or read as a question, meanwhile
             plan = touched_by(result.output, finished)
             touched = plan["touched"]
+            if not touched and getattr(result, "schema_status", None) == "invalid":
+                # Unreadable even after its repair round: no answer is not "no change".
+                asked.plan = {"state": UNCHECKED}
+                reply(db, asked, "I couldn't tell whether this changes finished work: the planner's answer wasn't readable. Send it again to check.")
+                if not asked.meant_for:
+                    asked.status = DECLINED
+                db.commit()
+                return
             if touched and project.status in _CHECKABLE:
                 asked.plan = {**plan, "state": SCHEDULED_CHANGE}
                 they = "it changes" if len(touched) == 1 else "they change"

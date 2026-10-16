@@ -43,12 +43,21 @@ class ChangePlannerAgent(BaseAgent):
     def task_instruction(self) -> str:
         return _TASK
 
-    def _build_messages(self, ctx: AgentContext, profile: Optional[ModelProfile] = None, reserve: int = 0) -> Prompt:
+    def _build_messages(
+        self,
+        ctx: AgentContext,
+        profile: Optional[ModelProfile] = None,
+        reserve: int = 0,
+        keys: bool = True,
+        bodies: object = None,
+    ) -> Prompt:
         """The app, its files, and the request — the file list cut first when it must be.
 
         `ctx.change` is the request, `ctx.extra_context` the app's file list and what it
         has settled on (the runner writes both). Nothing else of the pipeline's context
-        applies: there are no hand-offs to this call and no skills for it.
+        applies: there are no hand-offs to this call and no skills for it — so `keys` and
+        `bodies`, which the schema repair round passes as it does for every agent, change
+        nothing here. Without them that round raised instead of repairing (#102).
         """
         if profile is None:
             profile = router.profile_for(

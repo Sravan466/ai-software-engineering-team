@@ -289,3 +289,23 @@ def test_taking_a_note_back_cancels_its_change_too(script, client):
     assert r.status_code == 200, r.text
     m = r.json()["message"]
     assert m["status"] == "cancelled" and m["change"] == "cancelled"
+
+
+def test_the_planner_repairs_a_reply_that_isnt_its_shape(monkeypatch, stub_router):
+    """A small model's first plan is often not the JSON asked for: the repair round must run."""
+    from app.agents.base import AgentContext
+    from app.agents.change_planner import planner
+
+    replies = iter(["Sure! Here is the plan: change the backend.", json.dumps(Script().plan)])
+    stub(monkeypatch, "complete", lambda messages, **kw: _resp(next(replies)))
+    result = planner.run(AgentContext(idea="A habit tracker", change=NOTE, extra_context="backend_engineer:\n- backend/app/routes.py"))
+    assert result.output["phases"] == ["backend_engineer"]
+
+
+def test_an_unreadable_plan_is_not_called_no_change(monkeypatch, script, client):
+    pid = _running_frontend(client)
+    stub(monkeypatch, "complete", lambda messages, **kw: _resp("I think the backend, maybe."))
+    client.post(f"/api/projects/{pid}/messages", json={"text": NOTE})
+    [m] = _thread(client, pid)
+    assert m["change"] == "unchecked"
+    assert m["replies"][-1]["text"].startswith("I couldn't tell whether this changes finished work")
