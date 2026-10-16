@@ -656,6 +656,8 @@ export type CrewMessage = {
   kind: "question" | "note";
   status: CrewMessageStatus;
   agent: string | null;
+  /** The phases a note is for: the ones it names, or every phase that hadn't started when it was sent. */
+  meant_for: string[];
   /** The phases a note was handed to. */
   applied_to: string[];
   change_request_id: string | null;

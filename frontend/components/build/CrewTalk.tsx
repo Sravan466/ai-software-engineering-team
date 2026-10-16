@@ -169,16 +169,28 @@ export function CrewTalk({
   const count = thread.reduce((n, m) => n + 1 + m.replies.length, 0);
   const newest = thread[thread.length - 1];
 
-  // A new line scrolls into view, unless the person scrolled up to read.
-  const lastCount = useRef(count);
+  // The conversation opens on its newest line, and follows each new one as it opens its
+  // height — unless the person scrolled up to read, which `pinned` remembers.
+  const pinned = useRef(true);
+  const lastCount = useRef(-1);
   useLayoutEffect(() => {
     const el = list.current;
-    if (el && count > lastCount.current) {
-      const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-      const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (near || lastCount.current === 0) el.scrollTo({ top: el.scrollHeight, behavior: still ? "auto" : "smooth" });
-    }
+    const first = lastCount.current < 0;
+    const grew = count > lastCount.current;
     lastCount.current = count;
+    if (!el || !grew || !pinned.current) return;
+    el.scrollTop = el.scrollHeight;
+    if (first || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    // A new row grows for about half a second: keep to its foot until it has.
+    const until = performance.now() + 640;
+    let frame = 0;
+    const follow = () => {
+      if (!pinned.current) return;
+      el.scrollTop = el.scrollHeight;
+      if (performance.now() < until) frame = requestAnimationFrame(follow);
+    };
+    frame = requestAnimationFrame(follow);
+    return () => cancelAnimationFrame(frame);
   }, [count]);
 
   const asks = text.trim() ? readsAsQuestion(text) : null;
@@ -187,7 +199,17 @@ export function CrewTalk({
   return (
     <section className={`talk${embedded ? " is-embedded" : ""}`} aria-label="Talk to the crew">
       {thread.length > 0 && (
-        <ol ref={list} className="talk-thread" aria-live="polite" aria-relevant="additions" aria-label="Your messages to the crew">
+        <ol
+          ref={list}
+          className="talk-thread"
+          aria-live="polite"
+          aria-relevant="additions"
+          aria-label="Your messages to the crew"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+          }}
+        >
           {thread.map((m) => {
             const state = stateOf(m);
             const canReread =

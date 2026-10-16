@@ -338,6 +338,9 @@ _STATUS = re.compile(
         )
     )
 )
+#: Two status questions with an answer of their own, not the whole picture.
+_ASKS_NEXT = re.compile(r"\b(who|what)('?s| is| comes) next\b")
+_ASKS_TIME = re.compile(r"\bhow (long|much longer)\b|\bwhen (will|does|do|is) (it|you|this|the build|the crew)\b|\beta\b")
 #: The same, about one agent: "has the frontend started?", "is the backend done?".
 _PHASE_STATE = re.compile(r"\b(start|started|starting|finish|finished|done|ready|running|working|begun)\b")
 _STUCK_WORDS = frozenset({
@@ -367,6 +370,19 @@ _GATE_WAIT = {
     GateKind.DATABASE.value: "The build waits for you to connect its database, or choose to add it later.",
     GateKind.INTEGRATIONS.value: "The build waits for you to connect the services it uses, or choose to add them later.",
 }
+
+
+def _how_long(project: Project) -> str:
+    """No finish time is promised — it turns on the model — only what the record says."""
+    phase = project.current_phase
+    if phase not in _ORDER:
+        return "The build has just started."
+    i = _ORDER.index(phase)
+    left = len(_ORDER) - i - 1
+    took = int((project.elapsed_seconds or 0) // 60)
+    at = f"{title(phase)} has been working for {took} minute{'' if took == 1 else 's'}" if took else f"{title(phase)} has just started"
+    after = f"{left} more phase{'' if left == 1 else 's'} after it" if left else "it's the last phase"
+    return f"{at}. It's phase {i + 1} of {len(_ORDER)}, and {after}. How long each takes depends on the model, so there's no finish time to give."
 
 
 def _phase_answer(project: Project, phase: str, rows: dict) -> str:
@@ -418,6 +434,11 @@ def status_answer(project: Project, text: str) -> tuple[str, Optional[str]]:
     if status == PipelineStatus.RUNNING.value:
         if asks_model:
             return (_model_line(project, rows) or "The model hasn't answered yet, so I can't name it."), project.current_phase
+        low = text.lower()
+        if _ASKS_NEXT.search(low):
+            return (_next(project, rows) or f"{title(project.current_phase)} is the last phase."), project.current_phase
+        if _ASKS_TIME.search(low):
+            return _how_long(project), project.current_phase
         if project.change:
             change = project.change
             lead = f"The crew is making change #{change.get('number')}: {change.get('text')}."
@@ -464,6 +485,7 @@ def out(m: CrewMessage, replies: Iterable[CrewMessage] = ()) -> dict:
         "kind": m.kind,
         "status": m.status,
         "agent": m.agent,
+        "meant_for": list(m.meant_for or []),
         "applied_to": list(m.applied_to or []),
         "change_request_id": m.change_request_id,
         "created_at": _iso(m.created_at),

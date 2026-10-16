@@ -118,9 +118,10 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         asked.status = crew_chat.DECLINED
         asked.agent = None
         return
-    text, agent, _for = crew_chat.note_reply(project, asked.text)
+    text, agent, meant_for = crew_chat.note_reply(project, asked.text)
     crew_chat.reply(db, asked, text, agent)
     asked.status = crew_chat.QUEUED
+    asked.meant_for = meant_for or None
     # Who it waits for, as it is read now — a reread's earlier reply named someone else.
     asked.agent = agent
 

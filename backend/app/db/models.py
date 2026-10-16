@@ -621,6 +621,9 @@ class CrewMessage(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     #: The person's message a crew reply answers. Null on the person's own messages.
     reply_to: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    #: The phases a note is for, decided when it was sent: the ones it names, or every
+    #: phase that hadn't started then.
+    meant_for: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     #: The phases a note was handed to.
     applied_to: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     #: The change request a note that changes finished work became.

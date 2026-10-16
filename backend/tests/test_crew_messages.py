@@ -152,6 +152,15 @@ def test_the_fix_round_and_its_trend_are_part_of_the_answer(calls, client):
     assert "Fix round 3 of 3. Problems went 3 → 6 → 4." in text
 
 
+def test_who_is_next_and_how_long_get_answers_of_their_own(calls, client):
+    pid = _running_backend(client)
+    assert _say(client, pid, "Who's next?")["replies"][0]["text"] == "Next up: Frontend Engineer."
+    text = _say(client, pid, "how long will it take?")["replies"][0]["text"]
+    assert text.startswith("Backend Engineer has just started. It's phase 3 of 8, and 5 more phases after it.")
+    assert "no finish time" in text
+    assert calls == []
+
+
 def test_which_model_is_running(calls, client):
     pid = _running_backend(client)
     text = _say(client, pid, "which model are you on?")["replies"][0]["text"]
@@ -253,6 +262,7 @@ def test_a_note_waits_for_the_agents_that_havent_started(calls, client):
         "Got it. Frontend Engineer and the 4 after it haven't started, so they get this note when they start."
     )
     assert m["replies"][0]["agent"] == "frontend_engineer"
+    assert m["meant_for"] == ["frontend_engineer", "qa_engineer", "security_engineer", "devops_engineer", "cost_estimation"]
     assert calls == []
 
 
