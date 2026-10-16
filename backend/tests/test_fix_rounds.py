@@ -346,7 +346,27 @@ def test_a_python_package_is_never_shadowed_by_a_new_module():
     problems = [{"path": "backend/app/routes.py", "kind": "import",
                  "message": "imports `.models.user`, and no module is at backend/app/models.py."}]
     found = fixscope.scope(problems, own, own)
-    assert not found.new and list(found.touch) == ["backend/app/routes.py"]
+    # The module inside the package is what's missing, not a `models.py` beside it.
+    assert list(found.new) == ["backend/app/models/user.py"]
+
+
+def test_a_missing_python_subpackage_is_written_as_its_module():
+    own = {"backend/app/main.py": "from .services.todo import create\n"}
+    problems = [{"path": "backend/app/main.py", "kind": "import",
+                 "message": "imports `.services.todo`, and no module is at backend/app/services.py."}]
+    assert list(fixscope.scope(problems, own, own).new) == ["backend/app/services/todo.py"]
+
+
+def test_a_missing_stylesheet_is_written_as_one_and_a_missing_image_is_the_importer_s():
+    own = {"frontend/src/main.tsx": "import './index.css';\nimport logo from './logo.png';\n"}
+    problems = [
+        {"path": "frontend/src/main.tsx", "kind": "import",
+         "message": "imports `./index.css`, and no file in this build is at frontend/src/index.css. Write that file, or import one that exists."},
+        {"path": "frontend/src/main.tsx", "kind": "import",
+         "message": "imports `./logo.png`, and no file in this build is at frontend/src/logo.png. Write that file, or import one that exists."},
+    ]
+    found = fixscope.scope(problems, own, own)
+    assert list(found.new) == ["frontend/src/index.css"] and list(found.touch) == ["frontend/src/main.tsx"]
 
 
 def test_the_trend_keeps_an_episode_that_converged():
@@ -363,3 +383,61 @@ def test_the_trend_keeps_an_episode_that_converged():
         autofix.close_round(t, [f"{left}-{i}" for i in range(left)])
     autofix.settle(t)
     assert fix_rounds(SimpleNamespace(auto_fix=data))["fix_trend"] == {"backend_engineer": [3, 6, 4, 0]}
+
+
+# ── third review of #109 ─────────────────────────────────────────────────────
+def test_a_file_sent_back_that_was_not_asked_for_is_not_landed(monkeypatch, stub_router):
+    from app.agents.code_phase import _Run as Run
+
+    files = [
+        {"path": "backend/app/main.py", "language": "python", "code": "from .db import x\nprint(x)\n"},
+        {"path": "backend/app/models.py", "language": "python", "code": "class User:\n    pass\n"},
+        {"path": "backend/app/routes.py", "language": "python", "code": "from .models import User\nfrom .helpers import h\n"},
+    ]
+    problems = [p for p in _problems(files) if p["path"] == "backend/app/main.py"]
+    # The reply fixes main.py and also rewrites models.py, which nobody asked for.
+    reply = fenced({"backend/app/main.py": "print(1)\n", "backend/app/models.py": "class User(\n"})
+
+    def complete(messages, **kwargs):
+        if "A todo API" not in messages[-1].content:
+            return _fake_complete(messages, **kwargs)
+        return LLMResponse(text=reply, provider="mock", model="mock-model",
+                           usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2), latency_ms=1)
+
+    stub(monkeypatch, "complete", complete)
+    run = Run(BackendEngineerAgent(), AgentContext(idea="A todo API", base_output={"files": files}, fixing=tuple(problems)))
+    # Only main.py was asked for; models.py came back too, unasked, and is not landed.
+    result = run.fix()
+    code = {f["path"]: f["code"] for f in result.output["files"]}
+    assert code["backend/app/models.py"] == files[1]["code"]
+
+
+def test_nothing_is_called_worse_when_the_attempt_before_could_not_be_checked(monkeypatch, stub_router):
+    from app.agents.base import BaseAgent
+    from app.build.check import BuildCheck
+
+    real = BaseAgent._build_check
+
+    def flaky(self, ctx, output, previous=None, cap=True):
+        if not cap and output is ctx.base_output:
+            return BuildCheck(status="unchecked", reason="crashed")
+        return real(self, ctx, output, previous, cap)
+
+    monkeypatch.setattr(BaseAgent, "_build_check", flaky)
+    files = _files()
+    # Fixes the missing export and adds an unrelated problem to the module: with no
+    # "before" to compare, the edit is kept rather than every edit undone.
+    module = FIXED_SERVICE + "import { gone } from './nowhere.js';\n"
+    result, _asked = _fix(monkeypatch, files, [fenced({"backend/services/todoService.js": module, "backend/server.js": SERVER})])
+    assert not result.handoff["fix"]["reverted"]
+
+
+def test_a_stack_note_on_a_renamed_root_finds_its_file(monkeypatch, stub_router):
+    files = [{"path": "server/index.js", "language": "javascript", "code": "const pg = require('pg');\nmodule.exports = pg;\n"},
+             {"path": "server/util.js", "language": "javascript", "code": "module.exports = { a: 1 };\n"}]
+    problems = [{"path": None, "kind": "stack",
+                 "message": "`server/index.js` — uses PostgreSQL where the stack charter says the database is MongoDB."}]
+    reply = fenced({"backend/index.js": "const m = require('mongodb');\nmodule.exports = m;\n"})
+    result, asked = _fix(monkeypatch, files, [reply], problems=problems)
+    assert [a["schema"] for a in asked] == [False]  # placed, not left to the planner
+    assert "# Your last version of" in asked[0]["text"]

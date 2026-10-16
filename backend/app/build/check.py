@@ -94,14 +94,19 @@ class BuildCheck:
 
 
 # ── resolution ───────────────────────────────────────────────────────────────
-def _resolves(target: str, tree: set[str]) -> bool:
+def resolve(target: str, tree: set[str]) -> Optional[str]:
+    """The file a module path resolves to, as `next build` would find it, or None."""
     for ext in _RESOLVE_EXT:
         if f"{target}{ext}" in tree:
-            return True
+            return f"{target}{ext}"
     for ext in _RESOLVE_EXT[1:6]:
         if f"{target}/index{ext}" in tree:
-            return True
-    return False
+            return f"{target}/index{ext}"
+    return None
+
+
+def _resolves(target: str, tree: set[str]) -> bool:
+    return resolve(target, tree) is not None
 
 
 def _jsonc(text: str) -> Optional[dict]:

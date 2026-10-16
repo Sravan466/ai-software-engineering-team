@@ -346,6 +346,8 @@ class _Run:
         #: measured against. Placed path -> problems; and the paths that didn't parse.
         self.before: dict[str, int] = {}
         self.unparsed: set[str] = set()
+        #: Whether the attempt before could be checked: without that, nothing is "worse".
+        self.compared = False
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -424,17 +426,7 @@ class _Run:
         self.plan = SimpleNamespace(output={k: v for k, v in output.items() if k != "files"}, repair_rounds=0,
                                     calls=[], response=None, handoff={}, skills_used=[])
         agent._pin(ctx)
-        self.profile = router.profile_for(
-            ctx.routing_mode, ctx.preferred_model, complexity=agent._complexity(ctx), role=agent.key, pin=ctx.pin_model,
-        )
-        self.choice = 1
-        self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
-        router.note_write_overhead(agent.key, len(self.system))
-        self.digests = {
-            dep: handoff.digest(dep, ctx.prior_outputs[dep])
-            for dep in agent.depends_on
-            if isinstance(ctx.prior_outputs.get(dep), dict)
-        }
+        self._one_file_calls()
         lines = ask.get("lines") or []
         where = f"lines {lines[0]}–{lines[1]}" if len(lines) == 2 and lines[0] != lines[1] else (
             f"line {lines[0]}" if lines else "this file"
@@ -591,14 +583,7 @@ class _Run:
             e.imports = [i for i in e.imports if i in known_paths]
         self.changing = {e.path for e in self.edits if e.path in self.existing}
 
-        self.choice = 1
-        self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
-        router.note_write_overhead(agent.key, len(self.system))
-        self.digests = {
-            dep: handoff.digest(dep, ctx.prior_outputs[dep])
-            for dep in agent.depends_on
-            if isinstance(ctx.prior_outputs.get(dep), dict)
-        }
+        self._one_file_calls(profile=False)
         activity.plan([e.path for e in self.edits], 1, note=self.edit_summary or ctx.change.splitlines()[0][:200])
         queue = list(self.edits)
         while queue:
@@ -640,6 +625,24 @@ class _Run:
             },
         }
         return result
+
+    def _one_file_calls(self, profile: bool = True) -> None:
+        """What an edit's calls are built from (#78, #79, #103): the model's budgets, one
+        file a call, the system prompt every call shares, the hand-off digests."""
+        agent, ctx = self.agent, self.ctx
+        if profile:
+            self.profile = router.profile_for(
+                ctx.routing_mode, ctx.preferred_model, complexity=agent._complexity(ctx), role=agent.key,
+                pin=ctx.pin_model,
+            )
+        self.choice = 1
+        self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
+        router.note_write_overhead(agent.key, len(self.system))
+        self.digests = {
+            dep: handoff.digest(dep, ctx.prior_outputs[dep])
+            for dep in agent.depends_on
+            if isinstance(ctx.prior_outputs.get(dep), dict)
+        }
 
     def _load(self, base: dict) -> None:
         """The deliverable an edit starts from (#79, #103): every file kept as it is,
@@ -698,10 +701,21 @@ class _Run:
         stored_at = {where: stored for stored, where in self.place_of.items()}
         own = {self.place_of[p]: w.code for p, w in self.written.items()}
         tree, _mine = phase_tree(ctx.prior_outputs, agent.key, base, ctx.charter)
-        found = fixscope.scope(ctx.fixing, own, tree)
+        # A stack note names a file as the phase stored it (`server/index.js`); the
+        # checker's problems name where it's placed (`backend/index.js`).
+        placed_as = {layout.clean(k): v for k, v in self.place_of.items()}
+
+        def placed(p: dict) -> dict:
+            path = p.get("path") or (fixscope.stack_path(str(p.get("message") or "")) if p.get("kind") == "stack" else None)
+            return {**p, "path": placed_as.get(layout.clean(str(path or "")), path)}
+
+        problems = [placed(p) for p in ctx.fixing]
+        found = fixscope.scope(problems, own, tree)
         # The attempt as it was, every problem counted: the prompt's caps (five a file,
         # twenty-four in all) would make a file past the cut look clean before the edit.
-        self.before, self.unparsed = _counts(agent._build_check(ctx, base, cap=False))
+        before = agent._build_check(ctx, base, cap=False)
+        self.compared = before is not None and before.status != BuildStatus.UNCHECKED.value
+        self.before, self.unparsed = _counts(before)
 
         self.plan = SimpleNamespace(
             output={k: v for k, v in base.items() if k != "files"},
@@ -711,17 +725,7 @@ class _Run:
             handoff={},
             skills_used=[],
         )
-        self.profile = router.profile_for(
-            ctx.routing_mode, ctx.preferred_model, complexity=agent._complexity(ctx), role=agent.key, pin=ctx.pin_model,
-        )
-        self.choice = 1
-        self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
-        router.note_write_overhead(agent.key, len(self.system))
-        self.digests = {
-            dep: handoff.digest(dep, ctx.prior_outputs[dep])
-            for dep in agent.depends_on
-            if isinstance(ctx.prior_outputs.get(dep), dict)
-        }
+        self._one_file_calls()
 
         touch: dict[str, list[Problem]] = {}
         for where in found.touch:
@@ -922,9 +926,10 @@ class _Run:
         rest of a file's problems, and fixing it shows them."""
         from app.build import fixscope
 
-        if build is None or build.status == BuildStatus.UNCHECKED.value:
+        if build is None or build.status == BuildStatus.UNCHECKED.value or not self.compared:
             return build, output, errors, stack
-        if all(self.written.get(p) is None or self.written[p].code == code for p, code in self.existing.items()):
+        added = [p for p in self.written if p not in self.existing]
+        if not added and all(self.written.get(p) is None or self.written[p].code == code for p, code in self.existing.items()):
             return build, output, errors, stack  # nothing edited: nothing to compare
         reverted_any = False
         for _ in range(len(self.called_with) + 1):
@@ -936,11 +941,23 @@ class _Run:
                 self.place_of.get(path, path): path for path in self.existing
                 if path in self.written and self.written[path].code != self.existing[path]
             }
+            own = {self.place_of.get(p, p): w.code for p, w in self.written.items()}
+            new = {p for p in self.written if p not in self.existing}
+            # A module the round wrote that doesn't parse goes: the import it answered is
+            # missing again, which is what it was before.
+            dropped = [p for p in new if p in unparsed]
+            for path in dropped:
+                self.written.pop(path)
+                self.planned = [p for p in self.planned if p.path != path]
+                self.reverted.append(path)
+                activity.file(path, "failed")
             worse: list[str] = []
             # A file that parsed and doesn't now is worse whatever the count says: a parse
             # error hides the rest of a file's problems.
             broke_parse = [place for place in unparsed if place not in self.unparsed]
             for place in dict.fromkeys([*after, *broke_parse]):
+                if place in new:
+                    continue  # a module the round wrote has no "before"; one that doesn't parse went above
                 n = after.get(place, 0)
                 if place not in broke_parse and (
                     n <= self.before.get(place, 0) or (place in self.unparsed and place not in unparsed)
@@ -949,15 +966,19 @@ class _Run:
                 if place in edited:
                     worse.append(edited[place])
                     continue
-                # A file nobody edited, worse now: the edited module its problems name broke it.
-                for p in check.problems:
-                    if p.path == place:
-                        cause = fixscope.named(p.path, p.message, self.place_of.values())
-                        if cause in edited:
-                            worse.append(edited[cause])
+                # A file nobody edited, worse now: the edited module its problems name broke
+                # it — or, where no message names one, the edited files it imports; or, if
+                # it imports none of them, every edit, since one of them did.
+                causes = {
+                    fixscope.named(p.path, p.message, self.place_of.values())
+                    for p in check.problems if p.path == place
+                } & set(edited)
+                if not causes and place in own:
+                    causes = set(fixscope.imports_of(place, own[place], own)) & set(edited)
+                worse += [edited[c] for c in (causes or edited)]
             undo = [path for w in dict.fromkeys(worse) for path in sorted(self.called_with.get(w, {w}))]
             undo = [path for path in dict.fromkeys(undo) if path in self.existing and self.written[path].code != self.existing[path]]
-            if not undo:
+            if not undo and not dropped:
                 break
             for path in undo:
                 w = self.written[path]
@@ -965,8 +986,9 @@ class _Run:
                 if path not in self.reverted:
                     self.reverted.append(path)
                 activity.file(path, "failed")
-            log.info("%s: put back %d edited file(s) that left the build worse: %s",
-                     self.agent.title, len(undo), ", ".join(undo))
+            if undo or dropped:
+                log.info("%s: put back %d edited file(s) and dropped %d new one(s) that left the build worse: %s",
+                         self.agent.title, len(undo), len(dropped), ", ".join(undo + dropped))
             output, errors = self._assemble()
             reverted_any = True
         if not reverted_any:

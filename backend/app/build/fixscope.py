@@ -27,14 +27,16 @@ from typing import Iterable, Optional
 
 from app.build import layout
 from app.build import packages as pkg
-from app.build.check import Problem
+from app.build.check import Problem, resolve
 from app.build.scaffold import js_imports, platform_owned, py_imports
 
-#: What a module path may end in, as `check._resolves` tries them.
-_EXTENSIONS = ("", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".json", ".py")
 #: What a written module's name may end in — `auth.service` is a name, not an extension.
 _SOURCE = (".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".json", ".py")
-_INDEX = ("/index.tsx", "/index.ts", "/index.jsx", "/index.js", "/__init__.py")
+#: Text files an import may want that a model can write as they are named.
+_TEXT_ASSETS = (".css", ".scss", ".sass", ".less", ".svg", ".html", ".md", ".txt")
+#: Files no model writes: an import of a missing one is the importer's to change.
+_BINARY = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp", ".woff", ".woff2", ".ttf",
+           ".otf", ".eot", ".mp3", ".mp4", ".webm", ".wav", ".pdf", ".zip")
 
 #: TypeScript names the module it means as `'"./x"'` (#101 keeps the importer's own
 #: specifier there, or the build path when it couldn't).
@@ -68,16 +70,14 @@ def stack_path(note: str) -> Optional[str]:
 
 
 def find(target: str, tree: Iterable[str]) -> Optional[str]:
-    """The file a module path resolves to — `backend/services/todo` -> `…/todo.js`."""
+    """The file a module path resolves to — `backend/services/todo` -> `…/todo.js` —
+    by the compile gate's own rule, or Python's (`x.py`, `x/__init__.py`)."""
     paths = set(tree)
     stem = layout.clean(target)
-    for ext in _EXTENSIONS:
-        if f"{stem}{ext}" in paths:
-            return f"{stem}{ext}"
-    for index in _INDEX:
-        if f"{stem}{index}" in paths:
-            return f"{stem}{index}"
-    return None
+    found = resolve(stem, paths)
+    if found is None:
+        found = next((p for p in (f"{stem}.py", f"{stem}/__init__.py") if p in paths), None)
+    return found
 
 
 def _stem(path: str) -> str:
@@ -151,8 +151,29 @@ def _module_of(importer: str, spec: str, tree: set[str]) -> Optional[str]:
     return find(_VIRTUAL.sub("", spec), tree)
 
 
+def _python_missing(problem: dict) -> Optional[str]:
+    """A Python relative import's whole module path. The checker names only its first
+    segment's file — `services.py` for `.services.todo` — which is the package to make
+    a folder of, not the module to write."""
+    found = _SPEC.search(str(problem.get("message") or ""))
+    path = str(problem.get("path") or "")
+    if not found or not path.endswith(".py"):
+        return None
+    spec = found.group(1)
+    level = len(spec) - len(spec.lstrip("."))
+    if not level or not spec[level:]:
+        return None
+    base = posixpath.dirname(path)
+    for _ in range(level - 1):
+        base = posixpath.dirname(base)
+    return layout.join(base, *spec[level:].split(".")) + ".py"
+
+
 def _missing(problem: dict) -> Optional[str]:
     """The path an import of a file that doesn't exist points at."""
+    whole = _python_missing(problem)
+    if whole is not None:
+        return whole
     message = str(problem.get("message") or "")
     found = _MISSING_JS.search(message)
     if found:
@@ -224,10 +245,11 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
                 # The file exists, one folder off: the importer's path is what's wrong.
                 problem = Problem(problem.path, f"{problem.message} (This build has {', '.join(f'`{o}`' for o in others[:3])}.)",
                                   problem.kind, problem.line)
-            elif target and not _is_package(target, everything):
+            elif target and not _is_package(target, everything) and not target.lower().endswith(_BINARY):
                 # Nothing of that name anywhere: the file the import wants is written —
                 # and that answers the import, so the importer isn't asked about it.
-                new = target if target.endswith(_SOURCE) else target + posixpath.splitext(path)[1]
+                named_as_is = target.endswith(_SOURCE) or target.lower().endswith(_TEXT_ASSETS)
+                new = target if named_as_is else target + posixpath.splitext(path)[1]
                 out.new.setdefault(new, []).append(problem)
                 continue
             touch(path, problem)

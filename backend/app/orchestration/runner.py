@@ -789,8 +789,10 @@ class PipelineRunner:
             t["accepted"] = None
             autofix.settle(t)
         closed = autofix.close_round(t, keys)
-        if closed is not None and ((row.handoff or {}).get("fix") or {}).get("calls") == 0:
-            # Every file the round had to fix was too long to show whole (#103).
+        sent = (row.handoff or {}).get("fix") or {}
+        if closed is not None and sent.get("calls") == 0 and sent.get("too_long"):
+            # Every file the round had to fix was too long to show whole (#103): it
+            # tried nothing. A round that found nothing to edit at all did, and failed.
             t["rounds"][-1]["nothing_sent"] = True
         if not problems:
             autofix.settle(t)

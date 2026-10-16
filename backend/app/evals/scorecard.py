@@ -230,7 +230,8 @@ def fix_rounds(project: Project) -> dict:
         elif t.get("accepted"):
             counts.append(len(t["accepted"].get("keys") or []))
         elif last.get("fixed") is not None:
-            counts.append(0)
+            # Closed with nothing stopped or accepted: what it was sent and didn't fix.
+            counts.append(len(last.get("remaining") or []))
         trend[name[len(autofix.BUILD_PREFIX):]] = counts
     return {"fix_rounds": total, "fix_trend": trend}
 
