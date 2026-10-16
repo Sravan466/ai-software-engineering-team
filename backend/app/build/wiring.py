@@ -90,8 +90,12 @@ def _repoint(code: str, old: str, new: str, python: bool) -> Optional[str]:
         pattern = re.compile(rf"(\bfrom\s+){re.escape(old)}(\s+import\b)")
         out, n = pattern.subn(lambda m: m.group(1) + new + m.group(2), code)
     else:
-        pattern = re.compile(rf"""(['"]){re.escape(old)}\1""")
-        out, n = pattern.subn(lambda m: m.group(1) + new + m.group(1), code)
+        # Import specifiers only — `from '…'`, `import '…'`, `require('…')`, `import('…')`
+        # — never the same text in a path or a message elsewhere in the file.
+        pattern = re.compile(
+            rf"""(\bfrom\s*|\bimport\s*|\brequire\(\s*|\bimport\(\s*)(['"]){re.escape(old)}\2"""
+        )
+        out, n = pattern.subn(lambda m: m.group(1) + m.group(2) + new + m.group(2), code)
     return out if n else None
 
 
@@ -248,15 +252,11 @@ def _import_fix(problem: Problem, files: dict[str, str], exports: dict) -> Optio
         if not ok:
             return None
         if code_no in _DEFAULT_OF_NOTHING and default:
-            # `import X` of a module with no default: X by name, or its one export.
-            values = list(real.named)
-            if default in values:
-                new_named = [(default, default)]
-            elif len(values) == 1:
-                new_named = [(values[0], default)]
-            else:
+            # `import X` of a module with no default, that exports X by name. Never an
+            # unrelated export under X's name: the error would go and the bug stay.
+            if default not in real.named:
                 return None
-            clause = _join_clause(None, new_named + named)
+            clause = _join_clause(None, [(default, default)] + named)
         elif name and real.default is not None and name not in real.named:
             # `import { Y }` of a module whose default is Y (2614, or 2305 by its name).
             if code_no in _NO_MEMBER and real.default != name:
@@ -305,16 +305,20 @@ def apply_code_fixes(files: dict[str, str], fixes: Iterable[dict]) -> tuple[dict
             edits.setdefault(path, []).extend(change.get("edits") or [])
             notes.setdefault(path, str(fix.get("description") or fix.get("fix") or "code fix"))
     for path, list_ in edits.items():
-        text = out[path]
-        last = len(text) + 1
+        # TypeScript counts offsets in UTF-16 code units: edited as those, an emoji before
+        # the edit can't shift it into the middle of a word.
+        units = out[path].encode("utf-16-le")
+        size = len(units) // 2
+        last = size + 1
         # The same fix asked for twice (two files importing one undeclared export) is one
         # edit; anything else touching a span already edited is left out.
         unique = {(int(e.get("start") or 0), int(e.get("length") or 0), str(e.get("text") or "")) for e in list_}
         for start, length, new in sorted(unique, reverse=True):
-            if start < 0 or start + length > last or (start == last and length == 0 and last <= len(text)):
+            if start < 0 or start + length > last or (start == last and length == 0 and last <= size):
                 continue
-            text = text[:start] + new + text[start + length:]
+            units = units[: start * 2] + new.encode("utf-16-le") + units[(start + length) * 2 :]
             last = start
+        text = units.decode("utf-16-le")
         if text != out[path]:
             out[path] = text
             made.append(Fix(path, "import", notes[path]))

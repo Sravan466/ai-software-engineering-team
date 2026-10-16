@@ -350,6 +350,8 @@ class _Run:
         self.compared = False
         #: What the platform mended itself, without a model (#103): `wiring.Fix.as_dict()`.
         self.mended: list[dict] = []
+        #: Every file as the round's own calls left it, before the platform's mends.
+        self.edited: dict[str, str] = {}
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -786,7 +788,7 @@ class _Run:
             self._fix_group(group)
 
         result = self._finish()
-        changed = sorted(p for p in self.existing if p in self.written and self.written[p].code != self.existing[p])
+        changed = sorted(p for p in self.existing if p in self.edited and self.edited[p] != self.existing[p])
         added = sorted(p.path for p in self.planned if p.path not in self.existing and p.path in self.written)
         generation = dict((result.handoff or {}).get("generation") or {})
         generation.update(
@@ -1025,6 +1027,8 @@ class _Run:
         agent, ctx = self.agent, self.ctx
         if not settings.platform_wiring_fixes or build is None or build.status != BuildStatus.FAILED.value:
             return build, output, errors, stack
+        current: Optional[int] = None
+        broken: set[str] = set()
         for _ in range(2):
             stored_at = {self.place_of.get(p, p): p for p in self.written}
             tree, mine = phase_tree(ctx.prior_outputs, agent.key, output, ctx.charter)
@@ -1036,7 +1040,8 @@ class _Run:
                 made += more
             if not made:
                 break
-            current, broken = self._tally(output)
+            if current is None:
+                current, broken = self._tally(output)
             if current is None:
                 break  # nothing to compare against: nothing is kept
             changed = [p for p, code in mended.items() if code != own.get(p)]
@@ -1070,8 +1075,9 @@ class _Run:
             build = agent._build_check(ctx, output)
             self._take_exports(build)
             self.mended += [f.as_dict() for f in mine_made]
+            still = {p.path for p in (build.problems if build is not None else [])}
             for f in mine_made:
-                activity.file(stored_at.get(f.path, f.path), "ok")
+                activity.file(stored_at.get(f.path, f.path), "failed" if f.path in still else "ok")
             log.info("%s: the platform mended %d import(s) itself, without a model: %s", agent.title, len(mine_made),
                      "; ".join(f"{f.path}: {f.note}" for f in mine_made))
             if build is None or build.status != BuildStatus.FAILED.value:
@@ -1827,6 +1833,9 @@ class _Run:
             # A fix round is one pass (#103): what its edits left is the next round's,
             # with the problems found afresh — not the same files sent straight back.
             build, output, errors, stack = self._keep_no_worse(build, output, errors, stack)
+        # What the round's own edits did, before the platform mends anything (#103): its
+        # record credits the model with its own changes, not the platform's.
+        self.edited = {p: w.code for p, w in self.written.items()}
         # What the platform can mend without a model, before any model round (#103).
         build, output, errors, stack = self._mend(build, output, errors, stack)
         if (

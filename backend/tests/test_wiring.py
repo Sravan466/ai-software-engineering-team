@@ -166,3 +166,44 @@ def test_a_typescript_import_written_with_js_keeps_js():
     }
     out, made, before, after = _mend(files)
     assert "from '../services/todo_service.js'" in out["backend/src/controllers/todo.ts"] and after == 0
+
+
+# ── second review of #111 ────────────────────────────────────────────────────
+def test_an_emoji_before_the_edit_doesn_t_move_it():
+    files = {
+        "backend/server.ts": "import { helper } from './util';\nexport const h = helper;\n",
+        "backend/util.ts": "// 🚀🚀🚀 helpers\nfunction helper() {\n  return 1;\n}\nexport const other = 2;\n",
+    }
+    out, made, before, after = _mend(files)
+    assert "\nexport function helper() {" in out["backend/util.ts"] and after == 0
+
+
+def test_a_default_import_is_never_rebound_to_an_unrelated_export():
+    files = {
+        "backend/server.ts": "import db from './config';\nexport const d = db;\n",
+        "backend/config.ts": "export const PORT = 3000;\n",
+    }
+    out, made, before, after = _mend(files)
+    assert not made and out == files
+
+
+def test_a_repointed_path_changes_the_import_and_nothing_else():
+    files = {
+        "backend/app/controllers/todo.js": (
+            "import { list } from './todo_service.js';\n"
+            "export const all = list;\nexport const where = './todo_service.js';\n"
+        ),
+        "backend/app/services/todo_service.js": "export function list() {\n  return [];\n}\n",
+    }
+    out, made, before, after = _mend(files)
+    code = out["backend/app/controllers/todo.js"]
+    assert "from '../services/todo_service.js'" in code and "where = './todo_service.js'" in code
+
+
+def test_a_js_name_means_the_ts_source_only_to_typescript():
+    from app.build.check import check_tree
+
+    tree = {"backend/a.js": "const d = require('./db.js');\nmodule.exports = d;\n", "backend/db.ts": "export const x = 1;\n"}
+    assert [p.kind for p in check_tree(tree, ["backend/a.js"]).problems] == ["import"]
+    tree = {"backend/a.ts": "import { x } from './db.js';\nexport const y = x;\n", "backend/db.ts": "export const x = 1;\n"}
+    assert check_tree(tree, ["backend/a.ts"]).problems == []

@@ -103,10 +103,13 @@ class BuildCheck:
 _TS_FOR_JS = {".js": (".ts", ".tsx"), ".jsx": (".tsx",), ".mjs": (".mts",), ".cjs": (".cts",)}
 
 
-def resolve(target: str, tree: set[str]) -> Optional[str]:
-    """The file a module path resolves to, as `next build` would find it, or None."""
+def resolve(target: str, tree: set[str], typescript: bool = False) -> Optional[str]:
+    """The file a module path resolves to, as `next build` would find it, or None.
+    `typescript`: the importer is TypeScript, so `./x.js` may name the source `x.ts`."""
+    if target in tree:
+        return target
     stem, ext = posixpath.splitext(target)
-    for alt in _TS_FOR_JS.get(ext, ()):
+    for alt in _TS_FOR_JS.get(ext, ()) if typescript else ():
         if f"{stem}{alt}" in tree:
             return f"{stem}{alt}"
     for ext in _RESOLVE_EXT:
@@ -118,8 +121,8 @@ def resolve(target: str, tree: set[str]) -> Optional[str]:
     return None
 
 
-def _resolves(target: str, tree: set[str]) -> bool:
-    return resolve(target, tree) is not None
+def _resolves(target: str, tree: set[str], typescript: bool = False) -> bool:
+    return resolve(target, tree, typescript) is not None
 
 
 def _jsonc(text: str) -> Optional[dict]:
@@ -225,7 +228,7 @@ def _check_js_imports(path: str, content: str, tree: set[str], aliases: dict[str
     for spec in dict.fromkeys(js_imports(content)):
         if spec.startswith("."):
             target = layout.join(base, spec)
-            if not _resolves(target, tree):
+            if not _resolves(target, tree, path.endswith((".ts", ".tsx", ".mts", ".cts"))):
                 problems.append(
                     Problem(path, f"imports `{spec}`, and no file in this build is at {target}. "
                             "Write that file, or import one that exists.", "import")

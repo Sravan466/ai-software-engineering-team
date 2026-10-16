@@ -228,12 +228,17 @@ function Owner({ phase }: { phase: string }) {
 /** What the platform fixed itself across the episode, without a model (#103). */
 function platformFixed(t: AutoFixTrack): { paths: number; imports: number } {
   const out = { paths: 0, imports: 0 };
-  for (const r of t.rounds.slice(t.episode_start ?? 0)) {
-    for (const p of [r.platform_before, r.platform]) {
+  // Only what the build is on now: after a put-back, the rounds after the kept attempt
+  // were set aside, their mends with them.
+  const kept = t.stopped?.kept_best?.round;
+  t.rounds.slice(t.episode_start ?? 0).forEach((r, i) => {
+    const counted = i === 0 ? [r.platform_before] : [];
+    if (kept === undefined || kept === null || i + 1 <= kept) counted.push(r.platform);
+    for (const p of counted) {
       out.paths += p?.paths ?? 0;
       out.imports += p?.imports ?? 0;
     }
-  }
+  });
   return out;
 }
 
