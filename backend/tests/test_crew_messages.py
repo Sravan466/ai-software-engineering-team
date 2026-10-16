@@ -251,7 +251,7 @@ def test_a_note_on_a_stuck_build_is_keep_trying_with_it(calls, client):
     finally:
         monkey.undo()
     assert m["status"] == "applied" and m["applied_to"] == ["backend_engineer"]
-    assert m["replies"][0]["text"] == "Trying again with your note — up to 2 more rounds."
+    assert m["replies"][0]["text"] == "Trying again with your note, up to 2 more rounds."
     assert driven == [pid]
     with SessionLocal() as db:
         project = db.get(Project, pid)

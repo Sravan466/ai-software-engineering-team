@@ -29,13 +29,13 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
     label: "Talk to the crew",
     placeholder: "Ask what they're doing, or tell them what you want",
     quick: ["What are you doing?", "Who's next?"],
-    hint: "Questions are answered straight away. A note waits for the agents that haven't started.",
+    hint: "The crew answers questions straight away. A note waits for the agents that haven't started.",
   },
   stuck: {
     label: "Tell the crew what to try",
-    placeholder: "For example, keep all the routes in one file. Or ask why it's stuck.",
+    placeholder: "Keep all the routes in one file, for example, or ask why it's stuck",
     quick: ["Why is it stuck?"],
-    hint: "A note starts the next fix round with your words. Questions are answered straight away.",
+    hint: "A note starts the next fix round with your words. The crew answers questions straight away.",
   },
   stopped: {
     label: "Talk to the crew",

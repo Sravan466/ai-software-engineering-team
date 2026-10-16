@@ -90,7 +90,7 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         crew_chat.reply(
             db,
             asked,
-            f"Trying again with your note — up to {more} more round{'' if more == 1 else 's'}.",
+            f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}.",
             phases[0] if phases else project.current_phase,
         )
         asked.status = crew_chat.APPLIED
