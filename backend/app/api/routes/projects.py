@@ -1011,8 +1011,17 @@ def keep_trying(
     _require_needs_help(project, "retry")
     _require_models(project)
     more = (payload.rounds if payload and payload.rounds else None) or settings.auto_fix_retry_rounds
+    note = (payload.note or "").strip() if payload else ""
+    if note:
+        # The person's words reach a model: never a key they pasted by mistake.
+        _refuse_credentials(note, project)
     data = autofix.load(project)
-    names = autofix.keep_trying(data, more)
+    model = payload.model if payload else None
+    if model:
+        offered = {(data["tracks"][n].get("stopped") or {}).get("cloud") for n in autofix.stuck(data)}
+        if model not in offered:
+            raise HTTPException(400, "That model isn't one offered for this fix.")
+    names = autofix.keep_trying(data, more, note=note or None, model=model)
     token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
     if not token:
         raise _conflict(project, "retry")

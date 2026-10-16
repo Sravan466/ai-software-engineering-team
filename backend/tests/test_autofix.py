@@ -136,8 +136,13 @@ def test_a_model_that_forgets_a_finding_cannot_close_it(client, monkeypatch):
     assert client.post(f"/api/projects/{pid}/approve").status_code == 409
 
 
-def test_the_loop_stops_at_its_round_limit(client, monkeypatch):
-    """Progress every round, but never all the way: bounded all the same."""
+@pytest.mark.parametrize("stronger", [None, "ollama:a-bigger-model"])
+def test_the_loop_stops_at_its_round_limit(client, monkeypatch, stronger):
+    """Progress every round, but never all the way: bounded all the same. Round three is
+    on a stronger model only when there is one to reach (#103)."""
+    from app.router.router import ModelRouter
+
+    monkeypatch.setattr(ModelRouter, "strongest_for", lambda self, *a, **k: stronger)
     monkeypatch.setattr(settings, "auto_fix_max_rounds", 3)
     many = [dict(SECRET, line=3 + 10 * i) for i in range(5)]
     # Each rescan reports one fewer; five findings, three rounds.
@@ -145,7 +150,8 @@ def test_the_loop_stops_at_its_round_limit(client, monkeypatch):
     project = client.get(f"/api/projects/{pid}").json()
 
     track = project["auto_fix"]["tracks"]["security"]
-    assert [r["strategy"] for r in track["rounds"]] == ["guided", "with_code", "stronger_model"]
+    third = "stronger_model" if stronger else "with_code"
+    assert [r["strategy"] for r in track["rounds"]] == ["guided", "with_code", third]
     assert [len(r["fixed"]) for r in track["rounds"]] == [1, 1, 1]
     assert track["stopped"]["reason"] == "limit"
     assert project["gate_kind"] == "needs_help"

@@ -119,9 +119,7 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
   },
   needs_help: {
     title: "The crew needs a hand",
-    blurb:
-      "Something serious is still wrong after the crew's fix rounds. Here's what " +
-      "each round tried and what's left.",
+    blurb: "The crew's fix rounds didn't get the build working.",
     approve: "Keep trying",
     after: "",
   },

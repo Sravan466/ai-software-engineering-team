@@ -456,6 +456,16 @@ class ModelRouter:
             return chain
         return [pair, *(p for p in chain if p != pair)]
 
+    def strongest_cloud(self) -> Optional[str]:
+        """The strongest cloud model this account has a working key for, in the router's
+        own reasoning-strength order (#103): what a build held to local models could use
+        for one fix, only with the person's yes. None without one."""
+        for pname in CLOUD_PROVIDERS:
+            model = self._default_model.get(pname) or ""
+            if model and self._cloud[pname].available() and not self._refuses(pname, model):
+                return self._spec((pname, model))
+        return None
+
     def strongest_for(
         self,
         mode: RoutingMode = RoutingMode.LOCAL_ONLY,

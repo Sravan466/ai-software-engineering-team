@@ -137,6 +137,11 @@ class KeepTryingRequest(BaseModel):
     """Give a build that asked for help more rounds to fix its own problems."""
 
     rounds: Optional[int] = Field(None, ge=1, le=5)
+    #: What the person tells the crew to try (#103): the next round's note, in their words.
+    note: Optional[str] = Field(None, max_length=2000)
+    #: A model the person chose for the next code round, once (#103) — only the one the
+    #: card offered: a cloud model, while the build is held to local ones.
+    model: Optional[str] = Field(None, max_length=200)
 
 
 class AcceptRequest(BaseModel):

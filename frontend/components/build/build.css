@@ -1751,6 +1751,20 @@ a.finding-cwe:focus-visible,
 .ledger-empty { margin: 0 0 14px; }
 
 .decision-needs_help .decision-act { margin-top: 12px; }
+
+/* The compiler's own words, for whoever wants them (#103): behind a disclosure. */
+.help-details { margin: 0 0 14px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.help-details-body { width: 100%; animation: rise var(--tr-slow) both; }
+.help-details-body .fix-list { padding: 0; }
+/* What the person told the crew to try, on the round it went to. */
+.ledger-note { font-size: var(--t-xs); color: var(--ink-2); overflow-wrap: anywhere; }
+.ledger-model { color: var(--ink-2); font-size: var(--t-xs); overflow-wrap: anywhere; }
+/* "Tell the crew what to try": a real label, room for a sentence or two. */
+.help-note { display: flex; flex-direction: column; gap: 6px; max-width: 72ch; margin-bottom: 12px; }
+.help-note .textarea { min-height: 64px; }
+.help-model { padding: 0 18px; }
+.help-model a { color: var(--accent); text-underline-offset: 3px; }
+.help-more-body { animation: rise var(--tr-slow) both; }
 .help-more { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .help-more-chev { display: inline-flex; transition: transform var(--tr); }
 .help-more-chev svg { width: 14px; height: 14px; }
@@ -1850,12 +1864,15 @@ a.finding-cwe:focus-visible,
   .fixed-crew { margin: 0 12px 12px; }
   .fixed-crew-proof { margin-left: 0; flex-basis: 100%; }
   .decision-needs_help .decision-approve .btn { flex: 1 1 100%; justify-content: center; }
+  .help-model { padding: 0 14px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .fixing-mark svg,
   .fix-rail-seg,
-  .fix-trend-step { animation: none !important; }
+  .fix-trend-step,
+  .help-details-body,
+  .help-more-body { animation: none !important; }
 }
 
 /* ===========================================================================

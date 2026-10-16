@@ -351,14 +351,21 @@ def stuck(data: dict) -> list[str]:
     return [name for name, t in data["tracks"].items() if t.get("stopped") and not t.get("accepted")]
 
 
-def keep_trying(data: dict, more: int) -> list[str]:
-    """Give every stuck track `more` rounds, and forget why it stopped."""
+def keep_trying(data: dict, more: int, note: Optional[str] = None, model: Optional[str] = None) -> list[str]:
+    """Give every stuck track `more` rounds, and forget why it stopped. `note` (#103) is
+    what the person told the crew to try, for each track's next round; `model` a model
+    they chose for the next round of each code track it was offered for, once."""
     names = stuck(data)
     for name in names:
         t = data["tracks"][name]
+        offered = (t.get("stopped") or {}).get("cloud")
         t["allowed"] = len(t["rounds"]) + max(int(more), 1)
         t["resumed_after"] = len(t["rounds"])
         t["stopped"] = None
+        if note and note.strip():
+            t["note"] = note.strip()
+        if model and name.startswith(BUILD_PREFIX) and model == offered:
+            t["one_off"] = model
     return names
 
 
@@ -738,12 +745,14 @@ def code_note(
     round_number: int,
     snippets: Optional[dict] = None,
     standing: Optional[str] = None,
+    person: Optional[str] = None,
 ) -> str:
     """The note a phase is re-run with to fix its own compile or stack problems.
 
     `snippets` is the code each problem is about, from the second round on.
     `standing` is a security fix note this phase was already working to: a compile
-    fix that forgot it would bring the finding straight back.
+    fix that forgot it would bring the finding straight back. `person` is what the
+    person told the crew to try (#103), in their words.
     """
     lines = []
     for p in problems:
@@ -764,11 +773,6 @@ def code_note(
         if round_number > 1
         else ""
     )
-    if round_number >= 3:
-        retry += (
-            " This is the last automatic round: rewrite the broken files properly rather "
-            "than patching them."
-        )
     carried = (
         "\n\nThis phase is also in the middle of a security fix. Keep every one of those "
         "fixes while you fix the above:\n\n" + standing
@@ -780,9 +784,16 @@ def code_note(
         + "\n".join(lines)
         + retry
         + carried
+        + said_by_person(person)
         + "\n\nKeep the stack the architecture froze — the fix is to the code, not to "
         "the technology choices."
     )
+
+
+def said_by_person(note: Optional[str]) -> str:
+    """What the person told the crew to try (#103), as a round's note carries it."""
+    text = " ".join(str(note or "").split())
+    return f"\n\nThe person says: {text}" if text else ""
 
 
 __all__ = [
@@ -823,6 +834,7 @@ __all__ = [
     "episode",
     "platform_fixed",
     "said",
+    "said_by_person",
     "view",
     "track",
     "trend",
