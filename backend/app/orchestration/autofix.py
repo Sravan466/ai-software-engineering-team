@@ -307,6 +307,16 @@ def view(data: object) -> object:
     return out
 
 
+def platform_fixed(row) -> dict:
+    """What the platform mended itself on one attempt, before any model round (#103):
+    `{"paths": n, "imports": n}`, from the attempt's `handoff.wiring`. Empty for none."""
+    out: dict[str, int] = {}
+    for fix in ((getattr(row, "handoff", None) or {}).get("wiring") or []):
+        kind = "paths" if fix.get("kind") == "path" else "imports"
+        out[kind] = out.get(kind, 0) + 1
+    return out
+
+
 def said(points: list[dict]) -> str:
     """A trend in words: `3 → 6 → back to 3 → 5`."""
     return " → ".join(("back to " if p.get("back") else "") + str(p["n"]) for p in points)
@@ -811,6 +821,7 @@ __all__ = [
     "stuck",
     "after_of",
     "episode",
+    "platform_fixed",
     "said",
     "view",
     "track",

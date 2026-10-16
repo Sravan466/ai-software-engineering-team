@@ -1633,6 +1633,7 @@ a.finding-cwe:focus-visible,
   color: var(--ink-2);
 }
 .fix-kept svg { flex: none; width: 14px; height: 14px; margin-top: 3px; color: var(--ok); }
+.fixing-trend .fix-platform { margin: 8px 0 0; }
 
 .fix-list { margin: 0; padding: 0 16px 16px; list-style: none; display: flex; flex-direction: column; gap: 6px; }
 .fix-item {

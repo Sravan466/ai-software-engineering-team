@@ -59,6 +59,8 @@ class Problem:
     #: Which step of a real build found it (#75) — install | build | boot | vercel.
     #: None for what the parser found.
     step: Optional[str] = None
+    #: TypeScript's own diagnostic code (#103): what the platform's wiring fixes read.
+    code: Optional[int] = None
 
     def text(self) -> str:
         where = f"`{self.path}`" + (f" line {self.line}" if self.line else "")
@@ -68,6 +70,8 @@ class Problem:
         out = {"path": self.path, "line": self.line, "kind": self.kind, "message": self.message}
         if self.step:
             out["step"] = self.step
+        if self.code:
+            out["code"] = self.code
         return out
 
 
@@ -357,14 +361,16 @@ def _paths_for(files: dict[str, str], side: str) -> dict:
 EXPORT_MISS_CODES = frozenset({2305, 2724, 2613, 2614, 1192})
 
 
-def _run_js(groups: list[dict], exports: bool = False) -> tuple[Optional[list[dict]], Optional[str], list[dict]]:
+def _run_js(
+    groups: list[dict], exports: bool = False, codefixes: bool = False
+) -> tuple[Optional[list[dict]], Optional[str], list[dict]]:
     """(diagnostics, reason-if-not-run, each reported module's exports — asked for only
-    when `exports`)."""
+    when `exports` — or, with `codefixes`, TypeScript's allow-listed code fixes)."""
     ts_path = toolchain.typescript()
     node = toolchain.node()
     if not ts_path or not node:
         return None, toolchain.unavailable_reason() or "No JavaScript parser is available.", []
-    payload = json.dumps({"typescript": ts_path, "groups": groups, "exports": exports})
+    payload = json.dumps({"typescript": ts_path, "groups": groups, "exports": exports, "codefixes": codefixes})
     try:
         result = subprocess.run(
             [node, str(_CHECKER)],
@@ -384,7 +390,8 @@ def _run_js(groups: list[dict], exports: bool = False) -> tuple[Optional[list[di
         data = json.loads(result.stdout)
     except ValueError:
         return None, "The JavaScript check returned something unreadable.", []
-    return data.get("diagnostics", []), None, [e for e in data.get("exports") or [] if isinstance(e, dict)]
+    extra = data.get("fixes") if codefixes else data.get("exports")
+    return data.get("diagnostics", []), None, [e for e in extra or [] if isinstance(e, dict)]
 
 
 #: The checker's in-memory root, as TypeScript prints it in a message: `"/__build__/frontend/components/x"`.
@@ -395,15 +402,53 @@ def _js_problem(d: dict) -> Problem:
     # `check_js.cjs` names a module as the importing file wrote it; anywhere it couldn't,
     # by the build's own path rather than the checker's in-memory root (#101).
     message = _VIRTUAL.sub("", d.get("message") or "does not parse")
+    code = d.get("code") if isinstance(d.get("code"), int) else None
     if d.get("syntactic"):
-        return Problem(d["path"], f"does not parse: {message}", "syntax", d.get("line"))
+        return Problem(d["path"], f"does not parse: {message}", "syntax", d.get("line"), code=code)
     name = re.match(r"Cannot find name '([^']+)'", message)
     if name:
         message = (
             f"uses `{name.group(1)}`, which is never imported or declared in this file. "
             "Import it or define it."
         )
-    return Problem(d["path"], message, "reference", d.get("line"))
+    return Problem(d["path"], message, "reference", d.get("line"), code=code)
+
+
+#: The diagnostics TypeScript has a code fix the platform applies for (#103): a name
+#: declared but not exported. `check_js.cjs` holds the list.
+CODEFIX_CODES = frozenset({2459})
+
+
+def code_fixes(files: dict[str, str], report_on: Iterable[str]) -> list[dict]:
+    """TypeScript's own allow-listed code fixes for `report_on` in the tree `files` (#103):
+    `[{path, code, fix, description, changes: [{path, edits: [{start, length, text}]}]}]`,
+    every path the build's own. Empty when no checker can run."""
+    js = [p for p in dict.fromkeys(report_on) if p in files and p.endswith(_JS_EXT)]
+    if not js:
+        return []
+    groups = []
+    for side in sorted({layout.side_of(p) or "root" for p in js}):
+        prefix = "" if side == "root" else f"{side}/"
+        groups.append({
+            "name": side,
+            "files": {p[len(prefix):]: c for p, c in files.items()
+                      if p.endswith(_JS_EXT) and (p.startswith(prefix) if prefix else layout.side_of(p) is None)},
+            "report": [p[len(prefix):] for p in js if (layout.side_of(p) or "root") == side],
+            "paths": _paths_for(files, side),
+        })
+    _diagnostics, reason, fixes = _run_js(groups, codefixes=True)
+    if reason:
+        return []
+    out = []
+    for f in fixes:
+        side = f.get("group")
+        prefix = "" if side == "root" else f"{side}/"
+        out.append({
+            **f,
+            "path": f"{prefix}{f.get('path')}",
+            "changes": [{**c, "path": f"{prefix}{c.get('path')}"} for c in f.get("changes") or []],
+        })
+    return out
 
 
 # ── one file as it lands (#81) ───────────────────────────────────────────────

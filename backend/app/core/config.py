@@ -240,6 +240,11 @@ class Settings(BaseSettings):
     #: (#101): a function with only `pass` or `{}`, a comment where code should be, a
     #: TODO, lorem ipsum, an empty file, a refusal, a test that asserts nothing.
     check_placeholders: bool = True
+    #: Whether the platform mends import wiring itself (#103) before any model round: a
+    #: relative path one folder off, a default import of a named export (and back), and
+    #: TypeScript's own spelling and not-exported fixes. Kept only when they leave fewer
+    #: problems than they found.
+    platform_wiring_fixes: bool = True
 
     # ── Code phases, file by file (#81) ──
     #: Whether the Backend and Frontend phases plan their files and then write them in
