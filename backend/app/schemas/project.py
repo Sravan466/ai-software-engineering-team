@@ -172,6 +172,8 @@ class MessageCreate(BaseModel):
     #: round, and a build that can't be set going is refused as `/auto-fix/retry` refuses
     #: it — never kept as a note to wait.
     keep_trying: bool = False
+    #: With `keep_trying`: the cloud model the stuck card offered, for this round only.
+    model: Optional[str] = Field(None, max_length=200)
 
 
 class MessageCancel(BaseModel):

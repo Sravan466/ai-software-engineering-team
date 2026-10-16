@@ -1012,12 +1012,14 @@ def keep_trying(
     Also how a build moves on once every serious finding it stopped on has been
     waived: with nothing left to fix, the loop finds nothing and the run continues.
     """
+    note = payload.note if payload else None
     more, _names, token = start_keep_trying(
         db,
         project,
         rounds=payload.rounds if payload else None,
-        note=payload.note if payload else None,
+        note=note,
         model=payload.model if payload else None,
+        decided=bool(note) and crew_chat.is_decision(note),
     )
     db.commit()
     background.add_task(_drive, project.id, token)

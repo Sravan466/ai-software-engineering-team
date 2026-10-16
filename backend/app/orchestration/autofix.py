@@ -817,14 +817,15 @@ DECIDED = (
 )
 
 
-def take_person(t: dict) -> tuple[Optional[str], Optional[str]]:
+def take_person(t: dict) -> tuple[Optional[str], Optional[str], bool]:
     """What the person told this round, taken off the track: their words as the round
-    records them, and as its prompt carries them — a decision with what it allows."""
+    records them, as its prompt carries them — a decision with what it allows — and
+    whether it was one."""
     said = t.pop("note", None)
     decided = bool(t.pop("decided", None))
     if not said:
-        return None, None
-    return said, f"{said}\n{DECIDED}" if decided else said
+        return None, None, False
+    return said, (f"{said}\n{DECIDED}" if decided else said), decided
 
 
 def mark_round(record: dict, said: Optional[str], decided: bool) -> None:

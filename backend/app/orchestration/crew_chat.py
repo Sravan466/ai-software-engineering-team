@@ -86,21 +86,35 @@ def classify(text: str) -> str:
 
 #: A note that settles something about the app rather than hinting at a fix (#102): it
 #: drops or leaves out a feature. On a stuck build it stands for the rest of the build, and
-#: the fix round may remove what it drops instead of fixing it again.
-_DECISION = re.compile(
-    r"^(?:please\s+|ok(?:ay)?,?\s+|actually,?\s+)?"
-    r"(?:skip|drop|remove|cut|forget(?:\s+about)?|leave\s+out|get\s+rid\s+of|no\s+longer|"
-    r"don'?t\s+(?:add|include|build|need|bother|implement|make|offer|support|have)|"
-    r"do\s+not\s+(?:add|include|build|need|implement|make|offer|support|have)|"
-    r"we\s+don'?t\s+need|no\s+need\s+for|without|no\s+(?!,)[a-z])",
+#: the fix round may remove what it drops instead of fixing it again. Narrow on purpose:
+#: a decision missed is still the round's note, a hint mistaken for one deletes code.
+_OPENER = r"(?:(?:please|ok(?:ay)?|actually|just|no|so|then),?\s+|let'?s\s+)*"
+_DROPS = (
+    r"(?:skip|drop|remove|cut|leave\s+out|get\s+rid\s+of|forget(?:\s+about)?(?!\s+(?:my|that|it|this|what|the\s+last))"
+    r"|don'?t\s+(?:add|include|build|need|bother\s+with|implement|make|offer|support)"
+    r"|do\s+not\s+(?:add|include|build|need|implement|make|offer|support)"
+    r"|we\s+don'?t\s+need|no\s+need\s+for|no\s+longer\s+(?:need|want|offer|support))\b"
+)
+_DECISION = re.compile(rf"^{_OPENER}{_DROPS}", re.I)
+#: "no login", "no dark mode": a bare "no" decides only as a short phrase.
+_BARE_NO = re.compile(r"^no\s+[a-z][a-z' -]{1,40}$", re.I)
+#: Talk about the code itself — a fix hint, never a decision about the app.
+_CODE_TALK = re.compile(
+    r"\b(?:import|imports|require|exports|export\s+(?:default|const|function|class)|file|files|module|modules|function|functions|class|variable|"
+    r"line|lines|test|tests|error|errors|bug|compile|syntax|type|types|cache|caching)\b|[\w-]+\.(?:js|jsx|ts|tsx|py|css|json)\b",
     re.I,
 )
 
 
 def is_decision(text: str) -> bool:
-    """Whether a note decides something about the app — "skip voice input", "no login" —
-    from its words, as a question is told from a note."""
-    return bool(_DECISION.match(plain(text).strip()))
+    """Whether a note decides something about the app — "skip voice input", "no login",
+    "let's drop dark mode" — from its words, as a question is told from a note."""
+    said = plain(text).strip().rstrip(".!")
+    if _CODE_TALK.search(said):
+        return False
+    if _DECISION.match(said):
+        return True
+    return bool(_BARE_NO.match(said)) and len(said.split()) <= 4 and "," not in said
 
 
 # ── who is who ────────────────────────────────────────────────────────────────
@@ -821,8 +835,8 @@ def asked_during(db: Session, project_id: str, label: str = "the build", this_ru
     return [
         f"Asked during {label}: {' '.join(m.text.split())[:200]}"
         for m in _notes(db, project_id)
-        # A decision sent on a stuck build counts even with no phase left to hand it to.
-        if m.applied_to and (m.meant_for or (m.plan or {}).get("decided")) and _this_run(m, since)
+        # A decision sent on a stuck build counts whatever it was handed to.
+        if ((m.applied_to and m.meant_for) or (m.plan or {}).get("decided")) and _this_run(m, since)
     ][-ASKED_DECISIONS:]
 
 
@@ -1017,11 +1031,17 @@ def _still_checking(m: Optional[CrewMessage], token: object = ...) -> bool:
     return ok and (token is ... or (m.plan or {}).get("token") == token)
 
 
-def start_check(m: CrewMessage) -> None:
-    """Mark a note as being checked against finished work, with this check's own token."""
+def start_check(m: CrewMessage, exclude: Optional[list] = None) -> None:
+    """Mark a note as being checked against finished work, with this check's own token.
+    `exclude`: phases already handling it — a stuck build's round, told the decision."""
     import uuid
 
-    m.plan = {"state": CHECKING, "token": uuid.uuid4().hex}
+    m.plan = {
+        **{k: v for k, v in (m.plan or {}).items() if k == "decided"},
+        "state": CHECKING,
+        "token": uuid.uuid4().hex,
+        **({"exclude": list(exclude)} if exclude else {}),
+    }
 
 
 def scope_note(project_id: str, message_id: str) -> None:
@@ -1056,7 +1076,9 @@ def scope_note(project_id: str, message_id: str) -> None:
                 change=asked.text,
                 extra_context=runner._app_index(project, list(done.values())),  # noqa: SLF001 - the one app index
             )
-            owner, name, finished = project.owner_id, project.name, set(done)
+            # Phases already handling it are not read against it again (a stuck round).
+            owner, name = project.owner_id, project.name
+            finished = set(done) - set((asked.plan or {}).get("exclude") or [])
         if not finished:
             # Nothing finished has any output to read: no planner call for nothing.
             with lock_for(project_id), SessionLocal() as db:
@@ -1077,6 +1099,9 @@ def scope_note(project_id: str, message_id: str) -> None:
                 db.commit()
                 return  # taken back, or read as a question, meanwhile
             plan = touched_by(result.output, finished)
+            # What the note was before the check stays with it: a decision, and the phases
+            # a stuck round was already handling.
+            plan.update({k: v for k, v in (asked.plan or {}).items() if k in ("decided", "exclude")})
             touched = plan["touched"]
             if not touched and getattr(result, "schema_status", None) == "invalid":
                 # Unreadable even after its repair round: no answer is not "no change".

@@ -35,8 +35,9 @@ MAX_WAITING = 3
 #: waiting on a model and keeping a new one happen under this, together.
 _counting = threading.Lock()
 
-#: What Keep trying handed back: rounds given, the tracks it restarted, the claim token.
-Kept = tuple[int, list[str], str]
+#: What Keep trying handed back: rounds given, the tracks it restarted, the claim token —
+#: and whether the note was a decision about the app (#102), read once.
+Kept = tuple[int, list[str], str, bool]
 
 
 def _stuck(project: Project) -> bool:
@@ -57,16 +58,19 @@ def _something_to_fix(db: Session, project: Project) -> bool:
     return False
 
 
-def _keep_trying(db: Session, project: Project, kind: str, text: str, *, must: bool = False) -> Optional[Kept]:
+def _keep_trying(
+    db: Session, project: Project, kind: str, text: str, *, must: bool = False, model: Optional[str] = None
+) -> Optional[Kept]:
     """A note on a stuck build sets it going again with the note. Claimed before the
     message is kept: a refused claim keeps nothing, and a claim that went through is
     committed with the fix loop's state at once, as `/auto-fix/retry` commits it — so a
     message that then fails to save never leaves a claimed build that nothing drives."""
     if not must and (kind != crew_chat.NOTE or not _stuck(project) or not _something_to_fix(db, project)):
         return None
-    kept = start_keep_trying(db, project, note=text, decided=crew_chat.is_decision(text))
+    decided = crew_chat.is_decision(text)
+    more, names, token = start_keep_trying(db, project, note=text, model=model, decided=decided)
     db.commit()
-    return kept
+    return more, names, token, decided
 
 
 def _waiting_on_model(db: Session, project: Project, besides: str) -> int:
@@ -109,20 +113,20 @@ def _question(db: Session, project: Project, asked: CrewMessage) -> bool:
 def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept]) -> None:
     """Keep `asked` for the agents it is for, or say what Keep trying did with it."""
     if kept is not None:
-        more, names, _token = kept
+        more, names, _token, decided = kept
         phases = [n[len(autofix.BUILD_PREFIX):] for n in names if n.startswith(autofix.BUILD_PREFIX)]
         agent = phases[0] if phases else project.current_phase
         said = f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}."
-        decided = crew_chat.is_decision(asked.text)
         if decided:
             # A decision about the app stands for the rest of the build (#102): the phases
-            # still to come take it too, and it joins what the app has settled on.
-            ahead = crew_chat.not_started(project)
-            asked.meant_for = ahead
+            # still to come take it too, it joins what the app has settled on — and finished
+            # work it drops is changed after the round (#117), the round's own phases apart.
+            asked.meant_for = crew_chat.not_started(project)
             asked.plan = {"decided": True}
-            said += " I'll keep it as a decision for the rest of the build" + (
-                ", and the round may drop what it leaves out instead of fixing it." if phases else "."
-            )
+            said += " I'll keep it as a decision for the rest of the build, and the round may drop what it leaves out instead of fixing it."
+            if crew_chat.checks_finished_work(db, project, asked.text):
+                crew_chat.start_check(asked, exclude=phases)
+                said += " I'll also check whether it changes other finished work after this step."
         else:
             # For this fix round, which reads it (#103): not a standing note for every phase.
             asked.meant_for = []
@@ -208,7 +212,7 @@ def send_message(
     # The person's words reach a model: never a key they pasted by mistake.
     _refuse_credentials(text, project)
     kind = crew_chat.NOTE if payload.keep_trying else crew_chat.classify(text)
-    kept = _keep_trying(db, project, kind, text, must=payload.keep_trying)
+    kept = _keep_trying(db, project, kind, text, must=payload.keep_trying, model=payload.model if payload.keep_trying else None)
     asked = CrewMessage(
         project_id=project.id,
         author=crew_chat.PERSON,

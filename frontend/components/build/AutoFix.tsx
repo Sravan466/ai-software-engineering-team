@@ -408,7 +408,7 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               {r.note && (
                 <span className="ledger-note">
                   You said: “{r.note}”
-                  {r.decided && " Kept as a decision, so this round could drop what it leaves out."}
+                  {r.decided && r.note_sent !== false && " Kept as a decision, so this round could drop what it leaves out."}
                   {r.note_sent === false && " The model didn't see it: there was no room beside the code."}
                   {r.note_sent === "partly" && " Only some of this round's calls had room for it."}
                 </span>
@@ -573,9 +573,9 @@ export function NeedsHelp({
   const draftNote = !nothingToFix && note.trim() ? note.trim() : undefined;
   const retry = async (model?: string) => {
     const ok = await act(() =>
-      draftNote && !model
-        ? api.sendMessage(id, draftNote, { keepTrying: true })
-        : api.keepTrying(id, { note: draftNote, model }),
+      // With a draft, through the conversation — the cloud button too — so it's kept there
+      // and read as the person meant it (a decision about the app, #102).
+      draftNote ? api.sendMessage(id, draftNote, { keepTrying: true, model }) : api.keepTrying(id, { model }),
     );
     if (ok && draftNote) setNote("");
   };

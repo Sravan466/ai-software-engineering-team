@@ -73,9 +73,21 @@ def _stuck(client) -> str:
     ("Don't add login", True),
     ("please remove the export button", True),
     ("Forget about dark mode", True),
+    ("Let's skip voice input", True),
+    ("No, skip login", True),
+    ("please, skip login", True),
+    ("Just drop dark mode", True),
     ("keep all the routes in one file", False),
     ("use bcrypt for passwords", False),
     ("No, try again", False),
+    # Fix hints that merely start like a decision.
+    ("dropdown should close on click", False),
+    ("remove the unused import in main.py", False),
+    ("cut the file into two modules", False),
+    ("without changing the API, fix the import", False),
+    ("No worries, keep trying", False),
+    ("forget my last note, use bcrypt", False),
+    ("skipping the cache is fine", False),
 ])
 def test_a_decision_is_told_from_a_hint_by_its_words(text, decided):
     assert crew_chat.is_decision(text) is decided
@@ -101,8 +113,13 @@ def test_a_decision_on_a_stuck_build_may_drop_what_it_leaves_out_and_stands(scri
     m = client.post(f"/api/projects/{pid}/messages", json={"text": "skip the health check"}).json()["message"]
     assert m["replies"][0]["text"] == (
         "Trying again with your note, up to 2 more rounds. I'll keep it as a decision for the rest of the build, "
-        "and the round may drop what it leaves out instead of fixing it."
+        "and the round may drop what it leaves out instead of fixing it. "
+        "I'll also check whether it changes other finished work after this step."
     )
+    # Read against finished work too — the round's own phase apart, which has it already.
+    with SessionLocal() as db:
+        plan = db.get(CrewMessage, m["id"]).plan
+    assert plan.get("decided") and "backend_engineer" in (plan.get("exclude") or [])
     # It stands for the phases still to come.
     assert m["meant_for"] and "backend_engineer" not in m["meant_for"]
     fix_prompts = [c["prompt"] for c in script.calls[mark:] if c["role"] == "backend_engineer" and c["writes"]]
@@ -113,11 +130,26 @@ def test_a_decision_on_a_stuck_build_may_drop_what_it_leaves_out_and_stands(scri
     assert noted[0]["note"] == "skip the health check" and noted[0]["decided"] is True
 
 
+def test_the_cloud_button_with_a_draft_goes_through_the_conversation(monkeypatch, script, client):
+    from app.orchestration.runner import runner
+
+    pid = _stuck(client)
+    seen: list = []
+    monkeypatch.setattr("app.api.routes.messages.start_keep_trying",
+                        lambda db, project, **kw: (seen.append(kw), (2, ["build:backend_engineer"], "tok"))[1])
+    monkeypatch.setattr("app.api.routes.messages._drive", lambda *a: None)
+    r = client.post(f"/api/projects/{pid}/messages", json={"text": "skip voice input", "keep_trying": True, "model": "anthropic:claude-x"})
+    assert r.status_code == 201, r.text
+    assert seen == [{"note": "skip voice input", "model": "anthropic:claude-x", "decided": True}]
+    assert r.json()["message"]["status"] == "applied"
+    assert runner is not None
+
+
 def test_a_decision_with_no_phase_left_still_becomes_a_settled_decision(client):
     pid = client.post("/api/projects", json={"idea": "A tiny app"}).json()["id"]
     with SessionLocal() as db:
         db.add(CrewMessage(project_id=pid, author="person", text="no login", kind="note", status="applied",
-                           meant_for=[], applied_to=["backend_engineer"], plan={"decided": True}))
+                           meant_for=[], applied_to=None, plan={"decided": True}))
         db.add(CrewMessage(project_id=pid, author="person", text="import it from ./db", kind="note", status="applied",
                            meant_for=[], applied_to=["backend_engineer"]))
         db.commit()
@@ -126,11 +158,11 @@ def test_a_decision_with_no_phase_left_still_becomes_a_settled_decision(client):
 
 def test_the_person_words_and_the_decision_travel_apart():
     t = {"note": "skip voice input", "decided": True}
-    said, ask = autofix.take_person(t)
-    assert said == "skip voice input" and ask == f"skip voice input\n{autofix.DECIDED}"
+    said, ask, decided = autofix.take_person(t)
+    assert said == "skip voice input" and ask == f"skip voice input\n{autofix.DECIDED}" and decided
     assert "note" not in t and "decided" not in t
     record: dict = {}
-    autofix.mark_round(record, said, ask != said)
+    autofix.mark_round(record, said, decided)
     assert record == {"note": "skip voice input", "decided": True}
     # A round that never ran hands both back to the one that does.
     t = {"rounds": [{**record, "fixed": None}]}
