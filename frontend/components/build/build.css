@@ -1524,7 +1524,7 @@ a.finding-cwe:focus-visible,
   background: var(--bg-panel);
   box-shadow: var(--shadow-2);
   overflow: hidden;
-  animation: rise var(--tr-slow) cubic-bezier(0.2, 0, 0.2, 1) both;
+  animation: rise var(--tr-slow) both;
 }
 .fixing-track + .fixing-track { border-top: 1px solid var(--line); }
 .fixing-head {
@@ -1577,6 +1577,62 @@ a.finding-cwe:focus-visible,
   font-weight: 600;
   color: var(--run);
 }
+.fixing-trend { padding: 0 18px 12px 61px; }
+.fixing-trend .fix-trend { margin: 0; }
+
+/* The problems after each round (#103). Fewer than the step before is better, more is
+   worse: the numbers carry it, colour only agrees. Steps arrive in order, once. */
+.fix-trend {
+  display: flex;
+  align-items: center;
+  gap: 6px 10px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+.fix-trend-label { font-size: var(--t-xs); font-weight: 600; color: var(--ink-3); }
+.fix-trend-steps { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.fix-trend-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  animation: trend-in var(--tr-slow) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+.fix-trend-arrow { display: inline-flex; color: var(--ink-3); }
+.fix-trend-arrow svg { width: 11px; height: 11px; }
+.fix-trend-n {
+  min-width: 26px;
+  height: 22px;
+  padding: 0 6px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  background: var(--bg-sunken);
+  font-size: var(--t-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.fix-trend-n[data-dir="down"] { color: var(--ok); border-color: rgba(61, 214, 140, 0.35); }
+.fix-trend-n[data-dir="up"] { color: var(--bad); border-color: rgba(240, 82, 82, 0.4); }
+/* The attempt the build was put back on. */
+.fix-trend-n[data-kept] { box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 3px var(--ok); }
+/* Put back by the loop: the attempt the next round started from again. */
+.fix-trend-n[data-back] { border-style: dashed; }
+@keyframes trend-in { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+
+.fix-kept {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 72ch;
+  margin: 0 0 12px;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.fix-kept svg { flex: none; width: 14px; height: 14px; margin-top: 3px; color: var(--ok); }
 
 .fix-list { margin: 0; padding: 0 16px 16px; list-style: none; display: flex; flex-direction: column; gap: 6px; }
 .fix-item {
@@ -1686,6 +1742,7 @@ a.finding-cwe:focus-visible,
   color: var(--ink-2);
 }
 .ledger-row[data-progress] .ledger-n { border-color: rgba(61, 214, 140, 0.35); color: var(--ok); }
+.ledger-row[data-worse] .ledger-n { border-color: rgba(240, 82, 82, 0.4); color: var(--bad); }
 .ledger-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .ledger-what { font-size: var(--t-sm); color: var(--ink); }
 .ledger-how { font-size: var(--t-xs); color: var(--ink-3); }
@@ -1783,6 +1840,7 @@ a.finding-cwe:focus-visible,
 @media (max-width: 620px) {
   .fixing-head { flex-wrap: wrap; padding: 14px 14px 10px; }
   .fixing-approach { padding: 0 14px 12px; }
+  .fixing-trend { padding: 0 14px 12px; }
   .fix-list { padding: 0 12px 12px; }
   .fix-rail { margin-left: 0; }
   .help-track { padding: 14px 14px 4px; }
@@ -1795,7 +1853,8 @@ a.finding-cwe:focus-visible,
 
 @media (prefers-reduced-motion: reduce) {
   .fixing-mark svg,
-  .fix-rail-seg { animation: none !important; }
+  .fix-rail-seg,
+  .fix-trend-step { animation: none !important; }
 }
 
 /* ===========================================================================

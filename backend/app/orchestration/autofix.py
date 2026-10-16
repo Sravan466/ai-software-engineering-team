@@ -8,7 +8,9 @@ crew fixes it, re-checks, and goes again. That loop needs two things to be safe:
   **A stopping rule based on progress.** Self-repair gains most in its first two or
   three attempts, and a round that fixed nothing will not be rescued by an identical
   one. The loop stops at `auto_fix_max_rounds`, or earlier when a round's re-check
-  finds that nothing it was sent to fix went away.
+  finds that nothing it was sent to fix went away. On code (#103) progress is counted
+  net: a round that fixed 3 problems and made 6 new ones went backwards, and the loop
+  stops there and puts back the attempt with the fewest problems.
 
   **No silent shipping.** When the loop stops with something still wrong, the build
   parks as "needs help" — never "complete" — and says what was tried in each round.
@@ -102,23 +104,40 @@ def open_round(t: dict) -> Optional[dict]:
     return last if last is not None and last.get("fixed") is None else None
 
 
-def close_round(t: dict, remaining: Iterable[str]) -> Optional[list[str]]:
+def close_round(
+    t: dict, remaining: Iterable[str], attempt: Optional[str] = None, net: bool = False
+) -> Optional[list[str]]:
     """Record what the re-check found fixed. Returns those keys, or None if no round
-    was waiting on a re-check."""
+    was waiting on a re-check.
+
+    `net` (#103, code rounds): also every problem it found now, new ones included, and
+    `attempt`, the attempt the re-check read — so the trend is real and the best
+    attempt can be put back. Security and test rounds keep their own judgement."""
     last = open_round(t)
     if last is None:
         return None
-    left = set(remaining)
+    left = list(dict.fromkeys(remaining))
+    now = set(left)
     sent = [p["key"] for p in last.get("problems", [])]
-    fixed = [k for k in sent if k not in left]
+    was = set(sent)
+    fixed = [k for k in sent if k not in now]
     last["fixed"] = fixed
-    last["remaining"] = [k for k in sent if k in left]
+    last["remaining"] = [k for k in sent if k in now]
+    if net:
+        # Net, not just what went away: "fixed 3, broke 6" is a round that made it worse.
+        last["after"] = len(left)
+        last["broke"] = len([k for k in left if k not in was])
+        if attempt:
+            last["result"] = attempt
     last["checked_at"] = _now()
     return fixed
 
 
-def next_step(t: dict) -> str:
-    """"fix" to run another round, or the reason to stop and ask for help."""
+def next_step(t: dict, net: bool = False) -> str:
+    """"fix" to run another round, or the reason to stop and ask for help.
+
+    `net` (#103, code): a round that didn't leave fewer problems than it was sent made
+    no progress, whatever it fixed on the way."""
     rounds = t.get("rounds") or []
     judged = rounds[int(t.get("resumed_after") or 0) :]
     # A round that only asked the code's owners to fix failing tests hands what it
@@ -135,13 +154,19 @@ def next_step(t: dict) -> str:
         and not last.get("nothing_sent")
     ):
         return STOP_NO_PROGRESS
+    if (
+        net and last and last.get("after") is not None and not last.get("nothing_sent")
+        and int(last["after"]) >= len(last.get("problems") or [])
+    ):
+        return STOP_NO_PROGRESS
     if len(rounds) >= int(t.get("allowed") or 0):
         return STOP_LIMIT
     return "fix"
 
 
 def start_round(
-    t: dict, strategy: str, phases: list[str], problems: list[dict]
+    t: dict, strategy: str, phases: list[str], problems: list[dict], attempt: Optional[str] = None,
+    from_round: Optional[int] = None,
 ) -> dict:
     record = {
         "n": len(t["rounds"]) + 1,
@@ -154,13 +179,137 @@ def start_round(
         # problems are gone, and the record still says which rounds went together.
         "episode": int(t.get("episode_start") or 0),
     }
+    if attempt:
+        # The attempt the round was sent, with every one of `problems` (#103), and which
+        # round of the episode made it — not always the one before: the loop may have put
+        # an earlier one back.
+        record["attempt"] = attempt
+        record["from_round"] = from_round if from_round is not None else max(record["n"] - 1 - int(t.get("episode_start") or 0), 0)
     t["rounds"].append(record)
     t["stopped"] = None
     return record
 
 
-def stop(t: dict, reason: str, keys: list[str]) -> None:
+def stop(t: dict, reason: str, keys: list[str], problems: Optional[list[dict]] = None) -> None:
     t["stopped"] = {"reason": reason, "left": len(keys), "keys": list(keys), "at": _now()}
+    if problems is not None:
+        # What is left, new problems included (#103): the last round's own list only
+        # holds the ones it was sent.
+        t["stopped"]["problems"] = problems
+
+
+def episode(t: dict) -> list[dict]:
+    """The latest episode's rounds — still together after `settle` moved the start on."""
+    rounds = t.get("rounds") or []
+    if not rounds:
+        return []
+    latest = rounds[-1].get("episode")
+    start = int(t.get("episode_start") or 0)
+    # Rounds from before episodes were recorded belong to it when they are past its
+    # start: a build from before #103 that was sent round after round, and kept trying.
+    return [
+        r for i, r in enumerate(rounds)
+        if (latest is not None and r.get("episode") == latest) or (r.get("episode") is None and i >= start)
+    ]
+
+
+def _carried_on(t: dict, i: int) -> bool:
+    """Whether round i+1 carried on round i's problems, rather than opening an episode."""
+    rounds = t["rounds"]
+    r, nxt = rounds[i], rounds[i + 1]
+    if r.get("episode") is not None and nxt.get("episode") is not None:
+        return r["episode"] == nxt["episode"]
+    # Recorded before rounds said their episode: the current one is known, and a round
+    # that left some of its own problems was carried on whatever came next.
+    return i >= int(t.get("episode_start") or 0) or bool(r.get("remaining"))
+
+
+def after_of(t: dict, i: int) -> Optional[int]:
+    """What code round i left, new problems included (#103). Recorded since #103; for a
+    round before that, read off the round after it — each was sent every problem the
+    attempt before it had — or off how the loop ended."""
+    rounds = t.get("rounds") or []
+    r = rounds[i]
+    if r.get("fixed") is None:
+        return None
+    if r.get("after") is not None:
+        return int(r["after"])
+    if i + 1 < len(rounds):
+        return len(rounds[i + 1].get("problems") or []) if _carried_on(t, i) else None
+    if t.get("stopped"):
+        return int(t["stopped"].get("left") or 0)
+    if t.get("accepted"):
+        return len(t["accepted"].get("keys") or [])
+    return 0 if not r.get("remaining") else None
+
+
+def trend(t: dict) -> list[dict]:
+    """The episode's problem counts (#103), one point per attempt: what its first round
+    was sent, then what each round left — 3 → 6 → 4 is a loop going nowhere. A round
+    sent an attempt the loop put back, not the one the round before it made, starts
+    from it again (`back`). Each point says which attempt it is and which round made
+    it (0: none)."""
+    rounds = t.get("rounds") or []
+    current = episode(t)
+    if not current:
+        return []
+    first = rounds.index(current[0])
+    base = int(current[0].get("n") or 1) - 1
+    out: list[dict] = []
+    made: Optional[str] = None
+    for i in range(first, first + len(current)):
+        r = rounds[i]
+        sent = len(r.get("problems") or [])
+        if not out:
+            out.append({"n": sent, "attempt": r.get("attempt"), "round": int(r.get("from_round") or 0), "back": False})
+        elif r.get("attempt") and made and r["attempt"] != made:
+            out.append({"n": sent, "attempt": r["attempt"], "round": int(r.get("from_round") or 0), "back": True})
+        after = after_of(t, i)
+        if after is None:
+            break
+        out.append({"n": after, "attempt": r.get("result"), "round": int(r.get("n") or 0) - base, "back": False})
+        made = r.get("result")
+    return out if len(out) > 1 else []
+
+
+def best_attempt(t: dict, points: Optional[list[dict]] = None) -> Optional[dict]:
+    """The episode's attempt with the fewest problems, when it isn't the latest (#103):
+    `{"attempt", "problems", "round", "instead_of"}` — `round` 0 is the attempt before
+    any round. A tie goes to the attempt itself over a copy the loop put back, then to
+    the later one."""
+    seen = [p for p in (points if points is not None else trend(t)) if p.get("attempt")]
+    if not seen:
+        return None
+    latest = seen[-1]
+    best = min(enumerate(seen), key=lambda ip: (ip[1]["n"], ip[1]["back"], -ip[0]))[1]
+    if best["n"] >= latest["n"] or best["attempt"] == latest["attempt"]:
+        return None
+    return {"attempt": best["attempt"], "problems": best["n"], "round": best["round"], "instead_of": latest["n"]}
+
+
+def view(data: object) -> object:
+    """The loop's record as the page reads it (#103): each code track with its trend,
+    and each of its rounds with what it left and broke — worked out here, once, for
+    records from before those were kept too. Nothing is written back."""
+    if not isinstance(data, dict) or not isinstance(data.get("tracks"), dict):
+        return data
+    out = copy.deepcopy(data)
+    for name, t in out["tracks"].items():
+        if not name.startswith(BUILD_PREFIX) or not isinstance(t, dict):
+            continue
+        for i, r in enumerate(t.get("rounds") or []):
+            if r.get("after") is None and r.get("fixed") is not None:
+                after = after_of(t, i)
+                if after is not None:
+                    r["after"] = after
+                    r["broke"] = max(after - len(r.get("remaining") or []), 0)
+        t["trend"] = trend(t)
+    return out
+
+
+def said(points: list[dict]) -> str:
+    """A trend in words: `3 → 6 → back to 3 → 5`."""
+    return " → ".join(("back to " if p.get("back") else "") + str(p["n"]) for p in points)
 
 
 def abandon_open_round(t: dict) -> bool:
@@ -184,6 +333,7 @@ def settle(t: dict) -> None:
     t["episode_start"] = len(t["rounds"])
     t["allowed"] = len(t["rounds"]) + max(int(settings.auto_fix_max_rounds), 0)
     t["stopped"] = None
+    t.pop("kept", None)  # an attempt put back belongs to the episode that put it back
 
 
 def stuck(data: dict) -> list[str]:
@@ -644,6 +794,7 @@ __all__ = [
     "WAIVE_KINDS",
     "accept",
     "accepted",
+    "best_attempt",
     "build_track",
     "close_round",
     "code_note",
@@ -658,5 +809,10 @@ __all__ = [
     "start_round",
     "stop",
     "stuck",
+    "after_of",
+    "episode",
+    "said",
+    "view",
     "track",
+    "trend",
 ]

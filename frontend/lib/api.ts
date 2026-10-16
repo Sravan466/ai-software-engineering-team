@@ -438,15 +438,43 @@ export type AutoFixRound = {
   /** Keys the re-check no longer reports. `null` while the round is still running. */
   fixed: string[] | null;
   remaining?: string[];
+  /** Every problem the re-check found, new ones included (#103). Absent on older rounds. */
+  after?: number;
+  /** How many of those weren't there when the round started (#103). */
+  broke?: number;
+  /** The round had nothing it could show the model whole, so it tried nothing (#103). */
+  nothing_sent?: boolean;
+  /** Which episode of the track it belongs to (#103). */
+  episode?: number;
   at: string;
   checked_at?: string;
 };
 
+/** The attempt the loop put the build back on when it stopped (#103). */
+export type KeptBest = {
+  /** 0: the attempt before any round; n: the attempt round n made. */
+  round: number;
+  problems: number;
+  instead_of: number;
+};
+
+/** One attempt in a code track's trend (#103). `back`: the loop put it back. */
+export type TrendPoint = { n: number; attempt?: string | null; round: number; back: boolean };
+
 export type AutoFixTrack = {
   allowed: number;
   rounds: AutoFixRound[];
+  /** The problems each attempt of the episode had, as the backend records it (#103). */
+  trend?: TrendPoint[];
   /** `unchecked` (#77): the scanners couldn't run again to check the fix. */
-  stopped: { reason: "limit" | "no_progress" | "unchecked"; left: number; at: string } | null;
+  stopped: {
+    reason: "limit" | "no_progress" | "unchecked";
+    left: number;
+    at: string;
+    /** What is left, new problems included (#103). */
+    problems?: AutoFixProblem[];
+    kept_best?: (KeptBest & { from?: string }) | null;
+  } | null;
   accepted: { kind: WaiveKind; reason: string; at: string } | null;
   resumed_after: number;
   /** Where the current episode began: a fresh problem gets a fresh budget. */

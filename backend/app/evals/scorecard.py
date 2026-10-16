@@ -220,19 +220,11 @@ def fix_rounds(project: Project) -> dict:
         if not name.startswith(autofix.BUILD_PREFIX) or not rounds:
             continue
         total += len(rounds)
-        # The latest episode's rounds — still its own after `settle` moved the start on.
-        latest = rounds[-1].get("episode")
-        episode = [r for r in rounds if r.get("episode") == latest] if latest is not None else rounds
-        counts: list = [len(r.get("problems") or []) for r in episode]
-        last = episode[-1]
-        if t.get("stopped"):
-            counts.append(int(t["stopped"].get("left") or 0))
-        elif t.get("accepted"):
-            counts.append(len(t["accepted"].get("keys") or []))
-        elif last.get("fixed") is not None:
-            # Closed with nothing stopped or accepted: what it was sent and didn't fix.
-            counts.append(len(last.get("remaining") or []))
-        trend[name[len(autofix.BUILD_PREFIX):]] = counts
+        # One count per round: what the first was sent, then what each left — a put-back
+        # is not a round, so its "back to" point isn't counted.
+        points = [p["n"] for p in autofix.trend(t) if not p["back"]]
+        if points:
+            trend[name[len(autofix.BUILD_PREFIX):]] = points
     return {"fix_rounds": total, "fix_trend": trend}
 
 

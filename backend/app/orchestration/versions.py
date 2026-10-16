@@ -360,6 +360,39 @@ def shipping(db: Session, project: Project, number: Optional[int] = None, live: 
 
 
 # ── restoring one ─────────────────────────────────────────────────────────────
+def copy_row(
+    db: Session, project: Project, item: dict, status: str, note: Optional[str], marker: dict
+) -> PhaseResult:
+    """A new newest attempt of `item["phase"]` holding exactly `item`'s fields (a
+    snapshot entry, or `snapshot_of` a row), with `marker` added to its hand-off record.
+    The runner reads "the latest row of a phase" as "the attempt that counts", so this
+    is how an earlier attempt becomes the current one again — a restored version (#79),
+    or the fix loop's best attempt (#103)."""
+    fields = {name: item.get(name) for name in SNAP_FIELDS if name not in ("phase", "agent")}
+    fields["handoff"] = {**(item.get("handoff") or {}), **marker}
+    row = PhaseResult(
+        project_id=project.id,
+        phase=item.get("phase"),
+        agent=item.get("agent") or item.get("phase"),
+        status=status,
+        feedback=note,
+        completed_at=_now(),
+        **fields,
+    )
+    row.total_tokens = int(item.get("total_tokens") or 0)
+    row.latency_ms = int(item.get("latency_ms") or 0)
+    db.add(row)
+    return row
+
+
+def snapshot_of(row: PhaseResult) -> dict:
+    """One attempt's fields, as a version snapshots them — copies, so a row made from
+    them never shares a JSON value with the row they came from."""
+    import copy
+
+    return {name: copy.deepcopy(getattr(row, name)) for name in SNAP_FIELDS}
+
+
 def restore_rows(db: Session, project: Project, version: Version, note: str) -> dict[str, PhaseResult]:
     """Make the phases `version` saved the build's current attempts again.
 
@@ -390,22 +423,9 @@ def restore_rows(db: Session, project: Project, version: Version, note: str) -> 
             row.total_tokens = int(item.get("total_tokens") or 0)
             row.latency_ms = int(item.get("latency_ms") or 0)
         else:
-            fields = {name: item.get(name) for name in SNAP_FIELDS if name not in ("phase", "agent")}
             # Which row this copy restores: the version names that one, and the copy
             # still holds exactly it (`matches_current`).
-            fields["handoff"] = {**(item.get("handoff") or {}), "restored_row": item.get("id")}
-            row = PhaseResult(
-                project_id=project.id,
-                phase=phase,
-                agent=item.get("agent") or phase,
-                status=PhaseStatus.APPROVED.value,
-                feedback=note,
-                completed_at=_now(),
-                **fields,
-            )
-            row.total_tokens = int(item.get("total_tokens") or 0)
-            row.latency_ms = int(item.get("latency_ms") or 0)
-            db.add(row)
+            row = copy_row(db, project, item, PhaseStatus.APPROVED.value, note, {"restored_row": item.get("id")})
         chosen[phase] = row
     dead = (PhaseStatus.RUNNING.value, PhaseStatus.FAILED.value)
     for row in rows:

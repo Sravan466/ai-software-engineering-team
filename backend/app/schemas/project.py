@@ -317,6 +317,16 @@ class ProjectOut(BaseModel):
     #: The crew's fix loop: one track per kind of serious problem, each with its
     #: rounds, what they fixed, and — when it stopped — why. See `orchestration.autofix`.
     auto_fix: Optional[dict] = None
+
+    @field_validator("auto_fix", mode="before")
+    @classmethod
+    def _auto_fix_as_read(cls, value: Any) -> Any:
+        # Each code track's trend and each round's net counts, worked out once, here
+        # (#103) — the page renders them; older records get them too.
+        from app.orchestration import autofix
+
+        return autofix.view(value)
+
     #: The skills this build forces on or off, over the automatic choice. `None` on
     #: a build that never said anything about them.
     skill_overrides: Optional[SkillOverrides] = None
