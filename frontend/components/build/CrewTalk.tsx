@@ -229,7 +229,9 @@ export function CrewTalk({
             // The newest only, and not while a model is still answering it.
             const canReread =
               m.id === newest?.id &&
-              (m.status === "answered" || m.status === "declined" || (m.status === "queued" && m.kind === "note"));
+              (m.status === "answered" || m.status === "declined" || (m.status === "queued" && m.kind === "note")) &&
+              m.change !== "scheduled" &&
+              m.change !== "applied";
             return (
               <li key={m.id} className="talk-turn" data-kind={m.kind}>
                 <div className={`talk-row${fresh(m.id) ? " is-new" : ""}`}>
@@ -261,7 +263,7 @@ export function CrewTalk({
                       Cancel the change
                     </button>
                   )}
-                  {m.kind === "note" && m.status === "queued" && (
+                  {m.kind === "note" && m.status === "queued" && m.change !== "applied" && (
                     <button
                       type="button"
                       className="talk-reread talk-cancel"

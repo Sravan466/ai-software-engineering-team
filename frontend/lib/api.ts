@@ -667,7 +667,7 @@ export type CrewMessage = {
    * `checking` → `scheduled` (after the step in hand) → `applied`; or `none`, `cancelled`,
    * `missed` (the build finished first), `unchecked`. Null for a note never checked.
    */
-  change?: "checking" | "scheduled" | "applying" | "applied" | "none" | "cancelled" | "missed" | "unchecked" | null;
+  change?: "checking" | "scheduled" | "applied" | "none" | "cancelled" | "missed" | "unchecked" | null;
   /** The finished phases it changes after the step in hand. */
   touched?: string[];
   change_request_id: string | null;

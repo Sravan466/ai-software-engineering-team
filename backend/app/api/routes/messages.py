@@ -220,9 +220,16 @@ def reread_message(
     db: Session = Depends(get_db),
 ) -> dict:
     """"That was a question" (or a note): read the message the other way, and answer it so."""
+    with crew_chat.lock:
+        return _reread(message_id, payload, background, project, db)
+
+
+def _reread(message_id: str, payload: MessageReread, background: BackgroundTasks, project: Project, db: Session) -> dict:
     asked = db.get(CrewMessage, message_id)
     if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
         raise HTTPException(404, "There's no such message on this build.")
+    if crew_chat.change_state(asked) in (crew_chat.SCHEDULED_CHANGE, crew_chat.APPLIED_CHANGE):
+        raise HTTPException(409, "The crew is already acting on this note.")
     if asked.kind == payload.kind:
         raise HTTPException(409, f"It's already read as a {payload.kind}.")
     newest = db.execute(
@@ -263,20 +270,18 @@ def cancel_message(
             raise HTTPException(409, "Only a note can be taken back.")
         db.refresh(asked)
         state = crew_chat.change_state(asked)
+        if state == crew_chat.APPLIED_CHANGE:
+            raise HTTPException(409, "The change has already started.")
         if only_change:
             if state != crew_chat.SCHEDULED_CHANGE:
-                raise HTTPException(
-                    409,
-                    "The change has already started." if state in (crew_chat.APPLYING, crew_chat.APPLIED_CHANGE)
-                    else "There's no change waiting to cancel.",
-                )
-            asked.plan = {**(asked.plan or {}), "state": crew_chat.CANCELLED_CHANGE}
+                raise HTTPException(409, "There's no change waiting to cancel.")
+            crew_chat.resolve(asked, crew_chat.CANCELLED_CHANGE)
             crew_chat.reply(db, asked, "Cancelled the change. Nothing finished was changed.", asked.agent)
         else:
-            if asked.status not in (crew_chat.QUEUED, crew_chat.APPLIED) or state in (crew_chat.APPLYING, crew_chat.APPLIED_CHANGE):
-                raise HTTPException(409, "The crew has already acted on it." if asked.status == crew_chat.APPLIED else f"It's already {asked.status}.")
-            if asked.status == crew_chat.APPLIED:
-                raise HTTPException(409, "An agent has already taken this note.")
+            if asked.status != crew_chat.QUEUED:
+                raise HTTPException(
+                    409, "An agent has already taken this note." if asked.status == crew_chat.APPLIED else f"It's already {asked.status}."
+                )
             asked.status = crew_chat.CANCELLED
             if state in (crew_chat.SCHEDULED_CHANGE, crew_chat.CHECKING):
                 asked.plan = {**(asked.plan or {}), "state": crew_chat.CANCELLED_CHANGE}

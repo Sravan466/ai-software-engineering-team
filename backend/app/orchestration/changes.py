@@ -265,8 +265,14 @@ def note_for(change: dict, phase: str) -> str:
 
 
 def editing(change: Optional[dict], phase: str) -> bool:
-    """Whether `phase` edits its own deliverable in the change the checkpoint holds."""
-    return bool(change) and phase in (change.get("edit") or [])
+    """Whether `phase` edits its own deliverable in the change the checkpoint holds. A
+    note's change (#102) is over once its own edits are done: a later re-run of one of its
+    phases is the build's, not the note's."""
+    if not change or phase not in (change.get("edit") or []):
+        return False
+    if change.get("note") and set(change.get("edit") or []) <= set(change.get("done") or []):
+        return False
+    return True
 
 
 def landed(change: dict, phase: str, output: object) -> dict:

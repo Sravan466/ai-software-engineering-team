@@ -48,6 +48,7 @@ class Script:
         self.plan = {"summary": "Take login out", "phases": ["backend_engineer"],
                      "files_likely": ["backend/app/routes.py"], "needs_design": False, "needs_db_change": False}
         self.before = None
+        self.edited: set[str] = set()
 
     def __call__(self, messages, **kwargs) -> LLMResponse:
         role = kwargs.get("role") or ""
@@ -60,8 +61,12 @@ class Script:
             self.before(role, wanted)
         if role == "planner":
             return _resp(json.dumps(self.plan))
+        if editing:
+            self.edited.add(role)
         if wanted:
-            return _resp(fenced({p: CODE.get(p, "x = 1\n").replace("'login'", "None") if editing else CODE.get(p, "x = 1\n") for p in wanted}))
+            # After its edit plan, a phase's writes carry the change: login is gone.
+            changed = role in self.edited
+            return _resp(fenced({p: CODE.get(p, "x = 1\n").replace("'login'", "None") if changed else CODE.get(p, "x = 1\n") for p in wanted}))
         if editing:
             return _resp(json.dumps({"summary": "No login", "files": [{"path": "backend/app/routes.py", "purpose": "routes without login"}]}))
         if schema is None:
@@ -128,7 +133,12 @@ def test_a_note_that_changes_the_backend_edits_it_after_the_frontend_and_the_bui
 
     [m] = _thread(client, pid)
     assert m["change"] == "applied" and "backend_engineer" in m["applied_to"]
-    assert m["replies"][-1]["text"] == "Changing it now: Backend Engineer starts on its finished work."
+    # Kept only for its change: settled with it.
+    assert m["status"] == "applied"
+    texts = [r["text"] for r in m["replies"]]
+    assert "Changing it now: Backend Engineer starts on its finished work." in texts
+    # And what it did, once the Backend had edited.
+    assert texts[-1] == "Backend Engineer changed 1 file: `backend/app/routes.py`."
     with SessionLocal() as db:
         assert db.get(Project, pid).status == PipelineStatus.COMPLETED.value
     assert not graph.get_state(_config(pid)).values.get("change"), "the note's change outlived the build"
@@ -150,6 +160,7 @@ def test_a_change_taken_back_before_it_starts_changes_nothing(script, client):
     assert not any(c["edit_plan"] for c in script.calls), "a cancelled change still ran"
     [m] = _thread(client, pid)
     assert m["change"] == "cancelled" and m["replies"][-1]["text"] == "Cancelled the change. Nothing finished was changed."
+    assert m["status"] == "cancelled", "a note kept only for its change stayed waiting"
     assert client.post(f"/api/projects/{pid}/messages/{m['id']}/cancel", json={"change": True}).status_code == 409
 
 
@@ -258,7 +269,7 @@ def test_a_change_still_waiting_when_the_build_finishes_is_missed(client):
     with SessionLocal() as db:
         crew_chat.settle_unchanged(db, pid)
         m = db.get(CrewMessage, mid)
-        assert crew_chat.change_state(m) == "missed"
+        assert crew_chat.change_state(m) == "missed" and m.status == "declined"
 
 
 def test_a_notes_change_stops_being_live_once_its_edits_are_done():
@@ -309,3 +320,29 @@ def test_an_unreadable_plan_is_not_called_no_change(monkeypatch, script, client)
     [m] = _thread(client, pid)
     assert m["change"] == "unchecked"
     assert m["replies"][-1]["text"].startswith("I couldn't tell whether this changes finished work")
+
+
+def test_a_notes_change_no_longer_edits_once_its_edits_are_done():
+    from app.orchestration import changes
+
+    held = {"note": ["x"], "edit": ["backend_engineer", "frontend_engineer"], "done": ["backend_engineer"]}
+    assert changes.editing(held, "frontend_engineer")
+    assert changes.editing(held, "backend_engineer"), "a fix round inside the change still edits"
+    done = {**held, "done": ["backend_engineer", "frontend_engineer"]}
+    assert not changes.editing(done, "backend_engineer") and not changes.editing(done, "frontend_engineer")
+    # A change request's record is unchanged: it edits until it's reviewed.
+    assert changes.editing({"id": "c1", "edit": ["backend_engineer"], "done": ["backend_engineer"]}, "backend_engineer")
+
+
+def test_a_note_whose_change_is_scheduled_cant_be_read_again(script, client):
+    pid = _running_frontend(client)
+    mid = _schedule(pid)
+    r = client.post(f"/api/projects/{pid}/messages/{mid}/reread", json={"kind": "question"})
+    assert r.status_code == 409 and "already acting" in r.json()["detail"]
+
+
+def test_files_changed_reads_fingerprints():
+    before = crew_chat.fingerprint({"files": [{"path": "a.py", "code": "x = 1\n"}, {"path": "b.py", "code": "y = 2\n"}]})
+    after = {"files": [{"path": "a.py", "code": "x = 1\n"}, {"path": "b.py", "code": "y = 3\n"}, {"path": "c.py", "code": "z = 0\n"}]}
+    assert crew_chat.files_changed(before, after) == ["b.py", "c.py"]
+    assert crew_chat.files_changed(before, {"files": [{"path": "a.py", "code": "x = 1\n"}, {"path": "b.py", "code": "y = 2\n"}]}) == []
