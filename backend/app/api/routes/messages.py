@@ -115,6 +115,8 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         crew_chat.reply(db, asked, f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}.", agent)
         asked.status = crew_chat.APPLIED
         asked.agent = agent
+        # For this fix round, which reads it (#103): not a standing note for every phase.
+        asked.meant_for = []
         asked.applied_to = phases or None
         asked.applied_at = crew_chat.now()
         return

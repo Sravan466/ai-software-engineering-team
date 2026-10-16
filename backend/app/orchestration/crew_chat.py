@@ -640,15 +640,22 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
 
 
 def _writing_files(project: Project, rows: dict) -> bool:
-    """Whether the phase working now is a code phase with files still to write."""
+    """Whether the phase working now is a code phase that will read a note before another
+    file: files still planned, and not a fix round — whose prompts don't carry notes."""
     current = project.current_phase
     if current not in CODE_PHASES or phase_state(project, current, rows) != "working":
         return False
     found = project.activity or {}
     if found.get("ended") or found.get("stage") not in ("planning", "writing"):
         return False
+    from app.orchestration import autofix
+
+    track = (autofix.load(project)["tracks"]).get(autofix.build_track(current))
+    if track and autofix.open_round(track) is not None:
+        return False
     files = found.get("files") or []
-    return not files or any(f.get("state") in ("planned", "writing") for f in files)
+    # The file being written is already in flight: only one still planned comes after.
+    return not files or any(f.get("state") == "planned" for f in files)
 
 
 # ── notes reach the phases they're for ────────────────────────────────────────
@@ -657,58 +664,60 @@ NOTES_MAX = 8
 _HANDED = (QUEUED, APPLIED)
 
 
-def _notes(db: Session, project_id: str) -> list[CrewMessage]:
-    return list(
-        db.execute(
-            select(CrewMessage)
-            .where(
-                CrewMessage.project_id == project_id,
-                CrewMessage.author == PERSON,
-                CrewMessage.kind == NOTE,
-                CrewMessage.status.in_(_HANDED),
-            )
-            .order_by(CrewMessage.created_at)
-        ).scalars()
+def _note_filter(project_id):
+    """Which messages are notes a phase may be handed — one definition, for the notes
+    taken and for what `claim.between_calls` reads, so the two can't drift apart."""
+    return (
+        CrewMessage.project_id == project_id,
+        CrewMessage.author == PERSON,
+        CrewMessage.kind == NOTE,
+        CrewMessage.status.in_(_HANDED),
     )
 
 
-def notes_count():
-    """A scalar subquery: how many notes a build holds — for `claim.between_calls`, which
-    reads it in the read it already makes before every file, so a code phase notices a
-    new note (or one taken back) without a query of its own."""
+def _notes(db: Session, project_id: str) -> list[CrewMessage]:
+    return list(db.execute(select(CrewMessage).where(*_note_filter(project_id)).order_by(CrewMessage.created_at)).scalars())
+
+
+def notes_signature():
+    """Two scalar subqueries — how many notes the build holds, and when the newest was
+    sent — for `claim.between_calls`, which reads them in the read it already makes before
+    every file. A note added, or one taken back, moves one or the other."""
     from sqlalchemy import func
 
     return (
-        select(func.count())
-        .select_from(CrewMessage)
-        .where(
-            CrewMessage.project_id == Project.id,
-            CrewMessage.author == PERSON,
-            CrewMessage.kind == NOTE,
-            CrewMessage.status.in_(_HANDED),
-        )
-        .scalar_subquery()
+        select(func.count()).select_from(CrewMessage).where(*_note_filter(Project.id)).scalar_subquery(),
+        select(func.max(CrewMessage.created_at)).where(*_note_filter(Project.id)).scalar_subquery(),
     )
 
 
+def signature_of(count: int, newest) -> tuple:
+    """The pair `notes_signature` reads, in one comparable form."""
+    return (int(count or 0), str(newest) if newest is not None else None)
+
+
 def for_phase(m: CrewMessage, phase: str) -> bool:
-    """A note is for the phases it named or that hadn't started when it was sent; one
-    from before that was recorded is for every phase that starts after it."""
-    return not m.meant_for or phase in m.meant_for
+    """A note is for the phases it named or that hadn't started when it was sent. One sent
+    through Keep trying (`[]`) was for that fix round only; one from before notes recorded
+    who they were for (`None`) is for every phase that starts after it."""
+    return m.meant_for is None or phase in m.meant_for
 
 
-def take_notes(project_id: str, phase: str) -> str:
-    """Every note for `phase`, as its prompt carries them: one a line, oldest first.
+def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
+    """Every note for `phase`, as its prompt carries them (one a line, oldest first), and
+    the signature of the notes the build held when they were read.
 
-    At a phase's start (the graph node) and between two of a code phase's files. Each is
-    marked handed to `phase`; the first phase to take a note says so in the thread. Taken
-    again on a re-run — a resume, a fix round — so a note stands for the whole build.
-    Never raises: a note that can't be read never stops a build."""
+    At a phase's start (the graph node, a redo) and between two of a code phase's files.
+    Each note handed over is marked handed to `phase`; the first phase to take a note says
+    so in the thread. Taken again on a re-run — a resume, a redo — so a note stands for the
+    whole build. None when they couldn't be read: the caller keeps what it had, and a note
+    that can't be read never stops a build."""
     from app.db.base import SessionLocal
 
     try:
         with SessionLocal() as db:
-            mine = [m for m in _notes(db, project_id) if for_phase(m, phase)]
+            held = _notes(db, project_id)
+            mine = [m for m in held if for_phase(m, phase)][-NOTES_MAX:]
             for m in mine:
                 given = list(m.applied_to or [])
                 if phase in given:
@@ -720,15 +729,21 @@ def take_notes(project_id: str, phase: str) -> str:
                     m.agent = phase
                     reply(db, m, f"Got your note. {title(phase)} is working with it now.", phase)
             db.commit()
-            return "\n".join(f"- {' '.join(m.text.split())}" for m in mine[-NOTES_MAX:])
+            newest = max((m.created_at for m in held if m.created_at is not None), default=None)
+            return "\n".join(f"- {' '.join(m.text.split())}" for m in mine), signature_of(len(held), newest)
     except Exception:  # noqa: BLE001
         log.exception("Couldn't read the notes for %s on %s", phase, project_id)
-        return ""
+        return None
 
 
 def asked_during(db: Session, project_id: str) -> list[str]:
-    """What the person asked for while the build ran, for the app's settled decisions."""
-    return [f"Asked during the build: {' '.join(m.text.split())}" for m in _notes(db, project_id) if m.applied_to]
+    """What the person asked for while the build ran, for the app's settled decisions: the
+    notes a phase took. Not a Keep-trying note, which was for one fix round."""
+    return [
+        f"Asked during the build: {' '.join(m.text.split())[:200]}"
+        for m in _notes(db, project_id)
+        if m.applied_to and m.meant_for != []
+    ]
 
 
 # ── questions only a model can answer ─────────────────────────────────────────
@@ -870,7 +885,8 @@ __all__ = [
     "addressed_to",
     "asked_during",
     "for_phase",
-    "notes_count",
+    "notes_signature",
+    "signature_of",
     "take_notes",
     "ask_model",
     "classify",

@@ -320,8 +320,9 @@ class _Run:
     def __init__(self, agent: CodePhaseAgent, ctx: AgentContext) -> None:
         self.agent = agent
         self.ctx = ctx
-        #: How many notes to the crew the build held when they were last taken (#102).
-        self.notes_seen = -1
+        #: The notes to the crew the build held when they were last taken (#102): what the
+        #: graph node saw at the phase's start, so a note sent while it planned is caught.
+        self.notes_seen = ctx.asked_seen
         self.calls: list[LLMResponse] = []
         self.truncated = 0
         self.repairs = 0
@@ -1440,12 +1441,13 @@ class _Run:
         and pick up a note the person sent meanwhile (#102), so the files still to write
         carry it. The count comes back in the read this makes anyway."""
         held = claim.between_calls()
-        # A note added, or one taken back (#102 PR 3): the count moved either way.
-        if held != self.notes_seen and (held or self.notes_seen > 0):
-            build = inflight.current()
-            if build:
-                self.ctx.asked = crew_chat.take_notes(build["id"], self.agent.key)
-        self.notes_seen = held
+        if held == self.notes_seen or (self.notes_seen is None and not held[0]):
+            return
+        build = inflight.current()
+        found = crew_chat.take_notes(build["id"], self.agent.key) if build else None
+        if found is not None:
+            # A read that failed keeps what the phase had, and tries again next file.
+            self.ctx.asked, self.notes_seen = found
 
     def _call(self, build: Callable[[], list[ChatMessage]], batch: list[_Planned], doing: str) -> LLMResponse:
         """One write call. `build` makes its prompt from `self.profile`; a prompt the

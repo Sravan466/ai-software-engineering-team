@@ -123,11 +123,11 @@ def check() -> None:
         raise Superseded(project_id)
 
 
-def between_calls() -> int:
+def between_calls() -> tuple:
     """For a phase that makes many model calls (#81): stop before the next one when the
-    build is no longer this driver's, or the person pressed Stop. Returns how many notes
-    to the crew the build holds (#102), read in the same query: a code phase that sees
-    the number change takes them again before its next file.
+    build is no longer this driver's, or the person pressed Stop. Returns the signature of
+    the notes to the crew the build holds (#102) — how many, and the newest — read in the
+    same query: a code phase that sees it move takes them again before its next file.
 
     Stop cancels the call in flight, but a Stop landing *between* two calls has nothing
     to cancel — without this the next file's call would start anyway. Raises
@@ -135,6 +135,7 @@ def between_calls() -> int:
     build), which the run settles exactly as a cancelled call.
     """
     from app.db.base import SessionLocal
+    from app.orchestration import crew_chat
     from app.router import inflight
     from app.router.base import RequestCancelled
 
@@ -142,13 +143,11 @@ def between_calls() -> int:
     build = inflight.current()
     project_id = held[0] if held is not None else (build or {}).get("id")
     if not project_id:
-        return 0
-    from app.orchestration import crew_chat
-
+        return crew_chat.signature_of(0, None)
     # One read for every question: it runs before every file a code phase writes.
     with SessionLocal() as db:
         found = db.execute(
-            select(Project.run_token, Project.cancel_requested, crew_chat.notes_count()).where(
+            select(Project.run_token, Project.cancel_requested, *crew_chat.notes_signature()).where(
                 Project.id == project_id
             )
         ).first()
@@ -156,7 +155,7 @@ def between_calls() -> int:
         raise Superseded(project_id)
     if found is None or found[1]:
         raise RequestCancelled()
-    return int(found[2] or 0)
+    return crew_chat.signature_of(found[2], found[3])
 
 
 

@@ -284,7 +284,7 @@ def first_decisions(project: Project) -> list[str]:
     out = [f"Stack — {line}"] if line else []
     db = object_session(project)
     if db is not None:
-        out += [" ".join(n.split())[:240] for n in crew_chat.asked_during(db, project.id)]
+        out += crew_chat.asked_during(db, project.id)
     return out
 
 

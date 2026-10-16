@@ -319,6 +319,23 @@ def test_a_note_on_a_build_stopped_mid_phase_goes_to_that_phase_first(calls, cli
     assert m["meant_for"][:2] == ["backend_engineer", "frontend_engineer"]
 
 
+def test_no_promise_of_the_next_file_during_a_fix_round_or_on_the_last_file(calls, client):
+    pid = _running_backend(client)
+    with SessionLocal() as db:
+        data = {"tracks": {}}
+        t = autofix.track(data, "build:backend_engineer")
+        autofix.start_round(t, "with_code", ["backend_engineer"], [{"key": "a"}])
+        db.get(Project, pid).auto_fix = data
+        db.commit()
+    assert _say(client, pid, "keep it small")["replies"][0]["text"].startswith("Got it. Frontend Engineer")
+    pid = _running_backend(client)
+    with inflight.building(pid):
+        for path in ("lib/0.js", "lib/1.js", "lib/2.js", "lib/3.js"):
+            activity.file(path, "ok")
+        activity.file("lib/4.js", "writing")  # the last file, already in flight
+    assert _say(client, pid, "keep it small")["replies"][0]["text"].startswith("Got it. Frontend Engineer")
+
+
 def test_a_note_for_one_agent_says_so(calls, client):
     pid = _running_backend(client)
     m = _say(client, pid, "frontend: use a purple theme")
@@ -345,6 +362,7 @@ def test_a_note_on_a_stuck_build_is_keep_trying_with_it(calls, client):
     finally:
         monkey.undo()
     assert m["status"] == "applied" and m["applied_to"] == ["backend_engineer"]
+    assert m["meant_for"] == [], "a note for one fix round became a standing note"
     assert m["replies"][0]["text"] == "Trying again with your note, up to 2 more rounds."
     assert driven == [pid]
     with SessionLocal() as db:

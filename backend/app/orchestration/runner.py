@@ -1875,6 +1875,12 @@ class PipelineRunner:
                         revising=revise is not None,
                         pin_model=pin,
                     )
+                    if fix is None:
+                        # The person's notes (#102), on a redo as at any start. Not on a
+                        # fix round: its prompt carries the problems and their note only.
+                        from app.orchestration.graph import take_asked
+
+                        take_asked(ctx, project.id, phase_key)
                     if editing:
                         # Its own work, not stripped: what it delivered is what it
                         # changes (#79) — on a fix round, the change's own attempt.

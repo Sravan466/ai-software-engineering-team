@@ -198,12 +198,15 @@ def test_a_long_note_never_overruns_a_small_window(window):
             assert built <= profile.prompt_char_budget, f"{key} built {built:,} against {profile.prompt_char_budget:,}"
 
 
-def test_beside_a_reviewers_note_the_persons_words_come_first():
+def test_beside_a_reviewers_note_the_reason_it_was_sent_back_comes_first():
     from app.agents.base import feedback_frame, feedback_text
 
     ctx = AgentContext(idea="x", feedback="Fix the import in main.py", asked="- no login")
     assert feedback_frame(ctx).startswith("# Reviewer feedback")
-    assert feedback_text(ctx).startswith("The person asked for this during the build:\n- no login\n\n")
+    # The reason it was sent back first: a small window cuts the end, never that.
+    assert feedback_text(ctx) == (
+        "Fix the import in main.py\n\nThe person also asked for this during the build:\n- no login"
+    )
     alone = AgentContext(idea="x", asked="- no login")
     assert feedback_frame(alone) == "# What the person asked for — keep to it\n"
     assert feedback_text(alone) == "- no login"
@@ -213,10 +216,79 @@ def test_taking_a_note_again_hands_it_once(client):
     pid = _project(client)
     mid = _note(pid, meant_for=["backend_engineer"])
     for _ in range(3):
-        assert crew_chat.take_notes(pid, "backend_engineer") == f"- {NOTE}"
-    assert crew_chat.take_notes(pid, "frontend_engineer") == ""
+        assert crew_chat.take_notes(pid, "backend_engineer")[0] == f"- {NOTE}"
+    assert crew_chat.take_notes(pid, "frontend_engineer")[0] == ""
     with SessionLocal() as db:
         m = db.get(CrewMessage, mid)
         assert m.applied_to == ["backend_engineer"] and m.status == "applied"
         replies = db.query(CrewMessage).filter_by(reply_to=mid).count()
     assert replies == 1, "a phase run again replied again"
+
+
+def test_a_keep_trying_note_is_for_its_round_not_every_phase(client):
+    pid = _project(client)
+    mid = _note(pid, "import Router from react-router-dom v6", meant_for=[])
+    assert crew_chat.take_notes(pid, "frontend_engineer")[0] == ""
+    with SessionLocal() as db:
+        db.get(CrewMessage, mid).applied_to = ["frontend_engineer"]
+        db.commit()
+        assert crew_chat.asked_during(db, pid) == [], "a round's note became a settled decision"
+
+
+def test_only_the_notes_handed_over_are_marked(client):
+    pid = _project(client)
+    ids = [_note(pid, f"note {i}") for i in range(crew_chat.NOTES_MAX + 2)]
+    text, _seen = crew_chat.take_notes(pid, "backend_engineer")
+    assert "note 0" not in text and f"note {crew_chat.NOTES_MAX + 1}" in text
+    with SessionLocal() as db:
+        assert db.get(CrewMessage, ids[0]).applied_to is None, "a note left out of the prompt was marked handed over"
+        assert db.get(CrewMessage, ids[-1]).applied_to == ["backend_engineer"]
+
+
+def test_a_note_added_and_one_taken_back_still_moves_the_signature(client):
+    from app.orchestration import claim
+    from app.router import inflight
+
+    pid = _project(client)
+    first = _note(pid, "keep it small")
+    with inflight.building(pid):
+        before = claim.between_calls()
+        with SessionLocal() as db:
+            db.get(CrewMessage, first).status = "cancelled"
+            db.commit()
+        _note(pid, "make it purple")
+        after = claim.between_calls()
+    assert before[0] == after[0] == 1
+    assert before != after, "one note in for one out went unseen"
+    assert after == crew_chat.take_notes(pid, "backend_engineer")[1], "the two reads disagree"
+
+
+def test_a_failed_read_keeps_the_notes_the_phase_had(monkeypatch, client):
+    from app.agents import code_phase
+    from app.orchestration import claim
+
+    pid = _project(client)
+    run = code_phase._Run.__new__(code_phase._Run)
+    run.agent = AGENTS["backend_engineer"]
+    run.ctx = AgentContext(idea="x", asked="- no login", asked_seen=(1, "a"))
+    run.notes_seen = run.ctx.asked_seen
+    monkeypatch.setattr(claim, "between_calls", lambda: (2, "b"))
+    monkeypatch.setattr(crew_chat, "take_notes", lambda *a: None)
+    from app.router import inflight
+
+    with inflight.building(pid):
+        run._between_files()
+    assert run.ctx.asked == "- no login" and run.notes_seen == (1, "a"), "a failed read wiped the notes or stopped retrying"
+
+
+def test_a_redo_carries_the_notes_too(script, client):
+    pid = _project(client, approval_mode="checkpoints")
+    client.post(f"/api/projects/{pid}/run")
+    project = through_question_gates(client, pid)
+    assert project["gate_kind"] == "plan"
+    _note(pid, "no login anywhere", meant_for=["system_design", "backend_engineer"])
+    mark = len(script.calls)
+    r = client.post(f"/api/projects/{pid}/redo", json={"phase": "system_design", "feedback": "Use fewer services."})
+    assert r.status_code == 200, r.text
+    redone = [c["prompt"] for c in script.calls[mark:] if c["role"] == "system_design"]
+    assert redone and all("no login anywhere" in p and "Use fewer services." in p for p in redone)

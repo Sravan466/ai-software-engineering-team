@@ -165,6 +165,9 @@ class AgentContext:
     #: What the person asked for while the build ran (#102), one note a line: a standing
     #: instruction for this phase, carried in the feedback slot and its budget.
     asked: str = ""
+    #: The notes the build held when `asked` was read (`crew_chat.signature_of`): a code
+    #: phase takes them again between files only once that has moved.
+    asked_seen: Optional[tuple] = None
 
     @property
     def editing(self) -> bool:
@@ -1355,12 +1358,12 @@ def feedback_frame(ctx: AgentContext) -> str:
 
 
 def feedback_text(ctx: AgentContext) -> str:
-    """What the feedback slot carries: the reviewer's note, and what the person asked for
-    during the build (#102) ahead of it — first, where clipping to the window never
-    reaches. One slot and one budget, never a section of its own."""
+    """What the feedback slot carries: the reviewer's note, then what the person asked for
+    during the build (#102). One slot and one budget, never a section of its own; the
+    reason a phase was sent back comes first, so the window never cuts it for a note."""
     asked = (ctx.asked or "").strip()
     if asked and ctx.feedback:
-        return f"The person asked for this during the build:\n{asked}\n\n{ctx.feedback}"
+        return f"{ctx.feedback}\n\nThe person also asked for this during the build:\n{asked}"
     return ctx.feedback or asked
 
 
