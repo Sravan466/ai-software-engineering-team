@@ -202,3 +202,7 @@ def test_the_planner_naming_nothing_finished_is_not_guessed_into_a_change():
     assert crew_chat.touched_by(None, finished)["touched"] == []
     both = crew_chat.touched_by({"phases": ["backend_engineer"], "needs_design": True}, finished)
     assert both["touched"] == ["system_design", "backend_engineer"]
+    # A small model often names the file and not the phase (seen on qwen2.5:7b): its word too.
+    by_file = crew_chat.touched_by({"phases": [], "files_likely": ["backend/app/controllers/bookController.js"]}, finished)
+    assert by_file["touched"] == ["backend_engineer"]
+    assert crew_chat.touched_by({"files_likely": ["frontend/pages/index.jsx"]}, finished)["touched"] == []

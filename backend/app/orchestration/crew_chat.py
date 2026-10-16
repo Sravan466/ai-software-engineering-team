@@ -870,12 +870,16 @@ def touched_by(raw: object, finished: set[str]) -> dict:
 
     data = raw if isinstance(raw, dict) else {}
     wanted = {str(p).strip() for p in data.get("phases") or [] if isinstance(p, str)}
+    likely = [str(p).strip() for p in data.get("files_likely") or [] if isinstance(p, str) and str(p).strip()][:20]
+    # A file it names is its word too: a small model often lists the file and not the phase.
+    sides = {"backend": "backend_engineer", "frontend": "frontend_engineer"}
+    wanted |= {sides[h] for h in (p.lstrip("/").split("/", 1)[0].lower() for p in likely) if h in sides}
     editors = [p for p in changes.EDITORS if p in wanted and p in finished]
     design = (bool(data.get("needs_design")) or bool(data.get("needs_db_change"))) and "system_design" in finished
     return {
         "summary": str(data.get("summary") or "").strip()[:300],
         "phases": editors,
-        "files_likely": [str(p).strip() for p in data.get("files_likely") or [] if isinstance(p, str) and str(p).strip()][:20],
+        "files_likely": likely,
         "needs_design": design,
         "needs_db_change": bool(data.get("needs_db_change")),
         "touched": [p for p in _ORDER if p in editors or (design and p == "system_design")],
