@@ -572,7 +572,9 @@ export function NeedsHelp({
   const draftNote = !nothingToFix && note.trim() && !readsAsQuestion(note) ? note.trim() : undefined;
   const retry = async (model?: string) => {
     const ok = await act(() =>
-      draftNote && !model ? api.sendMessage(id, draftNote) : api.keepTrying(id, { note: draftNote, model }),
+      draftNote && !model
+        ? api.sendMessage(id, draftNote, { keepTrying: true })
+        : api.keepTrying(id, { note: draftNote, model }),
     );
     if (ok && draftNote) setNote("");
   };

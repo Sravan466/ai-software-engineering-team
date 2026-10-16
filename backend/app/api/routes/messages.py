@@ -10,6 +10,7 @@ Nothing here claims a running build. Stop stays the only interrupt.
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -29,6 +30,10 @@ router = APIRouter(prefix="/api/projects", tags=["messages"])
 #: Questions waiting on a model, per build, before another is turned away: each is a
 #: model call, and on a local model each waits behind the build's own.
 MAX_WAITING = 3
+
+#: One process (the runs are threads in it, as `activity` assumes): counting the questions
+#: waiting on a model and keeping a new one happen under this, together.
+_counting = threading.Lock()
 
 #: What Keep trying handed back: rounds given, the tracks it restarted, the claim token.
 Kept = tuple[int, list[str], str]
@@ -52,12 +57,16 @@ def _something_to_fix(db: Session, project: Project) -> bool:
     return False
 
 
-def _keep_trying(db: Session, project: Project, kind: str, text: str) -> Optional[Kept]:
-    """A note on a stuck build sets it going again with the note — claimed before the
-    message is kept, because the claim commits: one that's refused keeps nothing."""
-    if kind != crew_chat.NOTE or not _stuck(project) or not _something_to_fix(db, project):
+def _keep_trying(db: Session, project: Project, kind: str, text: str, *, must: bool = False) -> Optional[Kept]:
+    """A note on a stuck build sets it going again with the note. Claimed before the
+    message is kept: a refused claim keeps nothing, and a claim that went through is
+    committed with the fix loop's state at once, as `/auto-fix/retry` commits it — so a
+    message that then fails to save never leaves a claimed build that nothing drives."""
+    if not must and (kind != crew_chat.NOTE or not _stuck(project) or not _something_to_fix(db, project)):
         return None
-    return start_keep_trying(db, project, note=text)
+    kept = start_keep_trying(db, project, note=text)
+    db.commit()
+    return kept
 
 
 def _waiting_on_model(db: Session, project: Project, besides: str) -> int:
@@ -130,8 +139,23 @@ def _settle(
     db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept], background: BackgroundTasks
 ) -> dict:
     """Answer or keep `asked`, commit, then start whatever it set going."""
-    ask_model = _question(db, project, asked) if asked.kind == crew_chat.QUESTION else _note(db, project, asked, kept)
-    db.commit()
+    try:
+        if asked.kind == crew_chat.QUESTION:
+            # Counted and kept under one lock, so two sends at once can't both be the third.
+            with _counting:
+                ask_model = _question(db, project, asked)
+                db.commit()
+        else:
+            ask_model = False
+            _note(db, project, asked, kept)
+            db.commit()
+    except Exception:
+        db.rollback()
+        # A build claimed for Keep trying is driven whether or not its message was kept —
+        # and an error response runs no background task, so it starts here.
+        if kept is not None:
+            threading.Thread(target=_drive, args=(project.id, kept[2]), daemon=True, name="keep-trying").start()
+        raise
     if kept is not None:
         background.add_task(_drive, project.id, kept[2])
     if ask_model:
@@ -152,8 +176,8 @@ def send_message(
         raise HTTPException(400, "Say something to the crew.")
     # The person's words reach a model: never a key they pasted by mistake.
     _refuse_credentials(text, project)
-    kind = crew_chat.classify(text)
-    kept = _keep_trying(db, project, kind, text)
+    kind = crew_chat.NOTE if payload.keep_trying else crew_chat.classify(text)
+    kept = _keep_trying(db, project, kind, text, must=payload.keep_trying)
     asked = CrewMessage(
         project_id=project.id,
         author=crew_chat.PERSON,
@@ -186,6 +210,16 @@ def reread_message(
         raise HTTPException(404, "There's no such message on this build.")
     if asked.kind == payload.kind:
         raise HTTPException(409, f"It's already read as a {payload.kind}.")
+    newest = db.execute(
+        select(CrewMessage.id)
+        .where(CrewMessage.project_id == project.id, CrewMessage.author == crew_chat.PERSON)
+        .order_by(CrewMessage.created_at.desc())
+        .limit(1)
+    ).scalar()
+    if newest != asked.id:
+        raise HTTPException(409, "Only your newest message can be read again. Send this one again instead.")
+    if asked.kind == crew_chat.QUESTION and asked.status == crew_chat.QUEUED:
+        raise HTTPException(409, "The crew is still answering this. Wait for its answer, then say if it was a note.")
     if asked.status not in (crew_chat.ANSWERED, crew_chat.QUEUED, crew_chat.DECLINED):
         raise HTTPException(409, "The crew has already acted on this note.")
     kept = _keep_trying(db, project, payload.kind, asked.text)

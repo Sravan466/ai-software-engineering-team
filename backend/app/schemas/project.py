@@ -168,6 +168,10 @@ class MessageCreate(BaseModel):
     """A message to the crew while it builds (#102): a question, or a note for later."""
 
     text: str = Field(..., min_length=1, max_length=2000, description="What to ask or tell the crew.")
+    #: Sent by the stuck card's Try again (#102): this note must start the next fix
+    #: round, and a build that can't be set going is refused as `/auto-fix/retry` refuses
+    #: it — never kept as a note to wait.
+    keep_trying: bool = False
 
 
 class MessageReread(BaseModel):

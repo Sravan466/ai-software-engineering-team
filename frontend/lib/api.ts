@@ -1125,10 +1125,11 @@ export const api = {
   },
 
   // ── Talk to the crew while it builds (#102) ──
-  sendMessage: (id: string, text: string) =>
+  /** `keepTrying`: the stuck card's Try again — this note must start the next fix round. */
+  sendMessage: (id: string, text: string, opts: { keepTrying?: boolean } = {}) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages`, {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, keep_trying: !!opts.keepTrying }),
     }),
   listMessages: (id: string) => req<{ messages: CrewMessage[] }>(`/api/projects/${id}/messages`),
   rereadMessage: (id: string, messageId: string, kind: CrewMessage["kind"]) =>

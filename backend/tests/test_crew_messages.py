@@ -100,11 +100,36 @@ def _say(client, pid: str, text: str) -> dict:
     # Asking for something to be done is a note, question mark or not…
     ("Can you keep all the routes in one file", "note"),
     ("could you make it purple?", "note"),
-    # …unless what it asks for is to be told something.
+    # …unless what it asks for is to be told something, or is about the crew itself.
     ("can you tell me what's left", "question"),
+    ("Could you explain why it failed", "question"),
+    ("Will you be done soon", "question"),
+    ("Can you see the error", "question"),
+    # Other ways a question opens.
+    ("Which model is running", "question"),
+    ("Has the backend started", "question"),
+    ("Does it work on phones", "question"),
+    ("Don't add login", "note"),
 ])
 def test_a_message_is_a_question_by_its_words_alone(text, kind):
     assert crew_chat.classify(text) == kind
+
+
+def test_the_page_reads_a_message_by_the_same_words_as_the_server():
+    """The box's button and the stuck card's draft follow `readsAsQuestion`, a copy of
+    `classify`: its word lists must be the server's."""
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "frontend/components/build/CrewTalk.tsx").read_text()
+
+    def words(name: str) -> set[str]:
+        found = re.search(rf"const {name} = (?:new Set\()?\[(.*?)\]", source, re.S)
+        assert found, f"{name} is not in CrewTalk.tsx any more"
+        return set(re.findall(r'"([^"]+)"', found.group(1)))
+
+    assert words("ASKS") == set(crew_chat._ASKS)
+    assert words("NOT_A_REQUEST") == set(crew_chat._NOT_A_REQUEST)
 
 
 @pytest.mark.parametrize("text,status", [
@@ -317,6 +342,32 @@ def test_a_note_with_nothing_left_to_fix_waits_like_any_other(calls, client):
         project = db.get(Project, pid)
         assert project.status == PipelineStatus.AWAITING_APPROVAL.value, "a note claimed a round nobody runs"
         assert "note" not in project.auto_fix["tracks"]["security"]
+
+
+def test_try_again_with_a_note_is_refused_like_try_again_when_it_cant_start(calls, client):
+    pid = _running_backend(client)
+    r = client.post(f"/api/projects/{pid}/messages", json={"text": "keep it in one file", "keep_trying": True})
+    assert r.status_code == 409, r.text
+    assert client.get(f"/api/projects/{pid}/messages").json()["messages"] == [], "a refused Try again kept a note"
+
+
+def test_only_the_newest_message_can_be_read_again_and_not_while_a_model_answers(monkeypatch, calls, client):
+    monkeypatch.setattr(crew_chat, "spawn", lambda fn, *args: None)
+    pid = _running_backend(client)
+    older = _say(client, pid, "make it purple")
+    waiting = _say(client, pid, "will it work on phones?")
+    assert client.post(f"/api/projects/{pid}/messages/{older['id']}/reread", json={"kind": "question"}).status_code == 409
+    r = client.post(f"/api/projects/{pid}/messages/{waiting['id']}/reread", json={"kind": "note"})
+    assert r.status_code == 409 and "still answering" in r.json()["detail"]
+
+
+def test_a_stalled_build_never_says_an_agent_is_working(calls, client):
+    pid = _running_backend(client)
+    with SessionLocal() as db:
+        db.get(Project, pid).heartbeat_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        db.commit()
+    text = _say(client, pid, "is the backend done?")["replies"][0]["text"]
+    assert text.startswith("Nothing is driving this build")
 
 
 def test_a_note_on_a_finished_build_points_at_the_change_box(calls, client):

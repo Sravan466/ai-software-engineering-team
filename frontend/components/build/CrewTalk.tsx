@@ -51,11 +51,20 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
   },
 };
 
-const ASKS = new Set(["what", "why", "when", "how", "where", "who", "is", "are", "can", "will", "status"]);
-/** "Can you keep all the routes in one file" asks for something done: a note. */
-const REQUEST = /^(can|could|will|would)\s+(you|we|the crew)\s+(?!tell|explain|say|show|describe|confirm|check|let me know)\w/;
+// The server's rule (`crew_chat.classify`), for the button's word and the stuck card's
+// draft. `tests/test_crew_messages.py` fails if these lists drift from the server's.
+const ASKS = new Set([
+  "what", "why", "when", "how", "where", "who", "is", "are", "can", "will", "status",
+  "could", "would", "does", "did", "has", "which", "should",
+]);
+/** "Can you keep all the routes in one file" asks for something done: a note — unless it asks to be told something. */
+const NOT_A_REQUEST = [
+  "tell", "explain", "say", "show", "describe", "confirm", "check", "let", "see", "be", "know",
+  "still", "already", "ever", "really", "not", "remember", "hear", "read", "understand",
+];
+const REQUEST = new RegExp(`^(can|could|will|would)\\s+(you|we|the crew)\\s+(?!(?:${NOT_A_REQUEST.join("|")})\\b)[a-z]`);
 
-/** How the crew will read it — the server's rule (`crew_chat.classify`), for the button's word. */
+/** How the crew will read it. */
 export function readsAsQuestion(text: string): boolean {
   const said = text.trim();
   const low = said.toLowerCase();
@@ -212,8 +221,10 @@ export function CrewTalk({
         >
           {thread.map((m) => {
             const state = stateOf(m);
+            // The newest only, and not while a model is still answering it.
             const canReread =
-              m.id === newest?.id && (m.status === "answered" || m.status === "queued" || m.status === "declined");
+              m.id === newest?.id &&
+              (m.status === "answered" || m.status === "declined" || (m.status === "queued" && m.kind === "note"));
             return (
               <li key={m.id} className="talk-turn" data-kind={m.kind}>
                 <div className={`talk-row${fresh(m.id) ? " is-new" : ""}`}>

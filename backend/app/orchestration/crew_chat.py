@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 import threading
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Optional
 
@@ -47,10 +48,20 @@ TEXT_MAX = 2000
 #: The person's messages the build page's poll carries, with their replies.
 RECENT = 12
 
-_ASKS = frozenset({"what", "why", "when", "how", "where", "who", "is", "are", "can", "will", "status"})
-#: "Can you keep all the routes in one file" asks for something to be done: a note, with
-#: or without a question mark — unless what it asks for is to be told something.
-_REQUEST = re.compile(r"^(can|could|will|would)\s+(you|we|the crew)\s+(?!tell|explain|say|show|describe|confirm|check|let me know)\w")
+#: The words a question opens with. The issue's list, and the other ways a question
+#: opens: "Could you explain…", "Does it work on phones", "Which model…", "Has it started".
+_ASKS = frozenset({
+    "what", "why", "when", "how", "where", "who", "is", "are", "can", "will", "status",
+    "could", "would", "does", "did", "has", "which", "should",
+})
+#: Asking for something to be done is a note, question mark or not: "Can you keep all the
+#: routes in one file". Not when what it asks is to be told or shown something, or about
+#: the crew itself ("will you be done soon", "can you see the error").
+_NOT_A_REQUEST = (
+    "tell", "explain", "say", "show", "describe", "confirm", "check", "let", "see", "be", "know",
+    "still", "already", "ever", "really", "not", "remember", "hear", "read", "understand",
+)
+_REQUEST = re.compile(rf"^(can|could|will|would)\s+(you|we|the crew)\s+(?!(?:{'|'.join(_NOT_A_REQUEST)})\b)[a-z]")
 
 
 def classify(text: str) -> str:
@@ -132,7 +143,9 @@ def phase_state(project: Project, phase: str, rows: Optional[dict] = None) -> st
         return "not_started"
     status = getattr(row, "status", "")
     if status == PhaseStatus.RUNNING.value:
-        return "working" if project.status in ("running", "cancelled") else "not_started"
+        # A stalled build's row still says running; nothing is working on it.
+        live = project.status in ("running", "cancelled") and not project.stalled
+        return "working" if live else "not_started"
     if status == PhaseStatus.PENDING_APPROVAL.value:
         return "waiting"
     return "done"
@@ -270,7 +283,8 @@ def _stuck_track(name: str, t: dict) -> str:
         side = _SIDE.get(phase, f"{title(phase)}'s work")
         left = (t.get("stopped") or {}).get("problems") or []
         kinds = [_kind_of(p) for p in left if isinstance(p, dict)]
-        top = max(set(kinds), key=kinds.count) if kinds else "other"
+        # The commonest kind; a tie goes to the one seen first, as the stuck card's headline does.
+        top = Counter(kinds).most_common(1)[0][0] if kinds else "other"
         what = {
             "wiring": f"The files in {side} don't connect to each other yet",
             "parse": f"Some of {side} can't run as written",
@@ -421,16 +435,16 @@ def status_answer(project: Project, text: str) -> tuple[str, Optional[str]]:
         why = why_stuck(project)
         return (why or "The crew stopped and asked for help." + (f" {project.gate_note}" if project.gate_note else "")), project.current_phase
 
-    phase = named_phase(text)
-    if phase and not asks_model and not asks_stuck:
-        return _phase_answer(project, phase, rows), phase
-
     if status == PipelineStatus.RUNNING.value and project.stalled:
         return (
             "Nothing is driving this build: the server probably restarted mid-phase. Resume "
             "re-runs that phase from the last checkpoint and keeps everything approved.",
             None,
         )
+
+    phase = named_phase(text)
+    if phase and not asks_model and not asks_stuck:
+        return _phase_answer(project, phase, rows), phase
     if status == PipelineStatus.RUNNING.value:
         if asks_model:
             return (_model_line(project, rows) or "The model hasn't answered yet, so I can't name it."), project.current_phase
@@ -631,7 +645,10 @@ def _context(db: Session, project: Project) -> str:
 
 
 def ask_model(project_id: str, message_id: str) -> None:
-    """Answer one question with a model, once the generation slot is free. Never raises."""
+    """Answer one question with a model, once the generation slot is free. Never raises.
+
+    No session is held while the call waits for the slot or runs — on a local model that
+    is minutes: the record is read in one short session and the answer written in another."""
     from app.analytics import tracker
     from app.core import identity
     from app.core.constants import RoutingMode
@@ -640,51 +657,50 @@ def ask_model(project_id: str, message_id: str) -> None:
     from app.router.router import router
     from app.schemas.llm import ChatMessage, GenerationOptions
 
-    db = SessionLocal()
     try:
-        project = db.get(Project, project_id)
-        asked = db.get(CrewMessage, message_id)
-        if project is None or asked is None:
-            return
-        with identity.acting_as(project.owner_id), inflight.building(project.id, project.name), inflight.agent("Crew"):
+        with SessionLocal() as db:
+            project = db.get(Project, project_id)
+            asked = db.get(CrewMessage, message_id)
+            if project is None or asked is None:
+                return
+            owner, name, question = project.owner_id, project.name, asked.text
             mode = RoutingMode(project.routing_mode or "local_only")
-            profile = router.profile_for(mode, project.preferred_model, complexity="low", role="planner")
+            preferred = project.preferred_model
             context = _context(db, project)
-            room = max(profile.prompt_char_budget - len(_SYSTEM) - len(asked.text) - 200, 400)
+        with identity.acting_as(owner), inflight.building(project_id, name), inflight.agent("Crew"):
+            profile = router.profile_for(mode, preferred, complexity="low", role="planner")
+            room = max(profile.prompt_char_budget - len(_SYSTEM) - len(question) - 200, 400)
             if len(context) > room:
                 context = context[:room].rsplit("\n", 1)[0] + "\n…"
             messages = [
                 ChatMessage(role="system", content=_SYSTEM),
-                ChatMessage(role="user", content=f"{context}\n\n# Their question\n{asked.text}"),
+                ChatMessage(role="user", content=f"{context}\n\n# Their question\n{question}"),
             ]
             # A few sentences; the window decides when it is smaller still.
-            options = GenerationOptions(max_tokens=400)
             response = router.complete(
-                messages, mode=mode, preferred_model=project.preferred_model, options=options,
+                messages, mode=mode, preferred_model=preferred, options=GenerationOptions(max_tokens=400),
                 complexity="low", role="planner",
             )
-        tracker.record(db, response=response, project_id=project.id, phase="crew_answer", commit=False)
-        db.refresh(asked)
-        if asked.kind != QUESTION or asked.status != QUEUED:
+        with SessionLocal() as db:
+            tracker.record(db, response=response, project_id=project_id, phase="crew_answer", commit=False)
+            asked = db.get(CrewMessage, message_id)
+            # Read again as a note meanwhile, or gone with its build: the answer isn't wanted.
+            if asked is not None and asked.kind == QUESTION and asked.status == QUEUED:
+                answer = " ".join((response.text or "").split()).strip() or "The crew had nothing to say to that."
+                reply(db, asked, answer[:TEXT_MAX])
+                asked.status = ANSWERED
             db.commit()
-            return  # read again as a note meanwhile: the answer is no longer wanted
-        answer = " ".join((response.text or "").split()).strip() or "The crew had nothing to say to that."
-        reply(db, asked, answer[:TEXT_MAX])
-        asked.status = ANSWERED
-        db.commit()
     except Exception as e:  # noqa: BLE001 - a question must never take anything down
         log.warning("Crew answer failed for %s: %s", project_id, e)
-        db.rollback()
         try:
-            asked = db.get(CrewMessage, message_id)
-            if asked is not None and asked.status == QUEUED and asked.kind == QUESTION:
-                reply(db, asked, f"The crew couldn't answer this: {_reason(e)} Ask again in a moment.")
-                asked.status = DECLINED
-                db.commit()
+            with SessionLocal() as db:
+                asked = db.get(CrewMessage, message_id)
+                if asked is not None and asked.status == QUEUED and asked.kind == QUESTION:
+                    reply(db, asked, f"The crew couldn't answer this: {_reason(e)} Ask again in a moment.")
+                    asked.status = DECLINED
+                    db.commit()
         except Exception:  # noqa: BLE001
-            db.rollback()
-    finally:
-        db.close()
+            log.exception("Couldn't record that the crew's answer failed for %s", project_id)
 
 
 def _reason(e: Exception) -> str:
