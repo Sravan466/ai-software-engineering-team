@@ -237,7 +237,7 @@ def test_a_keep_trying_note_is_for_its_round_not_every_phase(client):
 
 def test_only_the_notes_handed_over_are_marked(client):
     pid = _project(client)
-    ids = [_note(pid, f"note {i}") for i in range(crew_chat.NOTES_MAX + 2)]
+    ids = [_note(pid, f"note {i}", meant_for=["backend_engineer"]) for i in range(crew_chat.NOTES_MAX + 2)]
     text, _seen = crew_chat.take_notes(pid, "backend_engineer")
     assert "note 0" not in text and f"note {crew_chat.NOTES_MAX + 1}" in text
     with SessionLocal() as db:
@@ -252,12 +252,12 @@ def test_a_note_added_and_one_taken_back_still_moves_the_signature(client):
     pid = _project(client)
     first = _note(pid, "keep it small")
     with inflight.building(pid):
-        before = claim.between_calls()
+        before = claim.between_calls(notes=True)
         with SessionLocal() as db:
             db.get(CrewMessage, first).status = "cancelled"
             db.commit()
         _note(pid, "make it purple")
-        after = claim.between_calls()
+        after = claim.between_calls(notes=True)
     assert before[0] == after[0] == 1
     assert before != after, "one note in for one out went unseen"
     assert after == crew_chat.take_notes(pid, "backend_engineer")[1], "the two reads disagree"
@@ -272,7 +272,7 @@ def test_a_failed_read_keeps_the_notes_the_phase_had(monkeypatch, client):
     run.agent = AGENTS["backend_engineer"]
     run.ctx = AgentContext(idea="x", asked="- no login", asked_seen=(1, "a"))
     run.notes_seen = run.ctx.asked_seen
-    monkeypatch.setattr(claim, "between_calls", lambda: (2, "b"))
+    monkeypatch.setattr(claim, "between_calls", lambda notes=False: (2, "b"))
     monkeypatch.setattr(crew_chat, "take_notes", lambda *a: None)
     from app.router import inflight
 
@@ -292,3 +292,38 @@ def test_a_redo_carries_the_notes_too(script, client):
     assert r.status_code == 200, r.text
     redone = [c["prompt"] for c in script.calls[mark:] if c["role"] == "system_design"]
     assert redone and all("no login anywhere" in p and "Use fewer services." in p for p in redone)
+
+
+def test_a_note_for_no_phase_is_handed_to_none(client):
+    """A Keep-trying note kept before notes said who they were for (NULL) was for its round."""
+    pid = _project(client)
+    _note(pid, "just stub the API", meant_for=None)
+    assert crew_chat.take_notes(pid, "backend_engineer")[0] == ""
+
+
+def test_a_note_from_before_the_build_last_finished_is_history(client):
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.models import Version
+
+    pid = _project(client)
+    old = _note(pid, "make it dark-themed", meant_for=["frontend_engineer"])
+    with SessionLocal() as db:
+        db.get(CrewMessage, old).created_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        db.add(Version(project_id=pid, number=1, label="First build", kind="first_build", snapshot={}))
+        db.commit()
+    fresh = _note(pid, "use a grid", meant_for=["frontend_engineer"])
+    text, _seen = crew_chat.take_notes(pid, "frontend_engineer")
+    assert text == "- use a grid", "a note from the run before was handed to this one"
+    with SessionLocal() as db:
+        assert db.get(CrewMessage, fresh).applied_to == ["frontend_engineer"]
+
+
+def test_only_a_code_phase_between_files_pays_for_the_notes_read(client):
+    from app.orchestration import claim
+    from app.router import inflight
+
+    pid = _project(client)
+    with inflight.building(pid):
+        assert claim.between_calls() is None
+        assert claim.between_calls(notes=True) == (0, None)

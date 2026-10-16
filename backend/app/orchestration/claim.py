@@ -123,11 +123,12 @@ def check() -> None:
         raise Superseded(project_id)
 
 
-def between_calls() -> tuple:
+def between_calls(notes: bool = False) -> Optional[tuple]:
     """For a phase that makes many model calls (#81): stop before the next one when the
-    build is no longer this driver's, or the person pressed Stop. Returns the signature of
-    the notes to the crew the build holds (#102) — how many, and the newest — read in the
-    same query: a code phase that sees it move takes them again before its next file.
+    build is no longer this driver's, or the person pressed Stop. With `notes`, also
+    returns the signature of the notes to the crew the build holds (#102) — how many, and
+    the newest — read in the same query: a code phase that sees it move takes them again
+    before its next file. Every other caller keeps the stop-check as cheap as it was.
 
     Stop cancels the call in flight, but a Stop landing *between* two calls has nothing
     to cancel — without this the next file's call would start anyway. Raises
@@ -143,19 +144,18 @@ def between_calls() -> tuple:
     build = inflight.current()
     project_id = held[0] if held is not None else (build or {}).get("id")
     if not project_id:
-        return crew_chat.signature_of(0, None)
+        return crew_chat.signature_of(0, None) if notes else None
     # One read for every question: it runs before every file a code phase writes.
     with SessionLocal() as db:
+        extra = crew_chat.notes_signature() if notes else ()
         found = db.execute(
-            select(Project.run_token, Project.cancel_requested, *crew_chat.notes_signature()).where(
-                Project.id == project_id
-            )
+            select(Project.run_token, Project.cancel_requested, *extra).where(Project.id == project_id)
         ).first()
     if held is not None and (found is None or found[0] != held[1]):
         raise Superseded(project_id)
     if found is None or found[1]:
         raise RequestCancelled()
-    return crew_chat.signature_of(found[2], found[3])
+    return crew_chat.signature_of(found[2], found[3]) if notes else None
 
 
 

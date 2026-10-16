@@ -1440,7 +1440,7 @@ class _Run:
         """The safe point between two files (#81): stop here for Stop or a lost claim —
         and pick up a note the person sent meanwhile (#102), so the files still to write
         carry it. The count comes back in the read this makes anyway."""
-        held = claim.between_calls()
+        held = claim.between_calls(notes=True)
         if held == self.notes_seen or (self.notes_seen is None and not held[0]):
             return
         build = inflight.current()

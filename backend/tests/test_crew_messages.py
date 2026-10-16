@@ -336,6 +336,17 @@ def test_no_promise_of_the_next_file_during_a_fix_round_or_on_the_last_file(call
     assert _say(client, pid, "keep it small")["replies"][0]["text"].startswith("Got it. Frontend Engineer")
 
 
+def test_a_note_naming_a_phase_in_a_fix_round_waits(calls, client):
+    pid = _running_backend(client)
+    with SessionLocal() as db:
+        data = {"tracks": {}}
+        autofix.start_round(autofix.track(data, "build:backend_engineer"), "with_code", ["backend_engineer"], [{"key": "a"}])
+        db.get(Project, pid).auto_fix = data
+        db.commit()
+    text = _say(client, pid, "backend: keep it small")["replies"][0]["text"]
+    assert text.startswith("Backend Engineer has already started."), text
+
+
 def test_a_note_for_one_agent_says_so(calls, client):
     pid = _running_backend(client)
     m = _say(client, pid, "frontend: use a purple theme")

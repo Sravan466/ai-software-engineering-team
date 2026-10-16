@@ -29,7 +29,7 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
     label: "Talk to the crew",
     placeholder: "Ask what they're doing, or tell them what you want",
     quick: ["What are you doing?", "Who's next?"],
-    hint: "The crew answers questions straight away. A note goes to every agent still to work on the build.",
+    hint: "The crew answers questions straight away. A note goes to every agent still to work, or to the one you name first: \u201cFrontend: use a grid\u201d.",
   },
   stuck: {
     label: "Tell the crew what to try",

@@ -592,12 +592,21 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
     """What happens to a note, said plainly; who it's for. A note waits, `queued`."""
     rows = _rows(project)
     ahead = not_started(project, rows)
+    stopped = project.status in (
+        PipelineStatus.CANCELLED.value, PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value
+    ) or (project.status == PipelineStatus.RUNNING.value and project.stalled)
+    current = project.current_phase
+    row = rows.get(current or "")
+    # Stopped mid-phase: that phase runs again when the build resumes.
+    rerun = stopped and row is not None and getattr(row, "status", "") == PhaseStatus.RUNNING.value
     named = addressed_to(text)
     if named:
         state = phase_state(project, named, rows)
+        if rerun and named == current:
+            return f"Got it. The build is stopped, so {title(named)} gets this note when it resumes.", named, [named]
         if state == "not_started":
             return f"Got it. {title(named)} hasn't started, so it gets this note when it starts.", named, [named]
-        if state == "working" and named in CODE_PHASES:
+        if named == current and not stopped and _writing_files(project, rows):
             return f"Got it. {title(named)} is writing its files now; it reads this note before the next one.", named, [named]
         return (
             f"{title(named)} has already {'started' if state == 'working' else 'finished'}. This note "
@@ -605,15 +614,8 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
             named,
             [named],
         )
-    stopped = project.status in (
-        PipelineStatus.CANCELLED.value, PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value
-    ) or (project.status == PipelineStatus.RUNNING.value and project.stalled)
-    current = project.current_phase
-    if stopped and current in _ORDER and current not in ahead:
-        row = rows.get(current)
-        if row is not None and getattr(row, "status", "") == PhaseStatus.RUNNING.value:
-            # Stopped mid-phase: that phase runs again when the build resumes.
-            ahead = [current, *ahead]
+    if rerun and current in _ORDER and current not in ahead:
+        ahead = [current, *ahead]
     if not stopped and _writing_files(project, rows):
         # A code phase between two files reads it before the next one (#102).
         later = list(ahead)
@@ -697,10 +699,20 @@ def signature_of(count: int, newest) -> tuple:
 
 
 def for_phase(m: CrewMessage, phase: str) -> bool:
-    """A note is for the phases it named or that hadn't started when it was sent. One sent
-    through Keep trying (`[]`) was for that fix round only; one from before notes recorded
-    who they were for (`None`) is for every phase that starts after it."""
-    return m.meant_for is None or phase in m.meant_for
+    """A note is for the phases it named or that hadn't started when it was sent. One for
+    no phase — sent through Keep trying, for that fix round only, or left with no phase to
+    reach (`[]`, or NULL from before notes said) — is handed to none."""
+    return phase in (m.meant_for or [])
+
+
+def _since(db: Session, project_id: str):
+    """When the build's current run began, for its notes: a note sent before the build was
+    last finished belongs to that run, and is in its settled decisions now."""
+    from sqlalchemy import func
+
+    from app.db.models import Version
+
+    return db.execute(select(func.max(Version.created_at)).where(Version.project_id == project_id)).scalar()
 
 
 def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
@@ -717,7 +729,11 @@ def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
     try:
         with SessionLocal() as db:
             held = _notes(db, project_id)
-            mine = [m for m in held if for_phase(m, phase)][-NOTES_MAX:]
+            since = _since(db, project_id)
+            mine = [
+                m for m in held
+                if for_phase(m, phase) and (since is None or m.created_at is None or _utc(m.created_at) > _utc(since))
+            ][-NOTES_MAX:]
             for m in mine:
                 given = list(m.applied_to or [])
                 if phase in given:
@@ -742,8 +758,12 @@ def asked_during(db: Session, project_id: str) -> list[str]:
     return [
         f"Asked during the build: {' '.join(m.text.split())[:200]}"
         for m in _notes(db, project_id)
-        if m.applied_to and m.meant_for != []
+        if m.applied_to and m.meant_for
     ]
+
+
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 # ── questions only a model can answer ─────────────────────────────────────────

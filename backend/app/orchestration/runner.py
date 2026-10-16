@@ -1164,7 +1164,7 @@ class PipelineRunner:
             "number": found.number,
             "text": found.text,
             "plan": plan,
-            "decisions": list(project.decisions or changes.first_decisions(project)),
+            "decisions": list(project.decisions or changes.first_decisions(project, db)),
             "edit": edit,
             "base": {phase: rows[phase].output for phase in edit},
             "done": [],
@@ -1440,7 +1440,7 @@ class PipelineRunner:
             if not existing:
                 versions.record(db, project, "First build", versions.FIRST_BUILD)
                 if not project.decisions:
-                    project.decisions = changes.first_decisions(project) or None
+                    project.decisions = changes.first_decisions(project, db) or None
                 return False
             # The pointer was lost: the newest version, if that is what the build holds.
             current = existing[-1]

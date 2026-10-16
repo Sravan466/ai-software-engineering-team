@@ -271,18 +271,16 @@ def _belongs(path: str, phase: str) -> bool:
 
 
 # ── what the app has settled on ───────────────────────────────────────────────
-def first_decisions(project: Project) -> list[str]:
+def first_decisions(project: Project, db: Optional[Session] = None) -> list[str]:
     """The decisions note a build starts with: its stack, from the charter — and what the
     person asked for while it ran (#102), so a later change keeps to "no login" too."""
-    from sqlalchemy.orm import object_session
-
     from app.orchestration import crew_chat
     from app.orchestration.charter import Charter
 
     charter = Charter.from_dict(project.charter)
     line = charter.summary_line() if charter is not None else ""
     out = [f"Stack — {line}"] if line else []
-    db = object_session(project)
+    db = db if db is not None else object_session(project)
     if db is not None:
         out += crew_chat.asked_during(db, project.id)
     return out
