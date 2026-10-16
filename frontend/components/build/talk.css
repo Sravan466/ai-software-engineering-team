@@ -158,6 +158,28 @@
 .talk-cancel { color: var(--ink-2); text-decoration-color: var(--line-3); }
 .talk-cancel:hover { color: var(--bad); text-decoration-color: var(--bad); }
 
+/* "Keep it as a decision" (#102): the person's say on what the stuck round may drop. */
+.talk-decide {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 18px 2px;
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.talk-decide input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.talk-decide input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.talk-decide b { color: var(--ink); font-weight: 600; }
+
 /* The composer under it: the same box as "What should change?". */
 .talk-box .finish-label { padding-top: 14px; }
 
@@ -168,6 +190,7 @@
   /* A quick question sends on a tap: a full touch target, like every button here. */
   .talk .finish-examples .example { min-height: 44px; }
   .talk-reread { min-height: 44px; }
+  .talk-decide { padding: 8px 14px 4px; min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -35,8 +35,9 @@ MAX_WAITING = 3
 #: waiting on a model and keeping a new one happen under this, together.
 _counting = threading.Lock()
 
-#: What Keep trying handed back: rounds given, the tracks it restarted, the claim token.
-Kept = tuple[int, list[str], str]
+#: What Keep trying handed back: rounds given, the tracks it restarted, the claim token —
+#: and whether the note was a decision about the app (#102), read once.
+Kept = tuple[int, list[str], str, bool]
 
 
 def _stuck(project: Project) -> bool:
@@ -57,16 +58,21 @@ def _something_to_fix(db: Session, project: Project) -> bool:
     return False
 
 
-def _keep_trying(db: Session, project: Project, kind: str, text: str, *, must: bool = False) -> Optional[Kept]:
+def _keep_trying(
+    db: Session, project: Project, kind: str, text: str, *, must: bool = False, model: Optional[str] = None,
+    decided: Optional[bool] = None,
+) -> Optional[Kept]:
     """A note on a stuck build sets it going again with the note. Claimed before the
     message is kept: a refused claim keeps nothing, and a claim that went through is
     committed with the fix loop's state at once, as `/auto-fix/retry` commits it — so a
     message that then fails to save never leaves a claimed build that nothing drives."""
     if not must and (kind != crew_chat.NOTE or not _stuck(project) or not _something_to_fix(db, project)):
         return None
-    kept = start_keep_trying(db, project, note=text)
+    # The person's say, when they gave one; the words otherwise.
+    decided = crew_chat.is_decision(text) if decided is None else decided
+    more, names, token = start_keep_trying(db, project, note=text, model=model, decided=decided)
     db.commit()
-    return kept
+    return more, names, token, decided
 
 
 def _waiting_on_model(db: Session, project: Project, besides: str) -> int:
@@ -109,14 +115,29 @@ def _question(db: Session, project: Project, asked: CrewMessage) -> bool:
 def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept]) -> None:
     """Keep `asked` for the agents it is for, or say what Keep trying did with it."""
     if kept is not None:
-        more, names, _token = kept
+        more, names, _token, decided = kept
         phases = [n[len(autofix.BUILD_PREFIX):] for n in names if n.startswith(autofix.BUILD_PREFIX)]
         agent = phases[0] if phases else project.current_phase
-        crew_chat.reply(db, asked, f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}.", agent)
+        said = f"Trying again with your note, up to {more} more round{'' if more == 1 else 's'}."
+        if decided:
+            # A decision about the app stands for the rest of the build (#102): the stuck
+            # phases (a later redo of them) and the phases still to come take it too, it joins
+            # what the app has settled on — and finished work it drops elsewhere is changed
+            # after the round (#117), the stuck phase included: shown, and cancellable.
+            asked.meant_for = list(dict.fromkeys([*phases, *crew_chat.not_started(project)]))
+            asked.plan = {"decided": True}
+            said += " I'll keep it as a decision for the rest of the build, and the round may drop what it leaves out instead of fixing it."
+            if crew_chat.checks_finished_work(db, project, asked.text):
+                # The stuck phase included: the round fixes what's broken; what the decision
+                # drops elsewhere in its files changes after it, in edit mode, cancellable.
+                crew_chat.start_check(asked)
+                said += " I'll also check whether it changes finished work after this round."
+        else:
+            # For this fix round, which reads it (#103): not a standing note for every phase.
+            asked.meant_for = []
+        crew_chat.reply(db, asked, said, agent)
         asked.status = crew_chat.APPLIED
         asked.agent = agent
-        # For this fix round, which reads it (#103): not a standing note for every phase.
-        asked.meant_for = []
         asked.applied_to = phases or None
         asked.applied_at = crew_chat.now()
         return
@@ -196,7 +217,10 @@ def send_message(
     # The person's words reach a model: never a key they pasted by mistake.
     _refuse_credentials(text, project)
     kind = crew_chat.NOTE if payload.keep_trying else crew_chat.classify(text)
-    kept = _keep_trying(db, project, kind, text, must=payload.keep_trying)
+    kept = _keep_trying(
+        db, project, kind, text, must=payload.keep_trying,
+        model=payload.model if payload.keep_trying else None, decided=payload.decided,
+    )
     asked = CrewMessage(
         project_id=project.id,
         author=crew_chat.PERSON,
@@ -213,6 +237,16 @@ def send_message(
 @router.get("/{project_id}/messages")
 def list_messages(project: Project = Depends(get_project), db: Session = Depends(get_db)) -> dict:
     return {"messages": crew_chat.thread(db, project.id)}
+
+
+@router.post("/{project_id}/messages/read")
+def read_message(payload: MessageCreate, project: Project = Depends(get_project)) -> dict:
+    """How the crew would read a draft, before it's sent — no model, nothing kept: whether
+    it's a question, and whether its words read as a decision about the app (#102), for
+    the stuck box's "Keep it as a decision" default. One rule, the server's."""
+    text = payload.text.strip()
+    kind = crew_chat.classify(text) if text else crew_chat.NOTE
+    return {"kind": kind, "decided": kind == crew_chat.NOTE and crew_chat.is_decision(text)}
 
 
 @router.post("/{project_id}/messages/{message_id}/reread")
@@ -248,7 +282,8 @@ def _reread(message_id: str, payload: MessageReread, background: BackgroundTasks
         raise HTTPException(409, "The crew is still answering this. Wait for its answer, then say if it was a note.")
     if asked.status not in (crew_chat.ANSWERED, crew_chat.QUEUED, crew_chat.DECLINED):
         raise HTTPException(409, "The crew has already acted on this note.")
-    kept = _keep_trying(db, project, payload.kind, asked.text)
+    # A reread is never a decision: only the box makes one (#102).
+    kept = _keep_trying(db, project, payload.kind, asked.text, decided=False)
     asked.kind = payload.kind
     if asked.kind == crew_chat.QUESTION:
         asked.meant_for = None  # a question is for no phase
@@ -266,6 +301,8 @@ def cancel_message(
     """Take a note back while it waits — or, with `change`, only the change it makes to
     finished work, until that starts (#102 PR 3): the note still reaches the phases to come."""
     only_change = bool(payload and payload.change)
+    if payload and payload.decision:
+        return _undecide(message_id, project, db)
     with crew_chat.lock_for(project.id):
         asked = db.get(CrewMessage, message_id)
         if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
@@ -290,6 +327,33 @@ def cancel_message(
             if state in (crew_chat.SCHEDULED_CHANGE, crew_chat.CHECKING):
                 asked.plan = {**(asked.plan or {}), "state": crew_chat.CANCELLED_CHANGE}
             crew_chat.reply(db, asked, "Taken back. No agent gets this note now, and nothing finished changes for it.", asked.agent)
+        db.commit()
+    return {
+        "message": _one(db, asked),
+        "messages": crew_chat.thread(db, project.id, crew_chat.RECENT),
+        "status": project.status,
+        "current_phase": project.current_phase,
+    }
+
+
+def _undecide(message_id: str, project: Project, db: Session) -> dict:
+    """"Not a decision": a note ticked as a decision by mistake stops being one (#102) —
+    off every fix track, out of the settled decisions, handed to no phase still to come."""
+    with crew_chat.lock_for(project.id):
+        asked = db.get(CrewMessage, message_id)
+        if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
+            raise HTTPException(404, "There's no such message on this build.")
+        if not (asked.plan or {}).get("decided"):
+            raise HTTPException(409, "It isn't kept as a decision.")
+        data = autofix.load(project)
+        autofix.undecide(data, asked.text)
+        autofix.save(project, data)
+        asked.plan = {k: v for k, v in (asked.plan or {}).items() if k != "decided"}
+        # What it would have changed in finished work goes with it, unless already under way.
+        if crew_chat.change_state(asked) in (crew_chat.CHECKING, crew_chat.SCHEDULED_CHANGE):
+            crew_chat.resolve(asked, crew_chat.CANCELLED_CHANGE)
+        asked.meant_for = []
+        crew_chat.reply(db, asked, "Not a decision, then. The crew treats it as a hint for that round only.", asked.agent)
         db.commit()
     return {
         "message": _one(db, asked),

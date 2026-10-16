@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   api,
@@ -408,6 +408,7 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
               {r.note && (
                 <span className="ledger-note">
                   You said: “{r.note}”
+                  {r.decided && r.note_sent !== false && " Kept as a decision, so this round could drop what it leaves out."}
                   {r.note_sent === false && " The model didn't see it: there was no room beside the code."}
                   {r.note_sent === "partly" && " Only some of this round's calls had room for it."}
                 </span>
@@ -570,11 +571,34 @@ export function NeedsHelp({
   // person saying so, and its label says it ("Try again with your note"). It goes as a
   // message, so the conversation shows it; a cloud round takes it along as before.
   const draftNote = !nothingToFix && note.trim() ? note.trim() : undefined;
+  // Whether the note is a decision about the app (#102): the server's reading of the words
+  // as the default, until the person says otherwise with the box.
+  const [suggested, setSuggested] = useState(false);
+  // The person's own say, for the draft exactly as it was when they gave it: edit the draft
+  // and the box goes back to the server's reading of the new words.
+  const [chosen, setChosen] = useState<{ text: string; value: boolean } | null>(null);
+  useEffect(() => {
+    setSuggested(false);
+    if (!draftNote) return;
+    let live = true;
+    const t = setTimeout(() => {
+      api.readMessage(id, draftNote).then((r) => live && setSuggested(r.decided)).catch(() => {});
+    }, 350);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [id, draftNote]);
+  const explicit = chosen !== null && chosen.text === draftNote;
+  const decided = explicit ? chosen!.value : suggested;
   const retry = async (model?: string) => {
     const ok = await act(() =>
-      draftNote && !model
-        ? api.sendMessage(id, draftNote, { keepTrying: true })
-        : api.keepTrying(id, { note: draftNote, model }),
+      // With a draft, through the conversation — the cloud button too — so it's kept there.
+      // Whether it's a decision: the person's say when they gave one for these words; the
+      // server reads the words itself otherwise, never a default that may be stale.
+      draftNote
+        ? api.sendMessage(id, draftNote, { keepTrying: true, model, ...(explicit ? { decided } : {}) })
+        : api.keepTrying(id, { model }),
     );
     if (ok && draftNote) setNote("");
   };
@@ -645,6 +669,11 @@ export function NeedsHelp({
           embedded
           text={note}
           setText={setNote}
+          decision={
+            nothingToFix || !draftNote
+              ? undefined
+              : { value: decided, explicit, set: (value: boolean) => setChosen({ text: draftNote, value }) }
+          }
         />
         <div className="decision-approve">
           <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>

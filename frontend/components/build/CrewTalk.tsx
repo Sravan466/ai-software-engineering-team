@@ -35,7 +35,7 @@ const COPY: Record<TalkPlace, { label: string; placeholder: string; quick: strin
     label: "Tell the crew what to try",
     placeholder: "Keep all the routes in one file, for example, or ask why it's stuck",
     quick: ["Why is it stuck?"],
-    hint: "A note starts the next fix round with your words. The crew answers questions straight away.",
+    hint: "A note starts the next fix round with your words. Say what to leave out (\u201cskip voice input\u201d) and the round can drop it instead. The crew answers questions straight away.",
   },
   stopped: {
     label: "Talk to the crew",
@@ -167,6 +167,7 @@ export function CrewTalk({
   embedded = false,
   text: heldText,
   setText: setHeldText,
+  decision,
 }: {
   project: Project;
   id: string;
@@ -175,6 +176,12 @@ export function CrewTalk({
   place: TalkPlace;
   /** Inside a card (the stuck one): the card's field, not a surface of its own. */
   embedded?: boolean;
+  /**
+   * On a stuck build (#102): whether the note is a decision about the app — the round may
+   * drop what it leaves out, and it stands for the rest of the build. The card holds it,
+   * because its Try again sends the draft too.
+   */
+  decision?: { value: boolean; explicit: boolean; set: (value: boolean) => void };
   /** The draft, when the card around the box needs to read it. */
   text?: string;
   setText?: (text: string) => void;
@@ -255,7 +262,7 @@ export function CrewTalk({
                     {state.tone === "run" && <span className="dot dot-run dot-pulse" aria-hidden="true" />}
                     {state.word}
                   </span>
-                  <span className="talk-read">Read as a {m.kind}</span>
+                  <span className="talk-read">{m.decided ? "Kept as a decision" : `Read as a ${m.kind}`}</span>
                   {m.kind === "note" && m.change === "scheduled" && (
                     <button
                       type="button"
@@ -264,6 +271,16 @@ export function CrewTalk({
                       onClick={() => act(() => api.cancelMessage(id, m.id, { change: true }))}
                     >
                       Cancel the change
+                    </button>
+                  )}
+                  {m.decided && (
+                    <button
+                      type="button"
+                      className="talk-reread talk-cancel"
+                      disabled={busy}
+                      onClick={() => act(() => api.cancelMessage(id, m.id, { decision: true }))}
+                    >
+                      Not a decision
                     </button>
                   )}
                   {m.kind === "note" && m.status === "queued" && m.change !== "applied" && (
@@ -306,7 +323,27 @@ export function CrewTalk({
         examplesSend
         submitLabel={submitLabel}
         submitIcon={place === "stuck" && asks === false ? Icon.rotate : Icon.arrowRight}
-        onSend={(said) => act(() => api.sendMessage(id, said))}
+        onSend={(said) =>
+          act(() =>
+            api.sendMessage(id, said, decision?.explicit && asks === false ? { decided: decision.value } : {}),
+          )
+        }
+        extra={
+          decision && asks === false ? (
+            <label className="talk-decide">
+              <input
+                type="checkbox"
+                checked={decision.value}
+                onChange={(e) => decision.set(e.target.checked)}
+                disabled={busy}
+              />
+              <span>
+                <b>Keep it as a decision.</b> The crew may drop what it leaves out instead of fixing it, and keeps to
+                it for the rest of the build.
+              </span>
+            </label>
+          ) : null
+        }
         hint={copy.hint}
       />
     </section>

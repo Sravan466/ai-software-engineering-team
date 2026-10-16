@@ -457,6 +457,8 @@ export type AutoFixRound = {
    * only some of the round's calls carried it. */
   note?: string;
   note_sent?: boolean | "partly";
+  /** The note was a decision about the app (#102): it stands, and the round may drop what it leaves out. */
+  decided?: boolean;
   /** What the platform mended itself, without a model (#103): on the attempt this round
    * made, and — on an episode's first round — on the attempt before it. */
   platform?: PlatformFixed;
@@ -670,6 +672,8 @@ export type CrewMessage = {
   change?: "checking" | "scheduled" | "applied" | "none" | "cancelled" | "missed" | "unchecked" | null;
   /** The finished phases it changes after the step in hand. */
   touched?: string[];
+  /** Kept as a decision about the app, from a stuck build (#102). */
+  decided?: boolean;
   change_request_id: string | null;
   created_at: string | null;
   applied_at: string | null;
@@ -1136,17 +1140,27 @@ export const api = {
 
   // ── Talk to the crew while it builds (#102) ──
   /** `keepTrying`: the stuck card's Try again — this note must start the next fix round. */
-  sendMessage: (id: string, text: string, opts: { keepTrying?: boolean } = {}) =>
+  sendMessage: (
+    id: string,
+    text: string,
+    opts: { keepTrying?: boolean; model?: string; decided?: boolean } = {},
+  ) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages`, {
       method: "POST",
-      body: JSON.stringify({ text, keep_trying: !!opts.keepTrying }),
+      body: JSON.stringify({ text, keep_trying: !!opts.keepTrying, model: opts.model ?? null, decided: opts.decided ?? null }),
+    }),
+  /** How the crew would read a draft (#102): a question or a note, and a decision about the app or not. */
+  readMessage: (id: string, text: string) =>
+    req<{ kind: "question" | "note"; decided: boolean }>(`/api/projects/${id}/messages/read`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
     }),
   listMessages: (id: string) => req<{ messages: CrewMessage[] }>(`/api/projects/${id}/messages`),
   /** Take a note back while it waits — a change to finished work included, until it starts. */
-  cancelMessage: (id: string, messageId: string, opts: { change?: boolean } = {}) =>
+  cancelMessage: (id: string, messageId: string, opts: { change?: boolean; decision?: boolean } = {}) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages/${messageId}/cancel`, {
       method: "POST",
-      body: JSON.stringify({ change: !!opts.change }),
+      body: JSON.stringify({ change: !!opts.change, decision: !!opts.decision }),
     }),
   rereadMessage: (id: string, messageId: string, kind: CrewMessage["kind"]) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages/${messageId}/reread`, {

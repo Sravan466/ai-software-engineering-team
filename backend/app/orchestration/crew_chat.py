@@ -84,6 +84,51 @@ def classify(text: str) -> str:
     return QUESTION if first and first.group(0) in _ASKS else NOTE
 
 
+#: A note that settles something about the app rather than hinting at a fix (#102): it
+#: drops or leaves out a feature. On a stuck build it stands for the rest of the build, and
+#: the fix round may remove what it drops instead of fixing it again. Narrow on purpose:
+#: a decision missed is still the round's note, a hint mistaken for one deletes code.
+_OPENER = r"(?:(?:please|ok(?:ay)?|actually|just|no|so|then),?\s+|let'?s\s+)*"
+_DROPS = (
+    r"(?:skip|drop|remove|cut|leave\s+out|get\s+rid\s+of"
+    # Not "forget about that / it / my last note": waving off a message isn't a decision.
+    r"|forget\s+about\s+(?!(?:my|that|it|this|what|the\s+last)\b)|forget\s+(?!(?:about|my|that|it|this|what|the\s+last)\b)"
+    r"|don'?t\s+(?:add|include|build|need|bother\s+with|implement|make|offer|support)"
+    r"|do\s+not\s+(?:add|include|build|need|implement|make|offer|support)"
+    r"|we\s+don'?t\s+need|no\s+need\s+for|no\s+longer\s+(?:need|want|offer|support))\b"
+    # An object that only points back ("skip it", "drop that") names no feature.
+    r"(?!\s+(?:it|that|this|them|those|these)\b)"
+)
+_DECISION = re.compile(rf"^{_OPENER}{_DROPS}", re.I)
+#: "no login", "no dark mode": a bare "no" decides only as a short phrase, and never as a
+#: reply ("no luck", "no thanks").
+_BARE_NO = re.compile(
+    r"^no\s+(?!(?:luck|thanks|thank|idea|change|changes|worries|problem|problems|way|wait|rush|matter|clue|good|"
+    r"more|fix|success|progress|improvement|difference|go|dice|joy|response|answer|reply|it|that|this|still)\b)"
+    r"(?!.*\b(?:still|it|works?|working|fails?|failing|broken)\b)[a-z][a-z' -]{1,40}$",
+    re.I,
+)
+#: Talk about the code itself — a fix hint, never a decision about the app.
+_CODE_TALK = re.compile(
+    r"\b(?:import|imports|require|exports|export\s+(?:default|const|function|class)|file|files|module|modules|function|functions|class|variable|"
+    r"line|lines|test|tests|error|errors|bug|compile|syntax|type|types|cache|caching|duplicate|extra|unused|"
+    r"brace|braces|bracket|brackets|semicolon|typo|comma|indent|indentation|whitespace|step|steps|log|logs|"
+    r"logging|console|debug|print|prints)\b|[\w-]+\.(?:js|jsx|ts|tsx|py|css|json)\b",
+    re.I,
+)
+
+
+def is_decision(text: str) -> bool:
+    """Whether a note decides something about the app — "skip voice input", "no login",
+    "let's drop dark mode" — from its words, as a question is told from a note."""
+    said = plain(text).strip().rstrip(".!")
+    if _CODE_TALK.search(said):
+        return False
+    if _DECISION.match(said):
+        return True
+    return bool(_BARE_NO.match(said)) and len(said.split()) <= 4 and "," not in said
+
+
 # ── who is who ────────────────────────────────────────────────────────────────
 _ORDER = [p.value for p in PHASE_ORDER]
 #: The phases that write their files one call at a time, and can read a note between two.
@@ -522,6 +567,8 @@ def out(m: CrewMessage, replies: Iterable[CrewMessage] = (), since: Optional[dat
         # Checked against finished work (#102 PR 3): still reading it, or which finished
         # phases it changes after this step.
         "change": change_state(m),
+        # Kept as a decision about the app, from a stuck build (#102 PR 4).
+        "decided": bool((m.plan or {}).get("decided")),
         "touched": list((m.plan or {}).get("touched") or []),
         "meant_for": list(m.meant_for or []),
         "applied_to": list(m.applied_to or []),
@@ -802,7 +849,8 @@ def asked_during(db: Session, project_id: str, label: str = "the build", this_ru
     return [
         f"Asked during {label}: {' '.join(m.text.split())[:200]}"
         for m in _notes(db, project_id)
-        if m.applied_to and m.meant_for and _this_run(m, since)
+        # A decision sent on a stuck build counts whatever it was handed to — while it stands.
+        if ((m.applied_to and m.meant_for) or (m.plan or {}).get("decided")) and _this_run(m, since)
     ][-ASKED_DECISIONS:]
 
 
@@ -997,11 +1045,19 @@ def _still_checking(m: Optional[CrewMessage], token: object = ...) -> bool:
     return ok and (token is ... or (m.plan or {}).get("token") == token)
 
 
+#: What a note's plan keeps when a check replaces it: that it's a decision (#102 PR 4).
+_KEPT_THROUGH_A_CHECK = ("decided",)
+
+
 def start_check(m: CrewMessage) -> None:
     """Mark a note as being checked against finished work, with this check's own token."""
     import uuid
 
-    m.plan = {"state": CHECKING, "token": uuid.uuid4().hex}
+    m.plan = {
+        **{k: v for k, v in (m.plan or {}).items() if k in _KEPT_THROUGH_A_CHECK},
+        "state": CHECKING,
+        "token": uuid.uuid4().hex,
+    }
 
 
 def scope_note(project_id: str, message_id: str) -> None:
@@ -1057,6 +1113,8 @@ def scope_note(project_id: str, message_id: str) -> None:
                 db.commit()
                 return  # taken back, or read as a question, meanwhile
             plan = touched_by(result.output, finished)
+            # What the note was before the check stays with it: a decision.
+            plan.update({k: v for k, v in (asked.plan or {}).items() if k in _KEPT_THROUGH_A_CHECK})
             touched = plan["touched"]
             if not touched and getattr(result, "schema_status", None) == "invalid":
                 # Unreadable even after its repair round: no answer is not "no change".
@@ -1077,7 +1135,10 @@ def scope_note(project_id: str, message_id: str) -> None:
             else:
                 asked.plan = plan
                 resolve(asked, NO_CHANGE)
-                if asked.meant_for:
+                if plan.get("decided"):
+                    # A stuck round took it already: nothing else finished needs it.
+                    reply(db, asked, "Checked: it doesn't change other finished work.")
+                elif asked.meant_for:
                     reply(db, asked, "Checked: it doesn't change finished work.")
                 else:
                     reply(db, asked, "Checked: it doesn't change finished work, and no agent is left to take it. Once the build is finished, ask for it as a change.")
@@ -1296,6 +1357,7 @@ __all__ = [
     "take_notes",
     "ask_model",
     "classify",
+    "is_decision",
     "is_status",
     "named_phase",
     "not_started",

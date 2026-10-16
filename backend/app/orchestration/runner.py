@@ -836,7 +836,7 @@ class PipelineRunner:
         # Stronger only when every phase the round asks has a stronger model (#103).
         stronger = all(self._stronger(project, p) for p in dests) if k >= 3 else True
         strategy = remediation.strategy_for(k, stronger)
-        person = t.pop("note", None)
+        said, person, decided = autofix.take_person(t)
         own = {path: code for path, code, _lang in artifacts.iter_files(row.output or {})}
         bodies = {}
         for p in routed:
@@ -850,8 +850,7 @@ class PipelineRunner:
             for phase in dests
         }
         record = autofix.start_round(t, strategy, dests, routed)
-        if person:
-            record["note"] = person
+        autofix.mark_round(record, said, decided)
         qa = Phase.QA_ENGINEER.value
         # What the rewind re-checks instead of regenerating: every phase between the
         # first one asked and QA that nobody asked this round — the frontend, while the
@@ -983,7 +982,7 @@ class PipelineRunner:
         # it runs on the one found here, so what the round is called is what ran.
         stronger = self._stronger(project, row.phase) if k >= 3 else None
         strategy = remediation.strategy_for(k, bool(stronger) or k < 3)
-        person = t.pop("note", None)
+        said, person, decided = autofix.take_person(t)
         one_off = t.pop("one_off", None)
         kept_now = t.get("kept") or {}
         record = autofix.start_round(
@@ -994,8 +993,7 @@ class PipelineRunner:
         if k == 1 and autofix.platform_fixed(row):
             # What the platform mended on the attempt before any round (#103).
             record["platform_before"] = autofix.platform_fixed(row)
-        if person:
-            record["note"] = person
+        autofix.mark_round(record, said, decided)
         if one_off:
             record["asked_model"] = one_off
         autofix.save(project, data)
@@ -1683,7 +1681,7 @@ class PipelineRunner:
         # Stronger only when every owner the round asks has a stronger model (#103).
         stronger = all(self._stronger(project, p) for p in owners) if k >= 3 else True
         strategy = remediation.strategy_for(k, stronger)
-        person = t.pop("note", None)
+        said, person, decided = autofix.take_person(t)
         notes = {
             phase: remediation.fix_instruction(
                 items, strategy=strategy, project=project, owner=phase, round_number=k
@@ -1714,8 +1712,7 @@ class PipelineRunner:
         # Kept with the round, so a compile fix inside it can carry the security fix
         # along — the phase's own note is overwritten by the first such fix.
         record["notes"] = notes
-        if person:
-            record["note"] = person
+        autofix.mark_round(record, said, decided)
         for finding in outstanding:
             finding.status = FindingStatus.FIX_REQUESTED.value
         project.remediation_rounds = n

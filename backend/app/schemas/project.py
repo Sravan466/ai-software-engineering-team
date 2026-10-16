@@ -172,12 +172,19 @@ class MessageCreate(BaseModel):
     #: round, and a build that can't be set going is refused as `/auto-fix/retry` refuses
     #: it — never kept as a note to wait.
     keep_trying: bool = False
+    #: With `keep_trying`: the cloud model the stuck card offered, for this round only.
+    model: Optional[str] = Field(None, max_length=200)
+    #: On a stuck build (#102): the person says whether the note is a decision about the
+    #: app — the round may drop what it leaves out. Omitted, the words decide it.
+    decided: Optional[bool] = None
 
 
 class MessageCancel(BaseModel):
-    """Take a note back — or, with `change`, only the change it makes to finished work."""
+    """Take a note back — or, with `change`, only the change it makes to finished work; or,
+    with `decision`, stop treating it as a decision about the app (#102)."""
 
     change: bool = False
+    decision: bool = False
 
 
 class MessageReread(BaseModel):

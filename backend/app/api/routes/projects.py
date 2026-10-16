@@ -1012,6 +1012,7 @@ def keep_trying(
     Also how a build moves on once every serious finding it stopped on has been
     waived: with nothing left to fix, the loop finds nothing and the run continues.
     """
+    # A decision is kept as a message, with the person's say on it: that's `/messages`.
     more, _names, token = start_keep_trying(
         db,
         project,
@@ -1036,6 +1037,7 @@ def start_keep_trying(
     rounds: Optional[int] = None,
     note: Optional[str] = None,
     model: Optional[str] = None,
+    decided: bool = False,
 ) -> tuple[int, list[str], str]:
     """Keep trying, up to the claim: `(rounds given, tracks, claim token)`. The caller
     commits and hands the token to `_drive` — and may add to the commit first: a message
@@ -1060,7 +1062,7 @@ def start_keep_trying(
             raise HTTPException(
                 409, "That model can't be used for this fix any more. Check its key in Settings, then try again."
             )
-    names = autofix.keep_trying(data, more, note=note or None, model=model)
+    names = autofix.keep_trying(data, more, note=note or None, model=model, decided=decided)
     token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
     if not token:
         raise _conflict(project, "retry")

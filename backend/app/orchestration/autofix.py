@@ -343,6 +343,7 @@ def settle(t: dict) -> None:
     # What the person asked for this episode (#103) — a note, a model they agreed to
     # send its code to — is not a standing order for the next one.
     t.pop("note", None)
+    # A decision (#102) is not: it stands for the rest of the build.
     t.pop("one_off", None)
     if t.get("episode_start") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
         int(settings.auto_fix_max_rounds), 0
@@ -360,10 +361,14 @@ def stuck(data: dict) -> list[str]:
     return [name for name, t in data["tracks"].items() if t.get("stopped") and not t.get("accepted")]
 
 
-def keep_trying(data: dict, more: int, note: Optional[str] = None, model: Optional[str] = None) -> list[str]:
+def keep_trying(
+    data: dict, more: int, note: Optional[str] = None, model: Optional[str] = None, decided: bool = False
+) -> list[str]:
     """Give every stuck track `more` rounds, and forget why it stopped. `note` (#103) is
     what the person told the crew to try, for each track's next round; `model` a model
-    they chose for the next round of each code track it was offered for, once."""
+    they chose for the next round of each code track it was offered for, once. `decided`
+    (#102): the note is a decision about the app ("skip voice input"), and the round may
+    remove what it drops instead of fixing it."""
     names = stuck(data)
     for name in names:
         t = data["tracks"][name]
@@ -373,6 +378,9 @@ def keep_trying(data: dict, more: int, note: Optional[str] = None, model: Option
         t["stopped"] = None
         if note and note.strip():
             t["note"] = note.strip()
+            if decided:
+                # Stands for the rest of the episode: every round in it is told (#102).
+                t["decision"] = note.strip()
         if model and name.startswith(BUILD_PREFIX) and model == offered:
             t["one_off"] = model
     return names
@@ -799,6 +807,44 @@ def code_note(
     )
 
 
+#: Said to a fix round beside a decision about the app (#102): short, it goes in tight prompts.
+DECIDED = "A decision about the app: where a problem is in what it drops, remove that code instead of fixing it."
+
+
+def take_person(t: dict) -> tuple[Optional[str], Optional[str], bool]:
+    """What the person told this round: their words as the round records them (taken off
+    the track — this round's only), as its prompt carries them, and whether a decision
+    stands. A decision (#102) stays on the track for the episode, so every round in it is
+    told it and what it allows — the first in the person's words, the rest as the decision."""
+    said = t.pop("note", None)
+    decision = t.get("decision")
+    if not decision:
+        return said, said, False
+    if said and said != decision:
+        # A later hint stays a hint; the decision is said apart from it.
+        return said, f"{said}\nDecided earlier: {decision}\n{DECIDED}", False
+    return said, f"{decision}\n{DECIDED}", said == decision
+
+
+def undecide(data: dict, text: str) -> list[str]:
+    """Stop treating `text` as a decision (#102): taken off every track that holds it."""
+    names = []
+    said = (text or "").strip()
+    for name, t in data["tracks"].items():
+        if (t.get("decision") or "").strip() == said:
+            t.pop("decision", None)
+            names.append(name)
+    return names
+
+
+def mark_round(record: dict, said: Optional[str], decided: bool) -> None:
+    """Keep the person's words on the round, and whether they were a decision."""
+    if said:
+        record["note"] = said
+        if decided:
+            record["decided"] = True
+
+
 def said_by_person(note: Optional[str]) -> str:
     """What the person told the crew to try (#103), in one line."""
     text = " ".join(str(note or "").split())
@@ -855,6 +901,10 @@ __all__ = [
     "platform_fixed",
     "said",
     "said_by_person",
+    "take_person",
+    "undecide",
+    "mark_round",
+    "DECIDED",
     "with_person",
     "view",
     "track",
