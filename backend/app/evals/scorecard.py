@@ -220,7 +220,9 @@ def fix_rounds(project: Project) -> dict:
         if not name.startswith(autofix.BUILD_PREFIX) or not rounds:
             continue
         total += len(rounds)
-        episode = rounds[int(t.get("episode_start") or 0):] or rounds[-1:]
+        # The latest episode's rounds — still its own after `settle` moved the start on.
+        latest = rounds[-1].get("episode")
+        episode = [r for r in rounds if r.get("episode") == latest] if latest is not None else rounds
         counts: list = [len(r.get("problems") or []) for r in episode]
         last = episode[-1]
         if t.get("stopped"):

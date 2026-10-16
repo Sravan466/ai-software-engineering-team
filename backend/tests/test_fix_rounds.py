@@ -78,8 +78,6 @@ def test_an_import_of_a_name_the_module_lacks_edits_the_importer_and_the_module_
     found = fixscope.scope(problems, own, own)
     assert set(found.touch) == {"backend/server.js", "backend/services/todoService.js"}
     assert found.pairs == [("backend/server.js", "backend/services/todoService.js")]
-    # The module goes first, so the importer's call sees what it really exports.
-    assert found.paths()[0] == "backend/services/todoService.js"
     assert not found.new and not found.unlocated
 
 
@@ -317,3 +315,51 @@ def test_a_round_that_sent_the_model_nothing_is_not_a_verdict():
     autofix.close_round(t, ["a"])
     t["rounds"][-1]["nothing_sent"] = True
     assert autofix.next_step(t) == "fix"
+
+
+# ── second review of #109 ────────────────────────────────────────────────────
+def test_an_edit_that_stops_a_file_parsing_is_put_back_though_it_hides_its_other_problems(monkeypatch, stub_router):
+    files = _files()
+    unbalanced = SERVER.replace("app.listen(3000);", "app.listen(3000;")
+    result, _asked = _fix(monkeypatch, files, [fenced({"backend/services/todoService.js": SERVICE, "backend/server.js": unbalanced})])
+    code = {f["path"]: f["code"] for f in result.output["files"]}
+    assert code["backend/server.js"] == SERVER and "backend/server.js" in result.handoff["fix"]["reverted"]
+
+
+def test_a_planned_file_never_written_is_written_whatever_else_shares_its_name():
+    own = {"backend/models/todos.js": "export const Todo = {};\n"}
+    problems = [{"path": "backend/routes/todos.js", "kind": "missing",
+                 "message": "was planned but never written. Write it, or drop it and every import of it."}]
+    assert list(fixscope.scope(problems, own, own).new) == ["backend/routes/todos.js"]
+
+
+def test_a_dotted_module_name_gets_a_real_extension():
+    own = {"frontend/src/login.ts": "import { login } from './auth.service';\nexport const go = login;\n"}
+    problems = [{"path": "frontend/src/login.ts", "kind": "import",
+                 "message": "imports `./auth.service`, and no file in this build is at frontend/src/auth.service. "
+                            "Write that file, or import one that exists."}]
+    assert list(fixscope.scope(problems, own, own).new) == ["frontend/src/auth.service.ts"]
+
+
+def test_a_python_package_is_never_shadowed_by_a_new_module():
+    own = {"backend/app/routes.py": "from .models.user import User\n", "backend/app/models/__init__.py": ""}
+    problems = [{"path": "backend/app/routes.py", "kind": "import",
+                 "message": "imports `.models.user`, and no module is at backend/app/models.py."}]
+    found = fixscope.scope(problems, own, own)
+    assert not found.new and list(found.touch) == ["backend/app/routes.py"]
+
+
+def test_the_trend_keeps_an_episode_that_converged():
+    from types import SimpleNamespace
+
+    from app.evals.scorecard import fix_rounds
+    from app.orchestration import autofix
+
+    data = {"tracks": {}}
+    t = autofix.track(data, autofix.build_track("backend_engineer"))
+    t["allowed"] = 5
+    for sent, left in ((3, 6), (6, 4), (4, 0)):
+        autofix.start_round(t, "guided", ["backend_engineer"], [{"key": f"{sent}-{i}"} for i in range(sent)])
+        autofix.close_round(t, [f"{left}-{i}" for i in range(left)])
+    autofix.settle(t)
+    assert fix_rounds(SimpleNamespace(auto_fix=data))["fix_trend"] == {"backend_engineer": [3, 6, 4, 0]}

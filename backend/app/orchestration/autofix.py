@@ -150,6 +150,9 @@ def start_round(
         "problems": problems,
         "fixed": None,
         "at": _now(),
+        # Which episode it belongs to (#103): `settle` moves the start past it once the
+        # problems are gone, and the record still says which rounds went together.
+        "episode": int(t.get("episode_start") or 0),
     }
     t["rounds"].append(record)
     t["stopped"] = None
@@ -328,7 +331,8 @@ def fix_scope(row) -> list[dict]:
                 "message": f"({label}) {message}" if label else message,
                 "step": p.get("step"),
             })
-    return out
+    # One entry per problem, as `code_problems` keys them: the same error twice is one.
+    return list({(p["path"], p["message"]): p for p in out}.values())
 
 
 def deploy_problems(problems: Iterable[dict], phase: str) -> list[dict]:

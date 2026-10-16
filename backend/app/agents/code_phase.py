@@ -520,14 +520,7 @@ class _Run:
         self.change_mode = True
         self.asked = ctx.change
         base = ctx.base_output or {}
-        for f in base.get("files") or []:
-            if not isinstance(f, dict) or not isinstance(f.get("path"), str) or not f["path"].strip():
-                continue
-            code = f.get("code") if isinstance(f.get("code"), str) else str(f.get("content") or "")
-            purpose = str(f.get("purpose") or "")
-            self.planned.append(_Planned(path=f["path"], purpose=purpose, origin="kept"))
-            self.written[f["path"]] = _Written(f["path"], code, str(f.get("language") or ""), purpose, origin="kept")
-        self.existing = {p: w.code for p, w in self.written.items()}
+        self._load(base)
 
         activity.stage("planning")
         with inflight.agent(f"{agent.title} — planning the change"):
@@ -648,6 +641,18 @@ class _Run:
         }
         return result
 
+    def _load(self, base: dict) -> None:
+        """The deliverable an edit starts from (#79, #103): every file kept as it is,
+        until an edit says otherwise."""
+        for f in base.get("files") or []:
+            if not isinstance(f, dict) or not isinstance(f.get("path"), str) or not f["path"].strip():
+                continue
+            code = f.get("code") if isinstance(f.get("code"), str) else str(f.get("content") or "")
+            purpose = str(f.get("purpose") or "")
+            self.planned.append(_Planned(path=f["path"], purpose=purpose, origin="kept"))
+            self.written[f["path"]] = _Written(f["path"], code, str(f.get("language") or ""), purpose, origin="kept")
+        self.existing = {p: w.code for p, w in self.written.items()}
+
     # ── a fix round (#103) ───────────────────────────────────────────────────
     def fix(self) -> AgentResult:
         """Fix what the checker found, in the files it names, and only those.
@@ -681,14 +686,7 @@ class _Run:
         agent, ctx = self.agent, self.ctx
         self.fix_mode = True
         base = ctx.base_output or {}
-        for f in base.get("files") or []:
-            if not isinstance(f, dict) or not isinstance(f.get("path"), str) or not f["path"].strip():
-                continue
-            code = f.get("code") if isinstance(f.get("code"), str) else str(f.get("content") or "")
-            purpose = str(f.get("purpose") or "")
-            self.planned.append(_Planned(path=f["path"], purpose=purpose, origin="kept"))
-            self.written[f["path"]] = _Written(f["path"], code, str(f.get("language") or ""), purpose, origin="kept")
-        self.existing = {p: w.code for p, w in self.written.items()}
+        self._load(base)
         # Every rewrite is judged as an edit of the file it replaces: code it loses is a
         # problem, as it is for a change (#101).
         self.changing = set(self.existing)
@@ -726,13 +724,16 @@ class _Run:
         }
 
         touch: dict[str, list[Problem]] = {}
-        for where in found.paths():
+        for where in found.touch:
             if where in stored_at:
                 touch[stored_at[where]] = list(found.touch[where])
         unlocated = list(found.unlocated)
+        located = 0
         if unlocated:
-            for path, problems in self._locate(unlocated, base).items():
+            located = len(self.calls)
+            for path, problems in self._locate(unlocated, base, stored_at).items():
                 touch.setdefault(path, []).extend(problems)
+            located = len(self.calls) - located
 
         too_long = self.too_long
         for path, problems in touch.items():
@@ -804,15 +805,16 @@ class _Run:
                 "cut_off": list(self.cut_off),
                 "lost_code": list(self.lost),
                 "reverted": list(self.reverted),
-                "settled": list(found.settled),
+                "unanswered": list(self.unanswered),
                 "kept": len([p for p in self.existing if p not in changed]),
-                # None when every file was too long to show: the round tried nothing.
-                "calls": len(self.calls),
+                # Fix and write calls, the planner's aside: 0 when every file was too long
+                # to show whole, and the round tried nothing.
+                "calls": len(self.calls) - located,
             },
         }
         return result
 
-    def _locate(self, problems: list[dict], base: dict) -> dict[str, list[Problem]]:
+    def _locate(self, problems: list[dict], base: dict, stored_at: dict[str, str]) -> dict[str, list[Problem]]:
         """The files to fix for problems no path or message placed: one small call
         through the change planner, which names files and writes no code."""
         from dataclasses import replace
@@ -832,7 +834,8 @@ class _Run:
         self.plan.calls = list(plan.calls or [plan.response])
         self.plan.repair_rounds = plan.repair_rounds
         out = plan.output if isinstance(plan.output, dict) else {}
-        known = {layout.place(agent.key, p): p for p in self.existing}
+        # Placed as the round placed them, renamed roots and all.
+        known = {**{layout.place(agent.key, p): p for p in self.existing}, **stored_at}
         found: dict[str, list[Problem]] = {}
         for item in out.get("files") or []:
             path = self._existing(item.get("path") or "", known) if isinstance(item, dict) else None
@@ -921,6 +924,8 @@ class _Run:
 
         if build is None or build.status == BuildStatus.UNCHECKED.value:
             return build, output, errors, stack
+        if all(self.written.get(p) is None or self.written[p].code == code for p, code in self.existing.items()):
+            return build, output, errors, stack  # nothing edited: nothing to compare
         reverted_any = False
         for _ in range(len(self.called_with) + 1):
             check = self.agent._build_check(self.ctx, output, cap=False)
@@ -932,8 +937,14 @@ class _Run:
                 if path in self.written and self.written[path].code != self.existing[path]
             }
             worse: list[str] = []
-            for place, n in after.items():
-                if n <= self.before.get(place, 0) or (place in self.unparsed and place not in unparsed):
+            # A file that parsed and doesn't now is worse whatever the count says: a parse
+            # error hides the rest of a file's problems.
+            broke_parse = [place for place in unparsed if place not in self.unparsed]
+            for place in dict.fromkeys([*after, *broke_parse]):
+                n = after.get(place, 0)
+                if place not in broke_parse and (
+                    n <= self.before.get(place, 0) or (place in self.unparsed and place not in unparsed)
+                ):
                     continue
                 if place in edited:
                     worse.append(edited[place])

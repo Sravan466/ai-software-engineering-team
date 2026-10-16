@@ -32,6 +32,8 @@ from app.build.scaffold import js_imports, platform_owned, py_imports
 
 #: What a module path may end in, as `check._resolves` tries them.
 _EXTENSIONS = ("", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".json", ".py")
+#: What a written module's name may end in — `auth.service` is a name, not an extension.
+_SOURCE = (".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".json", ".py")
 _INDEX = ("/index.tsx", "/index.ts", "/index.jsx", "/index.js", "/__init__.py")
 
 #: TypeScript names the module it means as `'"./x"'` (#101 keeps the importer's own
@@ -57,15 +59,6 @@ class Scope:
     pairs: list[tuple[str, str]] = field(default_factory=list)
     #: Problems no file could be found for, as they came.
     unlocated: list[dict] = field(default_factory=list)
-    #: A planned file never written that the build has under another path: nothing to
-    #: write, and said so rather than dropped.
-    settled: list[str] = field(default_factory=list)
-
-    def paths(self) -> list[str]:
-        """The files to edit, exporters first: a file another one imports is fixed
-        before the importer's call, so that call is shown its real exports."""
-        named = {b for _a, b in self.pairs}
-        return sorted(self.touch, key=lambda p: (p not in named,))
 
 
 def stack_path(note: str) -> Optional[str]:
@@ -185,6 +178,16 @@ def _importers_of(name: str, own: dict[str, str]) -> list[str]:
     return out
 
 
+def _is_package(target: str, tree: set[str]) -> bool:
+    """A Python import's first missing segment that is really a package folder: the
+    checker names `models.py` for `from .models.user import User` when `models/` is
+    there and `user.py` isn't — a `models.py` beside it would shadow the package."""
+    if not target.endswith(".py"):
+        return False
+    folder = target[: -len(".py")] + "/"
+    return any(p.startswith(folder) for p in tree)
+
+
 def _mentions(text: str, path: str) -> bool:
     """`path` as a whole path in `text`: `index.ts` is not in `src/index.tsx`."""
     return bool(path) and re.search(rf"(?:(?<=\./)|(?<![\w./-])){re.escape(path)}(?![\w-]|\.\w)", text) is not None
@@ -221,10 +224,10 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
                 # The file exists, one folder off: the importer's path is what's wrong.
                 problem = Problem(problem.path, f"{problem.message} (This build has {', '.join(f'`{o}`' for o in others[:3])}.)",
                                   problem.kind, problem.line)
-            elif target:
+            elif target and not _is_package(target, everything):
                 # Nothing of that name anywhere: the file the import wants is written —
                 # and that answers the import, so the importer isn't asked about it.
-                new = target if posixpath.splitext(target)[1] else target + posixpath.splitext(path)[1]
+                new = target if target.endswith(_SOURCE) else target + posixpath.splitext(path)[1]
                 out.new.setdefault(new, []).append(problem)
                 continue
             touch(path, problem)
@@ -237,12 +240,8 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
                     out.pairs.append((path, exporter))
             continue
         if path and kind == "missing" and not platform_owned(path):
-            # Planned and never written: written now, unless it exists under another name.
-            others = same_named(path, everything)
-            if others:
-                out.settled.append(f"{path} was planned, and the build has it as {others[0]}")
-            else:
-                out.new.setdefault(path, []).append(_as_problem(p, path))
+            # Planned and never written: the plan asked for it, so it is written now.
+            out.new.setdefault(path, []).append(_as_problem(p, path))
             continue
         if path and platform_owned(path) and kind == "package":
             # A package that won't install is the platform's manifest's problem only in
