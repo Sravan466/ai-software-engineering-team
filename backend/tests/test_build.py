@@ -207,12 +207,13 @@ def test_a_phase_that_writes_broken_code_is_sent_back_and_recorded(client, monke
     project = through_database_gate(client, pid)
 
     # Plan, write, and the file's own repair round naming the file and the error, as
-    # soon as it lands (#81); then the crew's fix loop re-runs the phase with the
-    # problems as its note. That round fixed nothing, so the loop stops rather than
-    # spending a third identical attempt.
+    # soon as it lands (#81); then the crew's fix loop edits the broken file (#103) —
+    # no new plan — and its own repair round tries once more. That round fixed nothing,
+    # so the loop stops rather than spending a third identical attempt.
     assert "# Write now" not in asked[0] and "`backend/main.py`" in asked[1]
     assert "backend/main.py" in asked[2] and "does not parse" in asked[2]
-    assert len(asked) == 6 and "does not compile" in asked[3]
+    assert len(asked) == 5 and "# Write now — fix 1 file" in asked[3] and "does not parse" in asked[3]
+    assert "# Your last version of backend/main.py" in asked[3]
     backend = next(
         p for p in project["phases"]
         if p["phase"] == "backend_engineer" and p["status"] != "rejected"

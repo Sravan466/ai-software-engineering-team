@@ -813,8 +813,12 @@ class PipelineRunner:
             "Fixing %d code problem(s) in %s on %s (round %d, %s).",
             len(problems), row.phase, project.id, n, strategy,
         )
+        # A code phase edits what it delivered (#103): each file shown whole, so it needs
+        # no snippets — and is never told to start again.
+        in_place = bool(getattr(get_agent(row.phase), "fixes_in_place", False))
+        standing = self._standing_fix_note(data, row.phase)
         snippets = {}
-        if strategy != remediation.STRATEGY_GUIDED:
+        if strategy != remediation.STRATEGY_GUIDED and not in_place:
             for p in problems:
                 code = remediation.snippet(
                     project,
@@ -830,10 +834,11 @@ class PipelineRunner:
             db,
             project,
             row.phase,
-            autofix.code_note(problems, k, snippets, self._standing_fix_note(data, row.phase)),
+            autofix.code_note(problems, k, snippets, standing),
             escalate=(row.phase,) if strategy == remediation.STRATEGY_STRONGER else (),
             continue_after=True,
             fix_track=name,
+            fix={"problems": autofix.fix_scope(row), "note": standing or ""} if in_place else None,
         )
         return True
 
@@ -1547,6 +1552,7 @@ class PipelineRunner:
         keep: Optional[dict] = None,
         revise: Optional[dict] = None,
         start_change: Optional[dict] = None,
+        fix: Optional[dict] = None,
     ) -> Project:
         """Re-run one phase with reviewer feedback, patching the checkpoint in place.
 
@@ -1576,6 +1582,10 @@ class PipelineRunner:
         rewind rebuilds, those the change still has to edit edit, the auditor and the
         estimator run again, and everything else is kept and re-checked: a change that
         touches the backend doesn't rewrite the deployment plan.
+
+        `fix` is a fix round on a code phase (#103): `{problems, note}`. The phase is
+        handed its own last attempt and edits the files the problems name — it never
+        plans again — and `note` is a fix it must keep while it does.
         """
         if not phase_key:
             return project
@@ -1684,6 +1694,20 @@ class PipelineRunner:
                             values.get("prior_outputs", {}).get(phase_key)
                             or (change.get("base") or {}).get(phase_key),
                         )
+                    if fix is not None:
+                        # A fix round (#103): the attempt being fixed, not stripped like a
+                        # redo's — fixing code the agent isn't given is how every round
+                        # used to become a rewrite.
+                        own = (
+                            ctx.base_output
+                            if editing
+                            else values.get("prior_outputs", {}).get(phase_key)
+                            or (superseded.output if superseded is not None else None)
+                        )
+                        if isinstance(own, dict) and own.get("files"):
+                            ctx.base_output = own
+                            ctx.fixing = tuple(fix.get("problems") or ())
+                            ctx.fix_note = str(fix.get("note") or "")
                     # Inside the lock, model call and all. This is a read-modify-write:
                     # the patch below is built from the snapshot above, so a write to this
                     # checkpoint in between would be silently overwritten by it. The lock

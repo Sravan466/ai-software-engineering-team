@@ -101,6 +101,9 @@ _FIX_ECHO = "# Your last version of {path} (fix it; keep what was right)\n{fence
 _EDIT_ECHO = "# The current version of {path} (change only what is asked)\n{fence}{lang}\n{code}{nl}{fence}\n"
 #: The share of a fix call's free prompt the failing files' echoes may take (#101).
 _FIX_ECHO_SHARE = 0.4
+#: ...in a fix round (#103), where the files being fixed are the call: the plan, the
+#: digests and the idea get what they leave.
+_FIX_ROUND_ECHO_SHARE = 0.6
 
 
 @dataclass
@@ -218,6 +221,8 @@ class CodePhaseAgent(BaseAgent):
 
     #: The plan's shape: the deliverable's, with `files` as a list of planned files.
     plan_model: type[BaseModel] = BaseModel
+    #: A fix round edits this phase's files in place (#103) rather than re-running it.
+    fixes_in_place = True
 
     def __init__(self) -> None:
         self.planner = _Planner(self)
@@ -245,6 +250,10 @@ class CodePhaseAgent(BaseAgent):
 
     # ── the run ──────────────────────────────────────────────────────────────
     def run(self, ctx: AgentContext) -> AgentResult:
+        if ctx.fixing and isinstance(ctx.base_output, dict) and ctx.base_output.get("files"):
+            # A fix round (#103): the files with problems, edited; nothing planned again.
+            # File by file whatever the setting, as a change is.
+            return _Run(self, ctx).fix()
         if ctx.editing:
             # A change request (#79): the files as they are, changed where asked. File
             # by file whatever the setting, because that is the only way to send back
@@ -321,6 +330,16 @@ class _Run:
         #: The reply ceiling the last prompt was built against when its instructions
         #: needed some of the reply's room (#101); None: the model's own.
         self.reply_cap: Optional[int] = None
+        #: A fix round (#103): the files it edits are in `edits`, every file as it was in
+        #: `existing`. Stored path -> placed path, for the checker's problems.
+        self.fix_mode = False
+        self.place_of: dict[str, str] = {}
+        #: A new file the round writes -> the problems of the files that import it.
+        self.needed_by: dict[str, list[Problem]] = {}
+        #: Edited files put back as they were: they came back with more problems.
+        self.reverted: list[str] = []
+        #: Files asked for in a fix call and not sent back.
+        self.unanswered: list[str] = []
 
     # ── driving ──────────────────────────────────────────────────────────────
     def run(self) -> AgentResult:
@@ -623,6 +642,295 @@ class _Run:
         }
         return result
 
+    # ── a fix round (#103) ───────────────────────────────────────────────────
+    def fix(self) -> AgentResult:
+        """Fix what the checker found, in the files it names, and only those.
+
+        Nothing is planned again: the file list, the purposes and the deliverable's
+        other fields stay as they are. Each file with a problem is shown whole with its
+        problems, and so is the file a problem names, so an importer and the module it
+        disagrees with are decided in one call where both fit. Each is written back
+        whole, then parsed and repaired like any file this phase writes. Every other file
+        is kept byte for byte. A file too long to show whole stays as it is and its
+        problem is carried to the next round; an edit that leaves its file with more
+        problems than it had is put back.
+        """
+        agent, ctx = self.agent, self.ctx
+        agent._pin(ctx)
+        board = activity.begin(agent.key)
+        try:
+            result = self._fix()
+        except BaseException:
+            activity.end(board, finished=False)
+            raise
+        activity.end(board)
+        return result
+
+    def _fix(self) -> AgentResult:
+        from types import SimpleNamespace
+
+        from app.build import fixscope
+        from app.build.check import phase_tree
+
+        agent, ctx = self.agent, self.ctx
+        self.fix_mode = True
+        base = ctx.base_output or {}
+        for f in base.get("files") or []:
+            if not isinstance(f, dict) or not isinstance(f.get("path"), str) or not f["path"].strip():
+                continue
+            code = f.get("code") if isinstance(f.get("code"), str) else str(f.get("content") or "")
+            purpose = str(f.get("purpose") or "")
+            self.planned.append(_Planned(path=f["path"], purpose=purpose, origin="kept"))
+            self.written[f["path"]] = _Written(f["path"], code, str(f.get("language") or ""), purpose, origin="kept")
+        self.existing = {p: w.code for p, w in self.written.items()}
+        # Every rewrite is judged as an edit of the file it replaces: code it loses is a
+        # problem, as it is for a change (#101).
+        self.changing = set(self.existing)
+
+        # The checker reports placed paths; the deliverable may store them otherwise.
+        language = ctx.charter.get("language").token if ctx.charter is not None and ctx.charter.get("language") else None
+        placed = layout.Placer(language).place_all(agent.key, [(p.strip().lstrip("/"), "") for p in self.written])
+        self.place_of = {stored: where for (where, *_), stored in zip(placed, self.written)}
+        stored_at = {where: stored for stored, where in self.place_of.items()}
+        own = {self.place_of[p]: w.code for p, w in self.written.items()}
+        tree, _mine = phase_tree(ctx.prior_outputs, agent.key, base, ctx.charter)
+        found = fixscope.scope(ctx.fixing, own, tree)
+
+        self.plan = SimpleNamespace(
+            output={k: v for k, v in base.items() if k != "files"},
+            repair_rounds=0,
+            calls=[],
+            response=None,
+            handoff={},
+            skills_used=[],
+        )
+        self.profile = router.profile_for(
+            ctx.routing_mode, ctx.preferred_model, complexity=agent._complexity(ctx), role=agent.key, pin=ctx.pin_model,
+        )
+        self.choice = 1
+        self.system = agent.write_system_prompt(ctx.charter, agent._registry(ctx))
+        router.note_write_overhead(agent.key, len(self.system))
+        self.digests = {
+            dep: handoff.digest(dep, ctx.prior_outputs[dep])
+            for dep in agent.depends_on
+            if isinstance(ctx.prior_outputs.get(dep), dict)
+        }
+
+        touch: dict[str, list[Problem]] = {}
+        for where in found.paths():
+            if where in stored_at:
+                touch[stored_at[where]] = list(found.touch[where])
+        unlocated = list(found.unlocated)
+        if unlocated:
+            for path, problems in self._locate(unlocated, base).items():
+                touch.setdefault(path, []).extend(problems)
+
+        too_long = self.too_long
+        for path, problems in touch.items():
+            w = self.written[path]
+            w.problems = problems
+            entry = self._entry(path)
+            entry.imports = [
+                stored_at[i] for i in fixscope.imports_of(self.place_of[path], w.code, own) if i in stored_at
+            ]
+            if not self._fix_fits([w]):
+                # Whole or not at all: a file clipped to fit would come back without its
+                # end. It stays as it is, and its problem is carried.
+                too_long.append(path)
+                continue
+            self.edits.append(entry)
+        fixing = [self.written[e.path] for e in self.edits]
+        news: list[_Planned] = []
+        for where, problems in found.new.items():
+            if where in stored_at or self._entry(where) is not None:
+                continue
+            importers = ", ".join(dict.fromkeys(f"`{p.path}`" for p in problems))
+            entry = _Planned(path=where, purpose=f"Imported by {importers}; it doesn't exist yet", origin="plan")
+            self.planned.append(entry)
+            self.edits.append(entry)
+            self.needed_by[where] = problems
+            news.append(entry)
+
+        sent = len(ctx.fixing)
+        activity.plan(
+            [e.path for e in self.edits], 1,
+            note=f"Fixing {sent} problem{'' if sent == 1 else 's'} in {len(self.edits)} file{'' if len(self.edits) == 1 else 's'}",
+        )
+        pairs = [(stored_at.get(a), stored_at.get(b)) for a, b in found.pairs]
+        for group in self._fix_groups(fixing, pairs):
+            claim.between_calls()
+            self._fix_group(group)
+        queue = list(news)
+        while queue:
+            claim.between_calls()
+            batch, queue = queue[:1], queue[1:]
+            queue = self._write(batch) + queue
+            queue = [p for p in queue if p.path not in self.written]
+
+        result = self._finish()
+        changed = sorted(p for p in self.existing if p in self.written and self.written[p].code != self.existing[p])
+        added = sorted(p.path for p in self.planned if p.path not in self.existing and p.path in self.written)
+        generation = dict((result.handoff or {}).get("generation") or {})
+        generation.update(
+            {"mode": "fix", "files_planned": len(self.planned), "files_written": len([p for p in self.planned if p.path in self.written])}
+        )
+        result.handoff = {
+            **(result.handoff or {}),
+            "deps": [{"phase": d, "digest": True, "full": "digest_only", "omitted": ["*"]} for d in self.digests],
+            "generation": generation,
+            "fix": {
+                "problems": sent,
+                "files": [e.path for e in self.edits],
+                "changed": changed,
+                "added": added,
+                # Asked for and sent back as it was, or not sent back at all.
+                "unchanged": sorted(
+                    p for p in touch
+                    if p not in changed and p not in too_long and p not in self.cut_off
+                    and p not in self.lost and p not in self.reverted
+                ),
+                "too_long": list(too_long),
+                "cut_off": list(self.cut_off),
+                "lost_code": list(self.lost),
+                "reverted": list(self.reverted),
+                "settled": list(found.settled),
+                "kept": len([p for p in self.existing if p not in changed]),
+            },
+        }
+        return result
+
+    def _locate(self, problems: list[dict], base: dict) -> dict[str, list[Problem]]:
+        """The files to fix for problems no path or message placed: one small call
+        through the change planner, which names files and writes no code."""
+        from dataclasses import replace
+
+        agent = self.agent
+        text = (
+            "Fix these problems the checker found. It couldn't tell which file each one is in, "
+            "so list the files that need to change:\n"
+            + "\n".join(f"- {str(p.get('message') or '').strip()[:600]}" for p in problems)
+        )
+        child = replace(self.ctx, change=text, base_output=base, likely_files=(), fixing=())
+        activity.stage("planning")
+        with inflight.agent(f"{agent.title} — finding the files to fix"):
+            plan = agent.edit_planner.run(child)
+        self.calls += plan.calls or [plan.response]
+        self.truncated += plan.truncated_replies
+        self.plan.calls = list(plan.calls or [plan.response])
+        self.plan.repair_rounds = plan.repair_rounds
+        out = plan.output if isinstance(plan.output, dict) else {}
+        known = {layout.place(agent.key, p): p for p in self.existing}
+        found: dict[str, list[Problem]] = {}
+        for item in out.get("files") or []:
+            path = self._existing(item.get("path") or "", known) if isinstance(item, dict) else None
+            if path and path not in found:
+                found[path] = [
+                    Problem(path, str(p.get("message") or "has a problem"), str(p.get("kind") or "build"))
+                    for p in problems
+                ]
+        return found
+
+    def _fix_groups(self, fixing: list[_Written], pairs: list[tuple]) -> list[list[_Written]]:
+        """The fix calls: each importer with the module it disagrees with, in one call
+        where they fit together; every other file on its own."""
+        parent = {w.path: w.path for w in fixing}
+
+        def root(path: str) -> str:
+            while parent[path] != path:
+                parent[path] = parent[parent[path]]
+                path = parent[path]
+            return path
+
+        for a, b in pairs:
+            if a in parent and b in parent:
+                parent[root(a)] = root(b)
+        # Each module beside the files that import it, so the calls a large group is cut
+        # into still keep a pair together where they can.
+        order: list[str] = []
+        for a, b in pairs:
+            for path in (b, a):
+                if path in parent and path not in order:
+                    order.append(path)
+        order += [w.path for w in fixing if w.path not in order]
+        by_path = {w.path: w for w in fixing}
+        together: dict[str, list[_Written]] = {}
+        for path in order:
+            together.setdefault(root(path), []).append(by_path[path])
+        return [group for files in together.values() for group in self._repair_groups(files)]
+
+    def _fix_group(self, group: list[_Written]) -> None:
+        """One fix call: the files shown whole with their problems, written back whole."""
+        for w in group:
+            activity.file(w.path, "fixing")
+        planned = [self._plan_entry(w.path) for w in group]
+        resp = self._call(lambda: self._messages(planned, fixing=group), planned, "fixing")
+        cut = _cut(resp)
+        self.truncated += 1 if cut else 0
+        blocks = {path: block for path, block in self._match(resp, planned) if block.complete}
+        landed: list[str] = []
+        for w in group:
+            block = blocks.get(w.path)
+            if block is None:
+                # Not sent back whole: it stays as it was — a cut-off copy would replace
+                # code other files import — and its problems are carried.
+                (self.cut_off if cut else self.unanswered).append(w.path)
+                activity.file(w.path, "missing")
+                continue
+            self._land(self._plan_entry(w.path), block.code, block.language)
+            landed.append(w.path)
+        self._check(landed)
+
+    def _keep_no_worse(
+        self, build: Optional[BuildCheck], output: dict, errors: list[str], stack: list[str]
+    ) -> tuple[Optional[BuildCheck], dict, list[str], list[str]]:
+        """Put back every edited file that now has more problems than it was sent with
+        (#103) — the edit made it worse, as SWE-agent's edit command judges one — and
+        check the tree again without them."""
+        from app.build import fixscope
+
+        if build is None or build.status == BuildStatus.UNCHECKED.value:
+            return build, output, errors, stack
+        before: dict[str, int] = {}
+        for p in self.ctx.fixing:
+            # The real build's problems aren't the tree check's to compare with.
+            if not p.get("step") and p.get("kind") != "stack":
+                path = layout.clean(str(p.get("path") or ""))
+                before[path] = before.get(path, 0) + 1
+        after: dict[str, int] = {}
+        for p in build.problems:
+            after[p.path] = after.get(p.path, 0) + 1
+        edited = {
+            self.place_of.get(path, path): path for path in self.existing
+            if path in self.written and self.written[path].code != self.existing[path]
+        }
+        worse: list[str] = []
+        for place in after:
+            if after[place] <= before.get(place, 0):
+                continue
+            if place in edited:
+                worse.append(edited[place])
+                continue
+            # A file nobody edited, worse now: the edited module its problems name broke it.
+            for p in build.problems:
+                if p.path == place:
+                    cause = fixscope.named(p.path, p.message, self.place_of.values())
+                    if cause in edited:
+                        worse.append(edited[cause])
+        worse = list(dict.fromkeys(worse))
+        if not worse:
+            return build, output, errors, stack
+        for path in worse:
+            w = self.written[path]
+            self.written[path] = _Written(path, self.existing[path], w.language, w.purpose, w.origin)
+            self.reverted.append(path)
+            activity.file(path, "failed")
+        log.info("%s: put back %d edited file(s) that came back worse: %s", self.agent.title, len(worse), ", ".join(worse))
+        output, errors = self._assemble()
+        stack = charter_violations(self.ctx.charter, self.agent.key, output) if settings.enforce_stack_charter else []
+        build = self.agent._build_check(self.ctx, output)
+        self._take_exports(build)
+        return build, output, errors, stack
+
     def _existing(self, path: str, known: dict[str, str]) -> Optional[str]:
         """The file a change names, as it is stored, or None for a new one."""
         if path in self.existing:
@@ -723,7 +1031,7 @@ class _Run:
             failing = [w for group in self._repair_groups(failing) for w in self._repair(group)]
         for path in paths:
             w = self.written[path]
-            if self.change_mode and any(placeholders.is_lost_code(p) for p in w.problems):
+            if (self.change_mode or self.fix_mode) and any(placeholders.is_lost_code(p) for p in w.problems):
                 # Every rewrite dropped much of a file that works (#101): it stays as it
                 # was, as a cut-off one does, and the change's record says why.
                 self.written[path] = _Written(path, self.existing[path], w.language, w.purpose, w.origin)
@@ -751,10 +1059,13 @@ class _Run:
 
     def _fix_fits(self, group: list[_Written]) -> bool:
         ask = self._write_now([self._plan_entry(w.path) for w in group], False, group)
-        pool = int(max(self.profile.prompt_char_budget - len(self.system) - len(ask) - 1, 0) * _FIX_ECHO_SHARE)
+        pool = int(max(self.profile.prompt_char_budget - len(self.system) - len(ask) - 1, 0) * self._echo_share())
         reply = int(self.profile.max_output_tokens * BATCH_REPLY_SHARE * self.profile.ratio)
         sources = [len(self._echo_source(w)) for w in group]
         return sum(n + 200 for n in sources) <= pool and sum(sources) <= reply
+
+    def _echo_share(self) -> float:
+        return _FIX_ROUND_ECHO_SHARE if self.fix_mode else _FIX_ECHO_SHARE
 
     def _echo_source(self, w: _Written) -> str:
         """What a fix call shows of `w`: the file as it was when a rewrite lost much of
@@ -937,8 +1248,8 @@ class _Run:
         the model it was rebuilt for, and the phase's later calls are sized the same."""
         agent, ctx = self.agent, self.ctx
         first = batch[0].path
-        if self.change_mode and self.edits:
-            # A change counts its own files, not the ones it keeps (#79).
+        if (self.change_mode or self.fix_mode) and self.edits:
+            # A change (#79) or a fix round (#103) counts its own files, not the ones it keeps.
             number = len([e for e in self.edits if e.path in self.landed]) + 1
             total = len(self.edits)
         else:
@@ -1018,7 +1329,7 @@ class _Run:
         put("write", ask, force=True)
         # The echoes share one pool, each by its size (#101): a group `_repair_groups`
         # made fits whole; a single file larger than the pool is clipped to it.
-        pool = int(left * _FIX_ECHO_SHARE)
+        pool = int(left * self._echo_share())
         needs = {w.path: len(self._echo_source(w)) + 200 for w in fixing or []}
         total = sum(needs.values())
         for w in fixing or []:
@@ -1051,6 +1362,12 @@ class _Run:
                         # written from its purpose alone, and everything else in it lost.
                         raise _NoRoom(p.path)
 
+        if self.fix_mode:
+            # What a fix needs next after the files themselves (#103): what the files
+            # around them really export, and the code of what they import. The plan,
+            # the idea and the digests get what is left.
+            put("written", self._written_index(batch))
+            put("bodies", self._bodies(batch, int(left * 0.5)))
         for compact in (0, 1, 2):
             if put("plan", self._plan_text(batch, compact)):
                 break
@@ -1059,7 +1376,13 @@ class _Run:
         if self.change_mode and ctx.change:
             share = min(len(ctx.change), budget // 6, max(left - 200, 0))
             put("change", f"# The change to make\n{_clip(ctx.change, share)}\n")
-        if ctx.feedback:
+        if self.fix_mode:
+            # A fix round (#103): each file's problems are under it in the ask. The round's
+            # note says them again, so only what it adds is shown — a fix to keep.
+            if ctx.fix_note:
+                share = min(len(ctx.fix_note), budget // 7, max(left - 200, 0))
+                put("feedback", f"# Keep this while you fix\n{_clip(ctx.fix_note, share)}\n")
+        elif ctx.feedback:
             share = min(len(ctx.feedback), budget // 7, max(left - 200, 0))
             put(
                 "feedback",
@@ -1072,9 +1395,9 @@ class _Run:
                 for limit in (each, each // 2, 300):
                     if put(f"dep:{dep}", f"# From {dep} (digest)\n```json\n{handoff.fit(d, limit)}\n```\n"):
                         break
-        put("written", self._written_index(batch))
-        bodies = self._bodies(batch, int(left * 0.4))
-        put("bodies", bodies)
+        if not self.fix_mode:
+            put("written", self._written_index(batch))
+            put("bodies", self._bodies(batch, int(left * 0.4)))
         if ctx.extra_context:
             room = min(len(ctx.extra_context), budget // 10, max(left - 200, 0))
             # A heading with nothing under it is worse than no heading at all.
@@ -1123,6 +1446,8 @@ class _Run:
             )
         if self.change_mode and not fixing and not split:
             return self._change_now(batch)
+        if self.fix_mode and not fixing and not split:
+            return self._fix_new_now(batch)
         if fixing:
             head = f"{_WRITE_NOW} — fix {len(fixing)} file{'s' if len(fixing) > 1 else ''}"
         elif len(batch) == 1:
@@ -1154,6 +1479,11 @@ class _Run:
             )
         if fixing:
             lines.append("Return each file above in full, with every problem fixed.")
+            if self.fix_mode:
+                lines.append(
+                    "Change only what the problems need. Keep everything else in each file exactly as "
+                    "it is: the other files import from it."
+                )
         instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
         if instruction:
             lines.append(instruction)
@@ -1180,6 +1510,20 @@ class _Run:
                 if p.imports:
                     line += f". Imports: {', '.join(p.imports[:8])}"
                 lines.append(line)
+        instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
+        if instruction:
+            lines.append(instruction)
+        lines.append("Answer with `### path` and one fenced block per file — nothing else.")
+        return "\n".join(lines) + "\n"
+
+    def _fix_new_now(self, batch: list[_Planned]) -> str:
+        """The ask for a file a fix round writes new (#103): what imports it, and how."""
+        lines = [f"{_WRITE_NOW} — add {len(batch)} file{'s' if len(batch) > 1 else ''}"]
+        for p in batch:
+            lines.append(f"- `{p.path}` (new file)" + (f" — {p.purpose}" if p.purpose else ""))
+            for problem in self.needed_by.get(p.path, [])[:4]:
+                lines.append(f"  - needed by: {problem.text()}")
+        lines.append("Write it with exactly what those files import from it.")
         instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
         if instruction:
             lines.append(instruction)
@@ -1223,12 +1567,13 @@ class _Run:
 
     def _written_index(self, batch: list[_Planned]) -> str:
         mine = {p.path for p in batch}
-        done = [w for w in self.written.values() if not (self.change_mode and w.path in mine)]
+        editing = self.change_mode or self.fix_mode
+        done = [w for w in self.written.values() if not (editing and w.path in mine)]
         if not done:
             return ""
         lines = [
             "# The app's other files — import from these by their real paths; don't write them"
-            if self.change_mode
+            if editing
             else "# Written so far — import from these by their real paths; do not write them again"
         ]
         for w in done:
@@ -1320,7 +1665,11 @@ class _Run:
         stack = charter_violations(ctx.charter, agent.key, output) if settings.enforce_stack_charter else []
         build = agent._build_check(ctx, output)
         self._take_exports(build)
-        if build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
+        if self.fix_mode:
+            # A fix round is one pass (#103): what its edits left is the next round's,
+            # with the problems found afresh — not the same files sent straight back.
+            build, output, errors, stack = self._keep_no_worse(build, output, errors, stack)
+        elif build is not None and build.status == BuildStatus.FAILED.value and settings.schema_repair_rounds > 0:
             build, output, errors, stack, _ = self._fix_build(build, output, errors, stack)
         # Once it parses, for real (#75): installed, built and started in a sandbox —
         # and one round on the files that build names, before the fix loop sees it.
@@ -1330,6 +1679,7 @@ class _Run:
             and build_run is not None
             and build_run.get("status") == BuildStatus.FAILED.value
             and settings.schema_repair_rounds > 0
+            and not self.fix_mode
         ):
             build, output, errors, stack, rerun = self._fix_build(build, output, errors, stack, real=True)
             if rerun is not _UNCHANGED:
@@ -1375,7 +1725,7 @@ class _Run:
                 "mode": mode,
                 "files_per_call": self.largest,
                 "calls": len(self.calls),
-                "plan_calls": len(plan.calls or [plan.response]),
+                "plan_calls": len([c for c in (plan.calls or [plan.response]) if c is not None]),
                 "files_planned": len([p for p in self.planned if p.origin == "plan"]),
                 "files_written": len(written),
                 "truncated_replies": self.truncated,
@@ -1394,7 +1744,8 @@ class _Run:
         return AgentResult(
             output=output,
             content_md=agent.to_markdown(output),
-            response=_merge(self.calls),
+            # A fix round with nothing it could show the model whole makes no call.
+            response=_merge(self.calls) if self.calls else self._no_call(),
             schema_status=status,
             schema_note="; ".join(e.replace("`", "") for e in shape[:3]) or None,
             repair_rounds=plan.repair_rounds + self.repairs,
@@ -1481,6 +1832,15 @@ class _Run:
             activity.file(path, "failed")
         return build, output, errors, stack, _UNCHANGED
 
+
+    def _no_call(self) -> LLMResponse:
+        """The response of a round that sent the model nothing: every file it would have
+        fixed was too long to show whole. Charged to the model the round was for."""
+        from app.schemas.llm import Usage
+
+        return LLMResponse(
+            text="", provider=self.profile.provider, model=self.profile.model, usage=Usage(), latency_ms=0,
+        )
 
     def _whole(self, reason: str) -> AgentResult:
         """No plan to write from: the one-reply path, with the plan's calls counted."""

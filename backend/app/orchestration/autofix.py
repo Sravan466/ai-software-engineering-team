@@ -296,6 +296,35 @@ def _build_problem(p: dict, phase: str) -> dict:
     return out
 
 
+def fix_scope(row) -> list[dict]:
+    """The problems `code_problems` keys, as a fix round reads them (#103): the file,
+    the line, the checker's own kind and its words — what `fixscope` finds the files
+    to edit from."""
+    from app.build.fixscope import stack_path
+
+    out: list[dict] = []
+    for note in row.stack_note or []:
+        text = str(note).strip()
+        if text:
+            out.append({"path": stack_path(text), "line": None, "kind": "stack", "message": text})
+    if row.build_status == BuildStatus.FAILED.value:
+        for p in row.build_note or []:
+            if not isinstance(p, dict) or p.get("kind") == NOTE_KIND:
+                continue
+            message = str(p.get("message") or "does not compile")
+            # Said as what it is, as the round's note says it: unfinished, or what a
+            # real build step it broke — "does not parse" already says itself.
+            label = _UNFINISHED.get(str(p.get("kind") or "")) or _BROKE.get(str(p.get("step") or ""))
+            out.append({
+                "path": p.get("path") or None,
+                "line": p.get("line"),
+                "kind": p.get("kind") or "build",
+                "message": f"({label}) {message}" if label else message,
+                "step": p.get("step"),
+            })
+    return out
+
+
 def deploy_problems(problems: Iterable[dict], phase: str) -> list[dict]:
     """A failed Vercel build's problems, keyed like the sandbox's own (#75)."""
     found = [_build_problem({**p, "step": "vercel"}, phase) for p in problems if isinstance(p, dict)]
@@ -610,6 +639,7 @@ __all__ = [
     "code_note",
     "code_problems",
     "deploy_problems",
+    "fix_scope",
     "keep_trying",
     "load",
     "next_step",

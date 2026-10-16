@@ -152,6 +152,14 @@ class AgentContext:
     base_output: Optional[dict] = None
     #: Paths the change is likely to touch, whose current code is shown in full.
     likely_files: tuple[str, ...] = ()
+    #: A fix round on a code phase (#103): what the checker found wrong with
+    #: `base_output`, each `{path, line, kind, message, step}`. With these the phase
+    #: edits the files they name and keeps every other file byte for byte, instead of
+    #: planning and writing the deliverable again.
+    fixing: tuple[dict, ...] = ()
+    #: What else the round is told beside the problems: a security fix this phase must
+    #: keep while it fixes them.
+    fix_note: str = ""
 
     @property
     def editing(self) -> bool:

@@ -1,0 +1,261 @@
+"""Which files a fix round edits (#103).
+
+A fix round used to run the code phase again from the start: a new plan, new file
+names, new mismatches, every round — so a backend with 3 problems came back with 6,
+then 4, then 8, and none of it was the code that had been sent back. A round now
+*edits*, and this decides what it edits, from the problems alone:
+
+  * the file each problem is in;
+  * the file each problem *names* — the module an import of a missing name points at
+    (TypeScript 2305, 2613, 2614, 2724, 1192), so the importer and the exporter it
+    disagrees with are decided together;
+  * a file an import points at that doesn't exist, written new — but only when no file
+    of that name exists anywhere in the build. One that does means the import's path is
+    wrong, and the importer is the file to change.
+
+Every other file stays byte for byte. A problem no file can be found for is handed
+back as `unlocated`, for the code phase to ask the model where it lives.
+
+Pure functions over paths and messages: no model, no I/O.
+"""
+from __future__ import annotations
+
+import posixpath
+import re
+from dataclasses import dataclass, field
+from typing import Iterable, Optional
+
+from app.build import layout
+from app.build import packages as pkg
+from app.build.check import Problem
+from app.build.scaffold import js_imports, platform_owned, py_imports
+
+#: What a module path may end in, as `check._resolves` tries them.
+_EXTENSIONS = ("", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".json", ".py")
+_INDEX = ("/index.tsx", "/index.ts", "/index.jsx", "/index.js", "/__init__.py")
+
+#: TypeScript names the module it means as `'"./x"'` (#101 keeps the importer's own
+#: specifier there, or the build path when it couldn't).
+_MODULE = re.compile(r"""'"([^"]+)"'""")
+_VIRTUAL = re.compile(r"^/__build__/(?:root/)?")
+_MISSING_JS = re.compile(r"no file in this build is at (.+?)\. Write that file")
+_MISSING_ALIAS = re.compile(r"imports `([^`]+)`, and no file in this build matches it \(`([^`]+)` points at ([^)]*?)/?\)")
+_MISSING_PY = re.compile(r"no module (?:in this build )?is at (\S+?\.py)")
+_PACKAGE = re.compile(r"`(@?[\w.\-]+(?:/[\w.\-]+)?)`")
+#: A charter violation names its file first: "`backend/x.js` — uses …".
+_STACK_PATH = re.compile(r"^\s*`([^`]+)`")
+
+
+@dataclass
+class Scope:
+    #: path -> what is shown under it: its own problems, then those of the files that
+    #: name it (each keeps the importer's path, so the model reads whose import it is).
+    touch: dict[str, list[Problem]] = field(default_factory=dict)
+    #: path -> why it is written new: the problems of the files that import it.
+    new: dict[str, list[Problem]] = field(default_factory=dict)
+    #: (importer, exporter): edited in one call when both fit.
+    pairs: list[tuple[str, str]] = field(default_factory=list)
+    #: Problems no file could be found for, as they came.
+    unlocated: list[dict] = field(default_factory=list)
+    #: A planned file never written that the build has under another path: nothing to
+    #: write, and said so rather than dropped.
+    settled: list[str] = field(default_factory=list)
+
+    def paths(self) -> list[str]:
+        """The files to edit, exporters first: a file another one imports is fixed
+        before the importer's call, so that call is shown its real exports."""
+        named = {b for _a, b in self.pairs}
+        return sorted(self.touch, key=lambda p: (p not in named,))
+
+
+def stack_path(note: str) -> Optional[str]:
+    """The file a stack-charter violation is about, when it names one."""
+    found = _STACK_PATH.match(str(note or ""))
+    return layout.clean(found.group(1)) if found else None
+
+
+def find(target: str, tree: Iterable[str]) -> Optional[str]:
+    """The file a module path resolves to — `backend/services/todo` -> `…/todo.js`."""
+    paths = set(tree)
+    stem = layout.clean(target)
+    for ext in _EXTENSIONS:
+        if f"{stem}{ext}" in paths:
+            return f"{stem}{ext}"
+    for index in _INDEX:
+        if f"{stem}{index}" in paths:
+            return f"{stem}{index}"
+    return None
+
+
+def _stem(path: str) -> str:
+    base = path.rsplit("/", 1)[-1]
+    if base in ("index.js", "index.jsx", "index.ts", "index.tsx", "__init__.py") and "/" in path:
+        base = path.rsplit("/", 2)[-2]
+    return base.split(".", 1)[0].lower()
+
+
+def same_named(target: str, tree: Iterable[str]) -> list[str]:
+    """Files anywhere on the same side of the build with the name `target` asks for,
+    with or without its extension — the file an import one folder off meant."""
+    side = layout.side_of(target)
+    want = _stem(target)
+    return sorted(
+        p for p in tree
+        if layout.side_of(p) == side and _stem(p) == want and not platform_owned(p)
+    )
+
+
+def _module_of(importer: str, spec: str, tree: set[str]) -> Optional[str]:
+    """The file `importer` means by `spec`, as TypeScript printed it."""
+    if spec.startswith("."):
+        return find(layout.join(posixpath.dirname(importer), spec), tree)
+    if spec.startswith(("@/", "~/")):
+        # An alias: whichever file on the importer's side ends in the rest of it.
+        rest = layout.clean(spec[2:])
+        side = layout.side_of(importer)
+        hits = [
+            p for p in tree
+            if layout.side_of(p) == side and posixpath.splitext(p)[0].endswith(("/" + rest, "/" + rest + "/index"))
+        ]
+        return hits[0] if len(hits) == 1 else None
+    # The build's own path, when the checker couldn't say how the file wrote it — on
+    # records from before #101, still under the checker's in-memory root.
+    return find(_VIRTUAL.sub("", spec), tree)
+
+
+def _missing(problem: dict) -> Optional[str]:
+    """The path an import of a file that doesn't exist points at."""
+    message = str(problem.get("message") or "")
+    found = _MISSING_JS.search(message)
+    if found:
+        return layout.clean(found.group(1))
+    found = _MISSING_ALIAS.search(message)
+    if found:
+        spec, prefix, roots = found.groups()
+        root = roots.split(",")[0].strip()
+        return layout.join(root, spec[len(prefix):]) if root and root != "." else None
+    found = _MISSING_PY.search(message)
+    return layout.clean(found.group(1)) if found else None
+
+
+def _importers_of(name: str, own: dict[str, str]) -> list[str]:
+    """This phase's files that import the package `name`."""
+    out = []
+    for path, code in own.items():
+        if path.endswith(".py"):
+            if any((module or "").split(".")[0] == name for module, level in py_imports(code) if not level):
+                out.append(path)
+        elif any(pkg.npm_package(spec) == name for spec in js_imports(code)):
+            out.append(path)
+    return out
+
+
+def _as_problem(p: dict, path: str) -> Problem:
+    line = p.get("line")
+    return Problem(path, str(p.get("message") or "has a problem"), str(p.get("kind") or "build"),
+                   int(line) if isinstance(line, int) or str(line or "").isdigit() else None)
+
+
+def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) -> Scope:
+    """What a fix round edits. `problems` are `{path, line, kind, message, step}` as the
+    compile gate and the real build report them; `own` is this phase's files (placed
+    path -> code); `tree` every path the build has, scaffold included."""
+    everything = set(tree) | set(own)
+    out = Scope()
+
+    def touch(path: str, problem: Problem) -> None:
+        shown = out.touch.setdefault(path, [])
+        if problem not in shown:
+            shown.append(problem)
+
+    for p in problems:
+        path = layout.clean(str(p.get("path") or ""))
+        kind = str(p.get("kind") or "")
+        if kind == "stack" and not path:
+            path = stack_path(str(p.get("message") or "")) or ""
+        if path and path in own:
+            problem = _as_problem(p, path)
+            target = _missing(p)
+            others = [o for o in same_named(target, everything) if o != path] if target else []
+            if others:
+                # The file exists, one folder off: the importer's path is what's wrong.
+                problem = Problem(problem.path, f"{problem.message} (This build has {', '.join(f'`{o}`' for o in others[:3])}.)",
+                                  problem.kind, problem.line)
+            elif target:
+                # Nothing of that name anywhere: the file the import wants is written.
+                new = target if posixpath.splitext(target)[1] else target + posixpath.splitext(path)[1]
+                out.new.setdefault(new, []).append(problem)
+            touch(path, problem)
+            # The file the problem names, decided in the same call when it fits.
+            module = next(iter(_MODULE.findall(str(p.get("message") or ""))), None)
+            exporter = _module_of(path, module, everything) if module else None
+            if exporter and exporter != path and exporter in own:
+                touch(exporter, problem)
+                if (path, exporter) not in out.pairs:
+                    out.pairs.append((path, exporter))
+            continue
+        if path and kind == "missing" and not platform_owned(path):
+            # Planned and never written: written now, unless it exists under another name.
+            others = same_named(path, everything)
+            if others:
+                out.settled.append(f"{path} was planned, and the build has it as {others[0]}")
+            else:
+                out.new.setdefault(path, []).append(_as_problem(p, path))
+            continue
+        if path and platform_owned(path) and kind == "package":
+            # A package that won't install is the platform's manifest's problem only in
+            # name: the files that import it are what change.
+            name = next(iter(_PACKAGE.findall(str(p.get("message") or ""))), None)
+            users = _importers_of(name, own) if name else []
+            for user in users:
+                touch(user, _as_problem(p, user))
+            if users:
+                continue
+        # Last: a file of this phase the message mentions by path.
+        message = str(p.get("message") or "")
+        named = [f for f in own if f in message or layout.relative_to_side(f) in message]
+        if named:
+            for f in named:
+                touch(f, _as_problem(p, f))
+            continue
+        out.unlocated.append(dict(p))
+    # A file written new is not also an edit.
+    for path in list(out.new):
+        if path in own:
+            for problem in out.new.pop(path):
+                touch(path, problem)
+    return out
+
+
+def named(path: str, message: str, tree: Iterable[str]) -> Optional[str]:
+    """The file of `tree` a problem in `path` names as the module it imports from."""
+    module = next(iter(_MODULE.findall(message or "")), None)
+    return _module_of(path, module, set(tree)) if module else None
+
+
+def imports_of(path: str, code: str, own: Iterable[str]) -> list[str]:
+    """The files of `own` that `path` imports by a relative path — whose code a fix
+    call shows beside it, where it fits."""
+    paths = set(own)
+    here = posixpath.dirname(path)
+    found: list[str] = []
+    if path.endswith(".py"):
+        for module, level in py_imports(code):
+            if not level:
+                continue
+            base = here
+            for _ in range(level - 1):
+                base = posixpath.dirname(base)
+            target = find(layout.join(base, *(module or "").split(".")), paths) if module else None
+            if target and target != path and target not in found:
+                found.append(target)
+        return found
+    for spec in js_imports(code):
+        if spec.startswith("."):
+            target = find(layout.join(here, spec), paths)
+            if target and target != path and target not in found:
+                found.append(target)
+    return found
+
+
+__all__ = ["Scope", "find", "imports_of", "named", "same_named", "scope", "stack_path"]

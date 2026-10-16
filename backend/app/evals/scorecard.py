@@ -44,6 +44,12 @@ and, since #76, what running QA's tests measured — never the model's own estim
   tests_passed_pct      passed / tests that ran, across every suite; None if none ran
   coverage_lines_pct    line coverage the runner measured (the lowest suite's, when
                         there are two); None when nothing measured it
+
+and, since #103, whether the crew's fix rounds on code converge:
+
+  fix_rounds            code fix rounds the build took, across every phase
+  fix_trend             per code phase: the problems before the first round, then
+                        after each one — 3 → 6 → 4 is a loop that isn't converging
 """
 
 from __future__ import annotations
@@ -192,7 +198,38 @@ def score(db: Session, project: Project) -> dict:
         ),
         **generation(db, project, phases, code_paths, check),
         **tests(phases),
+        **fix_rounds(project),
     }
+
+
+def fix_rounds(project: Project) -> dict:
+    """How many code fix rounds the build took, and the problems left after each (#103).
+
+    A round's problems are every problem the attempt before it had, so round n+1's are
+    what round n left. After the last: what it stopped on, what a person accepted, or
+    none once the phase came back clean."""
+    from app.orchestration import autofix
+
+    data = autofix.load(project)
+    trend: dict[str, list] = {}
+    total = 0
+    for name, t in data["tracks"].items():
+        rounds = t.get("rounds") or []
+        if not name.startswith(autofix.BUILD_PREFIX) or not rounds:
+            continue
+        total += len(rounds)
+        counts: list = [len(r.get("problems") or []) for r in rounds]
+        last = rounds[-1]
+        if last.get("after") is not None:
+            counts.append(int(last["after"]))
+        elif t.get("stopped"):
+            counts.append(int(t["stopped"].get("left") or 0))
+        elif t.get("accepted"):
+            counts.append(len(t["accepted"].get("keys") or []))
+        elif last.get("fixed") is not None:
+            counts.append(0)
+        trend[name[len(autofix.BUILD_PREFIX):]] = counts
+    return {"fix_rounds": total, "fix_trend": trend}
 
 
 def tests(phases: list) -> dict:
