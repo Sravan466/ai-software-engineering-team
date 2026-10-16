@@ -528,10 +528,13 @@ STRATEGY_WITH_CODE = "with_code"  # + the code it is about, and "the last try fa
 STRATEGY_STRONGER = "stronger_model"  # + the most capable model the router has
 
 
-def strategy_for(round_number: int) -> str:
+def strategy_for(round_number: int, stronger: bool = True) -> str:
+    """The approach for this round of an episode. `stronger`: whether the router can
+    reach a more capable model than the one the round would use (#103) — without one, a
+    third round is another round on the code, and is called that."""
     if round_number <= 1:
         return STRATEGY_GUIDED
-    if round_number == 2:
+    if round_number == 2 or not stronger:
         return STRATEGY_WITH_CODE
     return STRATEGY_STRONGER
 
@@ -696,10 +699,9 @@ def fix_instruction(
             "its rule no longer matches there, not when the code looks different."
         )
     if strategy == STRATEGY_STRONGER:
-        retry += (
-            " This is the last automatic round. Rewrite the affected code properly rather "
-            "than patching around it — whatever the earlier rounds kept is what did not work."
-        )
+        # On a stronger model; never "rewrite it" (#103) — bigger rewrites are what break
+        # a small model's wiring, and a stronger one doesn't need telling.
+        retry += " This is the last automatic round."
     guidance = ""
     if procedures:
         from app.skills.loader import render

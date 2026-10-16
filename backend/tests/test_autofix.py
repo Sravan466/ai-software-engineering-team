@@ -136,8 +136,13 @@ def test_a_model_that_forgets_a_finding_cannot_close_it(client, monkeypatch):
     assert client.post(f"/api/projects/{pid}/approve").status_code == 409
 
 
-def test_the_loop_stops_at_its_round_limit(client, monkeypatch):
-    """Progress every round, but never all the way: bounded all the same."""
+@pytest.mark.parametrize("stronger", [None, "ollama:a-bigger-model"])
+def test_the_loop_stops_at_its_round_limit(client, monkeypatch, stronger):
+    """Progress every round, but never all the way: bounded all the same. Round three is
+    on a stronger model only when there is one to reach (#103)."""
+    from app.router.router import ModelRouter
+
+    monkeypatch.setattr(ModelRouter, "strongest_for", lambda self, *a, **k: stronger)
     monkeypatch.setattr(settings, "auto_fix_max_rounds", 3)
     many = [dict(SECRET, line=3 + 10 * i) for i in range(5)]
     # Each rescan reports one fewer; five findings, three rounds.
@@ -145,7 +150,8 @@ def test_the_loop_stops_at_its_round_limit(client, monkeypatch):
     project = client.get(f"/api/projects/{pid}").json()
 
     track = project["auto_fix"]["tracks"]["security"]
-    assert [r["strategy"] for r in track["rounds"]] == ["guided", "with_code", "stronger_model"]
+    third = "stronger_model" if stronger else "with_code"
+    assert [r["strategy"] for r in track["rounds"]] == ["guided", "with_code", third]
     assert [len(r["fixed"]) for r in track["rounds"]] == [1, 1, 1]
     assert track["stopped"]["reason"] == "limit"
     assert project["gate_kind"] == "needs_help"
@@ -401,3 +407,16 @@ def test_a_standing_security_note_survives_every_compile_round():
     note = PipelineRunner._standing_fix_note(data, "backend_engineer")
     assert "MongoDB" in note
     assert "MongoDB" in autofix.code_note([{"key": "k", "title": "x", "kind": "build"}], 2, None, note)
+
+
+def test_the_person_s_note_goes_to_the_security_round_and_never_becomes_the_standing_note(client, monkeypatch):
+    """#103: a note for the next round rides that round's asks; the notes kept with the
+    round are what later compile and test fixes carry, so it isn't in them."""
+    pid, crew, _ = _build(client, monkeypatch, [[SECRET]])
+    r = client.post(f"/api/projects/{pid}/auto-fix/retry", json={"rounds": 1, "note": "Read it from process.env"})
+    assert r.status_code == 200
+    track = client.get(f"/api/projects/{pid}").json()["auto_fix"]["tracks"]["security"]
+    last = track["rounds"][-1]
+    assert last["note"] == "Read it from process.env"
+    assert all("The person says" not in n for n in (last.get("notes") or {}).values())
+    assert any("The person says: Read it from process.env" in n for n in _fix_notes(crew, "Backend Engineer"))

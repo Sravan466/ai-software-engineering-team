@@ -446,6 +446,17 @@ export type AutoFixRound = {
   nothing_sent?: boolean;
   /** Which episode of the track it belongs to (#103). */
   episode?: number;
+  /** What the round ran on, and why (#103): `escalated` — the strongest model the
+   * router could reach; `asked` — the person chose it for this fix; `asked_unreached`
+   * — they did, and it didn't answer, so the usual model ran; `escalated_unreached` —
+   * the stronger model didn't answer. */
+  model?: string | null;
+  basis?: string | null;
+  /** What the person told the crew to try for this round, in their words (#103), and
+   * false when no model saw it (no room beside the code, or no call), "partly" when
+   * only some of the round's calls carried it. */
+  note?: string;
+  note_sent?: boolean | "partly";
   /** What the platform mended itself, without a model (#103): on the attempt this round
    * made, and — on an episode's first round — on the attempt before it. */
   platform?: PlatformFixed;
@@ -481,6 +492,12 @@ export type AutoFixTrack = {
     /** What is left, new problems included (#103). */
     problems?: AutoFixProblem[];
     kept_best?: (KeptBest & { from?: string }) | null;
+    /** What would help (#103): the strongest model the build can reach (none: nothing
+     * stronger), and a cloud model it could use for one fix with the person's yes. */
+    stronger?: string | null;
+    cloud?: string | null;
+    /** Nothing stronger to reach and no cloud key at all: adding a model would help. */
+    add_model?: boolean;
   } | null;
   accepted: { kind: WaiveKind; reason: string; at: string } | null;
   resumed_after: number;
@@ -1325,10 +1342,10 @@ export const api = {
     ),
 
   // ── When the crew asked for help ──
-  keepTrying: (id: string, rounds?: number) =>
+  keepTrying: (id: string, ask: { rounds?: number; note?: string; model?: string } = {}) =>
     req<RunResponse>(`/api/projects/${id}/auto-fix/retry`, {
       method: "POST",
-      body: JSON.stringify(rounds ? { rounds } : {}),
+      body: JSON.stringify(ask),
     }),
   waiveTests: (id: string, kind: WaiveKind, reason: string) =>
     req<{ waived: number; kind: WaiveKind; reason: string }>(`/api/projects/${id}/tests/waive`, {

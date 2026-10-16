@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   api,
   type AutoFixProblem,
@@ -28,7 +29,7 @@ import { ReasonKinds } from "./ReasonKinds";
  *   FixingPanel — while the loop runs: which round, who is on which file, and where
  *                 each problem is on its way from queued to fixed.
  *   NeedsHelp   — when the loop stopped with something still wrong: what every round
- *                 tried, what is left, Keep trying first. Waiving is the exception,
+ *                 tried, what is left, Try again first. Waiving is the exception,
  *                 behind More, with a reason kind on the record.
  */
 
@@ -37,15 +38,23 @@ const ORDER = PHASES.map((p) => p.key);
 const STRATEGY: Record<AutoFixRound["strategy"], string> = {
   guided: "The findings, plus advice from the skills library",
   with_code: "The code, plus a note that the last try failed",
-  stronger_model: "A full rewrite on the strongest model available",
+  stronger_model: "The code, on the strongest model it can reach",
 };
 
 /** A code round starts from the errors, not from a reviewer's advice. */
 const CODE_STRATEGY: Record<AutoFixRound["strategy"], string> = {
   guided: "The errors, named file by file",
   with_code: "The broken code, plus a note that the last try failed",
-  stronger_model: "A full rewrite on the strongest model available",
+  stronger_model: "The broken code, on the strongest model it can reach",
 };
+
+/** `anthropic:claude-x` → `claude-x`: the model, without where it runs. */
+function modelName(model: string): string {
+  return model.includes(":") ? model.slice(model.indexOf(":") + 1) : model;
+}
+
+/** Who a cloud model's provider is, in a sentence. */
+const PROVIDERS: Record<string, string> = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google" };
 
 /**
  * A tests round (#76) is about who is asked: the engineer whose code a test checks,
@@ -59,12 +68,19 @@ function testApproach(strategy: AutoFixRound["strategy"], round?: AutoFixRound):
       ? "The owners fix the code; QA decides on the rest"
       : "QA decides whether the test or the code is wrong"
     : "The owner fixes the code; the same tests run again";
-  return strategy === "stronger_model" ? `${who}, on the strongest model available` : who;
+  return strategy === "stronger_model" ? `${who}, on the strongest model it can reach` : who;
 }
 
+/**
+ * What a round tried, by what ran (#103): a round the person sent to a model of their
+ * choosing says so, and a stronger round names the model it ran on.
+ */
 export function approach(track: string, strategy: AutoFixRound["strategy"], round?: AutoFixRound): string {
-  if (track === "tests") return testApproach(strategy, round);
-  return (track === "security" ? STRATEGY : CODE_STRATEGY)[strategy];
+  const base = track === "tests" ? testApproach(strategy, round) : (track === "security" ? STRATEGY : CODE_STRATEGY)[strategy];
+  if (round?.basis === "asked") return `${base.split(",")[0]}, on the model you chose for this fix`;
+  if (round?.basis === "asked_unreached") return `${base.split(",")[0]}. The model you chose couldn't be reached`;
+  if (round?.basis === "escalated_unreached") return `${base.split(",")[0]}. The stronger model couldn't be reached`;
+  return base;
 }
 
 
@@ -178,13 +194,6 @@ function ProblemTitle({ title }: { title: string }) {
       {rest.length > 0 && <pre className="fix-item-tail mono">{rest.join("\n")}</pre>}
     </>
   );
-}
-
-function trackLabel(name: string): string {
-  if (name === "security") return "security findings";
-  if (name === "tests") return "the failing tests";
-  const phase = name.replace(/^build:/, "");
-  return `${AGENT_BY_KEY[phase]?.codename ?? phase}'s code`;
 }
 
 /** Where one problem is, read from where the run is. */
@@ -385,8 +394,17 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
             <div className="ledger-body">
               <span className="ledger-what">
                 Sent {sent} to {who}
+                {/* The model's own name as it answered — tags like `:7b` are part of it. */}
+                {r.model && <span className="ledger-model mono"> on {r.model}</span>}
               </span>
               <span className="ledger-how">{approach(name, r.strategy, r)}</span>
+              {r.note && (
+                <span className="ledger-note">
+                  You said: “{r.note}”
+                  {r.note_sent === false && " The model didn't see it: there was no room beside the code."}
+                  {r.note_sent === "partly" && " Only some of this round's calls had room for it."}
+                </span>
+              )}
             </div>
             <span
               className={`badge${result.tone === "plain" ? "" : ` badge-${result.tone}`}`}
@@ -402,6 +420,112 @@ function RoundLedger({ name, track }: { name: string; track: AutoFixTrack }) {
 }
 
 // ── when the loop stopped ────────────────────────────────────────────────────
+/** Who a track's problems belong to, in a person's words. */
+type Side = { name: string; plural?: boolean };
+const SIDE: Record<string, Side> = {
+  backend_engineer: { name: "the backend" },
+  frontend_engineer: { name: "the website" },
+  qa_engineer: { name: "the tests", plural: true },
+};
+
+function sideOf(name: string): Side {
+  const phase = name.replace(/^build:/, "");
+  return SIDE[phase] ?? { name: `${AGENT_BY_KEY[phase]?.codename ?? phase}'s work` };
+}
+
+/** "the backend's", "the tests'". */
+function whose(side: Side): string {
+  return side.name.endsWith("s") ? `${side.name}'` : `${side.name}'s`;
+}
+
+/** What is left on a stopped track (#103), new problems included; older records only
+ * kept what the last round was sent, less what it fixed. */
+function leftOf(track: AutoFixTrack): AutoFixProblem[] {
+  const last = track.rounds[track.rounds.length - 1];
+  return track.stopped?.problems ?? (last ? last.problems.filter((p) => (last.remaining ?? []).includes(p.key)) : []);
+}
+
+function capital(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** Wiring: one file disagreeing with another about a name, a default, or a path. */
+const WIRING = /no exported member|no default export|has no exported|imports `?\.|no file in this build|never imported or declared|declares .* locally/i;
+
+/**
+ * The headline a person reads first (#103): what is wrong, in product terms, from
+ * the kinds of problem left. The compiler's own words are under "Details for
+ * developers".
+ */
+function headline(name: string, t: AutoFixTrack): string {
+  if (name === "security") return "A security problem is still open.";
+  if (name === "tests") return "Some of the app's tests fail.";
+  const side = sideOf(name);
+  const { plural } = side;
+  const kinds = leftOf(t).map((p): string => {
+    if (p.kind === "stack") return "stack";
+    if (p.problem === "weak_test") return "weak";
+    if (p.problem === "placeholder") return "unfinished";
+    if (p.step === "vercel") return "vercel";
+    if (p.step === "install") return "install";
+    if (p.step === "build" || p.step === "boot") return "start";
+    if (/does not parse/i.test(p.title)) return "parse";
+    if (/not a package the platform can install|is not a package on npm/i.test(p.title)) return "install";
+    if (WIRING.test(p.title)) return "wiring";
+    return "other";
+  });
+  const counts = new Map<string, number>();
+  for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1);
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "other";
+  switch (top) {
+    case "wiring":
+      return `${capital(whose(side))} files don't connect to each other yet.`;
+    case "parse":
+      return `Some of ${whose(side)} code can't run as written.`;
+    case "unfinished":
+      return plural ? `Some of ${side.name} aren't finished.` : `Part of ${side.name} isn't finished.`;
+    case "weak":
+      return "Some tests don't check anything yet.";
+    case "install":
+      return `${capital(side.name)} ${plural ? "use" : "uses"} a package that can't be installed.`;
+    case "stack":
+      return plural
+        ? `Some of ${side.name} use a different setup from the plan.`
+        : `Part of ${side.name} uses a different setup from the plan.`;
+    case "start":
+      return plural ? `${capital(side.name)} don't run yet.` : `${capital(side.name)} doesn't start yet.`;
+    case "vercel":
+      return "The website didn't build on Vercel.";
+    default:
+      return `${capital(side.name)} ${plural ? "have" : "has"} problems the crew couldn't fix.`;
+  }
+}
+
+/** The compiler's own words, for whoever wants them (#103). */
+function Details({ track }: { track: AutoFixTrack }) {
+  const [open, setOpen] = useState(false);
+  if (leftOf(track).length === 0) return null;
+  return (
+    <div className="help-details">
+      <button
+        className="btn btn-sm btn-ghost"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="help-more-chev" data-open={open || undefined} aria-hidden="true">
+          {Icon.chevron}
+        </span>
+        Details for developers
+      </button>
+      {open && (
+        <div className="help-details-body">
+          <CodeLeft track={track} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function NeedsHelp({
   project,
   id,
@@ -416,7 +540,8 @@ export function NeedsHelp({
   const stuck = trackEntries(project).filter(([, t]) => t.stopped && !t.accepted);
   const security = stuck.find(([name]) => name === "security");
   const code = stuck.filter(([name]) => name !== "security");
-  const [more, setMore] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const [note, setNote] = useState("");
   const [kind, setKind] = useState<WaiveKind | null>(null);
   const [reason, setReason] = useState("");
   const [tick, setTick] = useState(0);
@@ -425,13 +550,24 @@ export function NeedsHelp({
   // After every serious finding has been waived there is nothing left to try, so the
   // main action becomes carrying on — same request, honest label.
   const nothingToFix = code.length === 0 && securityLeft === 0;
+  // What would help (#103): a cloud model for one fix, with the person's yes; or, with
+  // nothing stronger to reach, a bigger model added in Settings.
+  const codeTracks = code.filter(([name]) => name.startsWith("build:"));
+  const cloud = codeTracks.map(([, t]) => t.stopped?.cloud).find((m): m is string => Boolean(m)) ?? null;
+  // Whose code goes to the cloud: every stuck side it was offered for.
+  const cloudSides = codeTracks.filter(([, t]) => cloud && t.stopped?.cloud === cloud).map(([name]) => sideOf(name));
+  // Only when the record says adding a model is what would help: nothing stronger to
+  // reach and no cloud key at all. A build stopped before this was recorded says nothing.
+  const nothingStronger = !cloud && codeTracks.some(([, t]) => t.stopped?.add_model === true);
+  const retry = (model?: string) =>
+    act(() => api.keepTrying(id, { note: note.trim() || undefined, model }));
 
   return (
     <div className="help">
       {stuck.map(([name, t]) => (
         <div key={name} className="help-track">
           <h3 className="help-title">
-            What the crew tried on {trackLabel(name)}
+            {headline(name, t)}
             <span className="field-hint">{stoppedHint(t)}</span>
           </h3>
           <Trend points={trendOf(name, t)} kept={t.stopped?.kept_best} />
@@ -447,7 +583,7 @@ export function NeedsHelp({
             </p>
           )}
           <RoundLedger name={name} track={t} />
-          {name !== "security" && <CodeLeft track={t} />}
+          {name !== "security" && <Details track={t} />}
         </div>
       ))}
 
@@ -463,24 +599,56 @@ export function NeedsHelp({
             busy={busy}
             act={act}
             scope="serious"
-            allowWaive={more}
+            allowWaive={advanced}
             onChange={() => setTick((n) => n + 1)}
             onCount={setSecurityLeft}
           />
         </div>
       )}
 
+      {nothingStronger && (
+        <p className="fix-kept help-model">
+          {Icon.info}
+          <span>
+            Bigger models fix this kind of problem more often. Add a cloud key or a bigger local model
+            in <Link href="/settings">Settings</Link>.
+          </span>
+        </p>
+      )}
+
       <div className="decision-act">
+        {!nothingToFix && (
+          <div className="field help-note">
+            <label htmlFor="help-note">
+              Tell the crew what to try <span className="field-hint">(optional)</span>
+            </label>
+            <textarea
+              id="help-note"
+              className="textarea"
+              rows={2}
+              maxLength={2000}
+              placeholder="For example, keep all the routes in one file"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+            />
+          </div>
+        )}
         <div className="decision-approve">
-          <button
-            className="btn btn-lg btn-accent"
-            disabled={busy}
-            onClick={() => act(() => api.keepTrying(id))}
-          >
+          <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>
             {busy && <span className="btn-spinner" aria-hidden="true" />}
             {nothingToFix ? Icon.arrowRight : Icon.rotate}
-            {nothingToFix ? "Continue the build" : "Keep trying"}
+            {nothingToFix ? "Continue the build" : "Try again"}
           </button>
+          {cloud && (
+            <button className="btn btn-lg btn-ghost" disabled={busy} onClick={() => retry(cloud)}>
+              {Icon.sparkle} Use {modelName(cloud)} for this fix
+            </button>
+          )}
+          {nothingStronger && (
+            <Link className="btn btn-lg btn-ghost" href="/settings">
+              {Icon.plus} Add a model
+            </Link>
+          )}
           <button
             className="btn btn-lg btn-danger"
             disabled={busy}
@@ -491,23 +659,29 @@ export function NeedsHelp({
           <span className="field-hint">
             {nothingToFix
               ? "Every serious finding is waived, so the build can go on."
-              : "Keep trying gives the crew up to two more rounds."}
+              : "Try again gives the crew up to 2 more rounds."}
+            {cloud && cloudSides.length > 0 && (
+              <>
+                {" "}Using {modelName(cloud)} sends {cloudSides.map(whose).join(" and ")} code to{" "}
+                {PROVIDERS[cloud.split(":")[0]] ?? cloud.split(":")[0]}, for this round only.
+              </>
+            )}
           </span>
         </div>
 
         <div className="help-more">
           <button
             className="btn btn-sm btn-ghost"
-            aria-expanded={more}
+            aria-expanded={advanced}
             aria-controls="help-more-body"
-            onClick={() => setMore((v) => !v)}
+            onClick={() => setAdvanced((v) => !v)}
           >
-            <span className="help-more-chev" data-open={more || undefined} aria-hidden="true">
+            <span className="help-more-chev" data-open={advanced || undefined} aria-hidden="true">
               {Icon.chevron}
             </span>
-            More
+            Advanced: continue with these problems
           </button>
-          {more && (
+          {advanced && (
             <div id="help-more-body" className="help-more-body">
               {security && (
                 <p className="field-hint">
@@ -551,10 +725,7 @@ function stoppedHint(t: AutoFixTrack): string {
 }
 
 function CodeLeft({ track }: { track: AutoFixTrack }) {
-  const last = track.rounds[track.rounds.length - 1];
-  // What is left, new problems included (#103); older records only kept what was sent.
-  const left = track.stopped?.problems
-    ?? (last ? last.problems.filter((p) => (last.remaining ?? []).includes(p.key)) : []);
+  const left = leftOf(track);
   if (left.length === 0) return null;
   return (
     <ul className="fix-list">

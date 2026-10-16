@@ -56,7 +56,7 @@ import { ChangeDiff, DiscardChange, planSentence } from "./Changes";
  *              first; failing tests ship only with a waiver and its reason.
  *   phase    — a single handoff, for anyone who kept the every-phase rhythm.
  *   needs_help — the crew could not fix a serious problem by itself. Not a judgement
- *              call: Keep trying or Stop, with waiving as the exception.
+ *              call: Try again or Stop, with waiving as the exception.
  *   database — Atlas picked a database that needs credentials: paste them, or carry
  *              on and add them later. Its own card, in `DatabaseConnect`.
  *
@@ -119,10 +119,8 @@ const HEAD: Record<GateKind, { title: string; blurb: string; approve: string; af
   },
   needs_help: {
     title: "The crew needs a hand",
-    blurb:
-      "Something serious is still wrong after the crew's fix rounds. Here's what " +
-      "each round tried and what's left.",
-    approve: "Keep trying",
+    blurb: "The crew's fix rounds didn't get the build working.",
+    approve: "Try again",
     after: "",
   },
   integrations: {

@@ -1011,8 +1011,25 @@ def keep_trying(
     _require_needs_help(project, "retry")
     _require_models(project)
     more = (payload.rounds if payload and payload.rounds else None) or settings.auto_fix_retry_rounds
+    note = (payload.note or "").strip() if payload else ""
+    if note:
+        # The person's words reach a model: never a key they pasted by mistake.
+        _refuse_credentials(note, project)
     data = autofix.load(project)
-    names = autofix.keep_trying(data, more)
+    model = payload.model if payload else None
+    if model:
+        offered = [n for n in autofix.stuck(data) if (data["tracks"][n].get("stopped") or {}).get("cloud") == model]
+        if not offered:
+            raise HTTPException(400, "That model isn't one offered for this fix.")
+        # Still so now, not only when the loop stopped (#103): the key works, and the
+        # build's routing is still one that asks for a yes before code goes there.
+        if not any(
+            runner._escalation(project, n[len(autofix.BUILD_PREFIX):])["cloud"] == model for n in offered
+        ):
+            raise HTTPException(
+                409, "That model can't be used for this fix any more. Check its key in Settings, then try again."
+            )
+    names = autofix.keep_trying(data, more, note=note or None, model=model)
     token = _claim(db, project, {PipelineStatus.AWAITING_APPROVAL.value})
     if not token:
         raise _conflict(project, "retry")

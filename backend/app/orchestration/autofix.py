@@ -328,13 +328,22 @@ def abandon_open_round(t: dict) -> bool:
     was ever tried."""
     if open_round(t) is None:
         return False
-    t["rounds"].pop()
+    record = t["rounds"].pop()
+    # What the person asked of it (#103) waits for the round that does run.
+    if record.get("note") and not t.get("note"):
+        t["note"] = record["note"]
+    if record.get("asked_model") and not t.get("one_off"):
+        t["one_off"] = record["asked_model"]
     return True
 
 
 def settle(t: dict) -> None:
     """The track's problems are all gone: the next problem is a new episode, with
     its own budget, and its own "did the last round help?"."""
+    # What the person asked for this episode (#103) — a note, a model they agreed to
+    # send its code to — is not a standing order for the next one.
+    t.pop("note", None)
+    t.pop("one_off", None)
     if t.get("episode_start") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
         int(settings.auto_fix_max_rounds), 0
     ):
@@ -351,14 +360,21 @@ def stuck(data: dict) -> list[str]:
     return [name for name, t in data["tracks"].items() if t.get("stopped") and not t.get("accepted")]
 
 
-def keep_trying(data: dict, more: int) -> list[str]:
-    """Give every stuck track `more` rounds, and forget why it stopped."""
+def keep_trying(data: dict, more: int, note: Optional[str] = None, model: Optional[str] = None) -> list[str]:
+    """Give every stuck track `more` rounds, and forget why it stopped. `note` (#103) is
+    what the person told the crew to try, for each track's next round; `model` a model
+    they chose for the next round of each code track it was offered for, once."""
     names = stuck(data)
     for name in names:
         t = data["tracks"][name]
+        offered = (t.get("stopped") or {}).get("cloud")
         t["allowed"] = len(t["rounds"]) + max(int(more), 1)
         t["resumed_after"] = len(t["rounds"])
         t["stopped"] = None
+        if note and note.strip():
+            t["note"] = note.strip()
+        if model and name.startswith(BUILD_PREFIX) and model == offered:
+            t["one_off"] = model
     return names
 
 
@@ -738,12 +754,14 @@ def code_note(
     round_number: int,
     snippets: Optional[dict] = None,
     standing: Optional[str] = None,
+    person: Optional[str] = None,
 ) -> str:
     """The note a phase is re-run with to fix its own compile or stack problems.
 
     `snippets` is the code each problem is about, from the second round on.
     `standing` is a security fix note this phase was already working to: a compile
-    fix that forgot it would bring the finding straight back.
+    fix that forgot it would bring the finding straight back. `person` is what the
+    person told the crew to try (#103), in their words.
     """
     lines = []
     for p in problems:
@@ -764,25 +782,38 @@ def code_note(
         if round_number > 1
         else ""
     )
-    if round_number >= 3:
-        retry += (
-            " This is the last automatic round: rewrite the broken files properly rather "
-            "than patching them."
-        )
     carried = (
         "\n\nThis phase is also in the middle of a security fix. Keep every one of those "
         "fixes while you fix the above:\n\n" + standing
         if standing
         else ""
     )
-    return (
+    return with_person(
         f"{CODE_NOTE_PREFIX}. Fix every one and return the complete deliverable:\n"
         + "\n".join(lines)
         + retry
         + carried
         + "\n\nKeep the stack the architecture froze — the fix is to the code, not to "
-        "the technology choices."
+        "the technology choices.",
+        person,
     )
+
+
+def said_by_person(note: Optional[str]) -> str:
+    """What the person told the crew to try (#103), in one line."""
+    text = " ".join(str(note or "").split())
+    return f"The person says: {text}" if text else ""
+
+
+def with_person(note: str, person: Optional[str]) -> str:
+    """`note` with the person's words on the line after its first (#103): near the top,
+    where clipping a long note to the window never reaches, and after the line the
+    note is recognised by."""
+    said = said_by_person(person)
+    if not said:
+        return note
+    head, sep, rest = note.partition("\n")
+    return f"{head}\n{said}\n\n{rest}" if sep else f"{note}\n\n{said}"
 
 
 __all__ = [
@@ -823,6 +854,8 @@ __all__ = [
     "episode",
     "platform_fixed",
     "said",
+    "said_by_person",
+    "with_person",
     "view",
     "track",
     "trend",
