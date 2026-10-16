@@ -32,11 +32,15 @@ def _clean_boards():
 
 @pytest.fixture
 def calls(monkeypatch, client):
-    """Every model call, answered with a fixed sentence. The thread runs inline."""
+    """The crew's answer calls, answered with a fixed sentence. The thread runs inline.
+
+    Only calls carrying a question are kept: the stub is class-wide, and a run an
+    earlier test left going can call it meanwhile."""
     seen: list[dict] = []
 
     def complete(messages, **kwargs):
-        seen.append({"messages": messages, **kwargs})
+        if "# Their question" in (messages[-1].content if messages else ""):
+            seen.append({"messages": messages, **kwargs})
         return LLMResponse(text="It will: the layout is responsive.", provider="mock", model="mock-model",
                            usage=Usage(prompt_tokens=5, completion_tokens=5, total_tokens=10), latency_ms=1)
 
