@@ -132,7 +132,7 @@ def test_a_note_that_changes_the_backend_edits_it_after_the_frontend_and_the_bui
     assert "qa_engineer" in roles[edit_at:], "the build didn't carry on after the change"
 
     [m] = _thread(client, pid)
-    assert m["change"] == "applied" and "backend_engineer" in m["applied_to"]
+    assert m["change"] == "applied" and m["touched"] == ["backend_engineer"]
     # Kept only for its change: settled with it.
     assert m["status"] == "applied"
     texts = [r["text"] for r in m["replies"]]
@@ -346,3 +346,54 @@ def test_files_changed_reads_fingerprints():
     after = {"files": [{"path": "a.py", "code": "x = 1\n"}, {"path": "b.py", "code": "y = 3\n"}, {"path": "c.py", "code": "z = 0\n"}]}
     assert crew_chat.files_changed(before, after) == ["b.py", "c.py"]
     assert crew_chat.files_changed(before, {"files": [{"path": "a.py", "code": "x = 1\n"}, {"path": "b.py", "code": "y = 2\n"}]}) == []
+
+
+def test_a_cancel_after_the_runner_first_read_the_notes_holds(script, client):
+    """The runner's session already holds the note from its first look; the cancel committed
+    meanwhile must win — the locked re-read is fresh from the database."""
+    from app.orchestration.runner import runner
+
+    pid = _running_frontend(client)
+    mid = _schedule(pid)
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        assert crew_chat.scheduled(db, pid), "the runner's first look"
+        r = client.post(f"/api/projects/{pid}/messages/{mid}/cancel", json={"change": True})
+        assert r.status_code == 200, r.text
+        assert runner._note_change(db, project) is False
+    assert not any(c["edit_plan"] for c in script.calls), "a cancelled change was made anyway"
+    with SessionLocal() as db:
+        assert crew_chat.change_state(db.get(CrewMessage, mid)) == "cancelled"
+
+
+def test_only_the_latest_check_of_a_note_is_written():
+    m = CrewMessage(project_id="p", author="person", text="x", kind="note", status="queued", plan=None)
+    crew_chat.start_check(m)
+    first = m.plan["token"]
+    crew_chat.start_check(m)  # read as a question, then as a note again: a second check
+    assert crew_chat._still_checking(m, m.plan["token"])
+    assert not crew_chat._still_checking(m, first), "the first check's answer would be written too"
+
+
+def test_a_check_still_running_when_the_build_finishes_is_unchecked_not_missed(client):
+    pid = _project(client)
+    with SessionLocal() as db:
+        m = CrewMessage(project_id=pid, author="person", text=NOTE, kind="note", status="queued",
+                        meant_for=["qa_engineer"], plan={"state": "checking", "token": "t"})
+        db.add(m)
+        db.commit()
+        crew_chat.settle_unchanged(db, pid)
+        db.refresh(m)
+        assert crew_chat.change_state(m) == "unchecked"
+        last = db.query(CrewMessage).filter_by(reply_to=m.id).all()[-1].text
+    assert last.startswith("The build finished before I could check this.")
+
+
+def test_a_change_never_marks_the_note_delivered_to_its_phases():
+    m = CrewMessage(project_id="p", author="person", text="x", kind="note", status="queued",
+                    meant_for=["backend_engineer"], applied_to=[], plan={"state": "scheduled"})
+    crew_chat.resolve(m, crew_chat.APPLIED_CHANGE, ["backend_engineer", "qa_engineer"])
+    assert m.applied_to == [], "take_notes would skip the backend and never deliver it"
+    assert m.plan["edit"] == ["backend_engineer", "qa_engineer"] and m.status == "queued"
+    crew_chat.unclaim(m)
+    assert m.plan["state"] == "scheduled" and "edit" not in m.plan and "claimed_at" not in m.plan

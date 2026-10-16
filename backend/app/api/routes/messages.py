@@ -126,13 +126,17 @@ def _note(db: Session, project: Project, asked: CrewMessage, kept: Optional[Kept
         asked.agent = None
         return
     # Some work is done: the planner reads the note against it once the slot is free (PR 3).
-    check = crew_chat.checks_finished_work(db, project, asked.text)
-    text, agent, meant_for = crew_chat.note_reply(project, asked.text, check)
+    rows = crew_chat.rows_of(project)
+    check = crew_chat.checks_finished_work(db, project, asked.text, rows)
+    text, agent, meant_for = crew_chat.note_reply(project, asked.text, check, rows)
     crew_chat.reply(db, asked, text, agent)
     # No phase left to take it and nothing to check: said so, not kept waiting for nobody.
     asked.status = crew_chat.QUEUED if (meant_for or check) else crew_chat.DECLINED
     asked.meant_for = list(meant_for)
-    asked.plan = {"state": crew_chat.CHECKING} if check else None
+    if check:
+        crew_chat.start_check(asked)
+    else:
+        asked.plan = None
     # Who it waits for, as it is read now — a reread's earlier reply named someone else.
     asked.agent = agent
 
@@ -220,7 +224,7 @@ def reread_message(
     db: Session = Depends(get_db),
 ) -> dict:
     """"That was a question" (or a note): read the message the other way, and answer it so."""
-    with crew_chat.lock:
+    with crew_chat.lock_for(project.id):
         return _reread(message_id, payload, background, project, db)
 
 
@@ -262,7 +266,7 @@ def cancel_message(
     """Take a note back while it waits — or, with `change`, only the change it makes to
     finished work, until that starts (#102 PR 3): the note still reaches the phases to come."""
     only_change = bool(payload and payload.change)
-    with crew_chat.lock:
+    with crew_chat.lock_for(project.id):
         asked = db.get(CrewMessage, message_id)
         if asked is None or asked.project_id != project.id or asked.author != crew_chat.PERSON:
             raise HTTPException(404, "There's no such message on this build.")

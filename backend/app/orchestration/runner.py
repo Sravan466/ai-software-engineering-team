@@ -428,12 +428,17 @@ class PipelineRunner:
             held = dict(graph.get_state(_config(project.id)).values).get("change")
         if held and self._live_change(db, held) is not None:
             return False  # a change is under way: these wait for it
-        with crew_chat.lock:
-            # Read, merged and claimed together: a Cancel is either before this or too late.
+        # The finished work, read and fingerprinted before the lock: no other note of this
+        # build waits on the code being hashed.
+        done = crew_chat.finished_rows(db, project)
+        prints = {phase: crew_chat.fingerprint(row.output) for phase, row in done.items()}
+        with crew_chat.lock_for(project.id):
+            # Read, merged and claimed together, fresh from the database — the session's own
+            # copies are from before the lock: a Cancel is either before this or too late.
+            db.expire_all()
             due = crew_chat.scheduled(db, project.id)
             if not due:
                 return False
-            done = crew_chat.finished_rows(db, project)
             plan = changes.merge_plans([m.plan or {} for m in due])
             first = changes.first_phase(plan, set(done))
             if first is None:
@@ -444,7 +449,7 @@ class PipelineRunner:
                 return False
             edit = changes.edit_phases(plan, set(done))
             # Each phase's files as they are now, to say afterwards what the change did.
-            before = {phase: crew_chat.fingerprint(done[phase].output) for phase in edit}
+            before = {phase: prints[phase] for phase in edit if phase in prints}
             for m in due:
                 crew_chat.resolve(m, crew_chat.APPLIED_CHANGE, edit)
                 m.plan = {**(m.plan or {}), "before": before}
@@ -488,13 +493,11 @@ class PipelineRunner:
                 if not landed:
                     # The first edit never landed — a model error, a Stop. Waiting again, it is
                     # made when the build goes on.
-                    with crew_chat.lock:
+                    with crew_chat.lock_for(project.id):
                         for m in due:
                             db.refresh(m)
                             if crew_chat.change_state(m) == crew_chat.APPLIED_CHANGE:
-                                m.plan = {**(m.plan or {}), "state": crew_chat.SCHEDULED_CHANGE}
-                                if m.status == crew_chat.APPLIED and not m.meant_for:
-                                    m.status = crew_chat.QUEUED
+                                crew_chat.unclaim(m)
                                 crew_chat.reply(db, m, "The build stopped before the change was made. It's made when the build goes on.")
                         db.commit()
             except Exception:  # noqa: BLE001 - never mask what the redo raised
@@ -504,29 +507,33 @@ class PipelineRunner:
     def _report_note_change(self, db: Session, project: Project) -> None:
         """Say what a note's change did once each phase it edits has edited (#102): the files
         it changed, or that they came back as they were — a small model's edit can leave
-        them so, and "changing it now" must not be the last word."""
+        them so, and "changing it now" must not be the last word. Read off each phase's own
+        rows — its newest attempt since the claim — never the checkpoint, which a later
+        redo may have cleared."""
         waiting = crew_chat.unreported(db, project.id)
         if not waiting:
             return
-        with _checkpoint_lock(project.id):
-            values = dict(graph.get_state(_config(project.id)).values)
-        held = values.get("change") or {}
-        outputs = values.get("prior_outputs") or {}
-        done = set(held.get("done") or []) if held.get("note") else set()
-        with crew_chat.lock:
+        with crew_chat.lock_for(project.id):
             for m in waiting:
                 db.refresh(m)
-                before = (m.plan or {}).get("before") or {}
-                told = list((m.plan or {}).get("reported") or [])
-                for phase in [p for p in (m.plan or {}).get("edit") or [] if p in done and p not in told]:
-                    changed = crew_chat.files_changed(before.get(phase), outputs.get(phase))
+                plan = m.plan or {}
+                claimed = _aware(datetime.fromisoformat(plan["claimed_at"])) if plan.get("claimed_at") else None
+                told = list(plan.get("reported") or [])
+                for phase in [p for p in plan.get("edit") or [] if p not in told]:
+                    row = self.latest_row(db, project, phase)
+                    made = _aware(getattr(row, "created_at", None))
+                    if row is None or claimed is None or made is None or made < claimed:
+                        continue
+                    if row.status not in (PhaseStatus.APPROVED.value, PhaseStatus.PENDING_APPROVAL.value):
+                        continue  # still at it, or sent back: said once it lands
+                    changed = crew_chat.files_changed((plan.get("before") or {}).get(phase), row.output)
                     if changed:
                         names = ", ".join(f"`{p}`" for p in changed[:4]) + (f" and {len(changed) - 4} more" if len(changed) > 4 else "")
                         crew_chat.reply(db, m, f"{crew_chat.title(phase)} changed {len(changed)} file{'' if len(changed) == 1 else 's'}: {names}.", phase)
                     else:
                         crew_chat.reply(db, m, f"{crew_chat.title(phase)} couldn't make this change: its files came back as they were.", phase)
                     told.append(phase)
-                m.plan = {**(m.plan or {}), "reported": told}
+                m.plan = {**plan, "reported": told}
             db.commit()
 
     # ── the crew fixing its own serious problems ──────────────────────────────
@@ -1426,7 +1433,7 @@ class PipelineRunner:
         if held and held.get("note"):
             # Live until its own edits are done: a later fix round or redo of the same
             # phase is not this note's change, and must not edit with its note again.
-            return None if set(held.get("edit") or []) <= set(held.get("done") or []) else held
+            return None if changes.note_change_over(held) else held
         if not held or not held.get("id"):
             return None
         found = db.get(ChangeRequest, held["id"])

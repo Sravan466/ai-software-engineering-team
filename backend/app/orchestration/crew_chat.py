@@ -599,19 +599,20 @@ def _later_than(m: CrewMessage) -> datetime:
 CHECK_AFTER = "I'll check whether this changes finished work after this step."
 
 
-def note_reply(project: Project, text: str, check: bool = False) -> tuple[str, Optional[str], list[str]]:
+def note_reply(
+    project: Project, text: str, check: bool = False, rows: Optional[dict] = None
+) -> tuple[str, Optional[str], list[str]]:
     """What happens to a note, said plainly; who it's for. A note waits, `queued`.
 
     `check`: some work is finished, and the note is read against it once the generation
     slot is free (`scope_note`) — the reply says so."""
-    said, agent, meant_for = _note_reply(project, text, check)
+    said, agent, meant_for = _note_reply(project, text, check, rows if rows is not None else _rows(project))
     if check and meant_for and CHECK_AFTER not in said:
         said = f"{said} I'll also check whether it changes finished work after this step."
     return said, agent, meant_for
 
 
-def _note_reply(project: Project, text: str, check: bool) -> tuple[str, Optional[str], list[str]]:
-    rows = _rows(project)
+def _note_reply(project: Project, text: str, check: bool, rows: dict) -> tuple[str, Optional[str], list[str]]:
     ahead = not_started(project, rows)
     stopped = project.status in (
         PipelineStatus.CANCELLED.value, PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value
@@ -764,7 +765,7 @@ def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
     from app.db.base import SessionLocal
 
     try:
-        with lock, SessionLocal() as db:
+        with lock_for(project_id), SessionLocal() as db:
             held = _notes(db, project_id)
             since = run_began(db, project_id)
             mine = [m for m in held if for_phase(m, phase) and _this_run(m, since)]
@@ -829,11 +830,21 @@ def standing(m: CrewMessage, since: Optional[datetime]) -> bool:
 CHECKING, SCHEDULED_CHANGE, APPLIED_CHANGE = "checking", "scheduled", "applied"
 NO_CHANGE, CANCELLED_CHANGE, MISSED, UNCHECKED = "none", "cancelled", "missed", "unchecked"
 
-#: Every change of a note's delivery or of its change happens under this: the runner, the
-#: planner's thread and the routes each read a note and write it back, and a Cancel must
-#: never be undone by a write that read the note a moment before. One process, as the
-#: run threads and `activity` assume.
-lock = threading.RLock()
+#: Every change of a build's notes — their delivery or their change — happens under that
+#: build's lock: the runner, the planner's thread and the routes each read a note and write
+#: it back, and a Cancel must never be undone by a write that read the note a moment
+#: before. One per build, so one build's notes never wait on another's. One process, as
+#: the run threads and `activity` assume.
+_locks: dict[str, threading.RLock] = {}
+_locks_guard = threading.Lock()
+
+
+def lock_for(project_id: str) -> threading.RLock:
+    with _locks_guard:
+        found = _locks.get(project_id)
+        if found is None:
+            found = _locks[project_id] = threading.RLock()
+        return found
 
 _FINISHED_ROW = (PhaseStatus.APPROVED.value, PhaseStatus.PENDING_APPROVAL.value)
 #: Where a note can be checked against finished work and changed after the step in hand.
@@ -857,35 +868,29 @@ def finished_rows(db: Session, project: Project) -> dict:
     }
 
 
-def any_finished(db: Session, project: Project) -> bool:
-    """Whether some phase's work is done — statuses only, never the code they wrote."""
-    from sqlalchemy.orm import load_only
-
-    from app.core import artifacts
-    from app.db.models import PhaseResult
-
-    rows = (
-        db.query(PhaseResult)
-        .options(load_only(PhaseResult.id, PhaseResult.phase, PhaseResult.status, PhaseResult.created_at))
-        .filter(PhaseResult.project_id == project.id)
-        .order_by(PhaseResult.created_at)
-        .all()
-    )
-    return any(r.status in _FINISHED_ROW for r in artifacts._current(rows))  # noqa: SLF001
+def rows_of(project: Project) -> dict:
+    """The attempt that counts for each phase — read once per message, passed along."""
+    return _rows(project)
 
 
-def checks_finished_work(db: Session, project: Project, text: str) -> bool:
-    """Whether a note is read against the work already done: some is, the build isn't
-    finished (a change request is how that's changed), no change request is open, and the
-    note isn't addressed to a phase still to come."""
+def checks_finished_work(db: Session, project: Project, text: str, rows: Optional[dict] = None) -> bool:
+    """Whether a note is read against the work already done: some is (with output to read),
+    the build isn't finished (a change request is how that's changed), no change request is
+    open, and a note addressed to one phase names a finished one — the planner reads only
+    finished work, so a note to the phase at work now waits for its next rework instead."""
     from app.orchestration import changes
 
-    if project.status not in _CHECKABLE or not any_finished(db, project):
+    rows = rows if rows is not None else _rows(project)
+    finished = [
+        p for p, r in rows.items()
+        if getattr(r, "status", "") in _FINISHED_ROW and isinstance(getattr(r, "output", None), dict) and r.output
+    ]
+    if project.status not in _CHECKABLE or not finished:
         return False
     if changes.open_change(db, project) is not None:
         return False
     named = addressed_to(text)
-    return not (named and phase_state(project, named) == "not_started")
+    return not named or named in finished
 
 
 def scheduled(db: Session, project_id: str) -> list[CrewMessage]:
@@ -937,13 +942,22 @@ def resolve(m: CrewMessage, state: str, edit: Optional[list] = None) -> None:
     ends with it: made → `applied`, taken back → `cancelled`, anything else → `declined`."""
     plan = {**(m.plan or {}), "state": state}
     if state == APPLIED_CHANGE and edit is not None:
+        # The change's own phases — never `applied_to`, which is the note's delivery: a
+        # phase it changes still takes it as a note, and says so.
         plan["edit"] = list(edit)
         plan["reported"] = []
-        m.applied_to = list(dict.fromkeys([*(m.applied_to or []), *edit]))
-        m.applied_at = now()
+        plan["claimed_at"] = now().isoformat()
     m.plan = plan
     if not m.meant_for and m.status == QUEUED:
         m.status = APPLIED if state == APPLIED_CHANGE else CANCELLED if state == CANCELLED_CHANGE else DECLINED
+
+
+def unclaim(m: CrewMessage) -> None:
+    """Back to waiting: a change whose first edit never landed leaves no trace of the claim."""
+    plan = {k: v for k, v in (m.plan or {}).items() if k not in ("edit", "reported", "claimed_at", "before")}
+    m.plan = {**plan, "state": SCHEDULED_CHANGE}
+    if m.status == APPLIED and not m.meant_for:
+        m.status = QUEUED
 
 
 def unreported(db: Session, project_id: str) -> list[CrewMessage]:
@@ -977,8 +991,17 @@ def files_changed(before: Optional[dict], after: object) -> list[str]:
     return sorted(p for p in set(a) | set(b) if a.get(p) != b.get(p))
 
 
-def _still_checking(m: Optional[CrewMessage]) -> bool:
-    return m is not None and m.kind == NOTE and m.status in _HANDED and change_state(m) == CHECKING
+def _still_checking(m: Optional[CrewMessage], token: object = ...) -> bool:
+    """Still waiting on this check — the one started with `token`, when one is given."""
+    ok = m is not None and m.kind == NOTE and m.status in _HANDED and change_state(m) == CHECKING
+    return ok and (token is ... or (m.plan or {}).get("token") == token)
+
+
+def start_check(m: CrewMessage) -> None:
+    """Mark a note as being checked against finished work, with this check's own token."""
+    import uuid
+
+    m.plan = {"state": CHECKING, "token": uuid.uuid4().hex}
 
 
 def scope_note(project_id: str, message_id: str) -> None:
@@ -995,12 +1018,15 @@ def scope_note(project_id: str, message_id: str) -> None:
     from app.orchestration.runner import runner
     from app.router import inflight
 
+    token: object = ...  # any check, until this one's own is read
     try:
         with SessionLocal() as db:
             project = db.get(Project, project_id)
             asked = db.get(CrewMessage, message_id)
             if project is None or not _still_checking(asked):
                 return
+            # This check's own: a reread that starts another makes this one's answer stale.
+            token = (asked.plan or {}).get("token")
             done = finished_rows(db, project)
             ctx = AgentContext(
                 idea=project.idea,
@@ -1013,9 +1039,9 @@ def scope_note(project_id: str, message_id: str) -> None:
             owner, name, finished = project.owner_id, project.name, set(done)
         if not finished:
             # Nothing finished has any output to read: no planner call for nothing.
-            with lock, SessionLocal() as db:
+            with lock_for(project_id), SessionLocal() as db:
                 asked = db.get(CrewMessage, message_id)
-                if _still_checking(asked):
+                if _still_checking(asked, token):
                     resolve(asked, NO_CHANGE)
                     reply(db, asked, "Checked: it doesn't change finished work." if asked.meant_for else
                           "Checked: it doesn't change finished work, and no agent is left to take it. Once the build is finished, ask for it as a change.")
@@ -1023,11 +1049,11 @@ def scope_note(project_id: str, message_id: str) -> None:
             return
         with identity.acting_as(owner), inflight.building(project_id, name), inflight.agent("Change planner"):
             result = planner.run(ctx)
-        with lock, SessionLocal() as db:
+        with lock_for(project_id), SessionLocal() as db:
             tracker.record(db, response=result.response, project_id=project_id, phase="crew_note_plan", commit=False)
             asked = db.get(CrewMessage, message_id)
             project = db.get(Project, project_id)
-            if project is None or not _still_checking(asked):
+            if project is None or not _still_checking(asked, token):
                 db.commit()
                 return  # taken back, or read as a question, meanwhile
             plan = touched_by(result.output, finished)
@@ -1059,9 +1085,9 @@ def scope_note(project_id: str, message_id: str) -> None:
     except Exception as e:  # noqa: BLE001 - a note must never take anything down
         log.warning("Checking a note against finished work failed for %s: %s", project_id, e)
         try:
-            with lock, SessionLocal() as db:
+            with lock_for(project_id), SessionLocal() as db:
                 asked = db.get(CrewMessage, message_id)
-                if _still_checking(asked):
+                if _still_checking(asked, token):
                     resolve(asked, UNCHECKED)
                     reply(db, asked, f"I couldn't check whether this changes finished work: {_reason(e)}")
                     db.commit()
@@ -1070,15 +1096,20 @@ def scope_note(project_id: str, message_id: str) -> None:
 
 
 def settle_unchanged(db: Session, project_id: str) -> None:
-    """The build finished: a change still waiting for a step that won't come was missed.
-    Under `lock`, so a check that ends after this sees the finished build."""
-    with lock:
+    """The build finished: a change still waiting for a step that won't come was missed, and
+    a check still running never finished. Under the build's lock, so a check that ends after
+    this sees the finished build."""
+    with lock_for(project_id):
         for m in db.execute(
             select(CrewMessage).where(CrewMessage.project_id == project_id, CrewMessage.author == PERSON, CrewMessage.kind == NOTE)
         ).scalars():
-            if change_state(m) in (SCHEDULED_CHANGE, CHECKING):
+            state = change_state(m)
+            if state == SCHEDULED_CHANGE:
                 resolve(m, MISSED)
                 reply(db, m, "The build finished first, so nothing was changed. Ask for this as a change.")
+            elif state == CHECKING:
+                resolve(m, UNCHECKED)
+                reply(db, m, "The build finished before I could check this. If it still matters, ask for it as a change.")
         db.commit()
 
 
@@ -1248,7 +1279,10 @@ __all__ = [
     "checks_finished_work",
     "finished_rows",
     "scheduled",
+    "lock_for",
     "resolve",
+    "rows_of",
+    "start_check",
     "scope_note",
     "unreported",
     "files_changed",

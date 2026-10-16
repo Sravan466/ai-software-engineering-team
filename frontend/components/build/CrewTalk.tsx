@@ -102,6 +102,9 @@ function stateOf(m: CrewMessage): { word: string; tone: "ok" | "run" | "warn" | 
   // What it does to finished work comes first while it's pending; once it's made (or not),
   // the note's delivery says the rest.
   if (m.change === "checking") return { word: "Checking finished work", tone: "run" };
+  if (m.change === "applied" && (m.touched ?? []).length) {
+    return { word: `Changed ${listOf((m.touched ?? []).map(roleOf))}`, tone: "ok" };
+  }
   if (m.change === "scheduled") {
     const who = (m.touched ?? []).map(roleOf);
     return { word: who.length ? `Changes ${listOf(who)} after this step` : "Change after this step", tone: "warn" };

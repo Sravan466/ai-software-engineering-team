@@ -270,9 +270,13 @@ def editing(change: Optional[dict], phase: str) -> bool:
     phases is the build's, not the note's."""
     if not change or phase not in (change.get("edit") or []):
         return False
-    if change.get("note") and set(change.get("edit") or []) <= set(change.get("done") or []):
-        return False
-    return True
+    return not note_change_over(change)
+
+
+def note_change_over(change: Optional[dict]) -> bool:
+    """Whether a change a note made mid-build (#102) has done every edit it was for — the
+    one rule for "it's over", read by `editing` and by `runner._live_change`."""
+    return bool(change and change.get("note")) and set(change.get("edit") or []) <= set(change.get("done") or [])
 
 
 def landed(change: dict, phase: str, output: object) -> dict:
