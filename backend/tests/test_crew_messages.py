@@ -291,6 +291,16 @@ def test_a_note_waits_for_the_agents_that_havent_started(calls, client):
     assert calls == []
 
 
+def test_a_note_on_a_build_stopped_mid_phase_goes_to_that_phase_first(calls, client):
+    pid = _running_backend(client)
+    with SessionLocal() as db:
+        db.get(Project, pid).status = PipelineStatus.CANCELLED.value
+        db.commit()
+    m = _say(client, pid, "use a simpler layout")
+    assert m["replies"][0]["text"] == "Got it. The build is stopped, so Backend Engineer gets this note when it resumes."
+    assert m["meant_for"][:2] == ["backend_engineer", "frontend_engineer"]
+
+
 def test_a_note_for_one_agent_says_so(calls, client):
     pid = _running_backend(client)
     m = _say(client, pid, "frontend: use a purple theme")

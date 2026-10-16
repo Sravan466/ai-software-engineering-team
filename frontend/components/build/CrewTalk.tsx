@@ -178,28 +178,23 @@ export function CrewTalk({
   const count = thread.reduce((n, m) => n + 1 + m.replies.length, 0);
   const newest = thread[thread.length - 1];
 
-  // The conversation opens on its newest line, and follows each new one as it opens its
-  // height — unless the person scrolled up to read, which `pinned` remembers.
+  // The conversation opens on its newest line and keeps to its foot while lines arrive
+  // and open their height — unless the person scrolled up to read, which `pinned`
+  // remembers. Growth is watched, not timed: a row grows for as long as it grows.
   const pinned = useRef(true);
-  const lastCount = useRef(-1);
+  const ours = useRef(false);
   useLayoutEffect(() => {
     const el = list.current;
-    const first = lastCount.current < 0;
-    const grew = count > lastCount.current;
-    lastCount.current = count;
-    if (!el || !grew || !pinned.current) return;
-    el.scrollTop = el.scrollHeight;
-    if (first || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    // A new row grows for about half a second: keep to its foot until it has.
-    const until = performance.now() + 640;
-    let frame = 0;
-    const follow = () => {
-      if (!pinned.current) return;
+    if (!el) return;
+    const stick = () => {
+      if (!pinned.current || el.scrollHeight - el.scrollTop - el.clientHeight < 1) return;
+      ours.current = true;
       el.scrollTop = el.scrollHeight;
-      if (performance.now() < until) frame = requestAnimationFrame(follow);
     };
-    frame = requestAnimationFrame(follow);
-    return () => cancelAnimationFrame(frame);
+    stick();
+    const watch = new ResizeObserver(stick);
+    for (const turn of Array.from(el.children)) watch.observe(turn);
+    return () => watch.disconnect();
   }, [count]);
 
   const asks = text.trim() ? readsAsQuestion(text) : null;
@@ -215,6 +210,7 @@ export function CrewTalk({
           aria-relevant="additions"
           aria-label="Your messages to the crew"
           onScroll={(e) => {
+            if (ours.current) return void (ours.current = false);
             const el = e.currentTarget;
             pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
           }}

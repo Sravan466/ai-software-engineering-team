@@ -588,12 +588,19 @@ def note_reply(project: Project, text: str) -> tuple[str, Optional[str], list[st
             named,
             [named],
         )
+    stopped = project.status in (
+        PipelineStatus.CANCELLED.value, PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value
+    ) or (project.status == PipelineStatus.RUNNING.value and project.stalled)
+    current = project.current_phase
+    if stopped and current in _ORDER and current not in ahead:
+        row = rows.get(current)
+        if row is not None and getattr(row, "status", "") == PhaseStatus.RUNNING.value:
+            # Stopped mid-phase: that phase runs again when the build resumes.
+            ahead = [current, *ahead]
     if not ahead:
         return "Every phase has started, so this note waits with the build until the crew can act on it.", None, []
     first = ahead[0]
-    if project.status in (PipelineStatus.CANCELLED.value, PipelineStatus.FAILED.value, PipelineStatus.PAUSED.value) or (
-        project.status == PipelineStatus.RUNNING.value and project.stalled
-    ):
+    if stopped:
         return f"Got it. The build is stopped, so {title(first)} gets this note when it resumes.", first, ahead
     rest = ahead[1:]
     if not rest:
