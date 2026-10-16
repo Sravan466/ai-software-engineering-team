@@ -151,3 +151,7 @@ def test_imports_of_packages_wire_nothing():
     plan = {"files": [{"path": "main.js", "imports": ["express"]}, {"path": "app/models/todo.js", "imports": ["mongoose"]},
                       {"path": "app/routes/todos.js", "imports": ["express"]}]}
     assert agent.plan_problems(plan, AgentContext(idea="x"))
+
+
+def test_a_node_framework_with_no_language_named_still_fixes_a_format():
+    assert freeze({"tech_stack": {"backend": ["Express"]}}).module_format == "commonjs"

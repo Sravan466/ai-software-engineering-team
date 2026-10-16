@@ -527,9 +527,14 @@ def freeze(
     node_backend = not routes_only and (
         bool(framework and framework.token in _NODE_FRAMEWORKS) or bool(language and language.source != SOURCE_IMPLIED)
     )
+    # A Node framework with no language named still has one: Express is JavaScript,
+    # NestJS is TypeScript.
+    spoken = language.token if language else {"express": "javascript", "nestjs": "typescript"}.get(
+        framework.token if framework else ""
+    )
     charter = Charter(
         chosen, provider, _env(token, provider, used), provider, used,
-        module_format_for(language.token if language and node_backend else None),
+        module_format_for(spoken if node_backend else None),
     )
     log.info(
         "Stack charter frozen — %s%s",
