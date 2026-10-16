@@ -181,7 +181,7 @@ export function CrewTalk({
    * drop what it leaves out, and it stands for the rest of the build. The card holds it,
    * because its Try again sends the draft too.
    */
-  decision?: { value: boolean; set: (value: boolean) => void };
+  decision?: { value: boolean; explicit: boolean; set: (value: boolean) => void };
   /** The draft, when the card around the box needs to read it. */
   text?: string;
   setText?: (text: string) => void;
@@ -262,7 +262,7 @@ export function CrewTalk({
                     {state.tone === "run" && <span className="dot dot-run dot-pulse" aria-hidden="true" />}
                     {state.word}
                   </span>
-                  <span className="talk-read">Read as a {m.kind}</span>
+                  <span className="talk-read">{m.decided ? "Kept as a decision" : `Read as a ${m.kind}`}</span>
                   {m.kind === "note" && m.change === "scheduled" && (
                     <button
                       type="button"
@@ -271,6 +271,16 @@ export function CrewTalk({
                       onClick={() => act(() => api.cancelMessage(id, m.id, { change: true }))}
                     >
                       Cancel the change
+                    </button>
+                  )}
+                  {m.decided && (
+                    <button
+                      type="button"
+                      className="talk-reread talk-cancel"
+                      disabled={busy}
+                      onClick={() => act(() => api.cancelMessage(id, m.id, { decision: true }))}
+                    >
+                      Not a decision
                     </button>
                   )}
                   {m.kind === "note" && m.status === "queued" && m.change !== "applied" && (
@@ -314,7 +324,9 @@ export function CrewTalk({
         submitLabel={submitLabel}
         submitIcon={place === "stuck" && asks === false ? Icon.rotate : Icon.arrowRight}
         onSend={(said) =>
-          act(() => api.sendMessage(id, said, decision && asks === false ? { decided: decision.value } : {}))
+          act(() =>
+            api.sendMessage(id, said, decision?.explicit && asks === false ? { decided: decision.value } : {}),
+          )
         }
         extra={
           decision && asks === false ? (

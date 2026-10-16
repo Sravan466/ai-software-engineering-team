@@ -96,20 +96,24 @@ _DROPS = (
     r"|don'?t\s+(?:add|include|build|need|bother\s+with|implement|make|offer|support)"
     r"|do\s+not\s+(?:add|include|build|need|implement|make|offer|support)"
     r"|we\s+don'?t\s+need|no\s+need\s+for|no\s+longer\s+(?:need|want|offer|support))\b"
+    # An object that only points back ("skip it", "drop that") names no feature.
+    r"(?!\s+(?:it|that|this|them|those|these)\b)"
 )
 _DECISION = re.compile(rf"^{_OPENER}{_DROPS}", re.I)
 #: "no login", "no dark mode": a bare "no" decides only as a short phrase, and never as a
 #: reply ("no luck", "no thanks").
 _BARE_NO = re.compile(
     r"^no\s+(?!(?:luck|thanks|thank|idea|change|changes|worries|problem|problems|way|wait|rush|matter|clue|good|"
-    r"more|fix|success|progress|improvement|difference|go|dice|joy|response|answer|reply)\b)[a-z][a-z' -]{1,40}$",
+    r"more|fix|success|progress|improvement|difference|go|dice|joy|response|answer|reply|it|that|this|still)\b)"
+    r"(?!.*\b(?:still|it|works?|working|fails?|failing|broken)\b)[a-z][a-z' -]{1,40}$",
     re.I,
 )
 #: Talk about the code itself — a fix hint, never a decision about the app.
 _CODE_TALK = re.compile(
     r"\b(?:import|imports|require|exports|export\s+(?:default|const|function|class)|file|files|module|modules|function|functions|class|variable|"
     r"line|lines|test|tests|error|errors|bug|compile|syntax|type|types|cache|caching|duplicate|extra|unused|"
-    r"brace|braces|bracket|brackets|semicolon|typo|comma|indent|indentation|whitespace)\b|[\w-]+\.(?:js|jsx|ts|tsx|py|css|json)\b",
+    r"brace|braces|bracket|brackets|semicolon|typo|comma|indent|indentation|whitespace|step|steps|log|logs|"
+    r"logging|console|debug|print|prints)\b|[\w-]+\.(?:js|jsx|ts|tsx|py|css|json)\b",
     re.I,
 )
 
@@ -563,6 +567,8 @@ def out(m: CrewMessage, replies: Iterable[CrewMessage] = (), since: Optional[dat
         # Checked against finished work (#102 PR 3): still reading it, or which finished
         # phases it changes after this step.
         "change": change_state(m),
+        # Kept as a decision about the app, from a stuck build (#102 PR 4).
+        "decided": bool((m.plan or {}).get("decided")),
         "touched": list((m.plan or {}).get("touched") or []),
         "meant_for": list(m.meant_for or []),
         "applied_to": list(m.applied_to or []),
@@ -843,7 +849,7 @@ def asked_during(db: Session, project_id: str, label: str = "the build", this_ru
     return [
         f"Asked during {label}: {' '.join(m.text.split())[:200]}"
         for m in _notes(db, project_id)
-        # A decision sent on a stuck build counts whatever it was handed to.
+        # A decision sent on a stuck build counts whatever it was handed to — while it stands.
         if ((m.applied_to and m.meant_for) or (m.plan or {}).get("decided")) and _this_run(m, since)
     ][-ASKED_DECISIONS:]
 

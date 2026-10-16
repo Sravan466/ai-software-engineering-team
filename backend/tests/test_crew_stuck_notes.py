@@ -98,6 +98,13 @@ def _stuck(client) -> str:
     ("remove the duplicate route", False),
     ("drop the extra brace", False),
     ("remove the login page", True),
+    ("no it still fails", False),
+    ("no still broken", False),
+    ("skip it", False),
+    ("drop it", False),
+    ("skip that step and try again", False),
+    ("remove the console logs", False),
+    ("no dark mode", True),
 ])
 def test_a_decision_is_told_from_a_hint_by_its_words(text, decided):
     assert crew_chat.is_decision(text) is decided
@@ -128,8 +135,9 @@ def test_a_decision_on_a_stuck_build_may_drop_what_it_leaves_out_and_stands(scri
     )
     with SessionLocal() as db:
         assert db.get(CrewMessage, m["id"]).plan.get("decided")
-    # It stands for the phases still to come.
-    assert m["meant_for"] and "backend_engineer" not in m["meant_for"]
+    # It stands for the stuck phase (a later redo of it) and the phases still to come.
+    assert m["meant_for"][0] == "backend_engineer" and len(m["meant_for"]) > 1
+    assert m["decided"]
     fix_prompts = [c["prompt"] for c in script.calls[mark:] if c["role"] == "backend_engineer" and c["writes"]]
     assert f"skip the health check\n{autofix.DECIDED}" in fix_prompts[0]
     # The row keeps the person's own words, and that they were a decision.
@@ -181,13 +189,19 @@ def test_the_person_words_and_the_decision_travel_apart():
     record: dict = {}
     autofix.mark_round(record, said, decided)
     assert record == {"note": "skip voice input", "decided": True}
-    # The next round of the episode is told the decision too, in no new words of the person's.
+    # The next round is told the decision too, in no new words of the person's.
     said, ask, decided = autofix.take_person(t)
-    assert said is None and decided and ask == f"The person decided: skip voice input\n{autofix.DECIDED}"
-    # A new episode starts without it.
+    assert said is None and not decided and ask == f"skip voice input\n{autofix.DECIDED}"
+    # A later hint stays a hint, with the decision said apart from it.
+    t["note"] = "put the routes in one file"
+    said, ask, decided = autofix.take_person(t)
+    assert said == "put the routes in one file" and not decided
+    assert ask == f"put the routes in one file\nDecided earlier: skip voice input\n{autofix.DECIDED}"
+    # It stands for the rest of the build: a new episode keeps it.
     t["rounds"] = []
     autofix.settle(t)
-    assert "decision" not in t and autofix.take_person(t) == (None, None, False)
+    assert t["decision"] == "skip voice input"
+    assert autofix.undecide({"tracks": {"build:x": t}}, "skip voice input") == ["build:x"] and "decision" not in t
 
 
 def test_the_box_asks_the_server_how_a_draft_reads(client):
@@ -198,3 +212,34 @@ def test_the_box_asks_the_server_how_a_draft_reads(client):
     assert read("why is it stuck?") == {"kind": "question", "decided": False}
     with SessionLocal() as db:
         assert db.query(CrewMessage).filter_by(project_id=pid).count() == 0, "reading a draft kept it"
+
+
+def test_a_reread_is_never_a_decision(monkeypatch, script, client):
+    pid = _stuck(client)
+    m = client.post(f"/api/projects/{pid}/messages", json={"text": "why is it stuck?"}).json()["message"]
+    seen: list = []
+    monkeypatch.setattr("app.api.routes.messages.start_keep_trying",
+                        lambda db, project, **kw: (seen.append(kw), (2, ["build:backend_engineer"], "tok"))[1])
+    monkeypatch.setattr("app.api.routes.messages._drive", lambda *a: None)
+    with SessionLocal() as db:
+        db.get(CrewMessage, m["id"]).text = "skip voice input"  # words that would read as one
+        db.commit()
+    r = client.post(f"/api/projects/{pid}/messages/{m['id']}/reread", json={"kind": "note"})
+    assert r.status_code == 200, r.text
+    assert seen and seen[0]["decided"] is False
+
+
+def test_not_a_decision_takes_it_back(script, client):
+    pid = _stuck(client)
+    m = client.post(f"/api/projects/{pid}/messages", json={"text": "skip the health check", "decided": True}).json()["message"]
+    assert m["decided"]
+    r = client.post(f"/api/projects/{pid}/messages/{m['id']}/cancel", json={"decision": True})
+    assert r.status_code == 200, r.text
+    after = r.json()["message"]
+    assert not after["decided"] and after["meant_for"] == []
+    assert after["replies"][-1]["text"].startswith("Not a decision, then.")
+    track = client.get(f"/api/projects/{pid}").json()["auto_fix"]["tracks"]["build:backend_engineer"]
+    assert "decision" not in track
+    with SessionLocal() as db:
+        assert crew_chat.asked_during(db, pid) == []
+    assert client.post(f"/api/projects/{pid}/messages/{m['id']}/cancel", json={"decision": True}).status_code == 409

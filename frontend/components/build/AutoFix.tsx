@@ -574,13 +574,12 @@ export function NeedsHelp({
   // Whether the note is a decision about the app (#102): the server's reading of the words
   // as the default, until the person says otherwise with the box.
   const [suggested, setSuggested] = useState(false);
-  const [chosen, setChosen] = useState<boolean | null>(null);
+  // The person's own say, for the draft exactly as it was when they gave it: edit the draft
+  // and the box goes back to the server's reading of the new words.
+  const [chosen, setChosen] = useState<{ text: string; value: boolean } | null>(null);
   useEffect(() => {
-    if (!draftNote) {
-      setChosen(null);
-      setSuggested(false);
-      return;
-    }
+    setSuggested(false);
+    if (!draftNote) return;
     let live = true;
     const t = setTimeout(() => {
       api.readMessage(id, draftNote).then((r) => live && setSuggested(r.decided)).catch(() => {});
@@ -590,12 +589,16 @@ export function NeedsHelp({
       clearTimeout(t);
     };
   }, [id, draftNote]);
-  const decided = chosen ?? suggested;
+  const explicit = chosen !== null && chosen.text === draftNote;
+  const decided = explicit ? chosen!.value : suggested;
   const retry = async (model?: string) => {
     const ok = await act(() =>
-      // With a draft, through the conversation — the cloud button too — so it's kept there
-      // with the person's say on whether it's a decision (#102).
-      draftNote ? api.sendMessage(id, draftNote, { keepTrying: true, model, decided }) : api.keepTrying(id, { model }),
+      // With a draft, through the conversation — the cloud button too — so it's kept there.
+      // Whether it's a decision: the person's say when they gave one for these words; the
+      // server reads the words itself otherwise, never a default that may be stale.
+      draftNote
+        ? api.sendMessage(id, draftNote, { keepTrying: true, model, ...(explicit ? { decided } : {}) })
+        : api.keepTrying(id, { model }),
     );
     if (ok && draftNote) setNote("");
   };
@@ -666,7 +669,11 @@ export function NeedsHelp({
           embedded
           text={note}
           setText={setNote}
-          decision={nothingToFix ? undefined : { value: decided, set: setChosen }}
+          decision={
+            nothingToFix || !draftNote
+              ? undefined
+              : { value: decided, explicit, set: (value: boolean) => setChosen({ text: draftNote, value }) }
+          }
         />
         <div className="decision-approve">
           <button className="btn btn-lg btn-accent" disabled={busy} onClick={() => retry()}>

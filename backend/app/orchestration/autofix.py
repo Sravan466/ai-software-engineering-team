@@ -343,7 +343,7 @@ def settle(t: dict) -> None:
     # What the person asked for this episode (#103) — a note, a model they agreed to
     # send its code to — is not a standing order for the next one.
     t.pop("note", None)
-    t.pop("decision", None)
+    # A decision (#102) is not: it stands for the rest of the build.
     t.pop("one_off", None)
     if t.get("episode_start") == len(t["rounds"]) and t.get("allowed") == len(t["rounds"]) + max(
         int(settings.auto_fix_max_rounds), 0
@@ -807,11 +807,8 @@ def code_note(
     )
 
 
-#: Said to a fix round beside a note that is a decision about the app (#102).
-DECIDED = (
-    "This is the person's decision about the app, not just a hint: where a problem is in "
-    "something it drops, remove that code (and what uses it) instead of fixing it."
-)
+#: Said to a fix round beside a decision about the app (#102): short, it goes in tight prompts.
+DECIDED = "A decision about the app: where a problem is in what it drops, remove that code instead of fixing it."
 
 
 def take_person(t: dict) -> tuple[Optional[str], Optional[str], bool]:
@@ -821,9 +818,22 @@ def take_person(t: dict) -> tuple[Optional[str], Optional[str], bool]:
     told it and what it allows — the first in the person's words, the rest as the decision."""
     said = t.pop("note", None)
     decision = t.get("decision")
-    if decision:
-        return said, f"{said or f'The person decided: {decision}'}\n{DECIDED}", True
-    return said, said, False
+    if not decision:
+        return said, said, False
+    if said and said != decision:
+        # A later hint stays a hint; the decision is said apart from it.
+        return said, f"{said}\nDecided earlier: {decision}\n{DECIDED}", False
+    return said, f"{decision}\n{DECIDED}", said == decision
+
+
+def undecide(data: dict, text: str) -> list[str]:
+    """Stop treating `text` as a decision (#102): taken off every track that holds it."""
+    names = []
+    for name, t in data["tracks"].items():
+        if t.get("decision") == text:
+            t.pop("decision", None)
+            names.append(name)
+    return names
 
 
 def mark_round(record: dict, said: Optional[str], decided: bool) -> None:
@@ -891,6 +901,7 @@ __all__ = [
     "said",
     "said_by_person",
     "take_person",
+    "undecide",
     "mark_round",
     "DECIDED",
     "with_person",

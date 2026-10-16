@@ -672,6 +672,8 @@ export type CrewMessage = {
   change?: "checking" | "scheduled" | "applied" | "none" | "cancelled" | "missed" | "unchecked" | null;
   /** The finished phases it changes after the step in hand. */
   touched?: string[];
+  /** Kept as a decision about the app, from a stuck build (#102). */
+  decided?: boolean;
   change_request_id: string | null;
   created_at: string | null;
   applied_at: string | null;
@@ -1155,10 +1157,10 @@ export const api = {
     }),
   listMessages: (id: string) => req<{ messages: CrewMessage[] }>(`/api/projects/${id}/messages`),
   /** Take a note back while it waits — a change to finished work included, until it starts. */
-  cancelMessage: (id: string, messageId: string, opts: { change?: boolean } = {}) =>
+  cancelMessage: (id: string, messageId: string, opts: { change?: boolean; decision?: boolean } = {}) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages/${messageId}/cancel`, {
       method: "POST",
-      body: JSON.stringify({ change: !!opts.change }),
+      body: JSON.stringify({ change: !!opts.change, decision: !!opts.decision }),
     }),
   rereadMessage: (id: string, messageId: string, kind: CrewMessage["kind"]) =>
     req<{ message: CrewMessage; messages: CrewMessage[] }>(`/api/projects/${id}/messages/${messageId}/reread`, {

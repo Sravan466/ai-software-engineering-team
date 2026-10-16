@@ -180,9 +180,11 @@ class MessageCreate(BaseModel):
 
 
 class MessageCancel(BaseModel):
-    """Take a note back — or, with `change`, only the change it makes to finished work."""
+    """Take a note back — or, with `change`, only the change it makes to finished work; or,
+    with `decision`, stop treating it as a decision about the app (#102)."""
 
     change: bool = False
+    decision: bool = False
 
 
 class MessageReread(BaseModel):
