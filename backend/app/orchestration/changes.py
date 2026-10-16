@@ -240,7 +240,7 @@ def note_for(change: dict, phase: str) -> str:
     decisions = change.get("decisions") or []
     if decisions:
         lines.append("Already settled in this app (keep these unless the change says otherwise):")
-        lines += [f"- {d}" for d in decisions[-8:]]
+        lines += [f"- {d}" for d in settled(decisions, 8)]
     return "\n".join(lines)
 
 
@@ -286,10 +286,19 @@ def first_decisions(project: Project, db: Optional[Session] = None) -> list[str]
     return out
 
 
+def settled(decisions: list, n: int) -> list:
+    """The newest `n` of what an app has settled on — its stack line always among them:
+    every reader takes the tail, and the stack is the first line."""
+    notes = [str(d) for d in decisions or []]
+    stack = [d for d in notes[:1] if d.startswith("Stack — ")]
+    rest = notes[len(stack):]
+    return stack + rest[-max(n - len(stack), 0):] if n > len(stack) else stack[:n]
+
+
 def remember(project: Project, line: str) -> None:
     """Add one line to what this app has settled on (bounded)."""
     notes = list(project.decisions or first_decisions(project))
     line = " ".join(line.split())[:240]
     if line and line not in notes:
         notes.append(line)
-    project.decisions = notes[-30:]
+    project.decisions = settled(notes, 30)

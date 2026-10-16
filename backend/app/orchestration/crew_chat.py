@@ -654,7 +654,8 @@ def _writing_files(project: Project, rows: dict) -> bool:
     if current not in CODE_PHASES or phase_state(project, current, rows) != "working":
         return False
     found = project.activity or {}
-    if found.get("ended") or found.get("stage") not in ("planning", "writing"):
+    # `fixing` here is one file's in-loop repair; a whole fix round is caught below.
+    if found.get("ended") or found.get("stage") not in ("planning", "writing", "fixing"):
         return False
     from app.orchestration import autofix
 
@@ -762,15 +763,15 @@ def take_notes(project_id: str, phase: str) -> Optional[tuple[str, tuple]]:
 ASKED_DECISIONS = 5
 
 
-def asked_during(db: Session, project_id: str) -> list[str]:
-    """What the person asked for while the first build ran, for the app's settled decisions
-    (set once, when it finishes): the notes a phase took, the newest few. Not a Keep-trying
-    note, which was for one fix round. A change run hands notes to no phase — every one
-    has started — so it has none to add."""
+def asked_during(db: Session, project_id: str, label: str = "the build", this_run: bool = False) -> list[str]:
+    """What the person asked for while a run went on, for the app's settled decisions: the
+    notes a phase took, the newest few. Not a Keep-trying note, which was for one fix round.
+    The first build's are set when it finishes; a kept change's (`this_run`) with it."""
+    since = run_began(db, project_id) if this_run else None
     return [
-        f"Asked during the build: {' '.join(m.text.split())[:200]}"
+        f"Asked during {label}: {' '.join(m.text.split())[:200]}"
         for m in _notes(db, project_id)
-        if m.applied_to and m.meant_for
+        if m.applied_to and m.meant_for and _this_run(m, since)
     ][-ASKED_DECISIONS:]
 
 
@@ -818,7 +819,9 @@ def _context(db: Session, project: Project) -> str:
     if done:
         lines.append("# Finished\n" + ", ".join(title(p) for p in done))
     if project.decisions:
-        lines.append("# Settled\n" + "\n".join(f"- {d}" for d in list(project.decisions)[-10:]))
+        from app.orchestration.changes import settled
+
+        lines.append("# Settled\n" + "\n".join(f"- {d}" for d in settled(list(project.decisions), 10)))
     from app.orchestration.runner import runner
 
     index = runner._app_index(project, list(rows.values()))  # noqa: SLF001 - the one app index
@@ -896,7 +899,8 @@ def _reason(e: Exception) -> str:
 
 
 def settle_orphans(db: Session) -> int:
-    """At startup: questions the last run of this server was answering when it stopped.
+    """At startup: questions the last run of this server was answering when it stopped, and
+    notes kept for no phase before notes said who they were for — waiting for nobody.
 
     The app is one process — a build's run is a thread in it, and so is every answer
     (`activity` and the claim make the same assumption) — so at startup none is live."""
@@ -908,9 +912,21 @@ def settle_orphans(db: Session) -> int:
     for m in found:
         reply(db, m, "The server restarted before the crew could answer. Ask again.")
         m.status = DECLINED
-    if found:
+    # In Python: a JSON column keeps None as JSON `null`, which `IS NULL` doesn't match.
+    stranded = [
+        m for m in db.execute(
+            select(CrewMessage).where(
+                CrewMessage.author == PERSON, CrewMessage.kind == NOTE, CrewMessage.status == QUEUED
+            )
+        ).scalars()
+        if m.meant_for is None
+    ]
+    for m in stranded:
+        reply(db, m, "No agent was left to take this note. Once the build is finished, ask for it as a change.")
+        m.status = DECLINED
+    if found or stranded:
         db.commit()
-    return len(found)
+    return len(found) + len(stranded)
 
 
 __all__ = [

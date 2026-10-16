@@ -348,3 +348,38 @@ def test_the_page_is_told_which_notes_still_stand(client):
     thread = {m["text"]: m["standing"] for m in client.get(f"/api/projects/{pid}/messages").json()["messages"]}
     assert thread == {"use a grid": True, "stub the API for this round": False}
     assert standing
+
+
+def test_the_stack_line_survives_every_tail_of_the_decisions():
+    from app.orchestration.changes import settled
+
+    notes = ["Stack — FastAPI + React"] + [f"v{i}: change {i}" for i in range(2, 20)]
+    assert settled(notes, 8)[0] == "Stack — FastAPI + React" and len(settled(notes, 8)) == 8
+    assert settled(notes, 8)[-1] == "v19: change 19"
+    assert settled(["v2: x", "v3: y"], 1) == ["v3: y"], "no stack line: just the newest"
+
+
+def test_notes_a_kept_change_run_took_are_remembered_with_it(client):
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.models import Version
+
+    pid = _project(client)
+    with SessionLocal() as db:
+        db.add(Version(project_id=pid, number=1, label="First build", kind="first_build", snapshot={},
+                       created_at=datetime.now(timezone.utc) - timedelta(minutes=5)))
+        db.commit()
+    _note(pid, "no login", meant_for=["backend_engineer"])
+    crew_chat.take_notes(pid, "backend_engineer")
+    with SessionLocal() as db:
+        assert crew_chat.asked_during(db, pid, "change #2", this_run=True) == ["Asked during change #2: no login"]
+
+
+def test_a_note_left_for_no_phase_before_notes_said_is_settled_at_startup(client):
+    pid = _project(client)
+    mid = _note(pid, "add dark mode", meant_for=None)
+    with SessionLocal() as db:
+        assert crew_chat.settle_orphans(db) >= 1
+        m = db.get(CrewMessage, mid)
+        assert m.status == "declined"
+        assert db.query(CrewMessage).filter_by(reply_to=mid).count() == 1

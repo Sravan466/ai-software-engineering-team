@@ -58,7 +58,7 @@ from app.db.models import ChangeRequest, DebateRecord, PhaseResult, PreviewRevis
 from app.preview import app_state
 from app.preview import history as preview_history
 from app.memory.store import memory_store
-from app.orchestration import activity, autofix, changes, claim, connectors, remediation, versions
+from app.orchestration import activity, autofix, changes, claim, connectors, crew_chat, remediation, versions
 from app.orchestration.approval import Gate, decide_gate
 from app.orchestration.charter import Charter, binding_on
 from app.orchestration.graph import connectors_note, graph, gather_skills
@@ -1253,7 +1253,7 @@ class PipelineRunner:
                 lines.append(f"- {path}" + (f" — {purpose[:100]}" if purpose else ""))
         notes = project.decisions or changes.first_decisions(project)
         if notes:
-            lines += ["", "Already settled:"] + [f"- {n}" for n in notes[-10:]]
+            lines += ["", "Already settled:"] + [f"- {n}" for n in changes.settled(notes, 10)]
         return "\n".join(lines)
 
     def _change_rewind(
@@ -1428,11 +1428,16 @@ class PipelineRunner:
                 self._close_failed(project, found, "The change stopped before anything was changed.")
                 found = None
         if found is not None:
+            # What the person asked for while the change ran (#102), kept with it — read
+            # before the version is recorded, which dates the next run from here.
+            asked = crew_chat.asked_during(db, project.id, f"change #{found.number}", this_run=True)
             version = versions.record(db, project, found.text, versions.CHANGE, change_id=found.id)
             found.status = changes.DONE
             found.version_id = version.id
             found.finished_at = _now()
             changes.remember(project, f"v{version.number}: {found.text}")
+            for line in asked:
+                changes.remember(project, line)
             return True
         current = versions.current(db, project)
         if current is None:

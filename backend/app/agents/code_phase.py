@@ -1444,7 +1444,10 @@ class _Run:
         if held == self.notes_seen or (self.notes_seen is None and not held[0]):
             return
         build = inflight.current()
-        found = crew_chat.take_notes(build["id"], self.agent.key) if build else None
+        if build is None:
+            self.notes_seen = held  # no build to read them for: don't ask again every file
+            return
+        found = crew_chat.take_notes(build["id"], self.agent.key)
         if found is not None:
             # A read that failed keeps what the phase had, and tries again next file.
             self.ctx.asked, self.notes_seen = found
