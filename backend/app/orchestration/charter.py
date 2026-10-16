@@ -187,7 +187,7 @@ class Charter:
         return cls(
             choices, provider, names, frozen if isinstance(frozen, str) and frozen else provider, used,
             # A charter from before formats were fixed has none: the scaffold reads the code.
-            fmt if fmt in MODULE_FORMATS else None,
+            fmt if isinstance(fmt, str) and fmt in MODULE_FORMATS else None,
         )
 
     def with_provider(self, provider: str) -> "Charter":
@@ -330,8 +330,14 @@ MODULE_FORMATS = {
 }
 
 
-#: Backend frameworks that run on Node.
+#: Backend frameworks that run on Node as a server; and ones that are route files.
 _NODE_FRAMEWORKS = frozenset({"express", "nestjs"})
+_ROUTE_FRAMEWORKS = frozenset({"nextjs"})
+
+
+def format_instruction(fmt: Optional[str]) -> str:
+    """The line every backend write ask ends with (#103), from the charter's own words."""
+    return f"Write {MODULE_FORMATS[fmt]}." if fmt in MODULE_FORMATS else ""
 
 
 def module_format_for(language: Optional[str]) -> Optional[str]:
@@ -348,23 +354,26 @@ def module_format_for(language: Optional[str]) -> Optional[str]:
     return None
 
 
-_ESM = re.compile(r"^\s*(?:import\s[^;]*?\bfrom\s|import\s*['\"]|export\s)", re.MULTILINE)
-_CJS = re.compile(r"\brequire\(\s*['\"]|\bmodule\.exports\b|^\s*exports\.\w+\s*=", re.MULTILINE)
+_ESM = re.compile(r"^\s*(?:import\s[^;=]*?\bfrom\s|import\s*['\"]|export\s)", re.MULTILINE)
+_CJS = re.compile(r"(?<![\w.])require\(\s*['\"]|\bmodule\.exports\b|^\s*exports\.\w+\s*=", re.MULTILINE)
+_COMMENTS = re.compile(r"/\*.*?\*/|(?<![:'\"\w])//[^\n]*", re.DOTALL)
+#: Ways an ES module or TypeScript file loads CommonJS on purpose: not a mix.
+_ON_PURPOSE = re.compile(r"\bimport\s+\w+\s*=\s*require\(|\bcreateRequire\(")
 
 
 def module_format_of(content: str) -> Optional[str]:
     """`esm` or `commonjs` for a file written in one of them, `mixed` for one using both
-    — the file that stops a backend starting — and None for neither."""
-    esm, cjs = bool(_ESM.search(content or "")), bool(_CJS.search(content or ""))
+    — the file that stops a backend starting — and None for neither. Comments don't
+    count, and an ES module that loads CommonJS on purpose (`createRequire`, TypeScript's
+    `import x = require(…)`) isn't a mix."""
+    code = _COMMENTS.sub("", content or "")
+    esm = bool(_ESM.search(code))
+    cjs = bool(_CJS.search(code)) and not (esm and _ON_PURPOSE.search(code))
     if esm and cjs:
         return "mixed"
     if esm or cjs:
         return "esm" if esm else "commonjs"
     return None
-
-
-#: Config files the tools read in their own format, whatever the backend's.
-_CONFIG = re.compile(r"(^|/)(\.[^/]+|[^/]+\.config\.[a-z]+|knexfile\.[a-z]+|gulpfile\.[a-z]+|gruntfile\.[a-z]+)$", re.I)
 
 
 # ── freezing one ─────────────────────────────────────────────────────────────
@@ -509,8 +518,14 @@ def freeze(
     framework = chosen.get("backend_framework")
     # The backend's own language, or a Node framework's: a language some other choice
     # implied (Next.js implies TypeScript) says nothing about a backend's modules.
-    node_backend = bool(framework and framework.token in _NODE_FRAMEWORKS) or bool(
-        language and language.source != SOURCE_IMPLIED
+    # A Next.js backend is API routes, written `export default` whatever the language —
+    # named as the backend, or the only server a Next.js app has.
+    front = chosen.get("frontend_framework")
+    routes_only = bool(framework and framework.token in _ROUTE_FRAMEWORKS) or (
+        framework is None and bool(front and front.token in _ROUTE_FRAMEWORKS)
+    )
+    node_backend = not routes_only and (
+        bool(framework and framework.token in _NODE_FRAMEWORKS) or bool(language and language.source != SOURCE_IMPLIED)
     )
     charter = Charter(
         chosen, provider, _env(token, provider, used), provider, used,
@@ -586,7 +601,8 @@ def _wrong_format(expected: str, output: object) -> list[str]:
     held = (".js",) if expected == "commonjs" else (".js", ".ts")
     out = []
     for path, content, _lang in iter_files(output if isinstance(output, dict) else {}):
-        if not path.endswith(held) or _is_test(path) or _CONFIG.search(path):
+        # Config files too: Node loads every `.js` file by the package's `type`.
+        if not path.endswith(held) or _is_test(path):
             continue
         found = module_format_of(content)
         if found == other:

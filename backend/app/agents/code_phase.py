@@ -246,8 +246,14 @@ class CodePhaseAgent(BaseAgent):
                 f"`files` — {len(files)} files is more than this build may plan "
                 f"({settings.code_max_files}); merge the small ones"
             ]
-        listed = [f for f in files if isinstance(f, dict)]
-        if len(listed) >= 3 and not any(_strings(f.get("imports")) for f in listed):
+        listed = [f for f in files if isinstance(f, dict) and str(f.get("path") or "").endswith(_SOURCE_EXT)]
+        stems = {layout.clean(str(f.get("path") or "")).rsplit(".", 1)[0] for f in listed}
+
+        def wired(f: dict) -> bool:
+            # An import of another file in the plan — a package wires nothing.
+            return any(layout.clean(i).rsplit(".", 1)[0] in stems for i in _strings(f.get("imports")))
+
+        if len(listed) >= 3 and not any(wired(f) for f in listed):
             # The plan never says which file uses which (#103): the entry file is then
             # written first and blind, guessing names the files after it never export.
             entry = next(
@@ -1693,13 +1699,11 @@ class _Run:
         instruction = TASK_OVERRIDES.get(f"{self.agent.key}.write") or self.agent.write_instruction()
         if instruction:
             out.append(instruction)
+        from app.orchestration.charter import format_instruction
+
         fmt = getattr(self.ctx.charter, "module_format", None)
         if fmt and self.agent.key == Phase.BACKEND_ENGINEER.value:
-            out.append(
-                "Write CommonJS: `require(...)` and `module.exports`, never `import` or `export`."
-                if fmt == "commonjs" else
-                "Write ES modules: `import` and `export`, never `require` or `module.exports`."
-            )
+            out.append(format_instruction(fmt))
         return out
 
     def _fix_new_now(self, batch: list[_Planned]) -> str:
@@ -2132,9 +2136,12 @@ _LAYERS = (
 _SOURCE_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py")
 _ENTRY = len(_LAYERS)
 _ENTRY_NAMES = ("main", "index", "app", "server")
+#: Between the routes and the entry file: `app.js` builds the app that `server.js`,
+#: `index.js` or `main.tsx` start, so it is written first.
+_APP = _ENTRY - 0.5
 
 
-def _layer(path: str) -> int:
+def _layer(path: str) -> float:
     """Where a file sits in the order a backend's files use each other: models first,
     the entry file (`main`, `index`, `app`, `server` at a side's root) last."""
     written = layout.relative_to_side(layout.clean(path)).split("/")
@@ -2142,7 +2149,7 @@ def _layer(path: str) -> int:
     stem = parts[-1].split(".")[0] if parts else ""
     folders = parts[:-1]
     if stem in _ENTRY_NAMES and all(f in ("src", "app") for f in folders):
-        return _ENTRY
+        return _APP if stem == "app" else _ENTRY
     for folder in reversed(folders):
         for i, names in enumerate(_LAYERS):
             if folder in names:

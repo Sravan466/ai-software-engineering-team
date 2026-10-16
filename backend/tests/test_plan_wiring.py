@@ -36,7 +36,9 @@ def test_a_plan_that_still_says_nothing_is_written_by_layer_with_the_entry_file_
              "backend/app/models/todo.js"]
     ordered = [p.path for p in _ordered([_Planned(path=p) for p in paths])]
     assert ordered == list(reversed(paths))
-    assert _layer("backend/server.js") == _layer("backend/src/index.js") == _layer("backend/app.js")
+    assert _layer("backend/server.js") == _layer("backend/src/index.js")
+    # `app.js` builds the app the entry file starts: written just before it.
+    assert _layer("backend/routes/todos.js") < _layer("backend/app.js") < _layer("backend/server.js")
     # Where the plan does say, it is followed instead.
     planned = [_Planned(path="backend/main.js"), _Planned(path="backend/app/models/todo.js", imports=["backend/main.js"])]
     assert [p.path for p in _ordered(planned)] == ["backend/main.js", "backend/app/models/todo.js"]
@@ -108,14 +110,27 @@ def test_one_stray_import_doesn_t_put_the_entry_file_first():
     assert [p.path for p in _ordered(planned)][-1] == "backend/main.js"
 
 
-def test_typescript_and_config_files_aren_t_held_to_commonjs():
+def test_typescript_isn_t_held_to_commonjs_and_config_files_are():
     output = {"files": [
         {"path": "backend/src/types.ts", "code": "export interface Todo { id: string }\n"},
         {"path": "backend/jest.config.js", "code": "export default {};\n"},
     ]}
-    assert violations(JS, "backend_engineer", output) == []
-    esm = Charter.from_dict({**JS.as_dict(), "module_format": "esm"})
-    assert violations(esm, "backend_engineer", {"files": [{"path": "backend/knexfile.js", "code": "module.exports = {};\n"}]}) == []
+    # Node loads every `.js` file by the package's `type`, a tool's config included.
+    assert [v.split("`")[1] for v in violations(JS, "backend_engineer", output)] == ["backend/jest.config.js"]
+
+
+def test_an_es_module_that_loads_commonjs_on_purpose_isn_t_mixed():
+    from app.orchestration.charter import module_format_of
+
+    assert module_format_of("import { createRequire } from 'module';\nconst require = createRequire(import.meta.url);\nconst a = require('./a.json');\nexport default a;\n") == "esm"
+    assert module_format_of("import x = require('x');\nexport const y = x;\n") == "esm"
+    assert module_format_of("// was: const x = require('x')\nimport x from 'x';\nexport default x;\n") == "esm"
+
+
+def test_a_next_js_backend_fixes_no_format_and_a_bad_stored_value_is_ignored():
+    design = {"tech_stack": {"backend": ["Next.js", "JavaScript"], "frontend": ["Next.js"]}}
+    assert freeze(design).module_format is None
+    assert Charter.from_dict({**JS.as_dict(), "module_format": ["commonjs"]}).module_format is None
 
 
 def test_a_language_implied_by_the_frontend_fixes_no_backend_format():
@@ -125,6 +140,14 @@ def test_a_language_implied_by_the_frontend_fixes_no_backend_format():
 
 def test_the_ask_again_names_a_source_file_as_the_entry():
     agent = BackendEngineerAgent()
-    plan = {"files": [{"path": "index.html"}, {"path": "src/index.css"}, {"path": "src/main.tsx"}, {"path": "src/App.tsx"}]}
+    plan = {"files": [{"path": "index.html"}, {"path": "src/index.css"}, {"path": "src/main.tsx"}, {"path": "src/App.tsx"},
+                      {"path": "src/api.ts"}]}
     [problem] = agent.plan_problems(plan, AgentContext(idea="x"))
     assert "`src/main.tsx`" in problem and "index.html" not in problem
+
+
+def test_imports_of_packages_wire_nothing():
+    agent = BackendEngineerAgent()
+    plan = {"files": [{"path": "main.js", "imports": ["express"]}, {"path": "app/models/todo.js", "imports": ["mongoose"]},
+                      {"path": "app/routes/todos.js", "imports": ["express"]}]}
+    assert agent.plan_problems(plan, AgentContext(idea="x"))

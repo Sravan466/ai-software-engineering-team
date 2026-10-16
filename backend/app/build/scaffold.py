@@ -969,9 +969,13 @@ def _scaffold_node_backend(
     module_format: Optional[str] = None,
 ) -> None:
     be = lambda rel: f"{BACKEND}/{rel}"  # noqa: E731
+    from app.orchestration.charter import module_format_of  # charter reads this module
+
     code = {p: c for p, c in files.items() if p.endswith(_JS_EXT)}
-    esm = any(re.search(r"^\s*import\s.+\sfrom\s|^\s*export\s", c, re.MULTILINE) for p, c in code.items() if not _is_test(p))
-    cjs = any(re.search(r"\brequire\(|module\.exports", c) for p, c in code.items() if not _is_test(p))
+    # The same reading of a file the stack charter's check makes (#103).
+    found = [module_format_of(c) for p, c in code.items() if not _is_test(p)]
+    esm = any(f in ("esm", "mixed") for f in found)
+    cjs = any(f in ("commonjs", "mixed") for f in found)
     if module_format in ("esm", "commonjs"):
         # The format the stack fixed (#103), not a guess from what the files happen to
         # use: a file in the other one is the code's problem, and the check says so.
