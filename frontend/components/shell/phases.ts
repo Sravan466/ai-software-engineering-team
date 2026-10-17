@@ -92,43 +92,53 @@ export const ROUTING_BY_BACKEND: Record<string, RoutingModeMeta> = Object.fromEn
 export type ApprovalModeMeta = {
   id: ApprovalMode;
   label: string;
-  /** The line under the option. */
+  /** The whole description: `short`, then `more`. */
   hint: string;
+  /** Its first sentence: the line on the composer's tile, read next to the others. */
+  short: string;
+  /** The rest, said once this answer is chosen. */
+  more?: string;
   /** The short form in the composer's collapsed line. */
   summary: string;
   /** What the build view says is coming next, once the run is going. */
   running: string;
 };
 
-export const APPROVAL_MODES: ApprovalModeMeta[] = [
+// Written as `short` + `more` so the composer's tiles can compare the answers on one
+// line each, and the build page's popover still reads the whole of it from `hint`.
+const APPROVAL_COPY: Omit<ApprovalModeMeta, "hint">[] = [
   {
     id: "checkpoints",
     label: "At the plan and the end",
-    hint:
-      "You approve the plan before any code is written, and the finished app before it ships. " +
-      "It also asks when a security finding or the hosting cost needs your call.",
+    short: "You approve the plan before any code is written, and the finished app before it ships.",
+    more: "It also asks when a security finding or the hosting cost needs your call.",
     summary: "Checks at the plan and the end",
     running: "Checks with you at the plan and at the end.",
   },
   {
     id: "every_phase",
     label: "After each agent",
-    hint: `You review each of the ${AGENTS.length} agents' work before the next one starts.`,
+    short: `You review each of the ${AGENTS.length} agents' work before the next one starts.`,
     summary: "Checks after each agent",
     running: "Checks with you after each agent.",
   },
   {
     id: "unattended",
     label: "Only when it's stuck",
-    hint:
-      "Runs to the end on its own. It still stops to ask for what only you can give, like a " +
-      "database or a service's API key. It also stops when it can't fix something itself: code " +
-      "that won't build, failing tests, a part written for a different stack, or a serious " +
-      "security problem.",
+    short: "Runs to the end on its own.",
+    more:
+      "It still stops to ask for what only you can give, like a database or a service's API " +
+      "key. It also stops when it can't fix something itself: code that won't build, failing " +
+      "tests, a part written for a different stack, or a serious security problem.",
     summary: "Checks only when stuck",
     running: "Runs to the end unless it gets stuck.",
   },
 ];
+
+export const APPROVAL_MODES: ApprovalModeMeta[] = APPROVAL_COPY.map((m) => ({
+  ...m,
+  hint: m.more ? `${m.short} ${m.more}` : m.short,
+}));
 
 /** The cost cap, worded once for both surfaces. */
 export const COST_CAP_COPY = {

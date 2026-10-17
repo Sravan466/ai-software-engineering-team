@@ -27,7 +27,7 @@ import { AGENT_BY_KEY } from "@/components/agents/personas";
 import { Icon } from "@/components/shell/icons";
 import PreviewRows from "@/components/skills/PreviewRows";
 import { byTitle } from "@/components/skills/skills";
-import ChoiceRows from "@/components/build/ChoiceRows";
+import ChoiceTiles from "@/components/build/ChoiceTiles";
 
 /**
  * Which model builds it and when it checks with you, and whether it can run at all.
@@ -291,22 +291,44 @@ function describe(
   }
   if (mode.backend === "local_only" && choices.localDefault) {
     const home = choices.localDefault;
-    const overrides = Array.from(localOverrides(roles, local));
+    // "Every agent" is only true without exceptions, and the tile is what the three
+    // answers are compared on, so it says who they are; the strip says which model.
+    const others = Array.from(localOverrides(roles, local).values()).flat();
+    const except =
+      others.length === 0
+        ? ""
+        : others.length <= 2
+          ? `, except ${listOf(others)} (set in Settings)`
+          : `, except ${others.length} agents set in Settings`;
     return (
       <>
-        Every agent uses <span className="mono">{home.name}</span> {whereItRuns(home)}.{" "}
+        Every agent uses <span className="mono">{home.name}</span> {whereItRuns(home)}
+        {except}.{" "}
         {home.remote ? "Free, and nothing goes to a cloud service." : "Free, and nothing leaves your machine."}
-        {overrides.map(([name, agents]) => (
-          <span key={name}>
-            {" "}
-            {listOf(agents)} {agents.length === 1 ? "uses" : "use"} <span className="mono">{name}</span>{" "}
-            instead (set in Settings).
-          </span>
-        ))}
       </>
     );
   }
   return mode.hint;
+}
+
+/**
+ * Which model each of Local model's exceptions runs, said once it is chosen: the
+ * agents pointed at a local model of their own in Settings. Undefined without any.
+ */
+function localExceptions(roles: RoleRow[] | null, local: LocalStatus | null) {
+  const overrides = Array.from(localOverrides(roles, local));
+  if (overrides.length === 0) return undefined;
+  return (
+    <>
+      {overrides.map(([name, agents], i) => (
+        <span key={name}>
+          {i > 0 && " "}
+          {listOf(agents)} {agents.length === 1 ? "uses" : "use"} <span className="mono">{name}</span>{" "}
+          instead.
+        </span>
+      ))}
+    </>
+  );
 }
 
 export type RuntimeBlocker = {
@@ -521,7 +543,7 @@ export default function RunSettings({
   const groups = Array.from(new Set(options.map((o) => o.group)));
 
   const picker = (
-    <div className="field choice-field">
+    <div className="field tiles-field">
       <label htmlFor="pinned-model">Model</label>
       {options.length > 0 ? (
         <select
@@ -574,7 +596,7 @@ export default function RunSettings({
             {picker}
           </>
         ) : choices.modes.length > 0 ? (
-          <ChoiceRows
+          <ChoiceTiles
             name="routing"
             legend="Which model builds it"
             value={routing.id}
@@ -587,6 +609,11 @@ export default function RunSettings({
               value: m.id,
               label: m.label,
               description: describe(m, choices, roles, local),
+              // With the tile's own wording, which names the exceptions only beside a default.
+              more:
+                m.backend === "local_only" && choices.localDefault
+                  ? localExceptions(roles, local)
+                  : undefined,
               under: m.needsModel ? picker : undefined,
             }))}
           />
@@ -617,7 +644,7 @@ export default function RunSettings({
       </div>
 
       <div className="setting">
-        <ChoiceRows
+        <ChoiceTiles
           name="checks"
           legend="When it checks with you"
           value={approval}
@@ -626,35 +653,39 @@ export default function RunSettings({
           choices={APPROVAL_MODES.map((m) => ({
             value: m.id,
             label: m.label,
-            description: m.hint,
+            description: m.short,
+            more: m.more,
             under:
               m.id === "checkpoints" ? (
-                <div className="field choice-field">
-                  <label htmlFor="cost-cap">{COST_CAP_COPY.label}</label>
-                  <div className="prefixed">
-                    <span className="prefixed-mark" aria-hidden="true">
-                      $
-                    </span>
-                    <input
-                      id="cost-cap"
-                      className="input input-mono"
-                      inputMode="decimal"
-                      placeholder="no cap"
-                      value={capText}
-                      disabled={disabled}
-                      aria-describedby="cost-cap-hint"
-                      onChange={(e) => {
-                        const raw = e.target.value.replace(/[^0-9.]/g, "");
-                        setCapText(raw);
-                        const value = Number(raw);
-                        onChange({
-                          ...config,
-                          // Anything not yet a usable number means "no cap" until it is one.
-                          costCap: raw !== "" && Number.isFinite(value) && value > 0 ? value : null,
-                        });
-                      }}
-                    />
-                    <span className="prefixed-suffix">{COST_CAP_COPY.suffix}</span>
+                <div className="field tiles-field cost-cap">
+                  {/* One sentence with the number in it: the label reads into the field. */}
+                  <div className="cost-cap-line">
+                    <label htmlFor="cost-cap">{COST_CAP_COPY.label}</label>
+                    <div className="prefixed">
+                      <span className="prefixed-mark" aria-hidden="true">
+                        $
+                      </span>
+                      <input
+                        id="cost-cap"
+                        className="input input-mono"
+                        inputMode="decimal"
+                        placeholder="no cap"
+                        value={capText}
+                        disabled={disabled}
+                        aria-describedby="cost-cap-hint"
+                        onChange={(e) => {
+                          const raw = e.target.value.replace(/[^0-9.]/g, "");
+                          setCapText(raw);
+                          const value = Number(raw);
+                          onChange({
+                            ...config,
+                            // Anything not yet a usable number means "no cap" until it is one.
+                            costCap: raw !== "" && Number.isFinite(value) && value > 0 ? value : null,
+                          });
+                        }}
+                      />
+                      <span className="prefixed-suffix">{COST_CAP_COPY.suffix}</span>
+                    </div>
                   </div>
                   <p className="field-hint" id="cost-cap-hint">
                     {COST_CAP_COPY.hint}
@@ -798,7 +829,9 @@ function SkillPicker({
           {skills === null
             ? "reading the library…"
             : touched === 0
-              ? `${skills.length} skills matched to this idea`
+              ? // The library's count: which of them reach an agent is decided per agent,
+                // from its own work, once the build runs.
+                `${skills.length} skills, matched to each agent's work`
               : `${skills.length} skills · ${touched} decided by you`}
         </span>
       </button>
