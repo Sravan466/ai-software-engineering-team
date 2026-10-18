@@ -251,12 +251,16 @@ class CodePhaseAgent(BaseAgent):
                 f"`files` — {len(files)} files is more than this build may plan "
                 f"({settings.code_max_files}); merge the small ones"
             ]
-        charter = getattr(ctx, "charter", None)
-        language = charter.get("language").token if charter is not None and charter.get("language") else None
+        from app.build.scaffold import platform_owned
+
         # Read exactly as `_normalise` reads it (#119): a plan the gate passes reaches the
-        # writer with this wiring. A package wires nothing.
-        listed = [w for w in _plan_wiring(self.key, files, language) if w.path.endswith(_SOURCE_EXT)]
-        if len(listed) >= 3 and not any(t.endswith(_SOURCE_EXT) for w in listed for t in w.imports):
+        # writer with this wiring. A package wires nothing, and nor does a file the
+        # platform writes, which the writer never sees.
+        listed = [w for w in _plan_wiring(self.key, files, _language(getattr(ctx, "charter", None)))
+                  if w.path.endswith(_SOURCE_EXT)]
+        if len(listed) >= 3 and not any(
+            t.endswith(_SOURCE_EXT) for w in listed if not platform_owned(w.path) for t in w.imports
+        ):
             # The plan never says which file uses which (#103): the entry file is then
             # written first and blind, guessing names the files after it never export.
             entry = next((str(w.plan["path"]) for w in listed if _layer(w.path) == _ENTRY), None)
@@ -611,7 +615,7 @@ class _Run:
                 target = _plan_import(e.path, name, known_paths, lambda p: layout.place(agent.key, p)) or self._existing(name, known)
                 if target and target != e.path and target in known_paths and target not in imports:
                     imports.append(target)
-            e.imports = imports or e.imports
+            e.imports = imports or [i for i in e.imports if i in known_paths]
         self.changing = {e.path for e in self.edits if e.path in self.existing}
 
         self._one_file_calls(profile=False)
@@ -726,7 +730,7 @@ class _Run:
         self.changing = set(self.existing)
 
         # The checker reports placed paths; the deliverable may store them otherwise.
-        language = ctx.charter.get("language").token if ctx.charter is not None and ctx.charter.get("language") else None
+        language = _language(ctx.charter)
         placed = layout.Placer(language).place_all(agent.key, [(p.strip().lstrip("/"), "") for p in self.written])
         self.place_of = {stored: where for (where, *_), stored in zip(placed, self.written)}
         stored_at = {where: stored for stored, where in self.place_of.items()}
@@ -1856,12 +1860,10 @@ class _Run:
         """
         from app.build.scaffold import platform_owned
 
-        charter = self.ctx.charter
-        language = charter.get("language").token if charter is not None and charter.get("language") else None
         out: list[_Planned] = []
         #: path -> each import it kept -> the import as the plan wrote it.
         written_as: dict[str, dict[str, str]] = {}
-        for w in _plan_wiring(self.agent.key, (output or {}).get("files") or [], language):
+        for w in _plan_wiring(self.agent.key, (output or {}).get("files") or [], _language(self.ctx.charter)):
             if platform_owned(w.path):
                 self.left_to_platform.append(w.path)
                 continue
@@ -2160,6 +2162,11 @@ def _strings(value: object) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
+def _language(charter) -> Optional[str]:
+    """The backend language the stack fixed, which decides where files are placed."""
+    return charter.get("language").token if charter is not None and charter.get("language") else None
+
+
 @dataclass
 class _Wired:
     """One plan file as the plan gate and `_normalise` both read it (#119)."""
@@ -2297,12 +2304,17 @@ def _spec(spec: object) -> str:
 
 
 def _meant_planned(spec: str) -> bool:
-    """Whether an import no plan file answered was written as a path rather than a
-    package's name: relative (Python's `.models` too), rooted, or under a side's root
-    (`backend/…`). A bare name never is — `firebase/auth` and `chart.js` are packages,
-    even beside a plan folder of that name."""
+    """Whether an import no plan file answered was written as a path to code rather
+    than a package's name or an asset: relative (Python's `.models` too), rooted, or
+    under a side's root (`backend/…`), with no extension or a source one. A bare name
+    never is — `firebase/auth` and `chart.js` are packages, even beside a plan folder
+    of that name — and `./globals.css` or `./logo.svg` is a stylesheet or an image."""
     s = _spec(spec)
-    return s.startswith((".", "/", "@/", "~/")) or ("/" in s and s.split("/", 1)[0] in (layout.BACKEND, layout.FRONTEND))
+    if s.lower().endswith(fixscope._TEXT_ASSETS + fixscope._BINARY + (".json",)):  # noqa: SLF001 - one list
+        return False
+    return s.startswith((".", "/", "@/", "~/")) or (
+        "/" in s and s.split("/", 1)[0].lower() in (layout.BACKEND, layout.FRONTEND)
+    )
 
 
 #: Layers by folder or name, used where the plan never says which file uses which (#103):

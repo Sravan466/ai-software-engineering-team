@@ -239,6 +239,9 @@ def test_a_package_is_never_wired_to_a_plan_file_of_its_name():
     # Counted as dropped only when written as a path: never by a name or an extension.
     assert not _meant_planned("chart.js") and not _meant_planned("next/router") and not _meant_planned("firebase/auth")
     assert _meant_planned("./animations") and _meant_planned(".models") and _meant_planned("backend/app/x")
+    assert _meant_planned("Backend/app/x") and _meant_planned("./auth.service") and _meant_planned("..services.todo")
+    # A stylesheet, an image or data the plan doesn't list is an asset, not missing wiring.
+    assert not _meant_planned("./globals.css") and not _meant_planned("./logo.svg") and not _meant_planned("./data.json")
     # A JavaScript import is never a Python file, nor `./x.py` a JavaScript one.
     assert _plan_import("a/x.js", "./y.js", plan) is None
     assert _plan_import("a/z.py", "./x.py", plan) is None
@@ -271,6 +274,13 @@ def test_an_import_from_the_side_s_root_finds_a_plan_written_under_a_side_folder
         importer = next(p for p in out.values() if p.path.endswith("/c.js"))
         assert importer.imports == [want], (plan, ask)
         assert BackendEngineerAgent().plan_problems({"files": files}, AgentContext(idea="x")) == []
+
+
+def test_wiring_only_a_file_the_platform_writes_is_no_wiring():
+    # `migrate.py` is the platform's: its imports reach no writer, so they don't pass the gate.
+    files = [{"path": "migrate.py", "imports": ["app.models"]}, {"path": "app/models/__init__.py"},
+             {"path": "app/main.py"}, {"path": "app/crud.py"}]
+    assert BackendEngineerAgent().plan_problems({"files": files}, AgentContext(idea="x"))
 
 
 def test_the_gate_and_normalise_search_the_same_files():
