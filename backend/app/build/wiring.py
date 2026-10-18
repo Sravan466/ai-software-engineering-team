@@ -416,7 +416,7 @@ def wanted(importer: str, code: str, spec: str) -> Optional[Wanted]:
     statement of that module, merged — or None when no line is one the readers here
     understand. A line inside a comment or a string doesn't count."""
     if importer.endswith(".py"):
-        return _python_wanted(importer, code, spec)
+        return None  # Python is read by `wanted_by`, from the resolved module
     from app.build.placeholders import lex
 
     bare, _ = lex(code)  # strings and comments emptied: `x.y` in a comment isn't a use
@@ -473,67 +473,50 @@ def wanted(importer: str, code: str, spec: str) -> Optional[Wanted]:
     return out
 
 
-def unexported(wants: Iterable[Wanted], real, code: Optional[str] = None) -> list[str]:
-    """What `wants` take by name that `real` (`exports.Exports`) doesn't export: each
-    missing name, and `default` for an ES default nobody exports. Nothing when the
-    reader can't see the module's exports whole — `export * from`, or CommonJS exports
-    built by a call, a spread or `Object.assign` (`code`) — and never a CommonJS
-    module's own value or what is read off it."""
-    if real is None or real.star or (code is not None and _opaque(code)):
+def unexported(wants: Iterable[Wanted], real, code: str) -> list[str]:
+    """What `wants` take by name that `real` (`exports.Exports` of `code`) doesn't
+    export: each missing name, and `default` for an ES default nobody exports.
+
+    Only for a module the reader sees whole: ES `export`s, `exports.x =`, and a
+    `module.exports = { … }` literal. Nothing is called missing in one whose exports are
+    built some other way — `export * from`, a name, a call, a `require`, a spread,
+    `Object.assign` — nor a CommonJS module's own value, nor what is read off it: a
+    file is asked for those, never judged on them."""
+    if real is None or real.star or _opaque(code):
         return []
-    have = {*real.named, *real.types}
+    have = {*real.named, *real.types, *(["default"] if real.default is not None else [])}
+    # Node and bundlers hand an ES default import a CommonJS module's whole value.
+    interop = _commonjs(code)
     missing: list[str] = []
     for want in wants:
-        if want.default and not want.commonjs and real.default is None and "default" not in missing:
+        if want.default and not want.commonjs and real.default is None and not interop and "default" not in missing:
             missing.append("default")
         missing += [n for n in want.named if n not in have and n not in missing]
     return missing
 
 
+def _commonjs(code: str) -> bool:
+    from app.build.placeholders import lex
+
+    return re.search(r"\b(?:module\.)?exports\s*(?:\.|=(?!=))", lex(code)[0]) is not None
+
+
 def _opaque(code: str) -> bool:
     """Whether a file's CommonJS exports are more than a reader here can see: assigned
-    from a call, a `require`, `new`, a function or class; an object with a spread; or
-    built with `Object.assign`. A plain name or an object literal is seen whole."""
+    as a name, a call, a `require`, `new`, a function or class; an object with a spread;
+    or built with `Object.assign`. Only an object literal is seen whole."""
+    from app.build.exports import object_parts
     from app.build.placeholders import lex
 
     bare, _ = lex(code)
     if re.search(r"\bObject\.assign\(\s*(?:module\.)?exports\b", bare):
         return True
     for m in re.finditer(r"\bmodule\.exports\s*=(?!=)\s*", bare):
-        rest = bare[m.end():]
-        if rest.startswith("{"):
-            depth, end = 0, len(rest)
-            for i, ch in enumerate(rest):
-                if ch in "{[(":
-                    depth += 1
-                elif ch in "}])":
-                    depth -= 1
-                    if depth == 0:
-                        end = i
-                        break
-            if "..." in rest[:end]:
-                return True  # a spread: names the reader can't list
-            continue
-        if not re.match(rf"{_IDENT}\s*(?:;|\n|$)", rest):
+        if not bare[m.end():].startswith("{"):
             return True
+        if any(part.strip().startswith("...") for part in object_parts(bare, m.end())):
+            return True  # a spread: names the reader can't list
     return False
-
-
-def _python_wanted(importer: str, code: str, spec: str) -> Optional[Wanted]:
-    import ast
-
-    level = len(spec) - len(spec.lstrip("."))
-    module = spec[level:] or None
-    try:
-        tree = ast.parse(code)
-    except (SyntaxError, ValueError):
-        return None
-    nodes = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and (n.level or 0) == level and n.module == module]
-    if not nodes:
-        return None
-    names = list(dict.fromkeys(a.name for n in nodes for a in n.names if a.name != "*"))
-    line = " ".join(dict.fromkeys(ast.get_source_segment(code, n) or f"from {spec} import …" for n in nodes))
-    return Wanted(importer, line[:400], named=names)
 
 
 def _python_takes(importer: str, code: str, target: str) -> Optional[Wanted]:
@@ -552,10 +535,17 @@ def _python_takes(importer: str, code: str, target: str) -> Optional[Wanted]:
     out = Wanted(importer, "")
     lines: list[str] = []
 
+    def dotted(node) -> str:
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        return ".".join([node.id] + parts[::-1]) if isinstance(node, ast.Name) else ""
+
     def attrs(local: str) -> list[str]:
+        # `anim.fade` for `from . import anim`; `app.services.anim.fade` for a dotted import.
         return list(dict.fromkeys(
-            n.attr for n in ast.walk(tree)
-            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == local
+            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and dotted(n.value) == local
         ))
 
     for node in ast.walk(tree):

@@ -244,7 +244,7 @@ def undefined(path: str, content: str) -> list[str]:
     for m in _CJS_OBJECT.finditer(code):
         shorthand += [k for k, whole in _object_parts(code, m.end() - 1) if whole]
     for m in _LIST.finditer(code):
-        if not m.group(1):
+        if not m.group(1) and not m.group(4):  # a type list, or a re-export: defined elsewhere
             for part in m.group(2).split(","):
                 name = part.strip()
                 if re.fullmatch(_IDENT, name):
@@ -264,7 +264,18 @@ def _object_keys(code: str, start: int) -> list[str]:
 
 def _object_parts(code: str, start: int) -> list[tuple[str, bool]]:
     """(key, whether the part is the key alone — the `{ User }` shorthand) for each
-    top-level part of the object literal whose `{` is at `start`."""
+    top-level part of the object literal whose `{` is at `start`; a spread is none."""
+    out = []
+    for part in object_parts(code, start):
+        m = re.match(rf"\s*(?:(?:async|get|set)\s+(?=[A-Za-z_$])|\*\s*)?({_IDENT})", part)
+        if m and not part.strip().startswith("..."):
+            out.append((m.group(1), part.strip() == m.group(1)))
+    return out
+
+
+def object_parts(code: str, start: int) -> list[str]:
+    """The top-level parts, as written, of the object literal whose `{` is at `start`
+    in lexed `code`."""
     depth, cut, parts = 0, start + 1, []
     for i in range(start, len(code)):
         ch = code[i]
@@ -278,12 +289,7 @@ def _object_parts(code: str, start: int) -> list[tuple[str, bool]]:
         elif ch == "," and depth == 1:
             parts.append(code[cut:i])
             cut = i + 1
-    out = []
-    for part in parts:
-        m = re.match(rf"\s*(?:(?:async|get|set)\s+(?=[A-Za-z_$])|\*\s*)?({_IDENT})", part)
-        if m and not part.strip().startswith("..."):
-            out.append((m.group(1), part.strip() == m.group(1)))
-    return out
+    return parts
 
 
 def from_checker(entry: dict) -> Exports:

@@ -76,7 +76,7 @@ def test_each_way_of_importing_says_what_it_takes():
     assert both.labels() == ["default", "fade"]
     star = wiring.wanted("a.ts", "import * as anim from './anim';\nanim.fadeIn(); anim.fadeOut();\n", "./anim")
     assert star.named == ["fadeIn", "fadeOut"]
-    py = wiring.wanted("app/routes.py", "from .services.todo import create_todo, list_todos\n", ".services.todo")
+    [py] = wiring.wanted_by("app/services/todo.py", {"app/routes.py": "from .services.todo import create_todo, list_todos\n"})
     assert py.named == ["create_todo", "list_todos"]
     # Every statement of the module, merged; a commented-out one isn't a line.
     two = wiring.wanted("a.js", "// import { old } from './a'\nimport A from './a';\nimport { b } from './a';\n", "./a")
@@ -99,28 +99,28 @@ def test_missing_names_are_what_a_module_doesn_t_export():
     from app.build import exports
 
     wants = [wiring.wanted("c.js", CONTROLLER, "./animations")]
-    assert wiring.unexported(wants, exports.read(NEW, RIGHT)) == []
-    assert wiring.unexported(wants, exports.read(NEW, WRONG)) == ["createTodoAnimation", "updateTodoAnimation", "deleteTodoAnimation"]
+    assert wiring.unexported(wants, exports.read(NEW, RIGHT), RIGHT) == []
+    assert wiring.unexported(wants, exports.read(NEW, WRONG), WRONG) == ["createTodoAnimation", "updateTodoAnimation", "deleteTodoAnimation"]
     # A CommonJS module's own value is asked for, never called missing: no reader here
     # sees `module.exports = function …` or `= express.Router()`.
     whole = [wiring.wanted("a.js", "const r = require('./r');\napp.use(r);\n", "./r")]
     for code in ("module.exports = express.Router();\n", "module.exports = function (app) {};\n", "module.exports = { a: 1 };\n"):
-        assert wiring.unexported(whole, exports.read("r.js", code)) == [], code
+        assert wiring.unexported(whole, exports.read("r.js", code), code) == [], code
     # What's read off a whole module isn't held against a module that sets its value.
     db = [wiring.wanted("a.js", "const db = require('./db');\ndb.query('x');\n", "./db")]
-    assert wiring.unexported(db, exports.read("db.js", "const pool = new Pool();\nmodule.exports = pool;\n")) == []
+    assert wiring.unexported(db, exports.read("db.js", "const pool = new Pool();\nmodule.exports = pool;\n"), "const pool = new Pool();\nmodule.exports = pool;\n") == []
     # Exports built by a call, a require, a spread or Object.assign are unknown, not missing.
     for code in ("module.exports = require('./impl');\n", "module.exports = makeAnimations();\n",
                  "module.exports = { ...require('./a') };\n", "Object.assign(module.exports, { a: 1 });\n"):
         assert wiring.unexported(wants, exports.read(NEW, code), code) == [], code
     # An ES default nobody exports is.
     es = [wiring.wanted("a.mjs", "import Anim from './anim.js';\n", "./anim.js")]
-    assert wiring.unexported(es, exports.read("anim.js", "export const x = 1;\n")) == ["default"]
+    assert wiring.unexported(es, exports.read("anim.js", "export const x = 1;\n"), "export const x = 1;\n") == ["default"]
     # Keys after an inline function body are exports too.
     obj = "module.exports = {\n  createTodoAnimation: () => { return 1 },\n  updateTodoAnimation() { return 2 },\n  deleteTodoAnimation,\n};\n"
-    assert wiring.unexported(wants, exports.read(NEW, obj)) == []
+    assert wiring.unexported(wants, exports.read(NEW, obj), obj) == []
     # A re-export the reader can't follow may hold any name: nothing is called missing.
-    assert wiring.unexported(wants, exports.read(NEW, "export * from './more';\n")) == []
+    assert wiring.unexported(wants, exports.read(NEW, "export * from './more';\n"), "export * from './more';\n") == []
 
 
 # ── the round ───────────────────────────────────────────────────────────────
@@ -197,3 +197,26 @@ def test_a_missing_es_default_names_the_es_importer_and_the_template_lists_every
     assert "`ui.mjs`" in _missing_text(["default"], wants)
     many = [wiring.wanted("c.js", "const { a, b, c, d, e, f, g, h } = require('./x');\n", "./x")]
     assert "module.exports = { a, b, c, d, e, f, g, h }" in _export_ask(many)
+
+
+def test_a_file_is_only_judged_on_exports_the_reader_sees_whole():
+    from app.build import exports
+
+    wants = [wiring.wanted("c.js", "const { a, b } = require('./x');\n", "./x")]
+    # A name, a class or a variable holding the object: seen only as a value, never judged.
+    for code in ("const api = { a, b };\nmodule.exports = api;\n", "class X { static a() {} static b() {} }\nmodule.exports = X;\n"):
+        assert wiring.unexported(wants, exports.read("x.js", code), code) == [], code
+    # An ES default of a CommonJS module is its whole value (interop).
+    es = [wiring.wanted("a.mjs", "import anim from './anim.js';\n", "./anim.js")]
+    cjs = "module.exports = { a: 1 };\n"
+    assert wiring.unexported(es, exports.read("anim.js", cjs), cjs) == []
+    # `{ default as X }` is the default.
+    named_default = [wiring.wanted("a.mjs", "import { default as X, a } from './x.js';\n", "./x.js")]
+    code = "export default function X() {}\nexport const a = 1;\n"
+    assert wiring.unexported(named_default, exports.read("x.js", code), code) == []
+    # A re-export list is defined elsewhere, not a name this file forgot to define.
+    assert exports.undefined("x.js", "export { fadeIn, slide } from './effects';\n") == []
+    # A dotted Python import reads its attributes.
+    [dotted] = wiring.wanted_by("backend/app/services/anim.py",
+                                {"backend/app/main.py": "import app.services.anim\napp.services.anim.fade()\n"})
+    assert dotted.loose == ["fade"]
