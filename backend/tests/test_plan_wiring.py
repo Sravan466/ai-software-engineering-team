@@ -155,3 +155,113 @@ def test_imports_of_packages_wire_nothing():
 
 def test_a_node_framework_with_no_language_named_still_fixes_a_format():
     assert freeze({"tech_stack": {"backend": ["Express"]}}).module_format == "commonjs"
+
+
+# ── the plan's imports, as a plan writes them (#119) ────────────────────────
+def _normalised(files: list[dict]) -> dict[str, _Planned]:
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(agent=SimpleNamespace(key="backend_engineer"), ctx=SimpleNamespace(charter=None), left_to_platform=[])
+    return {p.path: p for p in _Run._normalise(fake, {"files": files})}
+
+
+def test_every_shape_the_gate_accepts_keeps_its_import_through_normalise():
+    # The issue's table: the gate accepted `app/models/todo` and `_normalise` then dropped
+    # it, and the way code writes an import (`../models/todo`, `./models/todo`) neither.
+    agent = BackendEngineerAgent()
+    paths = ["app/models/todo.js", "app/controllers/todosController.js", "app/routes/todos.js", "main.js"]
+    for shape in ("app/models/todo.js", "./app/models/todo.js", "app/models/todo", "../models/todo", "./models/todo"):
+        files = [{"path": p, "purpose": "x"} for p in paths]
+        files[1]["imports"] = [shape]
+        assert agent.plan_problems({"files": files}, AgentContext(idea="x")) == [], shape
+        assert _normalised(files)["backend/app/controllers/todosController.js"].imports == ["backend/app/models/todo.js"], shape
+
+
+def test_a_7b_plan_written_the_javascript_way_keeps_all_of_its_wiring():
+    # qwen2.5:7b's own plan for the issue's idea: 0 of 11 files kept an import before.
+    plan = {
+        "index.js": ["./config", "./routes/auth", "./routes/todos", "./routes/streak"], "config.js": [],
+        "models/user.js": ["bcryptjs", "jsonwebtoken", "config"], "models/todo.js": ["mongoose", "config"],
+        "routes/auth.js": ["express", "./controllers/authController", "config"],
+        "routes/todos.js": ["express", "./controllers/todoController"],
+        "routes/streak.js": ["express", "./controllers/streakController"],
+        "controllers/authController.js": ["jsonwebtoken", "./models/user"],
+        "controllers/todoController.js": ["./models/todo"], "controllers/streakController.js": ["./models/streak"],
+        "models/streak.js": ["mongoose"],
+    }
+    files = [{"path": p, "purpose": "x", "imports": i} for p, i in plan.items()]
+    assert BackendEngineerAgent().plan_problems({"files": files}, AgentContext(idea="x")) == []
+    out = _normalised(files)
+    b = "backend/"
+    assert out[b + "index.js"].imports == [b + "config.js", b + "routes/auth.js", b + "routes/todos.js", b + "routes/streak.js"]
+    assert out[b + "routes/auth.js"].imports == [b + "controllers/authController.js", b + "config.js"]
+    assert out[b + "controllers/todoController.js"].imports == [b + "models/todo.js"]
+    assert out[b + "models/user.js"].imports == [b + "config.js"]
+    # Packages are left alone, and dropped without a word: they were never plan files.
+    assert not any(p.dropped for p in out.values())
+    # Written in the order the wiring now gives: each file after what it imports.
+    order = list(out)
+    assert order.index(b + "models/todo.js") < order.index(b + "controllers/todoController.js") < order.index(
+        b + "routes/todos.js") < order.index(b + "index.js")
+
+
+def test_a_relative_import_is_read_from_the_importer_s_folder_first():
+    from app.agents.code_phase import _plan_import
+
+    plan = {"user.js", "routes/user.js", "routes/api.js", "app/models/user.js", "app/models/todo.ts", "lib/db/index.js"}
+    # JavaScript's own rule: `./user` from `routes/api.js` is `routes/user.js`.
+    assert _plan_import("routes/api.js", "./user", plan) == "routes/user.js"
+    assert _plan_import("api.js", "./user", plan) == "user.js"
+    # A folder's index, and NodeNext's `.js` for a `.ts` source.
+    assert _plan_import("main.js", "./lib/db", plan) == "lib/db/index.js"
+    assert _plan_import("app/x.ts", "./models/todo.js", plan) == "app/models/todo.ts"
+    # `@/`, `~/` and `/` are the plan's root.
+    assert _plan_import("routes/api.js", "@/user", plan) == "user.js"
+    # The last resort is the one plan file ending in the import's path — never one of two.
+    assert _plan_import("main.js", "./models/todo", plan) == "app/models/todo.ts"
+    assert _plan_import("lib/x.js", "../user", {"routes/user.js", "app/models/user.js", "lib/x.js"}) is None
+    # A file never imports itself, and a bare name is a package unless a plan file is at it.
+    assert _plan_import("routes/api.js", "./api", plan) is None
+    assert _plan_import("main.js", "express", plan) is None
+    assert _plan_import("main.js", "user", plan) == "user.js"
+
+
+def test_python_modules_resolve_by_package_and_relative_dots():
+    from app.agents.code_phase import _plan_import
+
+    plan = {"app/main.py", "app/models/__init__.py", "app/models/user.py", "app/routes/todos.py", "app/crud.py"}
+    assert _plan_import("app/main.py", "app.models.user", plan) == "app/models/user.py"
+    assert _plan_import("app/routes/todos.py", "..crud", plan) == "app/crud.py"
+    assert _plan_import("app/main.py", ".models", plan) == "app/models/__init__.py"
+    assert _plan_import("app/main.py", "fastapi", plan) is None
+
+
+def test_an_import_meant_as_a_plan_file_that_isn_t_one_is_dropped_and_counted(monkeypatch):
+    from tests.test_code_phases import SMALL, Scripted, _run
+
+    files = [
+        {"path": "app/models/todo.js", "purpose": "model"},
+        {"path": "app/controllers/todos.js", "purpose": "controller",
+         "imports": ["../models/todo", "./animations", "express", "models/streak", "next/router"]},
+        {"path": "main.js", "purpose": "entry", "imports": ["./app/controllers/todos"]},
+    ]
+    model = Scripted("Backend Engineer", files)
+    result = _run(monkeypatch, "backend_engineer", model, SMALL)
+    record = result.handoff["generation"]
+    entry = next(p for p in record["plan"] if p["path"] == "backend/app/controllers/todos.js")
+    assert entry["imports"] == ["backend/app/models/todo.js"]
+    # A package (`express`, `next/router`) isn't counted; a path under a plan folder is.
+    assert entry["dropped_imports"] == ["./animations", "models/streak"]
+    assert record["imports_dropped"] == 2
+    assert "dropped_imports" not in next(p for p in record["plan"] if p["path"] == "backend/main.js")
+    # Each write call names what the file imports, with that file's code (#119's ask).
+    ask = next(p for p, w in zip(model.prompts[1:], model.writes) if w == ["backend/app/controllers/todos.js"])
+    assert "Imports: backend/app/models/todo.js" in ask and "### backend/app/models/todo.js" in ask
+
+
+def test_a_plan_whose_imports_all_resolve_nowhere_is_asked_again():
+    agent = BackendEngineerAgent()
+    plan = {"files": [{"path": "main.js", "imports": ["./routes/missing"]}, {"path": "app/models/todo.js"},
+                      {"path": "app/routes/todos.js", "imports": ["../models/gone"]}]}
+    [problem] = agent.plan_problems(plan, AgentContext(idea="x"))
+    assert "no file lists its `imports`" in problem

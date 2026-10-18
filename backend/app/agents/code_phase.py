@@ -30,9 +30,10 @@ to write, the phase falls back to the one-reply path and says so (`generation.mo
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from dataclasses import dataclass, field, replace
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from pydantic import BaseModel
 
@@ -120,6 +121,8 @@ class _Planned:
     misses: int = 0
     #: The exports the plan promised, before the code said what it really exports (#101).
     promised: list[str] = field(default_factory=list)
+    #: Imports the plan listed as files of its own that no plan file is at (#119).
+    dropped: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -249,11 +252,13 @@ class CodePhaseAgent(BaseAgent):
                 f"({settings.code_max_files}); merge the small ones"
             ]
         listed = [f for f in files if isinstance(f, dict) and str(f.get("path") or "").endswith(_SOURCE_EXT)]
-        stems = {layout.clean(str(f.get("path") or "")).rsplit(".", 1)[0] for f in listed}
+        paths = {layout.clean(str(f.get("path") or "")) for f in listed}
 
         def wired(f: dict) -> bool:
-            # An import of another file in the plan — a package wires nothing.
-            return any(layout.clean(i).rsplit(".", 1)[0] in stems for i in _strings(f.get("imports")))
+            # An import of another file in the plan, by `_normalise`'s own rule (#119) —
+            # a package wires nothing.
+            own = layout.clean(str(f.get("path") or ""))
+            return any(_plan_import(own, i, paths) is not None for i in _strings(f.get("imports")))
 
         if len(listed) >= 3 and not any(wired(f) for f in listed):
             # The plan never says which file uses which (#103): the entry file is then
@@ -1851,7 +1856,9 @@ class _Run:
         Placed as the archive will place them (`backend/…`, `frontend/…`), so the file
         each call is asked for is the file that ships. Files the platform writes itself
         are left to it, and each file comes after the plan files it imports where the
-        plan allows that order.
+        plan allows that order. Each import is read by the plan gate's own rule
+        (`_plan_import`, #119); one meant as a plan file that no plan file is at is
+        dropped, and the record says so.
         """
         from app.build.scaffold import platform_owned
 
@@ -1861,6 +1868,8 @@ class _Run:
         language = charter.get("language").token if charter is not None and charter.get("language") else None
         placed = layout.Placer(language).place_all(self.agent.key, [(f["path"], "") for f in files])
         where = {layout.clean(f["path"]): p for (p, *_), f in zip(placed, files)}
+        at = set(where.values())
+        folders = {part for p in where for part in p.split("/")[:-1]}
         out: list[_Planned] = []
         seen: set[str] = set()
         for (path, *_), f in zip(placed, files):
@@ -1870,10 +1879,20 @@ class _Run:
             if platform_owned(path):
                 self.left_to_platform.append(path)
                 continue
-            imports = []
+            imports: list[str] = []
+            dropped: list[str] = []
             for item in _strings(f.get("imports")):
-                target = where.get(layout.clean(item)) or layout.place(self.agent.key, item)
-                if target and target != path and target not in imports:
+                # Read as the plan wrote it (#119); an import written as the placed path
+                # (`backend/app/models/todo`) is found where the files were placed.
+                hit = _plan_import(layout.clean(f["path"]), item, where)
+                target = where[hit] if hit is not None else _planned_at(
+                    layout.place(self.agent.key, item.strip().strip("'\"`")), at, posixpath.splitext(path)[1]
+                )
+                if target is None:
+                    if _meant_planned(item, folders) and item not in dropped:
+                        dropped.append(item)
+                    continue
+                if target != path and target not in imports:
                     imports.append(target)
             out.append(
                 _Planned(
@@ -1881,6 +1900,7 @@ class _Run:
                     purpose=str(f.get("purpose") or "").strip(),
                     exports=_strings(f.get("exports"))[:20],
                     imports=imports,
+                    dropped=dropped,
                 )
             )
         out = out[: max(settings.code_max_files, 1)]
@@ -1975,9 +1995,12 @@ class _Run:
                 "truncated_replies": self.truncated,
                 "repairs": self.repairs,
                 "plan": [
-                    {"path": p.path, "purpose": p.purpose, "exports": p.exports, "imports": p.imports, "origin": p.origin}
+                    {"path": p.path, "purpose": p.purpose, "exports": p.exports, "imports": p.imports, "origin": p.origin,
+                     **({"dropped_imports": p.dropped} if p.dropped else {})}
                     for p in self.planned
                 ],
+                # Imports the plan meant as its own files and no plan file is at (#119).
+                "imports_dropped": sum(len(p.dropped) for p in self.planned),
                 "unwritten": list(self.unwritten),
                 "left_to_platform": list(self.left_to_platform),
                 "files": {
@@ -2161,6 +2184,99 @@ def _strings(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(v).strip() for v in value if str(v).strip()]
+
+
+def _plan_import(importer: str, spec: str, paths: Iterable[str]) -> Optional[str]:
+    """The plan file `importer` means by `spec`, one of its `imports` as a plan lists
+    it — or None: a package, or a path no plan file is at (#119).
+
+    A plan writes an import the way code does (`./models/user`, `../config`) or as a
+    plan path (`app/models/user.js`), with the extension or without. The first plan
+    file found wins, looking at:
+
+      1. the path as written (`app/models/todo.js`);
+      2. that path with the importer's extension or any source one, or a folder's
+         `index.*` (`app/models/todo` -> `app/models/todo.js`);
+      3. for a relative import, first the importer's own folder (`../models/todo`
+         from `app/controllers/x.js`), as JavaScript and Python resolve one;
+      4. the plan's root (`./models/todo` -> `models/todo.js`), and `@/`, `~/` or `/`;
+      5. the one plan file whose path ends in the import's own (`./models/todo` ->
+         `app/models/todo.js`) — none when two do.
+
+    A bare name (`express`, `bcryptjs`) is a package unless a plan file is at it. One
+    rule for the plan gate and `_normalise`, so the gate can't accept a plan that then
+    reaches the writer with its wiring gone. `importer` and `paths` are clean paths in
+    the same space; the answer is one of `paths`.
+    """
+    from app.build import fixscope
+
+    s = str(spec or "").strip().strip("'\"`").strip()
+    pool = set(paths)
+    if not s or not importer:
+        return None
+    here = posixpath.dirname(importer)
+    if importer.endswith(".py") and "/" not in s and not s.lower().endswith(_SOURCE_EXT):
+        # A Python module: `app.models.user`, or `.models` from the importer's package.
+        level = len(s) - len(s.lstrip("."))
+        rest = s[level:].replace(".", "/")
+        base = here
+        for _ in range(level - 1):
+            base = posixpath.dirname(base)
+        bases = ([layout.join(base, rest)] if level else []) + [layout.clean(rest)]
+        by_tail = bool(rest) and (bool(level) or "/" in rest)
+    elif s.startswith(("./", "../")) or s in (".", ".."):
+        bases, by_tail = [layout.join(here, s), layout.clean(s)], True
+    elif s.startswith(("@/", "~/", "/")):
+        bases, by_tail = [layout.clean(s.lstrip("@~"))], True
+    else:
+        bases = [layout.clean(s)]
+        by_tail = "/" in bases[0]
+    ext = posixpath.splitext(importer)[1]
+    for base in bases:
+        hit = _planned_at(base, pool, ext)
+        if hit is not None and hit != importer:
+            return hit
+    want = bases[-1] if bases else ""
+    if want.lower().endswith(_SOURCE_EXT):
+        want = posixpath.splitext(want)[0]
+    if not by_tail or not want:
+        return None
+    hits = [
+        p for p in pool
+        if p != importer and p.lower().endswith(_SOURCE_EXT)
+        and ("/" + fixscope._module_path(p)).endswith("/" + want)  # noqa: SLF001 - one rule
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _planned_at(base: str, pool: set[str], ext: str) -> Optional[str]:
+    """The plan file at `base`: as written, with an extension, or a folder's index."""
+    if not base:
+        return None
+    if base in pool:
+        return base
+    exts = [e for e in dict.fromkeys((ext, *_SOURCE_EXT)) if e]
+    stem, own = posixpath.splitext(base)
+    # `./x.js` names `x.ts` the way TypeScript's NodeNext imports are written.
+    for root in [base] + ([stem] if own.lower() in _SOURCE_EXT else []):
+        for e in exts:
+            if root + e in pool:
+                return root + e
+    for e in exts:
+        index = f"{base}/__init__.py" if e == ".py" else f"{base}/index{e}"
+        if index in pool:
+            return index
+    return None
+
+
+def _meant_planned(spec: str, folders: set[str]) -> bool:
+    """Whether an import no plan file answered was meant as one rather than a package:
+    a relative or rooted path, a source file's name, or a path under a plan folder."""
+    s = str(spec or "").strip().strip("'\"`").strip()
+    if s.startswith((".", "/", "@/", "~/")) or s.lower().endswith(_SOURCE_EXT):
+        return True
+    head = s.split("/", 1)[0] if "/" in s else s.split(".", 1)[0] if "." in s else ""
+    return bool(head) and head in folders
 
 
 #: Layers by folder or name, used where the plan never says which file uses which (#103):
