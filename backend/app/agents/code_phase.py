@@ -251,29 +251,15 @@ class CodePhaseAgent(BaseAgent):
                 f"`files` — {len(files)} files is more than this build may plan "
                 f"({settings.code_max_files}); merge the small ones"
             ]
-        from app.build.scaffold import platform_owned
-
-        listed = [f for f in files if isinstance(f, dict) and str(f.get("path") or "").endswith(_SOURCE_EXT)]
-        # The files the phase writes itself: one the platform writes is no wiring to show.
-        paths = {
-            layout.clean(str(f.get("path") or "")) for f in listed
-            if not platform_owned(layout.place(self.key, str(f.get("path") or "")))
-        }
-
-        def wired(f: dict) -> bool:
-            # An import of another file in the plan, by `_normalise`'s own rule (#119) —
-            # a package wires nothing.
-            own = layout.clean(str(f.get("path") or ""))
-            return any(_plan_import(own, i, paths) is not None for i in _strings(f.get("imports")))
-
-        if len(listed) >= 3 and not any(wired(f) for f in listed):
+        charter = getattr(ctx, "charter", None)
+        language = charter.get("language").token if charter is not None and charter.get("language") else None
+        # Read exactly as `_normalise` reads it (#119): a plan the gate passes reaches the
+        # writer with this wiring. A package wires nothing.
+        listed = [w for w in _plan_wiring(self.key, files, language) if w.path.endswith(_SOURCE_EXT)]
+        if len(listed) >= 3 and not any(t.endswith(_SOURCE_EXT) for w in listed for t in w.imports):
             # The plan never says which file uses which (#103): the entry file is then
             # written first and blind, guessing names the files after it never export.
-            entry = next(
-                (str(f.get("path")) for f in listed
-                 if str(f.get("path") or "").endswith(_SOURCE_EXT) and _layer(str(f.get("path") or "")) == _ENTRY),
-                None,
-            )
+            entry = next((str(w.plan["path"]) for w in listed if _layer(w.path) == _ENTRY), None)
             return [
                 "`files` — no file lists its `imports`. Give each file the plan paths it imports"
                 + (f", `{entry}` most of all: it uses the others" if entry else "")
@@ -622,7 +608,7 @@ class _Run:
             # Read by the plan's own rule (#119), once every file the change adds is known.
             imports: list[str] = []
             for name in asked_imports.get(e.path, []):
-                target = _plan_import(e.path, name, known_paths) or self._existing(name, known)
+                target = _plan_import(e.path, name, known_paths, lambda p: layout.place(agent.key, p)) or self._existing(name, known)
                 if target and target != e.path and target in known_paths and target not in imports:
                     imports.append(target)
             e.imports = imports or e.imports
@@ -1870,53 +1856,29 @@ class _Run:
         """
         from app.build.scaffold import platform_owned
 
-        files = [f for f in (output or {}).get("files") or [] if isinstance(f, dict)]
-        files = [f for f in files if isinstance(f.get("path"), str) and layout.clean(f["path"])]
         charter = self.ctx.charter
         language = charter.get("language").token if charter is not None and charter.get("language") else None
-        placed = layout.Placer(language).place_all(self.agent.key, [(f["path"], "") for f in files])
-        where = {layout.clean(f["path"]): p for (p, *_), f in zip(placed, files)}
-        pool = set(where)
-        folders = {part for p in where for part in p.split("/")[:-1]}
         out: list[_Planned] = []
-        seen: set[str] = set()
         #: path -> each import it kept -> the import as the plan wrote it.
         written_as: dict[str, dict[str, str]] = {}
-        for (path, *_), f in zip(placed, files):
-            if not path or path in seen:
+        for w in _plan_wiring(self.agent.key, (output or {}).get("files") or [], language):
+            if platform_owned(w.path):
+                self.left_to_platform.append(w.path)
                 continue
-            seen.add(path)
-            if platform_owned(path):
-                self.left_to_platform.append(path)
-                continue
-            imports: list[str] = []
-            dropped: list[str] = []
-            written_as[path] = {}
-            own = layout.clean(f["path"])
-            for item in _strings(f.get("imports")):
-                # Read as the plan wrote it, by the plan gate's own rule (#119).
-                hit = _plan_import(own, item, pool)
-                if hit is None:
-                    if _meant_planned(item, folders, own.endswith(".py")) and item not in dropped:
-                        dropped.append(item)
-                    continue
-                if where[hit] != path and where[hit] not in imports:
-                    imports.append(where[hit])
-                    written_as[path][where[hit]] = item
+            written_as[w.path] = w.written_as
             out.append(
                 _Planned(
-                    path=path,
-                    purpose=str(f.get("purpose") or "").strip(),
-                    exports=_strings(f.get("exports"))[:20],
-                    imports=imports,
-                    dropped=dropped,
+                    path=w.path,
+                    purpose=str(w.plan.get("purpose") or "").strip(),
+                    exports=_strings(w.plan.get("exports"))[:20],
+                    imports=list(w.imports),
+                    dropped=list(w.dropped),
                 )
             )
         out = out[: max(settings.code_max_files, 1)]
         known = {p.path for p in out}
         for p in out:
-            # A plan file the platform writes, or one past the cap: not shown to the
-            # writer, so dropped and said so like the rest.
+            # A plan file past the cap is never written: its import is dropped, and said.
             p.dropped += [written_as[p.path][i] for i in p.imports if i not in known]
             p.imports = [i for i in p.imports if i in known]
         return _ordered(out)
@@ -2198,7 +2160,63 @@ def _strings(value: object) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
-def _plan_import(importer: str, spec: str, paths: set[str]) -> Optional[str]:
+@dataclass
+class _Wired:
+    """One plan file as the plan gate and `_normalise` both read it (#119)."""
+
+    path: str  # where the build places it
+    plan: dict  # the plan's own entry
+    #: The plan files it imports, placed — never itself, nor a file the platform writes.
+    imports: list[str] = field(default_factory=list)
+    #: Each of those -> the import as the plan wrote it.
+    written_as: dict[str, str] = field(default_factory=dict)
+    #: Imports written as paths that no plan file is at.
+    dropped: list[str] = field(default_factory=list)
+
+
+def _plan_wiring(phase: str, files: object, language: Optional[str]) -> list[_Wired]:
+    """The plan's files at the paths the build places them, each with the plan files
+    it imports (#119): the one reading of a plan's `imports` that the plan gate and
+    `_normalise` share, so the gate can't pass a plan the writer then gets unwired.
+
+    Read where the files are placed, so an import written in the plan's own terms
+    (`app/models/todo`), from the side's root (`models/todo` beside a plan under
+    `server/`) or as placed (`backend/app/models/todo`) all find the same file."""
+    from app.build.scaffold import platform_owned
+
+    entries = [f for f in (files if isinstance(files, list) else []) if isinstance(f, dict)]
+    entries = [f for f in entries if isinstance(f.get("path"), str) and layout.clean(f["path"])]
+    raw = [f["path"] for f in entries]
+    placed = layout.Placer(language).place_all(phase, [(p, "") for p in raw])
+    strip = layout.renamed_roots(phase, raw)
+    where = {layout.clean(f["path"]): p for (p, *_), f in zip(placed, entries)}
+    pool = {p for p in where.values() if p}
+
+    def place(path: str) -> str:
+        return where.get(path) or layout.place(phase, path, strip=strip)
+
+    out: list[_Wired] = []
+    seen: set[str] = set()
+    for (path, *_), f in zip(placed, entries):
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        w = _Wired(path, f)
+        for item in _strings(f.get("imports")):
+            hit = _plan_import(path, item, pool, place)
+            if hit is None:
+                if _meant_planned(item) and item not in w.dropped:
+                    w.dropped.append(item)
+            elif hit != path and hit not in w.imports and not platform_owned(hit):
+                w.imports.append(hit)
+                w.written_as[hit] = item
+        out.append(w)
+    return out
+
+
+def _plan_import(
+    importer: str, spec: str, paths: set[str], place: Optional[Callable[[str], str]] = None
+) -> Optional[str]:
     """The plan file `importer` means by `spec`, one of its `imports` as a plan lists
     it — or None: a package, or a path no plan file is at (#119).
 
@@ -2208,56 +2226,58 @@ def _plan_import(importer: str, spec: str, paths: set[str]) -> Optional[str]:
     (`check.resolve`: as written, with an extension, or a folder's `index.*`; Python's
     `x.py` or `x/__init__.py`):
 
-      1. a bare path as written (`app/models/todo` -> `app/models/todo.js`);
+      1. a bare path from the plan's root (`app/models/todo` -> `app/models/todo.js`);
       2. a relative import from the importer's own folder first (`../models/todo` from
          `app/controllers/x.js`), as JavaScript and Python resolve one;
       3. then from the plan's root (`./models/todo` -> `models/todo.js`), as `@/`,
-         `~/` and `/` are; a leading `backend/` or `frontend/` is that root, placed;
+         `~/` and `/` are;
       4. last, for a relative or rooted import only, the one plan file whose path ends
-         in the import's own (`./models/todo` -> `app/models/todo.js`) — none of two.
+         in the import's own, in any case (`./models/todo` -> `app/models/Todo.js`) —
+         none of two.
 
-    A bare name (`express`, `firebase/auth`, `email.utils`) is a package unless a plan
-    file is at it as written. A file never imports itself. One rule for the plan gate
-    and `_normalise`, so the gate can't accept a plan that then reaches the writer with
-    its wiring gone. `importer` and `paths` are clean paths in the same space.
+    `place` turns a path from the plan's root into where `paths` are (by default they
+    are the same). A bare name (`express`, `firebase/auth`, `email.utils`) is a package
+    unless a plan file is at it as written. A file never imports itself.
     """
+    place = place or (lambda p: p)
     s = _spec(spec)
     if not s or not importer:
         return None
     python = importer.endswith(".py")
+    here = posixpath.dirname(importer)
     if python and "/" not in s and not s.endswith(".py"):
         # A Python module: `app.models.user`, or `.models` from the importer's package.
         level = len(s) - len(s.lstrip("."))
-        rest = s[level:].replace(".", "/")
-        base = posixpath.dirname(importer)
+        tail = layout.clean(s[level:].replace(".", "/"))
+        base = here
         for _ in range(level - 1):
             base = posixpath.dirname(base)
-        bases = [layout.join(base, rest), layout.clean(rest)] if level else [layout.clean(rest)]
-        by_tail = bool(level and rest)
+        bases = ([layout.join(base, tail)] if level else []) + ([place(tail)] if tail else [])
+        by_tail = bool(level and tail)
     elif s.startswith(("./", "../")) or s in (".", ".."):
-        bases, by_tail = [layout.join(posixpath.dirname(importer), s), layout.clean(s)], True
+        tail = layout.clean(s)
+        bases, by_tail = [layout.join(here, s)] + ([place(tail)] if tail else []), True
     elif s.startswith(("@/", "~/", "/")):
-        bases, by_tail = [layout.clean(s.lstrip("@~"))], True
+        tail = layout.clean(s.lstrip("@~"))
+        bases, by_tail = [place(tail)], True
     else:
-        bases, by_tail = [layout.clean(s)], False
-    head, _, rest = bases[-1].partition("/")
-    if rest and head in (layout.BACKEND, layout.FRONTEND):
-        bases.append(rest)
+        tail = layout.clean(s)
+        bases, by_tail = [place(tail)], False
     # TypeScript's NodeNext `./x.js` names `x.ts` — for a path, never a package's name.
     typescript = importer.endswith((".ts", ".tsx", ".mts", ".cts")) and (by_tail or "/" in s)
     for base in bases:
         hit = _planned_at(base, paths, python, typescript)
         if hit is not None:
             return None if hit == importer else hit
-    want = bases[-1]
-    if want.endswith(_SOURCE_EXT):
-        want = posixpath.splitext(want)[0]
-    if not by_tail or not want:
+    if tail.endswith(_SOURCE_EXT):
+        tail = posixpath.splitext(tail)[0]
+    if not by_tail or not tail:
         return None
+    end = "/" + tail.lower()
     hits = [
         p for p in paths
         if p != importer and p.endswith(_SOURCE_EXT) and p.endswith(".py") == python
-        and ("/" + fixscope._module_path(p)).endswith("/" + want)  # noqa: SLF001 - one rule
+        and ("/" + fixscope._module_path(p)).lower().endswith(end)  # noqa: SLF001 - one rule
     ]
     return hits[0] if len(hits) == 1 else None
 
@@ -2276,16 +2296,13 @@ def _spec(spec: object) -> str:
     return str(spec or "").strip().strip("'\"`").strip()
 
 
-def _meant_planned(spec: str, folders: set[str], python: bool) -> bool:
-    """Whether an import no plan file answered was meant as one rather than a package:
-    a relative or rooted path, or a path under a plan folder — never by its extension,
-    since `chart.js` is a package's name."""
+def _meant_planned(spec: str) -> bool:
+    """Whether an import no plan file answered was written as a path rather than a
+    package's name: relative (Python's `.models` too), rooted, or under a side's root
+    (`backend/…`). A bare name never is — `firebase/auth` and `chart.js` are packages,
+    even beside a plan folder of that name."""
     s = _spec(spec)
-    if s.startswith((".", "/", "@/", "~/")):
-        return True
-    sep = "." if python and "/" not in s else "/"
-    head = s.split(sep, 1)[0] if sep in s else ""
-    return bool(head) and (head in folders or head in (layout.BACKEND, layout.FRONTEND))
+    return s.startswith((".", "/", "@/", "~/")) or ("/" in s and s.split("/", 1)[0] in (layout.BACKEND, layout.FRONTEND))
 
 
 #: Layers by folder or name, used where the plan never says which file uses which (#103):

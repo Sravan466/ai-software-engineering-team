@@ -225,8 +225,8 @@ def test_a_relative_import_is_read_from_the_importer_s_folder_first():
     # A bare name is a package unless a plan file is at it as written.
     assert _plan_import("main.js", "express", plan) is None
     assert _plan_import("main.js", "user", plan) == "user.js"
-    # A leading `backend/` is the plan's root, placed: written as the placed path, kept.
-    assert _plan_import("main.js", "backend/app/models/user", plan) == "app/models/user.js"
+    # The last resort reads any case: a small model writes `./models/todo` for `Todo.js`.
+    assert _plan_import("main.js", "./models/TODO", plan) == "app/models/todo.ts"
 
 
 def test_a_package_is_never_wired_to_a_plan_file_of_its_name():
@@ -236,9 +236,9 @@ def test_a_package_is_never_wired_to_a_plan_file_of_its_name():
     assert _plan_import("src/hooks/useAuth.js", "firebase/auth", plan) is None
     assert _plan_import("app/main.py", "email.utils", plan) is None
     assert _plan_import("main.ts", "chart.js", plan) is None
-    assert not _meant_planned("chart.js", {"src", "app"}, python=False)
-    assert not _meant_planned("next/router", {"src", "app"}, python=False)
-    assert _meant_planned("app.models.user", {"src", "app"}, python=True)
+    # Counted as dropped only when written as a path: never by a name or an extension.
+    assert not _meant_planned("chart.js") and not _meant_planned("next/router") and not _meant_planned("firebase/auth")
+    assert _meant_planned("./animations") and _meant_planned(".models") and _meant_planned("backend/app/x")
     # A JavaScript import is never a Python file, nor `./x.py` a JavaScript one.
     assert _plan_import("a/x.js", "./y.js", plan) is None
     assert _plan_import("a/z.py", "./x.py", plan) is None
@@ -251,11 +251,34 @@ def test_the_gate_and_normalise_agree_on_placed_paths_and_platform_files():
     assert agent.plan_problems({"files": files}, AgentContext(idea="x")) == []
     out = _normalised(files)
     assert out["backend/main.js"].imports == ["backend/app/controllers/t.js"]
-    # A file the platform writes is no wiring the gate counts, and its import is recorded.
+    # A file the platform writes is no wiring, in the gate as in `_normalise` — and no
+    # dropped import either: the file is there, the platform writes it.
     files = [{"path": "main.js", "imports": ["./jest.config.js"]}, {"path": "jest.config.js"}, {"path": "app/x.js"},
              {"path": "app/y.js"}]
     assert agent.plan_problems({"files": files}, AgentContext(idea="x"))
-    assert _normalised(files)["backend/main.js"].dropped == ["./jest.config.js"]
+    assert _normalised(files)["backend/main.js"].imports == [] and _normalised(files)["backend/main.js"].dropped == []
+
+
+def test_an_import_from_the_side_s_root_finds_a_plan_written_under_a_side_folder():
+    # The plan's own paths carry the side's folder; its imports are written from the root.
+    for plan, ask, want in (
+        ("backend/app/models/t.js", "app/models/t.js", "backend/app/models/t.js"),
+        ("server/models/t.js", "models/t.js", "backend/models/t.js"),
+    ):
+        files = [{"path": plan}, {"path": plan.rsplit("/", 2)[0] + "/c.js", "imports": [ask]},
+                 {"path": plan.rsplit("/", 2)[0] + "/main.js", "imports": ["./c"]}]
+        out = _normalised(files)
+        importer = next(p for p in out.values() if p.path.endswith("/c.js"))
+        assert importer.imports == [want], (plan, ask)
+        assert BackendEngineerAgent().plan_problems({"files": files}, AgentContext(idea="x")) == []
+
+
+def test_the_gate_and_normalise_search_the_same_files():
+    # Two `migrate.js`, one the platform's: the same file set in both, so the same answer.
+    files = [{"path": "app.js", "imports": ["./migrate"]}, {"path": "db/migrate.js"}, {"path": "scripts/migrate.js"},
+             {"path": "routes/x.js"}]
+    gate = BackendEngineerAgent().plan_problems({"files": files}, AgentContext(idea="x"))
+    assert bool(gate) == (not _normalised(files)["backend/app.js"].imports)
 
 
 def test_python_modules_resolve_by_package_and_relative_dots():
@@ -274,7 +297,7 @@ def test_an_import_meant_as_a_plan_file_that_isn_t_one_is_dropped_and_counted(mo
     files = [
         {"path": "app/models/todo.js", "purpose": "model"},
         {"path": "app/controllers/todos.js", "purpose": "controller",
-         "imports": ["../models/todo", "./animations", "express", "models/streak", "next/router"]},
+         "imports": ["../models/todo", "./animations", "express", "backend/app/models/streak", "next/router"]},
         {"path": "main.js", "purpose": "entry", "imports": ["./app/controllers/todos"]},
     ]
     model = Scripted("Backend Engineer", files)
@@ -282,8 +305,8 @@ def test_an_import_meant_as_a_plan_file_that_isn_t_one_is_dropped_and_counted(mo
     record = result.handoff["generation"]
     entry = next(p for p in record["plan"] if p["path"] == "backend/app/controllers/todos.js")
     assert entry["imports"] == ["backend/app/models/todo.js"]
-    # A package (`express`, `next/router`) isn't counted; a path under a plan folder is.
-    assert entry["dropped_imports"] == ["./animations", "models/streak"]
+    # A package (`express`, `next/router`) isn't counted; a path is, relative or placed.
+    assert entry["dropped_imports"] == ["./animations", "backend/app/models/streak"]
     assert record["imports_dropped"] == 2
     assert "dropped_imports" not in next(p for p in record["plan"] if p["path"] == "backend/main.js")
     # Each write call names what the file imports, with that file's code (#119's ask).
@@ -310,3 +333,17 @@ def test_a_change_s_new_file_keeps_an_import_written_the_javascript_way(monkeypa
     assert "backend/app/controllers/streak.js" in {f["path"] for f in result.output["files"]}
     ask = next(p for p, w in zip(model.prompts[1:], model.writes) if w == ["backend/app/controllers/streak.js"])
     assert "Imports: backend/app/models/todo.js" in ask and "module.exports = { Todo: 1 };" in ask
+
+
+def test_a_change_s_new_file_finds_another_new_file_by_its_plan_path(monkeypatch):
+    from tests.test_code_phases import SMALL, Scripted, _run
+
+    model = Scripted("Backend Engineer", [
+        {"path": "app/models/streak.js", "purpose": "streak model"},
+        {"path": "app/controllers/streak.js", "purpose": "streaks", "imports": ["app/models/streak.js"]},
+    ])
+    base = {"summary": "s", "files": [{"path": "backend/main.js", "language": "javascript", "code": "module.exports = 1;\n"}]}
+    ctx = AgentContext(idea="A todo app", prior_outputs={}, change="Add streaks", base_output=base)
+    _run(monkeypatch, "backend_engineer", model, SMALL, ctx)
+    ask = next(p for p, w in zip(model.prompts[1:], model.writes) if w == ["backend/app/controllers/streak.js"])
+    assert "Imports: backend/app/models/streak.js" in ask
