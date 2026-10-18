@@ -367,6 +367,8 @@ class _Run:
         self.tree: set[str] = set()
         #: Imports pointed at the file they meant, with no model (#119).
         self.repointed: list[dict] = []
+        #: A paired importer -> the missing-module problems its pair answers (#119).
+        self.pair_missing: dict[str, list[Problem]] = {}
         #: Edited files put back as they were: they came back with more problems.
         self.reverted: list[str] = []
         #: Files asked for in a fix call and not sent back.
@@ -781,6 +783,13 @@ class _Run:
                     else:
                         found.new.pop(target)
 
+        for where in list(found.new):
+            if fixscope.repeats(where) and not any(p.startswith(posixpath.dirname(where) + "/") for p in self.tree):
+                # A path that repeats a folder nothing has is never written (#119): the
+                # import is what's wrong, so its importer is asked to change it.
+                for problem in found.new.pop(where):
+                    found.touch.setdefault(problem.path, []).append(problem)
+
         touch: dict[str, list[Problem]] = {}
         for where in found.touch:
             if where in stored_at:
@@ -812,8 +821,6 @@ class _Run:
         for where, problems in found.new.items():
             if where in stored_at or self._entry(where) is not None:
                 continue
-            if fixscope.repeats(where) and not any(p.startswith(posixpath.dirname(where) + "/") for p in self.tree):
-                continue  # a path that repeats a folder sequence nothing has is never written (#119)
             importers = ", ".join(dict.fromkeys(f"`{p.path}`" for p in problems))
             # What every file that imports it takes from it, read off its import line
             # (#119): the names it must export, so the plan and the index list them too.
@@ -850,6 +857,7 @@ class _Run:
             if not self._fix_fits([trial]):
                 continue
             w.problems = trial.problems
+            self.pair_missing.setdefault(stored, []).extend(missing)
             paired.setdefault(stored, []).append(entry)
             if self._entry(stored) not in self.edits:
                 self.edits.append(self._entry(stored))
@@ -1027,10 +1035,12 @@ class _Run:
         try:
             resp = self._call(lambda: self._messages(planned, fixing=[w]), planned, "fixing")
         except _NoRoom:
-            # Not both in one call: the modules alone, as before pairs, then the importer.
+            # Not both in one call: the modules alone, as before pairs, then the importer
+            # with its own problems — never told a module it was just given doesn't exist.
             self._write_alone(news)
-            if w.problems and any(p.path in (self.place_of.get(w.path), w.path) and "imports `" not in p.message
-                                  for p in w.problems):
+            own = [p for p in w.problems if p not in self.pair_missing.get(w.path, [])]
+            if own:
+                w.problems = own
                 self._fix_group([w])
             return
         cut = _cut(resp)
@@ -1042,22 +1052,27 @@ class _Run:
             if block is not None:
                 self._land(entry, block.code, block.language)
                 landed.append(entry.path)
-        if not landed:
+        own_problems = [p for p in w.problems if p not in self.pair_missing.get(w.path, [])]
+        if w.path not in landed and (own_problems or not landed):
+            # The file wasn't sent back, and it had problems of its own to fix.
             (self.cut_off if cut else self.unanswered).append(w.path)
             activity.file(w.path, "missing")
         for path in landed:
             self.called_with[path] = frozenset(landed)
         self._check(landed)
-        # A module the call didn't write that its importer still imports: on its own, as
-        # before pairs — the import wasn't changed instead.
-        importer = self.written[w.path]
-        self._write_alone([
-            n for n in news if n.path not in self.written
-            and any(path == importer.path for path, _spec in wiring.importers_of(n.path, {importer.path: importer.code}))
-        ])
+        # A module the call didn't write that a file still imports: on its own, as before
+        # pairs — the import wasn't changed instead.
+        self._write_alone([n for n in news if n.path not in self.written and self._imported(n.path)])
         for n in news:
             if n.path not in self.written:
                 activity.file(n.path, "missing")
+
+    def _imported(self, path: str) -> bool:
+        """Whether any file of the phase, as the round has it now, imports `path`."""
+        placed = {self.place_of.get(p, p): w.code for p, w in self.written.items()}
+        return bool(wiring.importers_of(path, placed)) or bool(
+            wiring.wanted_by(path, {p: c for p, c in placed.items() if p.endswith(".py")})
+        )
 
     def _write_alone(self, news: list[_Planned]) -> None:
         """New modules written one a call (#103): asked for again once, then unwritten."""
@@ -1079,12 +1094,14 @@ class _Run:
             new = wiring._python_relative(where, target)  # noqa: SLF001 - one rule
         else:
             ext = posixpath.splitext(spec)[1]
-            new = wiring._relative(where, target, ext if ext in _JS else "")  # noqa: SLF001
+            new = wiring._relative(where, target, ext if ext and target.endswith(ext) else "")  # noqa: SLF001
         changed = wiring._repoint(w.code, spec, new, python) if new and new != spec else None  # noqa: SLF001
         if changed is None:
             return False
         self.written[stored] = _Written(stored, changed, w.language, w.purpose, w.origin)
         own[where] = changed
+        # The importer's baseline from here: an edit put back keeps the repoint.
+        self.existing[stored] = changed
         self.repointed.append({"path": stored, "from": spec, "to": new})
         log.info("%s: pointed %s's import `%s` at `%s` (the path repeated a folder).", self.agent.title, stored, spec, new)
         return True
@@ -1588,7 +1605,7 @@ class _Run:
         from app.build.scaffold import js_imports, py_imports
 
         # Every file there is, and every one this round wrote — a module split off included.
-        pool = self.tree | set(self.needed_by) | set(self.written)
+        pool = self.tree | set(self.needed_by) | {self.place_of.get(p, p) for p in self.written}
         here = posixpath.dirname(w.path)
         out: list[Problem] = []
         if w.path.endswith(".py"):

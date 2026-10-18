@@ -71,35 +71,38 @@ class Scope:
     unlocated: list[dict] = field(default_factory=list)
 
 
-def _first_repeat(folders: list[str]) -> Optional[tuple[int, int]]:
-    """(start, length) of the first folder sequence written twice in a row, or None."""
+def _first_repeat(folders: list[str], after: int = 0) -> Optional[tuple[int, int]]:
+    """(start, length) of the first folder sequence written twice in a row whose second
+    copy reaches past the first `after` folders — the importer's own, which a project may
+    repeat on purpose (Django's `mysite/mysite/`) — or None."""
     for k in range(1, len(folders) // 2 + 1):
         for i in range(len(folders) - 2 * k + 1):
-            if folders[i : i + k] == folders[i + k : i + 2 * k]:
+            if i + 2 * k > after and folders[i : i + k] == folders[i + k : i + 2 * k]:
                 return i, k
     return None
 
 
+def _own(beside: Optional[str]) -> int:
+    return len(layout.clean(beside).split("/")) - 1 if beside else 0
+
+
 def repeats(path: str, beside: Optional[str] = None) -> bool:
     """Whether `path`'s folders hold one sequence twice in a row — `routes/routes/`,
-    `api/users/api/users/` — that `beside` (the importer) doesn't already: an import
-    written from the wrong folder, resolved from the importer's own (#119). A project
-    whose own folders repeat (Django's `mysite/mysite/`) is no mistake."""
-    if _first_repeat(layout.clean(path).split("/")[:-1]) is None:
-        return False
-    return beside is None or _first_repeat(layout.clean(beside).split("/")[:-1]) is None
+    `api/users/api/users/` — that reaches past `beside`'s (the importer's) own folder: an
+    import written from the wrong folder, resolved from the importer's (#119)."""
+    return _first_repeat(layout.clean(path).split("/")[:-1], _own(beside)) is not None
 
 
-def collapse(path: str) -> str:
-    """`path` with every repeated folder sequence written once: `backend/routes/routes/user`
-    -> `backend/routes/user`."""
+def collapse(path: str, beside: Optional[str] = None) -> str:
+    """`path` with each repeated folder sequence `repeats` finds written once:
+    `backend/routes/routes/user` -> `backend/routes/user`."""
     parts = layout.clean(path).split("/")
     folders, name = parts[:-1], parts[-1:]
-    found = _first_repeat(folders)
+    found = _first_repeat(folders, _own(beside))
     while found is not None:
         i, k = found
         folders = folders[: i + k] + folders[i + 2 * k :]
-        found = _first_repeat(folders)
+        found = _first_repeat(folders, _own(beside))
     return "/".join(folders + name)
 
 
@@ -281,7 +284,7 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
             problem = _as_problem(p, path)
             target = _missing(p)
             spec = next(iter(_SPEC.findall(str(p.get("message") or ""))), None)
-            meant = collapse(target) if target and spec and repeats(target, beside=path) else None
+            meant = collapse(target, beside=path) if target and spec and repeats(target, beside=path) else None
             if meant is not None and not meant.lower().endswith(_BINARY) and not _is_package(meant, everything):
                 # `./routes/user` from `routes/api.js`: the path repeats the importer's own
                 # folder. The file meant is the one without the repeat — pointed at if it

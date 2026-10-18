@@ -219,3 +219,59 @@ def test_a_typescript_import_of_a_js_name_for_a_ts_file_is_no_dangling_import():
     assert _Run._dangling(run, w) == []
     w = _Written("backend/src/routes/user.ts", "import { x } from '../nothing.js';\nexport const u = x;\n", "typescript", "")
     assert len(_Run._dangling(run, w)) == 1
+
+
+def test_a_repeat_past_the_importer_s_own_folder_counts_and_only_it_is_collapsed():
+    importer = "backend/mysite/mysite/routes/api.py"
+    target = "backend/mysite/mysite/routes/routes/user.py"
+    assert fixscope.repeats(target, beside=importer)
+    assert fixscope.collapse(target, beside=importer) == "backend/mysite/mysite/routes/user.py"
+
+
+def test_a_repoint_keeps_the_extension_it_was_written_with(monkeypatch, stub_router):
+    api = "import './routes/style.css';\nconst users = require('./routes/user');\nmodule.exports = users;\n"
+    files = _js({"backend/main.js": "const api = require('./routes/api');\nmodule.exports = api;\n",
+                 "backend/routes/api.js": api, "backend/routes/style.css": "a { color: red; }\n"})
+    files[-1]["language"] = "css"
+    problems = [{"path": "backend/routes/api.js", "kind": "import", "line": 1, "message":
+                 "imports `./routes/style.css`, and no file in this build is at backend/routes/routes/style.css. Write that file, or import one that exists."}]
+    result, _asked, _ = _round_with(monkeypatch, files, problems, lambda wanted, text: {p: ROUTER for p in wanted})
+    out = {f["path"]: f["code"] for f in result.output["files"]}
+    assert "import './style.css';" in out["backend/routes/api.js"]
+
+
+def test_a_module_another_file_still_imports_is_written_though_its_pair_changed_the_import(monkeypatch, stub_router):
+    other = "const { createTodoAnimation } = require('./animations');\nexports.other = () => createTodoAnimation();\n"
+    files = _js({"backend/main.js": "const t = require('./controllers/todos');\nconst o = require('./controllers/other');\nmodule.exports = [t, o];\n",
+                 "backend/controllers/todos.js": CONTROLLER, "backend/controllers/other.js": other})
+
+    def answer(wanted, text):
+        out = {}
+        for p in wanted:
+            if p.endswith("todos.js") and "animations.js` (new file)" in text:
+                out[p] = DROPPED  # the pair drops the import; other.js still has it
+            elif p.endswith("animations.js"):
+                out[p] = "function createTodoAnimation() {}\nmodule.exports = { createTodoAnimation };\n"
+            else:
+                out[p] = other if p.endswith("other.js") else CONTROLLER
+        return out
+
+    result, _asked, _ = _round(monkeypatch, files, answer)
+    assert "backend/controllers/animations.js" in {f["path"] for f in result.output["files"]}
+    assert result.build_status == "ok"
+
+
+def _round_with(monkeypatch, files, problems, answer):
+    asked: list[str] = []
+
+    def complete(messages, **kwargs):
+        if "A todo API" not in messages[-1].content or getattr(kwargs.get("options"), "json_schema", None):
+            return _fake_complete(messages, **kwargs)
+        asked.append(messages[-1].content)
+        wanted = asked_files([type("M", (), {"content": messages[-1].content})()])
+        return LLMResponse(text=fenced(answer(wanted, messages[-1].content)), provider="mock", model="mock-model",
+                           usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2), latency_ms=1)
+
+    stub(monkeypatch, "complete", complete)
+    ctx = AgentContext(idea="A todo API", base_output={"summary": "A todo API", "files": files}, fixing=tuple(problems))
+    return _Run(BackendEngineerAgent(), ctx).fix(), asked, problems
