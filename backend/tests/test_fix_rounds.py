@@ -188,8 +188,10 @@ def test_a_missing_file_is_asked_for_new_with_who_needs_it(monkeypatch, stub_rou
     stub(monkeypatch, "complete", complete)
     ctx = AgentContext(idea="A todo API", base_output={"files": files}, fixing=tuple(_problems(files)))
     result = _Run(BackendEngineerAgent(), ctx).fix()
-    new = [a for a in asked if "# Write now — add 1 file" in a]
+    # The file that imports it comes too (#119): written, or its import changed instead.
+    new = [a for a in asked if "# Write now — fix 1 file, add 1" in a]
     assert new and "- `backend/routes/todos.js` (new file)" in new[0] and "needed by: `backend/server.js`" in new[0]
+    assert "# Your last version of backend/server.js" in new[0] and "change that import instead" in new[0]
     assert result.handoff["fix"]["added"] == ["backend/routes/todos.js"]
     assert result.build_status == "ok"
 
