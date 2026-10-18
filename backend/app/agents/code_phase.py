@@ -58,7 +58,7 @@ from app.agents.base import (
     _pack_skills,
 )
 from app.build import exports as module_exports
-from app.build import fixscope, layout, placeholders
+from app.build import fixscope, layout, placeholders, wiring
 from app.build.check import BuildCheck, Problem, file_problems, resolve
 from app.core.artifacts import NOTE_KIND
 from app.core.config import settings
@@ -361,6 +361,8 @@ class _Run:
         self.place_of: dict[str, str] = {}
         #: A new file the round writes -> the problems of the files that import it.
         self.needed_by: dict[str, list[Problem]] = {}
+        #: ...and what each of those files' import lines takes from it (#119).
+        self.wants: dict[str, list[wiring.Wanted]] = {}
         #: Edited files put back as they were: they came back with more problems.
         self.reverted: list[str] = []
         #: Files asked for in a fix call and not sent back.
@@ -794,10 +796,17 @@ class _Run:
             if where in stored_at or self._entry(where) is not None:
                 continue
             importers = ", ".join(dict.fromkeys(f"`{p.path}`" for p in problems))
-            entry = _Planned(path=where, purpose=f"Imported by {importers}; it doesn't exist yet", origin="plan")
+            # What every file that imports it takes from it, read off its import line
+            # (#119): the names it must export, so the plan and the index list them too.
+            wants = wiring.wanted_by(where, own)
+            entry = _Planned(
+                path=where, purpose=f"Imported by {importers}; it doesn't exist yet", origin="plan",
+                exports=list(dict.fromkeys(label for w in wants for label in w.labels()))[:20],
+            )
             self.planned.append(entry)
             self.edits.append(entry)
             self.needed_by[where] = problems
+            self.wants[where] = wants
             news.append(entry)
 
         sent = len(ctx.fixing)
@@ -845,6 +854,17 @@ class _Run:
                 "lost_code": list(self.lost),
                 "reverted": list(self.reverted),
                 "unanswered": list(self.unanswered),
+                # Each new file (#119): the names its importers asked for, what it really
+                # exports, and what it still doesn't — carried to the checker, not hidden.
+                "new_exports": {
+                    path: {
+                        "asked": (self._entry(path).promised or self._entry(path).exports) if self._entry(path) else [],
+                        "exported": (real.labels() if real is not None else None),
+                        "missing": wiring.unexported(wants, real, self.written[path].code),
+                    }
+                    for path, wants in self.wants.items() if wants and path in self.written
+                    for real in [self.written[path].real_exports()]
+                },
                 # The person's note (#103): "unsent" when the round made no call at all,
                 # "dropped" when no call had room for it, "partly" when only some did.
                 "person": (
@@ -1421,6 +1441,22 @@ class _Run:
             w.problems = placeholders.edited(w.path, before, w.code, self.asked)
         if not w.complete and not any(p.kind == "syntax" for p in w.problems):
             w.problems = [Problem(w.path, "was cut off at the model's output limit before it ended", "syntax")] + w.problems
+        wants = self.wants.get(w.path) if self.fix_mode else None
+        if wants and w.complete and not any(p.kind == "syntax" for p in w.problems):
+            # A new file is held to what its importers take (#119): a name missing is
+            # asked for once more, by name, as a file that doesn't parse is.
+            missing = wiring.unexported(wants, w.real_exports(), w.code)
+            if missing:
+                w.problems = w.problems + [Problem(w.path, _missing_text(missing, wants), "import")]
+            # ...and the names it exports must exist in it: told to export `User`, a small
+            # model writes `module.exports = { User }` beside a `UserSchema`.
+            ghosts = module_exports.undefined(w.path, w.code)
+            if ghosts:
+                names = ", ".join(f"`{n}`" for n in ghosts)
+                w.problems = w.problems + [Problem(
+                    w.path, f"exports {names}, but never defines {'it' if len(ghosts) == 1 else 'them'}. "
+                    f"Define {names} in this file.", "reference",
+                )]
         w.stack = (
             charter_violations(self.ctx.charter, self.agent.key, {"files": [{"path": w.path, "code": w.code}]})
             if settings.enforce_stack_charter
@@ -1686,8 +1722,11 @@ class _Run:
             line = f"- `{p.path}`"
             if p.purpose:
                 line += f" — {p.purpose}"
-            if p.exports:
-                line += f". Exports: {', '.join(p.exports[:12])}"
+            # A new file's repair lists what it was asked to export (#119), not the names
+            # it wrote instead.
+            shown = p.promised if p.path in self.wants and p.promised else p.exports
+            if shown:
+                line += f". Exports: {', '.join(shown[:12])}"
             if p.imports:
                 line += f". Imports: {', '.join(p.imports[:8])}"
             lines.append(line)
@@ -1752,13 +1791,18 @@ class _Run:
         return out
 
     def _fix_new_now(self, batch: list[_Planned]) -> str:
-        """The ask for a file a fix round writes new (#103): what imports it, and how."""
+        """The ask for a file a fix round writes new (#103): what imports it, how — each
+        importer's own import line — and the names it must export (#119)."""
         lines = [f"{_WRITE_NOW} — add {len(batch)} file{'s' if len(batch) > 1 else ''}"]
         for p in batch:
             lines.append(f"- `{p.path}` (new file)" + (f" — {p.purpose}" if p.purpose else ""))
+            wants = self.wants.get(p.path) or []
+            for want in wants[:4]:
+                lines.append(f"  - `{want.importer}` imports it: `{want.line}`")
             for problem in self.needed_by.get(p.path, [])[:4]:
                 lines.append(f"  - needed by: {problem.text()}")
-        lines.append("Write it with exactly what those files import from it.")
+            ask = _export_ask(wants)
+            lines.append(f"  - {ask}" if ask else "  - Write it with exactly what those files import from it.")
         lines += self._instructions()
         lines.append("Answer with `### path` and one fenced block per file — nothing else.")
         return "\n".join(lines) + "\n"
@@ -2165,6 +2209,42 @@ def _strings(value: object) -> list[str]:
 def _language(charter) -> Optional[str]:
     """The backend language the stack fixed, which decides where files are placed."""
     return charter.get("language").token if charter is not None and charter.get("language") else None
+
+
+def _export_ask(wants: list[wiring.Wanted]) -> str:
+    """"Export exactly …" for a new file, default against named as its importers' lines
+    use them (#119)."""
+    named = list(dict.fromkeys(n for w in wants for n in w.named + w.loose))
+    whole = next((w for w in wants if w.default), None)
+    parts = []
+    if named:
+        cjs = all(w.commonjs for w in wants if w.named or w.loose)
+        parts.append(
+            "Export exactly: " + ", ".join(f"`{n}`" for n in named) + ", each by that name"
+            + (f" (`module.exports = {{ {', '.join(named)} }}`)" if cjs and not whole else "")
+        )
+    if whole is not None:
+        parts.append(
+            f"`module.exports` must be the value itself: `{whole.importer}` takes the whole module as `{whole.default}`"
+            if whole.commonjs else f"Give it a default export: `{whole.importer}` imports it as `{whole.default}`"
+        )
+    return ". ".join(parts) + "." if parts else ""
+
+
+def _missing_text(missing: list[str], wants: list[wiring.Wanted]) -> str:
+    """A new file's problem when it lacks what its importers take (#119)."""
+    names = [n for n in missing if n != "default"]
+    # The importer whose own line needs what's missing: an ES default is an ES line's.
+    who = next(
+        (w for w in wants if any(n in w.named for n in names) or (w.default and not w.commonjs and "default" in missing)),
+        wants[0],
+    )
+    said = []
+    if names:
+        said.append("doesn't export " + ", ".join(f"`{n}`" for n in names))
+    if "default" in missing:
+        said.append("has no default export" if not who.commonjs else "doesn't set `module.exports` to the value itself")
+    return f"{' and '.join(said)}, which `{who.importer}` imports: `{who.line}`. {_export_ask(wants)}"
 
 
 @dataclass
