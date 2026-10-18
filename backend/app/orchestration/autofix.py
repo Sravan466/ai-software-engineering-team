@@ -754,6 +754,58 @@ def test_note(problems: list[dict], phase: str, round_number: int, bodies: Optio
     return lead + "\n" + "\n".join(lines) + retry + carried
 
 
+def learned(row, sent: Iterable[str], problems: list[dict]) -> Optional[dict]:
+    """What one code fix round's attempt showed (#119), kept on its round so a round
+    after it — the next one, or a Try again after the loop put an earlier attempt back —
+    is told what was tried and what the checker said, not just "it didn't work": the
+    files the round added or changed, what each new file exported against what its
+    importers needed, and the problems it left that it wasn't sent."""
+    fix = (getattr(row, "handoff", None) or {}).get("fix") or {}
+    was = set(sent)
+    found = [
+        {"where": p.get("where"), "title": str(p.get("title") or "")[:300]}
+        for p in problems if p.get("key") not in was
+    ][:6]
+    exports = {
+        path: {"asked": list(e.get("asked") or [])[:12], "exported": list(e.get("exported") or [])[:12]}
+        for path, e in (fix.get("new_exports") or {}).items()
+        if isinstance(e, dict) and e.get("exported") is not None
+    }
+    out = {
+        "added": list(fix.get("added") or [])[:8],
+        "changed": list(fix.get("changed") or [])[:8],
+        **({"exports": exports} if exports else {}),
+        **({"found": found} if found else {}),
+    }
+    return out if any(out.values()) else None
+
+
+def last_try(t: dict, attempt: Optional[str]) -> str:
+    """The "last try" a code round is told (#119): what the episode's latest round tried
+    and what the checker then said — when the attempt now being fixed isn't the one it
+    left, because the loop put an earlier one back. Facts, not "do not repeat it"."""
+    last = next(
+        (r for r in reversed(episode(t)) if r.get("fixed") is not None and r.get("learned")), None
+    )
+    if last is None or not attempt or last.get("result") == attempt:
+        return ""
+    seen = last["learned"]
+    lines = [f"Round {last.get('n')} tried this and was put back, because it left more problems than it fixed:"]
+    for path, e in (seen.get("exports") or {}).items():
+        exported = ", ".join(f"`{n}`" for n in e.get("exported") or []) or "nothing"
+        asked = ", ".join(f"`{n}`" for n in e.get("asked") or [])
+        lines.append(f"- It added `{path}`, exporting {exported}." + (f" Its importers need {asked}." if asked else ""))
+    for path in seen.get("added") or []:
+        if path not in (seen.get("exports") or {}):
+            lines.append(f"- It added `{path}`.")
+    for path in seen.get("changed") or []:
+        lines.append(f"- It changed `{path}`.")
+    for p in seen.get("found") or []:
+        where = f"`{p['where']}`: " if p.get("where") else ""
+        lines.append(f"- The checker then found {where}{p['title']}")
+    return "\n".join(lines)
+
+
 CODE_NOTE_PREFIX = "Your last deliverable still has problems"
 
 
@@ -763,6 +815,7 @@ def code_note(
     snippets: Optional[dict] = None,
     standing: Optional[str] = None,
     person: Optional[str] = None,
+    last: str = "",
 ) -> str:
     """The note a phase is re-run with to fix its own compile or stack problems.
 
@@ -783,8 +836,13 @@ def code_note(
         code = (snippets or {}).get(p["key"])
         if code:
             lines.append("\n".join(f"    {line}" for line in code.splitlines()))
+    # What the last round tried and what the checker said (#119), where it is known;
+    # "it didn't work" only where it isn't.
     retry = (
-        f"\n\nThis is fix round {round_number}. The previous attempt did not fix these. "
+        f"\n\nThis is fix round {round_number}. {last}\nFix it another way: check that every import "
+        "resolves and every file parses before you return them."
+        if round_number > 1 and last
+        else f"\n\nThis is fix round {round_number}. The previous attempt did not fix these. "
         "Do not repeat it: change the files named above, and check that every import "
         "resolves and every file parses before you return them."
         if round_number > 1

@@ -162,6 +162,10 @@ class AgentContext:
     fix_note: str = ""
     #: What the person told the crew to try on this round (#103), in their words.
     person_note: str = ""
+    #: What the episode's last round tried and what the checker then said (#119), when
+    #: the attempt being fixed is one the loop put back; and which round of it this is.
+    last_try: str = ""
+    fix_round: int = 0
     #: What the person asked for while the build ran (#102), one note a line: a standing
     #: instruction for this phase, carried in the feedback slot and its budget.
     asked: str = ""

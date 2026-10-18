@@ -911,7 +911,7 @@ class _Run:
                         "exported": (real.labels() if real is not None else None),
                         "missing": wiring.unexported(wants, real, self.written[path].code),
                     }
-                    for path, wants in self.wants.items() if wants and path in self.written
+                    for path, wants in self.wants.items() if path in self.written
                     for real in [self.written[path].real_exports()]
                 },
                 # The person's note (#103): "unsent" when the round made no call at all,
@@ -1791,10 +1791,20 @@ class _Run:
             self._person_put = bool(ctx.person_note) and put(
                 "person", f"# What the person asks you to try\n{ctx.person_note.strip()}\n"
             )
+            # What the last round tried and what the checker said (#119): the attempt was
+            # put back, so this one carries none of it.
+            if ctx.last_try:
+                share = min(len(ctx.last_try), budget // 6, max(left - 200, 0))
+                put("last", f"# What the last try showed\n{_clip(ctx.last_try, share)}\n")
             # What a fix needs next after the files themselves (#103): what the files
             # around them really export, and the code of what they import. The plan,
             # the idea and the digests get what is left.
             put("written", self._written_index(batch))
+            if ctx.fix_round >= 2:
+                # From round 2 (#119): how each file a problem names imports, where this
+                # call doesn't show it whole — the importer of a module it writes, a file
+                # too long to show.
+                put("imports", self._named_imports({p.path for p in batch} | {w.path for w in fixing or []}))
             put("bodies", self._bodies(batch, int(left * 0.5)))
         for compact in (0, 1, 2):
             if put("plan", self._plan_text(batch, compact)):
@@ -1846,9 +1856,9 @@ class _Run:
 
         order = [
             "idea", *[k for k in sections if k.startswith("dep:")], "skills", "rag", "memory",
-            "extra", "change", "feedback", "plan", "written", "bodies",
-            # Next to the ask it is about (#103).
-            "person",
+            "extra", "change", "feedback", "plan", "written", "imports", "bodies",
+            # Next to the ask it is about (#103, #119).
+            "last", "person",
         ]
         parts = [sections[k] for k in order if k in sections]
         parts.append(sections.get("write", ""))
@@ -2059,6 +2069,22 @@ class _Run:
                 line += f". Exports: {', '.join(planned.exports[:12])}"
             lines.append(line)
         return "\n".join(lines) + "\n"
+
+    def _named_imports(self, shown: set[str]) -> str:
+        """The import lines of every file the round's problems name that isn't in
+        `shown` (#119)."""
+        stored_at = {where: stored for stored, where in self.place_of.items()}
+        out: list[str] = []
+        for p in self.ctx.fixing:
+            where = layout.clean(str(p.get("path") or ""))
+            path = stored_at.get(where, where)
+            w = self.written.get(path)
+            if w is None or path in shown or any(o.startswith(f"`{path}`") for o in out):
+                continue
+            lines = [line.strip() for line in w.code.splitlines() if _IMPORT_LINE.match(line)][:8]
+            if lines:
+                out.append(f"`{path}`:\n" + "\n".join(f"    {line}" for line in lines))
+        return "# How the other files these problems name import\n" + "\n".join(out) + "\n" if out else ""
 
     def _bodies(self, batch: list[_Planned], room: int) -> str:
         """The code of written files this batch imports, whole, while they fit."""
@@ -2391,6 +2417,12 @@ def _strings(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(v).strip() for v in value if str(v).strip()]
+
+
+#: A line that imports: ESM, a re-export, `require`, or Python's two forms (#119).
+_IMPORT_LINE = re.compile(
+    r"^\s*(?:import\s|export\s+(?:\*|\{[^}]*\})\s*from\s|(?:const|let|var)\s+[^=]+=\s*require\(|from\s+\S+\s+import\s)"
+)
 
 
 def _language(charter) -> Optional[str]:
