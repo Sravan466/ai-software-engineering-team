@@ -68,7 +68,8 @@ def test_each_way_of_importing_says_what_it_takes():
     # A whole `require` used as a value is the module itself; one read through is its members.
     assert wiring.wanted("a.js", "const r = require('./r');\napp.use('/x', r);\n", "./r").default == "r"
     members = wiring.wanted("a.js", "const db = require('./db');\ndb.connect();\n// db.never()\nconst s = 'db.no()';\n", "./db")
-    assert members.named == ["connect"] and members.default is None
+    # Read off the whole module: asked for, not held to — `module.exports = pool` has it.
+    assert members.loose == ["connect"] and members.named == [] and members.default is None
     both = wiring.wanted("a.mjs", "import Anim, { fade as f } from './anim.js';\n", "./anim.js")
     assert (both.default, both.named, both.commonjs) == ("Anim", ["fade"], False)
     # The plan says `default`: `Anim` is the importer's own name for it, not the module's.
@@ -82,7 +83,13 @@ def test_each_way_of_importing_says_what_it_takes():
     assert (two.default, two.named) == ("A", ["b"]) and "old" not in two.line
     # A whole `require` destructured later takes those names.
     config = wiring.wanted("a.js", "const config = require('./config');\nconst { port, host } = config;\n", "./config")
-    assert config.named == ["port", "host"] and config.default is None
+    assert config.loose == ["port", "host"] and config.default is None
+    # A comment that says `import` above the real line doesn't hide it.
+    said = wiring.wanted("a.js", "// we import the helpers below\nimport { fadeIn, slide } from './animations';\n", "./animations")
+    assert said is not None and said.named == ["fadeIn", "slide"]
+    # A type part and a destructuring default don't lose the names beside them.
+    assert wiring.wanted("a.ts", "import { type Opts, fadeIn } from './anim';\n", "./anim").named == ["fadeIn"]
+    assert wiring.wanted("a.js", "const { a, b = 1, c: d } = require('./x');\n", "./x").named == ["a", "b", "c"]
     # The files that import a module, by the compile gate's own resolution.
     files = {"backend/c/t.js": CONTROLLER, "backend/x.js": "import a from './c/animations.js';\n", "backend/y.js": "import 'express';\n"}
     assert wiring.importers_of("backend/c/animations.js", files) == [("backend/c/t.js", "./animations"), ("backend/x.js", "./c/animations.js")]
@@ -99,6 +106,13 @@ def test_missing_names_are_what_a_module_doesn_t_export():
     whole = [wiring.wanted("a.js", "const r = require('./r');\napp.use(r);\n", "./r")]
     for code in ("module.exports = express.Router();\n", "module.exports = function (app) {};\n", "module.exports = { a: 1 };\n"):
         assert wiring.unexported(whole, exports.read("r.js", code)) == [], code
+    # What's read off a whole module isn't held against a module that sets its value.
+    db = [wiring.wanted("a.js", "const db = require('./db');\ndb.query('x');\n", "./db")]
+    assert wiring.unexported(db, exports.read("db.js", "const pool = new Pool();\nmodule.exports = pool;\n")) == []
+    # Exports built by a call, a require, a spread or Object.assign are unknown, not missing.
+    for code in ("module.exports = require('./impl');\n", "module.exports = makeAnimations();\n",
+                 "module.exports = { ...require('./a') };\n", "Object.assign(module.exports, { a: 1 });\n"):
+        assert wiring.unexported(wants, exports.read(NEW, code), code) == [], code
     # An ES default nobody exports is.
     es = [wiring.wanted("a.mjs", "import Anim from './anim.js';\n", "./anim.js")]
     assert wiring.unexported(es, exports.read("anim.js", "export const x = 1;\n")) == ["default"]
@@ -161,3 +175,25 @@ def test_a_new_file_exporting_a_name_it_never_defines_is_asked_once_more(monkeyp
     result, asked = _round(monkeypatch, [ghost, RIGHT])
     assert len(asked) == 2 and "exports `deleteTodoAnimation`, but never defines it" in asked[1]
     assert result.build_status == "ok"
+
+
+def test_python_importers_are_found_by_absolute_and_package_imports():
+    files = {
+        "backend/app/main.py": "from app.services.anim import fade, slide\n",
+        "backend/app/services/__init__.py": "",
+        "backend/app/services/use.py": "from . import anim\nanim.bounce()\n",
+    }
+    wants = {w.importer: w for w in wiring.wanted_by("backend/app/services/anim.py", files)}
+    assert wants["backend/app/main.py"].named == ["fade", "slide"]
+    # `from . import anim` takes the module: its attributes are asked for, never checked.
+    assert wants["backend/app/services/use.py"].loose == ["bounce"] and wants["backend/app/services/use.py"].named == []
+
+
+def test_a_missing_es_default_names_the_es_importer_and_the_template_lists_every_name():
+    from app.agents.code_phase import _export_ask, _missing_text
+
+    wants = [wiring.wanted("server.js", "const anim = require('./anim');\nanim();\n", "./anim"),
+             wiring.wanted("ui.mjs", "import anim from './anim.js';\n", "./anim.js")]
+    assert "`ui.mjs`" in _missing_text(["default"], wants)
+    many = [wiring.wanted("c.js", "const { a, b, c, d, e, f, g, h } = require('./x');\n", "./x")]
+    assert "module.exports = { a, b, c, d, e, f, g, h }" in _export_ask(many)

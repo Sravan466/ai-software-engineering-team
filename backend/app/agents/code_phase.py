@@ -798,10 +798,7 @@ class _Run:
             importers = ", ".join(dict.fromkeys(f"`{p.path}`" for p in problems))
             # What every file that imports it takes from it, read off its import line
             # (#119): the names it must export, so the plan and the index list them too.
-            wants = [
-                w for path, spec in wiring.importers_of(where, own)
-                for w in [wiring.wanted(path, own[path], spec)] if w is not None
-            ]
+            wants = wiring.wanted_by(where, own)
             entry = _Planned(
                 path=where, purpose=f"Imported by {importers}; it doesn't exist yet", origin="plan",
                 exports=list(dict.fromkeys(label for w in wants for label in w.labels()))[:20],
@@ -863,7 +860,7 @@ class _Run:
                     path: {
                         "asked": (self._entry(path).promised or self._entry(path).exports) if self._entry(path) else [],
                         "exported": (real.labels() if real is not None else None),
-                        "missing": wiring.unexported(wants, real),
+                        "missing": wiring.unexported(wants, real, self.written[path].code),
                     }
                     for path, wants in self.wants.items() if wants and path in self.written
                     for real in [self.written[path].real_exports()]
@@ -1448,7 +1445,7 @@ class _Run:
         if wants and w.complete and not any(p.kind == "syntax" for p in w.problems):
             # A new file is held to what its importers take (#119): a name missing is
             # asked for once more, by name, as a file that doesn't parse is.
-            missing = wiring.unexported(wants, w.real_exports())
+            missing = wiring.unexported(wants, w.real_exports(), w.code)
             if missing:
                 w.problems = w.problems + [Problem(w.path, _missing_text(missing, wants), "import")]
             # ...and the names it exports must exist in it: told to export `User`, a small
@@ -2217,14 +2214,14 @@ def _language(charter) -> Optional[str]:
 def _export_ask(wants: list[wiring.Wanted]) -> str:
     """"Export exactly …" for a new file, default against named as its importers' lines
     use them (#119)."""
-    named = list(dict.fromkeys(n for w in wants for n in w.named))
+    named = list(dict.fromkeys(n for w in wants for n in w.named + w.loose))
     whole = next((w for w in wants if w.default), None)
     parts = []
     if named:
-        cjs = all(w.commonjs for w in wants if w.named)
+        cjs = all(w.commonjs for w in wants if w.named or w.loose)
         parts.append(
             "Export exactly: " + ", ".join(f"`{n}`" for n in named) + ", each by that name"
-            + (f" (`module.exports = {{ {', '.join(named[:6])} }}`)" if cjs and not whole else "")
+            + (f" (`module.exports = {{ {', '.join(named)} }}`)" if cjs and not whole else "")
         )
     if whole is not None:
         parts.append(
@@ -2237,7 +2234,11 @@ def _export_ask(wants: list[wiring.Wanted]) -> str:
 def _missing_text(missing: list[str], wants: list[wiring.Wanted]) -> str:
     """A new file's problem when it lacks what its importers take (#119)."""
     names = [n for n in missing if n != "default"]
-    who = next((w for w in wants if any(n in w.named for n in names) or (w.default and "default" in missing)), wants[0])
+    # The importer whose own line needs what's missing: an ES default is an ES line's.
+    who = next(
+        (w for w in wants if any(n in w.named for n in names) or (w.default and not w.commonjs and "default" in missing)),
+        wants[0],
+    )
     said = []
     if names:
         said.append("doesn't export " + ", ".join(f"`{n}`" for n in names))
