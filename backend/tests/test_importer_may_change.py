@@ -65,7 +65,7 @@ def test_scope_points_a_repeating_import_at_the_file_it_meant():
     found = fixscope.scope(problems, own, own)
     # Nothing at `routes/routes/`: the files go where the import meant, and it's repointed.
     assert set(found.new) == {"backend/routes/user.js", "backend/routes/todo.js"}
-    assert sorted(found.repoint) == [
+    assert sorted(r[:3] for r in found.repoint) == [
         ("backend/routes/api.js", "./routes/todo", "backend/routes/todo.js"),
         ("backend/routes/api.js", "./routes/user", "backend/routes/user.js"),
     ]
@@ -73,7 +73,7 @@ def test_scope_points_a_repeating_import_at_the_file_it_meant():
     # Where the meant file exists, only the import changes.
     own["backend/routes/user.js"] = ROUTER
     found = fixscope.scope(problems, own, own)
-    assert ("backend/routes/api.js", "./routes/user", "backend/routes/user.js") in found.repoint
+    assert ("backend/routes/api.js", "./routes/user", "backend/routes/user.js") in [r[:3] for r in found.repoint]
     assert "backend/routes/user.js" not in found.new
 
 
@@ -149,3 +149,73 @@ def test_a_fix_round_never_lands_a_file_it_didn_t_ask_for(monkeypatch, stub_rout
 
     result, _asked, _ = _round(monkeypatch, files, answer)
     assert not any(fixscope.repeats(f["path"]) for f in result.output["files"])
+
+
+# ── review of #122 ───────────────────────────────────────────────────────────
+def _scope(own: dict[str, str], extra=()):
+    files = _js(own)
+    problems = [p.as_dict() for p in check_phase({}, "backend_engineer", {"summary": "s", "files": files}).problems]
+    return fixscope.scope(problems, own, set(own) | set(extra))
+
+
+def test_a_project_s_own_repeated_folder_is_no_mistake():
+    # Django's `mysite/mysite/`: the importer already sits in it, so the import added nothing.
+    assert not fixscope.repeats("backend/mysite/mysite/views.py", beside="backend/mysite/mysite/urls.py")
+    assert fixscope.repeats("backend/routes/routes/user", beside="backend/routes/api.js")
+
+
+def test_a_repeating_import_points_at_the_file_one_folder_off_rather_than_writing_a_copy():
+    found = _scope({"backend/routes/api.js": API, "backend/main.js": MAIN, "backend/src/routes/user.js": ROUTER})
+    assert ("backend/routes/api.js", "./routes/user", "backend/src/routes/user.js") in [r[:3] for r in found.repoint]
+    assert "backend/routes/user.js" not in found.new and "backend/src/routes/user.js" not in found.new
+
+
+def test_a_repeating_import_of_an_image_is_the_importer_s_to_change():
+    own = {"frontend/src/components/Header.jsx": "import logo from './components/logo.png';\nexport default function H() { return logo; }\n"}
+    problems = [{"path": "frontend/src/components/Header.jsx", "kind": "import", "line": 1,
+                 "message": "imports `./components/logo.png`, and no file in this build is at frontend/src/components/components/logo.png. Write that file, or import one that exists."}]
+    found = fixscope.scope(problems, own, own)
+    assert not found.repoint and not any(p.endswith((".tsx", ".jsx")) and "logo" in p for p in found.new)
+    assert "frontend/src/components/Header.jsx" in found.touch
+
+
+def test_one_module_two_files_import_is_asked_for_once(monkeypatch, stub_router):
+    other = CONTROLLER.replace("exports.create", "exports.other")
+    files = _js({"backend/main.js": "const t = require('./controllers/todos');\nconst o = require('./controllers/other');\nmodule.exports = [t, o];\n",
+                 "backend/controllers/todos.js": CONTROLLER, "backend/controllers/other.js": other})
+    result, asked, _ = _round(monkeypatch, files, lambda wanted, text: {
+        p: ("function createTodoAnimation() {}\nmodule.exports = { createTodoAnimation };\n" if p.endswith("animations.js")
+            else (other if p.endswith("other.js") else CONTROLLER)) for p in wanted})
+    assert sum(1 for a in asked if "`backend/controllers/animations.js` (new file)" in a) == 1
+    assert result.build_status == "ok"
+
+
+def test_a_pair_with_no_room_still_writes_the_module_alone(monkeypatch, stub_router):
+    from app.agents import code_phase
+
+    files = _js({"backend/main.js": "const t = require('./controllers/todos');\nmodule.exports = t;\n",
+                 "backend/controllers/todos.js": CONTROLLER})
+    real = code_phase._Run._messages
+
+    def messages(self, batch, **kw):
+        if kw.get("fixing") and len(batch) > 1:
+            raise code_phase._NoRoom(batch[0].path)  # the pair doesn't fit this model
+        return real(self, batch, **kw)
+
+    monkeypatch.setattr(code_phase._Run, "_messages", messages)
+    result, asked, _ = _round(monkeypatch, files, lambda wanted, text: {
+        p: "function createTodoAnimation() {}\nmodule.exports = { createTodoAnimation };\n" for p in wanted})
+    assert "backend/controllers/animations.js" in {f["path"] for f in result.output["files"]}
+    assert result.build_status == "ok"
+
+
+def test_a_typescript_import_of_a_js_name_for_a_ts_file_is_no_dangling_import():
+    from types import SimpleNamespace
+
+    from app.agents.code_phase import _Run, _Written
+
+    run = SimpleNamespace(tree={"backend/src/db.ts"}, needed_by={"backend/src/routes/user.ts": []}, written={})
+    w = _Written("backend/src/routes/user.ts", "import { db } from '../db.js';\nexport const u = db;\n", "typescript", "")
+    assert _Run._dangling(run, w) == []
+    w = _Written("backend/src/routes/user.ts", "import { x } from '../nothing.js';\nexport const u = x;\n", "typescript", "")
+    assert len(_Run._dangling(run, w)) == 1

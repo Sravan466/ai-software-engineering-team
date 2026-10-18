@@ -770,8 +770,16 @@ class _Run:
         self._one_file_calls()
         # An import whose path repeats a folder (#119), pointed at the file it meant with
         # no model; that file is written below when it doesn't exist yet.
-        for where, spec, target in found.repoint:
-            self._repoint(stored_at.get(where), where, spec, target, own)
+        for where, spec, target, problem in found.repoint:
+            if not self._repoint(stored_at.get(where), where, spec, target, own):
+                # Couldn't be rewritten: the importer's to change, as any import is.
+                found.touch.setdefault(where, []).append(problem)
+                left = [q for q in found.new.get(target, []) if q != problem]
+                if target in found.new:
+                    if left:
+                        found.new[target] = left
+                    else:
+                        found.new.pop(target)
 
         touch: dict[str, list[Problem]] = {}
         for where in found.touch:
@@ -802,8 +810,10 @@ class _Run:
         fixing = [self.written[e.path] for e in self.edits]
         news: list[_Planned] = []
         for where, problems in found.new.items():
-            if where in stored_at or self._entry(where) is not None or fixscope.repeats(where):
-                continue  # a path that repeats a folder sequence is never written (#119)
+            if where in stored_at or self._entry(where) is not None:
+                continue
+            if fixscope.repeats(where) and not any(p.startswith(posixpath.dirname(where) + "/") for p in self.tree):
+                continue  # a path that repeats a folder sequence nothing has is never written (#119)
             importers = ", ".join(dict.fromkeys(f"`{p.path}`" for p in problems))
             # What every file that imports it takes from it, read off its import line
             # (#119): the names it must export, so the plan and the index list them too.
@@ -831,6 +841,8 @@ class _Run:
             stored, entry = stored_at.get(importer), self._entry(new)
             if stored is None or entry is None or entry not in news or stored in self.too_long:
                 continue
+            if any(entry in entries for entries in paired.values()):
+                continue  # one importer asks for it; the others see it once it's written
             w = self.written[stored]
             missing = [p for p in found.new[new] if p.path == importer]
             trial = _Written(w.path, w.code, w.language, w.purpose, w.origin,
@@ -844,12 +856,7 @@ class _Run:
             touch.setdefault(stored, [])
         # Modules nobody wrote first: the files that import them are then edited
         # against their real exports, rather than told the module doesn't exist.
-        queue = [e for e in news if not any(e in entries for entries in paired.values())]
-        while queue:
-            claim.between_calls()
-            batch, queue = queue[:1], queue[1:]
-            queue = self._write(batch) + queue
-            queue = [p for p in queue if p.path not in self.written]
+        self._write_alone([e for e in news if not any(e in entries for entries in paired.values())])
         for stored, entries in paired.items():
             claim.between_calls()
             self._fix_pair(self.written[stored], entries)
@@ -1020,10 +1027,11 @@ class _Run:
         try:
             resp = self._call(lambda: self._messages(planned, fixing=[w]), planned, "fixing")
         except _NoRoom:
-            self.too_long.append(w.path)
-            activity.file(w.path, "missing")
-            for n in news:
-                self._unwritten(n)
+            # Not both in one call: the modules alone, as before pairs, then the importer.
+            self._write_alone(news)
+            if w.problems and any(p.path in (self.place_of.get(w.path), w.path) and "imports `" not in p.message
+                                  for p in w.problems):
+                self._fix_group([w])
             return
         cut = _cut(resp)
         self.truncated += 1 if cut else 0
@@ -1037,18 +1045,35 @@ class _Run:
         if not landed:
             (self.cut_off if cut else self.unanswered).append(w.path)
             activity.file(w.path, "missing")
-        for n in news:
-            if n.path not in self.written:
-                activity.file(n.path, "missing")  # the import was changed instead, or not
         for path in landed:
             self.called_with[path] = frozenset(landed)
         self._check(landed)
+        # A module the call didn't write that its importer still imports: on its own, as
+        # before pairs — the import wasn't changed instead.
+        importer = self.written[w.path]
+        self._write_alone([
+            n for n in news if n.path not in self.written
+            and any(path == importer.path for path, _spec in wiring.importers_of(n.path, {importer.path: importer.code}))
+        ])
+        for n in news:
+            if n.path not in self.written:
+                activity.file(n.path, "missing")
 
-    def _repoint(self, stored: Optional[str], where: str, spec: str, target: str, own: dict[str, str]) -> None:
-        """`stored`'s import of `spec` pointed at `target` instead, with no model (#119)."""
+    def _write_alone(self, news: list[_Planned]) -> None:
+        """New modules written one a call (#103): asked for again once, then unwritten."""
+        queue = list(news)
+        while queue:
+            claim.between_calls()
+            batch, queue = queue[:1], queue[1:]
+            queue = self._write(batch) + queue
+            queue = [p for p in queue if p.path not in self.written]
+
+    def _repoint(self, stored: Optional[str], where: str, spec: str, target: str, own: dict[str, str]) -> bool:
+        """`stored`'s import of `spec` pointed at `target` instead, with no model (#119).
+        False when it couldn't be rewritten."""
         w = self.written.get(stored) if stored else None
         if w is None:
-            return
+            return False
         python = where.endswith(".py")
         if python:
             new = wiring._python_relative(where, target)  # noqa: SLF001 - one rule
@@ -1057,11 +1082,12 @@ class _Run:
             new = wiring._relative(where, target, ext if ext in _JS else "")  # noqa: SLF001
         changed = wiring._repoint(w.code, spec, new, python) if new and new != spec else None  # noqa: SLF001
         if changed is None:
-            return
+            return False
         self.written[stored] = _Written(stored, changed, w.language, w.purpose, w.origin)
         own[where] = changed
         self.repointed.append({"path": stored, "from": spec, "to": new})
         log.info("%s: pointed %s's import `%s` at `%s` (the path repeated a folder).", self.agent.title, stored, spec, new)
+        return True
 
     def _keep_no_worse(
         self, build: Optional[BuildCheck], output: dict, errors: list[str], stack: list[str]
@@ -1561,7 +1587,8 @@ class _Run:
         """The relative imports of a file this round wrote new that reach no file."""
         from app.build.scaffold import js_imports, py_imports
 
-        pool = self.tree | set(self.needed_by)
+        # Every file there is, and every one this round wrote — a module split off included.
+        pool = self.tree | set(self.needed_by) | set(self.written)
         here = posixpath.dirname(w.path)
         out: list[Problem] = []
         if w.path.endswith(".py"):
@@ -1574,8 +1601,10 @@ class _Run:
                     specs.append(("." * level + module, layout.join(base, *module.split("."))))
         else:
             specs = [(spec, layout.join(here, spec)) for spec in dict.fromkeys(js_imports(w.code)) if spec.startswith(".")]
+        typescript = w.path.endswith((".ts", ".tsx", ".mts", ".cts"))
         for spec, target in specs:
-            if fixscope.find(target, pool) is None:
+            # The compile gate's own resolution: NodeNext's `../db.js` names `db.ts`.
+            if (fixscope.find(target, pool) if w.path.endswith(".py") else resolve(target, pool, typescript)) is None:
                 out.append(Problem(
                     w.path,
                     f"imports `{spec}`, and no file in this build is at {target}. Import a file that exists, "
