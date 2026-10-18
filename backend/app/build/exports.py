@@ -151,7 +151,7 @@ _LIST = re.compile(r"\bexport\s+(type\s+)?\{([^}]*)\}\s*(?:from\s*(['\"])([^'\"]
 _STAR = re.compile(r"\bexport\s+\*\s*(?:as\s+(" + _IDENT + r")\s+)?from\s*(['\"])([^'\"]+)\2")
 _DESTRUCTURED = re.compile(r"\bexport\s+(?:const|let|var)\s*\{([^}]*)\}\s*=")
 _CJS_DEFAULT = re.compile(rf"\bmodule\.exports\s*=\s*({_IDENT})\s*;?\s*$", re.MULTILINE)
-_CJS_OBJECT = re.compile(r"\bmodule\.exports\s*=\s*\{([^}]*)\}")
+_CJS_OBJECT = re.compile(r"\bmodule\.exports\s*=\s*\{")
 _CJS_NAMED = re.compile(rf"\b(?:module\.)?exports\.({_IDENT})\s*=(?!=)")
 
 
@@ -221,16 +221,39 @@ def _javascript(content: str) -> Exports:
     if m and out.default is None:
         out.default = m.group(1)
     for m in _CJS_OBJECT.finditer(code):
-        for part in m.group(1).split(","):
-            name = part.split(":")[0].strip()
-            if re.fullmatch(_IDENT, name):
-                add(name)
+        for name in _object_keys(code, m.end() - 1):
+            add(name)
     for m in _CJS_NAMED.finditer(code):
         if m.group(1) == "default":
             out.default = out.default or ""  # `exports.default = X`: a transpiled default
         else:
             add(m.group(1))
     return out
+
+
+def _object_keys(code: str, start: int) -> list[str]:
+    """The top-level keys of the object literal whose `{` is at `start` (#119): `a`,
+    `a: …`, `b() {…}`, `async c()` — never a name inside a value's own braces, which a
+    `{[^}]*}` match stopped at. `code` is lexed, so a brace in a string isn't one."""
+    depth, cut, parts = 0, start + 1, []
+    for i in range(start, len(code)):
+        ch = code[i]
+        if ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth -= 1
+            if depth == 0:
+                parts.append(code[cut:i])
+                break
+        elif ch == "," and depth == 1:
+            parts.append(code[cut:i])
+            cut = i + 1
+    keys = []
+    for part in parts:
+        m = re.match(rf"\s*(?:(?:async|get|set)\s+(?=[A-Za-z_$])|\*\s*)?({_IDENT})", part)
+        if m and not part.strip().startswith("..."):
+            keys.append(m.group(1))
+    return keys
 
 
 def from_checker(entry: dict) -> Exports:

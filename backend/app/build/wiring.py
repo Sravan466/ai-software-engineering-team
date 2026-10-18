@@ -133,19 +133,24 @@ def _path_fix(problem: Problem, files: dict[str, str], tree: set[str]) -> Option
 
 
 # ── default against named ────────────────────────────────────────────────────
-def _esm_statement(code: str, spec: str) -> Optional[re.Match]:
-    return re.search(
-        rf"""\bimport\s+(?!type\b)(?P<clause>[^;'"]*?)\s+from\s+(?P<q>['"]){re.escape(spec)}(?P=q)""",
-        code,
-        re.DOTALL,
+def _esm_re(spec: str) -> re.Pattern:
+    return re.compile(
+        rf"""\bimport\s+(?!type\b)(?P<clause>[^;'"]*?)\s+from\s+(?P<q>['"]){re.escape(spec)}(?P=q)""", re.DOTALL
     )
+
+
+def _cjs_re(spec: str) -> re.Pattern:
+    return re.compile(
+        rf"""\b(?P<kw>const|let|var)\s+(?P<lhs>\{{[^}}]*\}}|{_IDENT})\s*=\s*require\(\s*(?P<q>['"]){re.escape(spec)}(?P=q)\s*\)"""
+    )
+
+
+def _esm_statement(code: str, spec: str) -> Optional[re.Match]:
+    return _esm_re(spec).search(code)
 
 
 def _cjs_statement(code: str, spec: str) -> Optional[re.Match]:
-    return re.search(
-        rf"""\b(?P<kw>const|let|var)\s+(?P<lhs>\{{[^}}]*\}}|{_IDENT})\s*=\s*require\(\s*(?P<q>['"]){re.escape(spec)}(?P=q)\s*\)""",
-        code,
-    )
+    return _cjs_re(spec).search(code)
 
 
 def _split_clause(clause: str) -> tuple[Optional[str], list[tuple[str, str]], bool]:
@@ -363,14 +368,17 @@ class Wanted:
 
     importer: str
     line: str
+    #: The local name a default import binds — or, for CommonJS, the name the whole
+    #: module is bound to where it is used as a value or called.
     default: Optional[str] = None
     named: list[str] = field(default_factory=list)
     #: The import is `require`, so a default is `module.exports` itself.
     commonjs: bool = False
 
     def labels(self) -> list[str]:
-        """As the plan lists exports: `Anim (default)`, then the names."""
-        return ([f"{self.default} (default)"] if self.default else []) + list(self.named)
+        """As the plan lists exports: `default`, then the names. The importer's own name
+        for the default is its local name, not the module's."""
+        return (["default"] if self.default else []) + list(self.named)
 
 
 def importers_of(target: str, files: dict[str, str]) -> list[tuple[str, str]]:
@@ -380,6 +388,7 @@ def importers_of(target: str, files: dict[str, str]) -> list[tuple[str, str]]:
     for path, code in files.items():
         if path == target:
             continue
+        found = len(out)
         if path.endswith(".py"):
             for module, level in py_imports(code):
                 if not level:
@@ -390,6 +399,7 @@ def importers_of(target: str, files: dict[str, str]) -> list[tuple[str, str]]:
                 module_path = layout.join(base, *(module or "").split(".")) if module else base
                 if fixscope.find(module_path, {target}) == target:
                     out.append((path, "." * level + (module or "")))
+            out[found:] = list(dict.fromkeys(out[found:]))  # one per statement: one per spelling
             continue
         for spec in dict.fromkeys(js_imports(code)):
             if spec.startswith((".", "@/", "~/")) and fixscope._module_of(path, spec, {target}) == target:  # noqa: SLF001
@@ -398,47 +408,71 @@ def importers_of(target: str, files: dict[str, str]) -> list[tuple[str, str]]:
 
 
 def wanted(importer: str, code: str, spec: str) -> Optional[Wanted]:
-    """What `importer`'s import of `spec` takes, read from its own import line — or
-    None when the line isn't one the readers here understand."""
+    """What `importer`'s imports of `spec` take, read from its own import lines — every
+    statement of that module, merged — or None when no line is one the readers here
+    understand. A line inside a comment or a string doesn't count."""
     if importer.endswith(".py"):
         return _python_wanted(importer, code, spec)
     from app.build.placeholders import lex
 
     bare, _ = lex(code)  # strings and comments emptied: `x.y` in a comment isn't a use
-    esm = _esm_statement(code, spec)
-    if esm is not None:
-        clause = esm.group("clause").strip()
-        line = _line(code, esm.start(), esm.end())
+
+    def live(m: re.Match) -> bool:
+        # The lexer keeps code where it is and blanks comments: a statement whose
+        # keyword survived is code, not `// import { old } from './a'`.
+        return bare[m.start() : m.start() + 3] == code[m.start() : m.start() + 3]
+
+    out = Wanted(importer, "")
+    lines: list[str] = []
+
+    def take(m: re.Match, default: Optional[str], named: list[str], commonjs: bool) -> None:
+        lines.append(_line(code, m.start(), m.end()))
+        out.default = out.default or default
+        out.named += [n for n in named if n not in out.named]
+        out.commonjs = out.commonjs or commonjs
+
+    for m in _esm_re(spec).finditer(code):
+        if not live(m):
+            continue
+        clause = m.group("clause").strip()
         star = re.match(rf"\*\s+as\s+({_IDENT})$", clause)
         if star:
-            return Wanted(importer, line, named=_members(bare, star.group(1)))
+            take(m, None, _members(bare, star.group(1)), False)
+            continue
         default, named, ok = _split_clause(clause)
-        return Wanted(importer, line, default=default if ok else None, named=[a for a, _b in named] if ok else [])
-    cjs = _cjs_statement(code, spec)
-    if cjs is not None:
-        lhs, line = cjs.group("lhs"), _line(code, cjs.start(), cjs.end())
+        take(m, default if ok else None, [a for a, _b in named] if ok else [], False)
+    for m in _cjs_re(spec).finditer(code):
+        if not live(m):
+            continue
+        lhs = m.group("lhs")
         if lhs.startswith("{"):
-            return Wanted(importer, line, named=[a for a, _b in _cjs_named(lhs) or []], commonjs=True)
-        members = _members(bare, lhs)
+            take(m, None, [a for a, _b in _cjs_named(lhs) or []], True)
+            continue
+        members = _members(bare, lhs) + [n for n in _destructured(bare, lhs) if n not in _members(bare, lhs)]
         called = re.search(rf"(?<![\w$.]){re.escape(lhs)}\s*\(|\bnew\s+{re.escape(lhs)}\b", bare)
         # Used only as a value (`app.use('/todos', todos)`), the module is that value.
-        return Wanted(importer, line, default=lhs if called or not members else None, named=members, commonjs=True)
-    member = re.search(rf"""\brequire\(\s*(['"]){re.escape(spec)}\1\s*\)\.({_IDENT})""", code)
-    if member is not None:
-        return Wanted(importer, _line(code, member.start(), member.end()), named=[member.group(2)], commonjs=True)
-    return None
+        take(m, lhs if called or not members else None, members, True)
+    for m in re.finditer(rf"""\brequire\(\s*(['"]){re.escape(spec)}\1\s*\)\.({_IDENT})""", code):
+        if live(m):
+            take(m, None, [m.group(2)], True)
+    if not lines:
+        return None
+    out.line = " ".join(dict.fromkeys(lines))[:400]
+    return out
 
 
 def unexported(wants: Iterable[Wanted], real) -> list[str]:
     """What `wants` take that `real` (`exports.Exports`) doesn't export: each missing
-    name, and `default` for a default nobody exports. Nothing when a re-export the
-    reader couldn't follow (`export * from`) may hold it."""
+    name, and `default` for an ES default nobody exports. A CommonJS module's own value
+    is never called missing — `module.exports = function …` or `= express.Router()` is
+    one no reader here sees — and nothing is, when a re-export the reader couldn't
+    follow (`export * from`) may hold it."""
     if real is None or real.star:
         return []
     have = {*real.named, *real.types}
     missing: list[str] = []
     for want in wants:
-        if want.default and real.default is None and "default" not in missing:
+        if want.default and not want.commonjs and real.default is None and "default" not in missing:
             missing.append("default")
         missing += [n for n in want.named if n not in have and n not in missing]
     return missing
@@ -453,11 +487,23 @@ def _python_wanted(importer: str, code: str, spec: str) -> Optional[Wanted]:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.level or 0) == level and node.module == module:
-            names = [a.name for a in node.names if a.name != "*"]
-            return Wanted(importer, ast.get_source_segment(code, node) or f"from {spec} import …", named=names)
-    return None
+    nodes = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and (n.level or 0) == level and n.module == module]
+    if not nodes:
+        return None
+    names = list(dict.fromkeys(a.name for n in nodes for a in n.names if a.name != "*"))
+    line = " ".join(dict.fromkeys(ast.get_source_segment(code, n) or f"from {spec} import …" for n in nodes))
+    return Wanted(importer, line[:400], named=names)
+
+
+def _destructured(code: str, name: str) -> list[str]:
+    """The names `code` destructures off `name`: `const { port } = config` -> `port`."""
+    out: list[str] = []
+    for inner in re.findall(rf"\{{([^{{}}]*)\}}\s*=\s*{re.escape(name)}\b(?!\s*\.)", code):
+        for part in inner.split(","):
+            m = re.match(rf"\s*({_IDENT})", part)
+            if m and m.group(1) not in out:
+                out.append(m.group(1))
+    return out
 
 
 def _members(code: str, name: str) -> list[str]:

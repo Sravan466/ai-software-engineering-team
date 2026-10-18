@@ -861,7 +861,7 @@ class _Run:
                 # exports, and what it still doesn't — carried to the checker, not hidden.
                 "new_exports": {
                     path: {
-                        "asked": next((e.promised or e.exports for e in self.planned if e.path == path), []),
+                        "asked": (self._entry(path).promised or self._entry(path).exports) if self._entry(path) else [],
                         "exported": (real.labels() if real is not None else None),
                         "missing": wiring.unexported(wants, real),
                     }
@@ -1716,8 +1716,11 @@ class _Run:
             line = f"- `{p.path}`"
             if p.purpose:
                 line += f" — {p.purpose}"
-            if p.exports:
-                line += f". Exports: {', '.join(p.exports[:12])}"
+            # A new file's repair lists what it was asked to export (#119), not the names
+            # it wrote instead.
+            shown = p.promised if p.path in self.wants and p.promised else p.exports
+            if shown:
+                line += f". Exports: {', '.join(shown[:12])}"
             if p.imports:
                 line += f". Imports: {', '.join(p.imports[:8])}"
             lines.append(line)
@@ -1792,10 +1795,8 @@ class _Run:
                 lines.append(f"  - `{want.importer}` imports it: `{want.line}`")
             for problem in self.needed_by.get(p.path, [])[:4]:
                 lines.append(f"  - needed by: {problem.text()}")
-            if wants:
-                lines.append(f"  - {_export_ask(wants)}")
-        if not any(self.wants.get(p.path) for p in batch):
-            lines.append("Write it with exactly what those files import from it.")
+            ask = _export_ask(wants)
+            lines.append(f"  - {ask}" if ask else "  - Write it with exactly what those files import from it.")
         lines += self._instructions()
         lines.append("Answer with `### path` and one fenced block per file — nothing else.")
         return "\n".join(lines) + "\n"
@@ -2221,7 +2222,7 @@ def _export_ask(wants: list[wiring.Wanted]) -> str:
             f"`module.exports` must be the value itself: `{whole.importer}` takes the whole module as `{whole.default}`"
             if whole.commonjs else f"Give it a default export: `{whole.importer}` imports it as `{whole.default}`"
         )
-    return ". ".join(parts) + "."
+    return ". ".join(parts) + "." if parts else ""
 
 
 def _missing_text(missing: list[str], wants: list[wiring.Wanted]) -> str:

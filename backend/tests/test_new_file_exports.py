@@ -71,11 +71,18 @@ def test_each_way_of_importing_says_what_it_takes():
     assert members.named == ["connect"] and members.default is None
     both = wiring.wanted("a.mjs", "import Anim, { fade as f } from './anim.js';\n", "./anim.js")
     assert (both.default, both.named, both.commonjs) == ("Anim", ["fade"], False)
-    assert both.labels() == ["Anim (default)", "fade"]
+    # The plan says `default`: `Anim` is the importer's own name for it, not the module's.
+    assert both.labels() == ["default", "fade"]
     star = wiring.wanted("a.ts", "import * as anim from './anim';\nanim.fadeIn(); anim.fadeOut();\n", "./anim")
     assert star.named == ["fadeIn", "fadeOut"]
     py = wiring.wanted("app/routes.py", "from .services.todo import create_todo, list_todos\n", ".services.todo")
     assert py.named == ["create_todo", "list_todos"]
+    # Every statement of the module, merged; a commented-out one isn't a line.
+    two = wiring.wanted("a.js", "// import { old } from './a'\nimport A from './a';\nimport { b } from './a';\n", "./a")
+    assert (two.default, two.named) == ("A", ["b"]) and "old" not in two.line
+    # A whole `require` destructured later takes those names.
+    config = wiring.wanted("a.js", "const config = require('./config');\nconst { port, host } = config;\n", "./config")
+    assert config.named == ["port", "host"] and config.default is None
     # The files that import a module, by the compile gate's own resolution.
     files = {"backend/c/t.js": CONTROLLER, "backend/x.js": "import a from './c/animations.js';\n", "backend/y.js": "import 'express';\n"}
     assert wiring.importers_of("backend/c/animations.js", files) == [("backend/c/t.js", "./animations"), ("backend/x.js", "./c/animations.js")]
@@ -87,9 +94,17 @@ def test_missing_names_are_what_a_module_doesn_t_export():
     wants = [wiring.wanted("c.js", CONTROLLER, "./animations")]
     assert wiring.unexported(wants, exports.read(NEW, RIGHT)) == []
     assert wiring.unexported(wants, exports.read(NEW, WRONG)) == ["createTodoAnimation", "updateTodoAnimation", "deleteTodoAnimation"]
+    # A CommonJS module's own value is asked for, never called missing: no reader here
+    # sees `module.exports = function …` or `= express.Router()`.
     whole = [wiring.wanted("a.js", "const r = require('./r');\napp.use(r);\n", "./r")]
-    assert wiring.unexported(whole, exports.read("r.js", "exports.x = 1;\n")) == ["default"]
-    assert wiring.unexported(whole, exports.read("r.js", "module.exports = router;\n")) == []
+    for code in ("module.exports = express.Router();\n", "module.exports = function (app) {};\n", "module.exports = { a: 1 };\n"):
+        assert wiring.unexported(whole, exports.read("r.js", code)) == [], code
+    # An ES default nobody exports is.
+    es = [wiring.wanted("a.mjs", "import Anim from './anim.js';\n", "./anim.js")]
+    assert wiring.unexported(es, exports.read("anim.js", "export const x = 1;\n")) == ["default"]
+    # Keys after an inline function body are exports too.
+    obj = "module.exports = {\n  createTodoAnimation: () => { return 1 },\n  updateTodoAnimation() { return 2 },\n  deleteTodoAnimation,\n};\n"
+    assert wiring.unexported(wants, exports.read(NEW, obj)) == []
     # A re-export the reader can't follow may hold any name: nothing is called missing.
     assert wiring.unexported(wants, exports.read(NEW, "export * from './more';\n")) == []
 
@@ -116,6 +131,9 @@ def test_a_new_file_missing_a_name_is_asked_once_more_by_name(monkeypatch, stub_
     result, asked = _round(monkeypatch, [WRONG, RIGHT])
     assert len(asked) == 2
     assert "doesn't export `createTodoAnimation`, `updateTodoAnimation`, `deleteTodoAnimation`" in asked[1]
+    # Listed with the names it was asked for, not the ones it wrote instead.
+    assert "Exports: createTodoAnimation, updateTodoAnimation, deleteTodoAnimation" in asked[1]
+    assert "Exports: fadeIn" not in asked[1]
     assert result.build_status == "ok"
     assert result.handoff["fix"]["new_exports"][NEW]["missing"] == []
 
@@ -127,3 +145,9 @@ def test_names_still_missing_after_the_retry_are_carried_not_hidden(monkeypatch,
     assert record["exported"] == ["fadeIn", "bounce"] and "createTodoAnimation" in record["missing"]
     assert result.build_status == "failed"
     assert any("createTodoAnimation" in p["message"] for p in result.build_problems)
+
+
+def test_an_import_line_that_names_nothing_still_gets_the_general_ask(monkeypatch, stub_router):
+    from app.agents.code_phase import _export_ask
+
+    assert _export_ask([wiring.Wanted("a.js", "import './anim';")]) == ""
