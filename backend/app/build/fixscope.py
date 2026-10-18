@@ -59,8 +59,46 @@ class Scope:
     new: dict[str, list[Problem]] = field(default_factory=dict)
     #: (importer, exporter): edited in one call when both fit.
     pairs: list[tuple[str, str]] = field(default_factory=list)
+    #: (importer, new file): a missing module and the file that imports it, asked in one
+    #: call when both fit (#119) — write it, or change the import if it shouldn't exist.
+    new_pairs: list[tuple[str, str]] = field(default_factory=list)
+    #: (importer, the import as written, the file it should name): an import whose path
+    #: repeats a folder (`./routes/user` from `routes/api.js`), pointed at the path
+    #: without the repeat — mechanically, with no model (#119).
+    repoint: list[tuple[str, str, str]] = field(default_factory=list)
     #: Problems no file could be found for, as they came.
     unlocated: list[dict] = field(default_factory=list)
+
+
+def repeats(path: str) -> bool:
+    """Whether `path`'s folders hold one sequence twice in a row — `routes/routes/`,
+    `api/users/api/users/` — which no app means: an import written from the wrong folder,
+    resolved from the importer's own (#119)."""
+    folders = layout.clean(path).split("/")[:-1]
+    return any(
+        folders[i : i + k] == folders[i + k : i + 2 * k]
+        for k in range(1, len(folders) // 2 + 1)
+        for i in range(len(folders) - 2 * k + 1)
+    )
+
+
+def collapse(path: str) -> str:
+    """`path` with every repeated folder sequence written once: `backend/routes/routes/user`
+    -> `backend/routes/user`."""
+    parts = layout.clean(path).split("/")
+    folders, name = parts[:-1], parts[-1:]
+    changed = True
+    while changed:
+        changed = False
+        for k in range(1, len(folders) // 2 + 1):
+            for i in range(len(folders) - 2 * k + 1):
+                if folders[i : i + k] == folders[i + k : i + 2 * k]:
+                    folders = folders[: i + k] + folders[i + 2 * k :]
+                    changed = True
+                    break
+            if changed:
+                break
+    return "/".join(folders + name)
 
 
 def stack_path(note: str) -> Optional[str]:
@@ -240,6 +278,22 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
         if path and path in own:
             problem = _as_problem(p, path)
             target = _missing(p)
+            spec = next(iter(_SPEC.findall(str(p.get("message") or ""))), None)
+            if target and spec and repeats(target):
+                # `./routes/user` from `routes/api.js`: the path repeats the importer's own
+                # folder. The file meant is the one without the repeat — pointed at if it
+                # exists, written there if not; never at `routes/routes/` (#119).
+                meant = collapse(target)
+                found = find(meant, everything)
+                if found is None and not meant.endswith(_SOURCE) and not meant.lower().endswith(_TEXT_ASSETS):
+                    found = meant + posixpath.splitext(path)[1]
+                    out.new.setdefault(found, []).append(problem)
+                elif found is None:
+                    found = meant
+                    out.new.setdefault(found, []).append(problem)
+                if (path, spec, found) not in out.repoint:
+                    out.repoint.append((path, spec, found))
+                continue
             others = [o for o in same_named(target, everything, _tail(p)) if o != path] if target else []
             if others:
                 # The file exists, one folder off: the importer's path is what's wrong.
@@ -251,6 +305,9 @@ def scope(problems: Iterable[dict], own: dict[str, str], tree: Iterable[str]) ->
                 named_as_is = target.endswith(_SOURCE) or target.lower().endswith(_TEXT_ASSETS)
                 new = target if named_as_is else target + posixpath.splitext(path)[1]
                 out.new.setdefault(new, []).append(problem)
+                # The importer comes too (#119): the import may be what's wrong.
+                if (path, new) not in out.new_pairs:
+                    out.new_pairs.append((path, new))
                 continue
             touch(path, problem)
             # The file the problem names, decided in the same call when it fits.
@@ -321,4 +378,4 @@ def imports_of(path: str, code: str, own: Iterable[str]) -> list[str]:
     return found
 
 
-__all__ = ["Scope", "find", "imports_of", "named", "same_named", "scope", "stack_path"]
+__all__ = ["Scope", "collapse", "find", "imports_of", "named", "repeats", "same_named", "scope", "stack_path"]

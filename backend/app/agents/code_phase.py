@@ -363,6 +363,10 @@ class _Run:
         self.needed_by: dict[str, list[Problem]] = {}
         #: ...and what each of those files' import lines takes from it (#119).
         self.wants: dict[str, list[wiring.Wanted]] = {}
+        #: Every path the build has, placed — what a new file's own imports must reach.
+        self.tree: set[str] = set()
+        #: Imports pointed at the file they meant, with no model (#119).
+        self.repointed: list[dict] = []
         #: Edited files put back as they were: they came back with more problems.
         self.reverted: list[str] = []
         #: Files asked for in a fix call and not sent back.
@@ -738,6 +742,7 @@ class _Run:
         stored_at = {where: stored for stored, where in self.place_of.items()}
         own = {self.place_of[p]: w.code for p, w in self.written.items()}
         tree, _mine = phase_tree(ctx.prior_outputs, agent.key, base, ctx.charter)
+        self.tree = set(tree) | set(own)
         # A stack note names a file as the phase stored it (`server/index.js`); the
         # checker's problems name where it's placed (`backend/index.js`).
         placed_as = {layout.clean(k): v for k, v in self.place_of.items()}
@@ -763,6 +768,10 @@ class _Run:
             skills_used=[],
         )
         self._one_file_calls()
+        # An import whose path repeats a folder (#119), pointed at the file it meant with
+        # no model; that file is written below when it doesn't exist yet.
+        for where, spec, target in found.repoint:
+            self._repoint(stored_at.get(where), where, spec, target, own)
 
         touch: dict[str, list[Problem]] = {}
         for where in found.touch:
@@ -793,8 +802,8 @@ class _Run:
         fixing = [self.written[e.path] for e in self.edits]
         news: list[_Planned] = []
         for where, problems in found.new.items():
-            if where in stored_at or self._entry(where) is not None:
-                continue
+            if where in stored_at or self._entry(where) is not None or fixscope.repeats(where):
+                continue  # a path that repeats a folder sequence is never written (#119)
             importers = ", ".join(dict.fromkeys(f"`{p.path}`" for p in problems))
             # What every file that imports it takes from it, read off its import line
             # (#119): the names it must export, so the plan and the index list them too.
@@ -814,14 +823,37 @@ class _Run:
             [e.path for e in self.edits], 1,
             note=f"Fixing {sent} problem{'' if sent == 1 else 's'} in {len(self.edits)} file{'' if len(self.edits) == 1 else 's'}",
         )
+        # A missing module beside the file that imports it, in one call where that file
+        # fits whole (#119): the module written with the names it must export — or, if it
+        # shouldn't exist, the import changed instead.
+        paired: dict[str, list[_Planned]] = {}
+        for importer, new in found.new_pairs:
+            stored, entry = stored_at.get(importer), self._entry(new)
+            if stored is None or entry is None or entry not in news or stored in self.too_long:
+                continue
+            w = self.written[stored]
+            missing = [p for p in found.new[new] if p.path == importer]
+            trial = _Written(w.path, w.code, w.language, w.purpose, w.origin,
+                             problems=(list(touch.get(stored, [])) if stored not in paired else w.problems) + missing)
+            if not self._fix_fits([trial]):
+                continue
+            w.problems = trial.problems
+            paired.setdefault(stored, []).append(entry)
+            if self._entry(stored) not in self.edits:
+                self.edits.append(self._entry(stored))
+            touch.setdefault(stored, [])
         # Modules nobody wrote first: the files that import them are then edited
         # against their real exports, rather than told the module doesn't exist.
-        queue = list(news)
+        queue = [e for e in news if not any(e in entries for entries in paired.values())]
         while queue:
             claim.between_calls()
             batch, queue = queue[:1], queue[1:]
             queue = self._write(batch) + queue
             queue = [p for p in queue if p.path not in self.written]
+        for stored, entries in paired.items():
+            claim.between_calls()
+            self._fix_pair(self.written[stored], entries)
+        fixing = [w for w in fixing if w.path not in paired]
         pairs = [(stored_at.get(a), stored_at.get(b)) for a, b in found.pairs]
         for group in self._fix_groups(fixing, pairs):
             claim.between_calls()
@@ -854,6 +886,8 @@ class _Run:
                 "lost_code": list(self.lost),
                 "reverted": list(self.reverted),
                 "unanswered": list(self.unanswered),
+                # Imports pointed at the file they meant, with no model (#119).
+                "repointed": list(self.repointed),
                 # Each new file (#119): the names its importers asked for, what it really
                 # exports, and what it still doesn't — carried to the checker, not hidden.
                 "new_exports": {
@@ -975,6 +1009,59 @@ class _Run:
         for path in landed:
             self.called_with[path] = frozenset(landed)
         self._check(landed)
+
+    def _fix_pair(self, w: _Written, news: list[_Planned]) -> None:
+        """One call for a file and the modules it imports that don't exist (#119): the
+        modules written with the names its import lines take — or, if one shouldn't
+        exist, the import changed instead. The file is judged as any edit is."""
+        for path in [w.path] + [n.path for n in news]:
+            activity.file(path, "fixing" if path == w.path else "writing")
+        planned = [self._plan_entry(w.path)] + news
+        try:
+            resp = self._call(lambda: self._messages(planned, fixing=[w]), planned, "fixing")
+        except _NoRoom:
+            self.too_long.append(w.path)
+            activity.file(w.path, "missing")
+            for n in news:
+                self._unwritten(n)
+            return
+        cut = _cut(resp)
+        self.truncated += 1 if cut else 0
+        blocks = {path: block for path, block in self._match(resp, planned) if block.complete}
+        landed: list[str] = []
+        for entry in planned:
+            block = blocks.get(entry.path)
+            if block is not None:
+                self._land(entry, block.code, block.language)
+                landed.append(entry.path)
+        if not landed:
+            (self.cut_off if cut else self.unanswered).append(w.path)
+            activity.file(w.path, "missing")
+        for n in news:
+            if n.path not in self.written:
+                activity.file(n.path, "missing")  # the import was changed instead, or not
+        for path in landed:
+            self.called_with[path] = frozenset(landed)
+        self._check(landed)
+
+    def _repoint(self, stored: Optional[str], where: str, spec: str, target: str, own: dict[str, str]) -> None:
+        """`stored`'s import of `spec` pointed at `target` instead, with no model (#119)."""
+        w = self.written.get(stored) if stored else None
+        if w is None:
+            return
+        python = where.endswith(".py")
+        if python:
+            new = wiring._python_relative(where, target)  # noqa: SLF001 - one rule
+        else:
+            ext = posixpath.splitext(spec)[1]
+            new = wiring._relative(where, target, ext if ext in _JS else "")  # noqa: SLF001
+        changed = wiring._repoint(w.code, spec, new, python) if new and new != spec else None  # noqa: SLF001
+        if changed is None:
+            return
+        self.written[stored] = _Written(stored, changed, w.language, w.purpose, w.origin)
+        own[where] = changed
+        self.repointed.append({"path": stored, "from": spec, "to": new})
+        log.info("%s: pointed %s's import `%s` at `%s` (the path repeated a folder).", self.agent.title, stored, spec, new)
 
     def _keep_no_worse(
         self, build: Optional[BuildCheck], output: dict, errors: list[str], stack: list[str]
@@ -1328,6 +1415,8 @@ class _Run:
                 partial[path] = block
                 continue
             planned = self._entry(path)
+            if planned is None and self.fix_mode and split_of is None:
+                continue  # a fix round writes the files it asks for, never one unasked (#119)
             if planned is None:
                 origin = "split" if split_of is not None else "unplanned"
                 planned = _Planned(path=path, purpose=f"Split from {split_of.path}" if split_of else "", origin=origin)
@@ -1457,11 +1546,43 @@ class _Run:
                     w.path, f"exports {names}, but never defines {'it' if len(ghosts) == 1 else 'them'}. "
                     f"Define {names} in this file.", "reference",
                 )]
+        if self.fix_mode and w.path in self.needed_by and w.complete and not any(p.kind == "syntax" for p in w.problems):
+            # A new file's own imports answered in the round that wrote it (#119): one that
+            # points at nothing is asked about once more, rather than written as the next
+            # round's new file — the path that grew `routes/routes/api/users/…`.
+            w.problems = w.problems + self._dangling(w)
         w.stack = (
             charter_violations(self.ctx.charter, self.agent.key, {"files": [{"path": w.path, "code": w.code}]})
             if settings.enforce_stack_charter
             else []
         )
+
+    def _dangling(self, w: _Written) -> list[Problem]:
+        """The relative imports of a file this round wrote new that reach no file."""
+        from app.build.scaffold import js_imports, py_imports
+
+        pool = self.tree | set(self.needed_by)
+        here = posixpath.dirname(w.path)
+        out: list[Problem] = []
+        if w.path.endswith(".py"):
+            specs = []
+            for module, level in py_imports(w.code):
+                if level and module:
+                    base = here
+                    for _ in range(level - 1):
+                        base = posixpath.dirname(base)
+                    specs.append(("." * level + module, layout.join(base, *module.split("."))))
+        else:
+            specs = [(spec, layout.join(here, spec)) for spec in dict.fromkeys(js_imports(w.code)) if spec.startswith(".")]
+        for spec, target in specs:
+            if fixscope.find(target, pool) is None:
+                out.append(Problem(
+                    w.path,
+                    f"imports `{spec}`, and no file in this build is at {target}. Import a file that exists, "
+                    "or write what you need in this file.",
+                    "import",
+                ))
+        return out
 
     def _entry(self, path: str) -> Optional[_Planned]:
         return next((p for p in self.planned if p.path == path), None)
@@ -1718,7 +1839,14 @@ class _Run:
             head = f"{_WRITE_NOW} — files {done + 1}–{min(done + len(batch), total)} of {total}"
         lines = [head]
         broken = {w.path: w for w in fixing or []}
+        adding = [p for p in batch if fixing and p.path in self.needed_by and p.path not in broken]
+        if adding:
+            head = f"{_WRITE_NOW} — fix {len(fixing)} file{'s' if len(fixing) > 1 else ''}, add {len(adding)}"
+            lines = [head]
         for p in batch:
+            if p in adding:
+                lines += self._new_lines(p)
+                continue
             line = f"- `{p.path}`"
             if p.purpose:
                 line += f" — {p.purpose}"
@@ -1742,8 +1870,15 @@ class _Run:
                 "Write it shorter as two files: this one, and a new module beside it that takes "
                 "part of its code (this one imports from it). Return both."
             )
-        if fixing:
+        if adding:
+            lines.append(
+                "Write each new file with exactly those exports, and return the file that imports it with "
+                "its problems fixed. Or, if a new file shouldn't exist, change that import instead — the import "
+                "and the lines that use what it brought in, nothing else — and don't write the new file."
+            )
+        elif fixing:
             lines.append("Return each file above in full, with every problem fixed.")
+        if fixing:
             if self.fix_mode:
                 lines.append(
                     "Change only what the problems need. Keep everything else in each file exactly as "
@@ -1795,17 +1930,23 @@ class _Run:
         importer's own import line — and the names it must export (#119)."""
         lines = [f"{_WRITE_NOW} — add {len(batch)} file{'s' if len(batch) > 1 else ''}"]
         for p in batch:
-            lines.append(f"- `{p.path}` (new file)" + (f" — {p.purpose}" if p.purpose else ""))
-            wants = self.wants.get(p.path) or []
-            for want in wants[:4]:
-                lines.append(f"  - `{want.importer}` imports it: `{want.line}`")
-            for problem in self.needed_by.get(p.path, [])[:4]:
-                lines.append(f"  - needed by: {problem.text()}")
-            ask = _export_ask(wants)
-            lines.append(f"  - {ask}" if ask else "  - Write it with exactly what those files import from it.")
+            lines += self._new_lines(p)
         lines += self._instructions()
         lines.append("Answer with `### path` and one fenced block per file — nothing else.")
         return "\n".join(lines) + "\n"
+
+    def _new_lines(self, p: _Planned) -> list[str]:
+        """A new file in an ask (#103, #119): who imports it, by their own lines, and the
+        names it must export."""
+        lines = [f"- `{p.path}` (new file)" + (f" — {p.purpose}" if p.purpose else "")]
+        wants = self.wants.get(p.path) or []
+        for want in wants[:4]:
+            lines.append(f"  - `{want.importer}` imports it: `{want.line}`")
+        for problem in self.needed_by.get(p.path, [])[:4]:
+            lines.append(f"  - needed by: {problem.text()}")
+        ask = _export_ask(wants)
+        lines.append(f"  - {ask}" if ask else "  - Write it with exactly what those files import from it.")
+        return lines
 
     def _plan_text(self, batch: list[_Planned], compact: int) -> str:
         """The plan: whole (0), purposes only outside this batch (1), or paths only (2)."""
