@@ -151,3 +151,13 @@ def test_an_import_line_that_names_nothing_still_gets_the_general_ask(monkeypatc
     from app.agents.code_phase import _export_ask
 
     assert _export_ask([wiring.Wanted("a.js", "import './anim';")]) == ""
+
+
+def test_a_new_file_exporting_a_name_it_never_defines_is_asked_once_more(monkeypatch, stub_router):
+    # What qwen2.5:7b wrote for `const { User } = require('../models/User')`: the name, and
+    # nothing behind it. The compile gate doesn't see an undeclared name in a JS file.
+    ghost = ("function createTodoAnimation() {}\nfunction updateTodoAnimation() {}\n"
+             "module.exports = { createTodoAnimation, updateTodoAnimation, deleteTodoAnimation };\n")
+    result, asked = _round(monkeypatch, [ghost, RIGHT])
+    assert len(asked) == 2 and "exports `deleteTodoAnimation`, but never defines it" in asked[1]
+    assert result.build_status == "ok"

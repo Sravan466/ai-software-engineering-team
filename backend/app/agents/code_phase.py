@@ -1451,6 +1451,15 @@ class _Run:
             missing = wiring.unexported(wants, w.real_exports())
             if missing:
                 w.problems = w.problems + [Problem(w.path, _missing_text(missing, wants), "import")]
+            # ...and the names it exports must exist in it: told to export `User`, a small
+            # model writes `module.exports = { User }` beside a `UserSchema`.
+            ghosts = module_exports.undefined(w.path, w.code)
+            if ghosts:
+                names = ", ".join(f"`{n}`" for n in ghosts)
+                w.problems = w.problems + [Problem(
+                    w.path, f"exports {names}, but never defines {'it' if len(ghosts) == 1 else 'them'}. "
+                    f"Define {names} in this file.", "reference",
+                )]
         w.stack = (
             charter_violations(self.ctx.charter, self.agent.key, {"files": [{"path": w.path, "code": w.code}]})
             if settings.enforce_stack_charter
