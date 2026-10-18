@@ -788,26 +788,31 @@ def last_try(t: dict, attempt: Optional[str]) -> str:
     kept = t.get("kept") or {}
     if not attempt or kept.get("attempt") != attempt:
         return ""
-    rounds = episode(t)
-    start = int(t.get("episode_start") or 0)
-    made_by = kept.get("round")
-    made_by = int(made_by) if isinstance(made_by, int) else 0
-    # The rounds after the one that made the kept attempt: rounds in the episode are
-    # numbered from 1 within it, and "round 0" is the attempt before any round.
-    thrown = [r for r in rounds if r.get("fixed") is not None and int(r.get("n") or 0) - start > made_by]
+    rounds = t.get("rounds") or []
+    current = episode(t)
+    if not current:
+        return ""
+    # Numbered as `trend` and `best_attempt` number them: from the episode's first round,
+    # "round 0" being the attempt before any round.
+    first = rounds.index(current[0])
+    base = int(current[0].get("n") or 1) - 1
+    made_by = int(kept.get("round") or 0)
+    thrown = [(i, rounds[i]) for i in range(first, len(rounds))
+              if rounds[i].get("fixed") is not None and int(rounds[i].get("n") or 0) - base > made_by]
     if not thrown:
         return ""
-    base = "the attempt before any round" if made_by == 0 else f"round {made_by}'s attempt"
-    had = next((r.get("after") for r in rounds if int(r.get("n") or 0) - start == made_by), None)
-    if had is None and thrown:
-        had = len(thrown[0].get("problems") or [])
-    worst = max((int(r.get("after") or 0) for r in thrown), default=0)
-    head = f"The build went back to {base}" + (f" ({had} problem{'' if had == 1 else 's'}, against {worst} after)" if had is not None else "") + "."
+    where = "the attempt before any round" if made_by == 0 else f"round {made_by}'s attempt"
+    had, instead = kept.get("problems"), kept.get("instead_of")
+    if instead is None:
+        instead = after_of(t, thrown[-1][0])
+    head = f"The build went back to {where}" + (
+        f" ({had} problem{'' if had == 1 else 's'} instead of {instead})" if had is not None and instead is not None else ""
+    ) + "."
     checker: list[str] = []
     tried: list[str] = []
-    for r in thrown:
+    for _i, r in thrown:
         seen = r.get("learned") or {}
-        label = f"Round {int(r.get('n') or 0) - start}"
+        label = f"Round {int(r.get('n') or 0) - base}"
         for p in seen.get("found") or []:
             where = f"`{p['where']}`: " if p.get("where") else ""
             checker.append(f"- After {label.lower()}, the checker found {where}{p['title']}")

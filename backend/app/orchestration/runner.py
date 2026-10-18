@@ -975,7 +975,9 @@ class PipelineRunner:
                 t["stopped"]["kept_best"] = best
                 # Which round made it, for the round a Keep trying sends it to — on the
                 # track, so an episode that settles forgets it (the row keeps its marker).
-                t["kept"] = {"attempt": kept.id, "round": best.get("round")}
+                t["kept"] = {"attempt": kept.id, "round": best.get("round"),
+                             # What a round after it is told it was judged against (#119).
+                             "problems": best.get("problems"), "instead_of": best.get("instead_of")}
             autofix.save(project, data)
             db.commit()
             self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))

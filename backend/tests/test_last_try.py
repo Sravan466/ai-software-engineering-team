@@ -40,13 +40,14 @@ def _track(result: str = "r1") -> dict:
         "found": [{"where": "backend/controllers/todos.js", "title": "Module './animations' has no exported member 'createTodoAnimation'."}],
     }
     # The loop put the attempt before any round back, as the copy c0.
-    t["kept"] = {"attempt": "c0", "round": 0}
+    t["kept"] = {"attempt": "c0", "round": 0, "problems": 1, "instead_of": 2}
     return t
 
 
 def test_the_last_try_says_what_was_written_against_what_was_needed():
     text = autofix.last_try(_track(), attempt="c0")  # c0: the copy put back
-    assert text.startswith("The build went back to the attempt before any round (1 problem, against 2 after).")
+    # The same count the stuck card says it was put back from.
+    assert text.startswith("The build went back to the attempt before any round (1 problem instead of 2).")
     assert f"Round 1 added `{NEW}`, exporting `smoothAddTask`. Its importers need `createTodoAnimation`." in text
     # The checker's words first: a clipped section keeps them.
     assert text.index("has no exported member 'createTodoAnimation'") < text.index("Round 1 added")
@@ -146,3 +147,5 @@ def test_from_round_2_the_import_lines_of_files_not_shown_whole_are():
 
     assert _import_statements("import {\n  a,\n  b,\n} from './x';\nconst {\n  c,\n} = require('./y');\n") == [
         "import { a, b, } from './x'", "const { c, } = require('./y')"]
+    # A commented-out import isn't one, and a require written inline is.
+    assert _import_statements("// import old from './old'\napp.use('/t', require('./t'));\n") == ["app.use('/t', require('./t'));"]

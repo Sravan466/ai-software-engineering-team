@@ -1794,14 +1794,14 @@ class _Run:
             )
             # What the last round tried and what the checker said (#119): the attempt was
             # put back, so this one carries none of it.
-            if ctx.last_try:
-                share = min(len(ctx.last_try), budget // 6, max(left - 200, 0))
-                if share >= min(len(ctx.last_try), 200):  # a heading with nothing under it is no help
-                    put("last", f"# What the last try showed\n{_clip(ctx.last_try, share)}\n")
             # What a fix needs next after the files themselves (#103): what the files
             # around them really export, and the code of what they import. The plan,
             # the idea and the digests get what is left.
             put("written", self._written_index(batch))
+            if ctx.last_try:
+                share = min(len(ctx.last_try), budget // 8, max(left - 200, 0))
+                if share >= min(len(ctx.last_try), 200):  # a heading with nothing under it is no help
+                    put("last", f"# What the last try showed\n{_clip(ctx.last_try, share)}\n")
             if ctx.fix_round >= 2:
                 # From round 2 (#119): how each file a problem names imports, where this
                 # call doesn't show it whole — the importer of a module it writes, a file
@@ -2088,7 +2088,7 @@ class _Run:
             message = " ".join(str(q.get("message") or "") for q in self.ctx.fixing if layout.clean(str(q.get("path") or "")) == where)
             statements = _import_statements(w.code)
             # The ones naming a module a problem names first: those are what it's about.
-            statements.sort(key=lambda st: not any(spec in message for spec in re.findall(r"['\"]([^'\"]+)['\"]", st)))
+            statements.sort(key=lambda st: not any(spec and spec in message for spec in _modules_of(st)))
             if statements:
                 out.append(f"`{path}`:\n" + "\n".join(f"    {st}" for st in statements[:8]))
         return "# How the other files these problems name import\n" + "\n".join(out) + "\n" if out else ""
@@ -2426,21 +2426,52 @@ def _strings(value: object) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
-#: An import statement, whole and over several lines where it is written so (#119): ESM,
-#: a side-effect import, a re-export, `require`, and Python's two forms.
+#: An import statement from the start of its line, whole and over several lines where it
+#: is written so (#119): ESM, a side-effect import, a re-export, a `require` bound to a
+#: name, and Python's two forms.
 _IMPORT_STATEMENT = re.compile(
-    r"""\bimport\s+(?:(?!\bimport\b)[^;'"])*?\s*from\s*['"][^'"]+['"]"""
-    r"""|\bimport\s*['"][^'"]+['"]"""
-    r"""|\bexport\s+(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*['"][^'"]+['"]"""
-    r"""|\b(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"][^'"]+['"]\s*\)"""
-    r"""|^[ \t]*from\s+[\w.]+\s+import\s+(?:\([^)]*\)|[^\n]+)|^[ \t]*import\s+[\w., \t]+$""",
+    r"""^[ \t]*(?:import\s+(?:(?!\bimport\b)[^;'"])*?\s*from\s*['"][^'"]+['"]"""
+    r"""|import\s*['"][^'"]+['"]"""
+    r"""|export\s+(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*['"][^'"]+['"]"""
+    r"""|(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"][^'"]+['"]\s*\)"""
+    r"""|from\s+[\w.]+\s+import\s+(?:\([^)]*\)|[^\n]+)|import\s+[\w., \t]+$)""",
     re.MULTILINE,
 )
 
 
 def _import_statements(code: str) -> list[str]:
-    """Every import statement in `code`, each on one line."""
-    return [" ".join(m.group(0).split()) for m in _IMPORT_STATEMENT.finditer(code)]
+    """Every import in `code`, each on one line: whole statements, then the line of any
+    other import the compile gate's reader finds (`app.use('/x', require('./y'))`). One
+    in a comment or a string isn't one."""
+    from app.build.placeholders import lex
+    from app.build.scaffold import js_imports
+
+    bare = lex(code)[0]
+    out: list[str] = []
+    for m in _IMPORT_STATEMENT.finditer(code):
+        start = m.start() + len(m.group(0)) - len(m.group(0).lstrip())
+        if bare[start : start + 3] == code[start : start + 3]:  # the lexer kept its keyword: code
+            out.append(" ".join(m.group(0).split()))
+    shown = " ".join(out)
+    for spec in dict.fromkeys(js_imports(code)):
+        if f"'{spec}'" in shown or f'"{spec}"' in shown:
+            continue
+        for m in re.finditer(r"""['"]""" + re.escape(spec) + r"""['"]""", code):
+            head = code.rfind("\n", 0, m.start()) + 1
+            first = head + len(code[head:m.start()]) - len(code[head:m.start()].lstrip())
+            # The line's first character survived the lexer: the line is code, not a comment.
+            if first < m.start() and bare[first] == code[first]:
+                tail = code.find("\n", m.end())
+                out.append(" ".join(code[head : len(code) if tail < 0 else tail].split()))
+                break
+    return out
+
+
+def _modules_of(statement: str) -> list[str]:
+    """The modules an import statement names, quoted (`'./x'`) or not (`from app.models import`)."""
+    found = re.findall(r"['\"]([^'\"]+)['\"]", statement)
+    found += re.findall(r"^(?:from|import)\s+([\w.]+)", statement)
+    return found
 
 
 def _language(charter) -> Optional[str]:
