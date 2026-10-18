@@ -27,11 +27,12 @@ from __future__ import annotations
 
 import posixpath
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-from app.build import fixscope
+from app.build import fixscope, layout
 from app.build.check import Problem
+from app.build.scaffold import js_imports, py_imports
 
 #: TypeScript's codes for a named import of a default, and a default import of nothing.
 _NAMED_OF_DEFAULT = {2614}
@@ -353,4 +354,122 @@ def mend(problems: Iterable[Problem], files: dict[str, str], tree: Iterable[str]
     return out, made
 
 
-__all__ = ["Fix", "apply_code_fixes", "mend"]
+# ── what an importer takes from a module (#119) ─────────────────────────────
+@dataclass
+class Wanted:
+    """What one file's import of a module takes from it: the import as written, the
+    default it binds (by its local name), and the names it takes by name — a
+    namespace import's or a whole `require`'s members among them."""
+
+    importer: str
+    line: str
+    default: Optional[str] = None
+    named: list[str] = field(default_factory=list)
+    #: The import is `require`, so a default is `module.exports` itself.
+    commonjs: bool = False
+
+    def labels(self) -> list[str]:
+        """As the plan lists exports: `Anim (default)`, then the names."""
+        return ([f"{self.default} (default)"] if self.default else []) + list(self.named)
+
+
+def importers_of(target: str, files: dict[str, str]) -> list[tuple[str, str]]:
+    """(importer, the specifier it wrote) for every file of `files` whose relative or
+    `@/` import resolves to `target`, by the compile gate's own rule."""
+    out: list[tuple[str, str]] = []
+    for path, code in files.items():
+        if path == target:
+            continue
+        if path.endswith(".py"):
+            for module, level in py_imports(code):
+                if not level:
+                    continue
+                base = posixpath.dirname(path)
+                for _ in range(level - 1):
+                    base = posixpath.dirname(base)
+                module_path = layout.join(base, *(module or "").split(".")) if module else base
+                if fixscope.find(module_path, {target}) == target:
+                    out.append((path, "." * level + (module or "")))
+            continue
+        for spec in dict.fromkeys(js_imports(code)):
+            if spec.startswith((".", "@/", "~/")) and fixscope._module_of(path, spec, {target}) == target:  # noqa: SLF001
+                out.append((path, spec))
+    return out
+
+
+def wanted(importer: str, code: str, spec: str) -> Optional[Wanted]:
+    """What `importer`'s import of `spec` takes, read from its own import line — or
+    None when the line isn't one the readers here understand."""
+    if importer.endswith(".py"):
+        return _python_wanted(importer, code, spec)
+    from app.build.placeholders import lex
+
+    bare, _ = lex(code)  # strings and comments emptied: `x.y` in a comment isn't a use
+    esm = _esm_statement(code, spec)
+    if esm is not None:
+        clause = esm.group("clause").strip()
+        line = _line(code, esm.start(), esm.end())
+        star = re.match(rf"\*\s+as\s+({_IDENT})$", clause)
+        if star:
+            return Wanted(importer, line, named=_members(bare, star.group(1)))
+        default, named, ok = _split_clause(clause)
+        return Wanted(importer, line, default=default if ok else None, named=[a for a, _b in named] if ok else [])
+    cjs = _cjs_statement(code, spec)
+    if cjs is not None:
+        lhs, line = cjs.group("lhs"), _line(code, cjs.start(), cjs.end())
+        if lhs.startswith("{"):
+            return Wanted(importer, line, named=[a for a, _b in _cjs_named(lhs) or []], commonjs=True)
+        members = _members(bare, lhs)
+        called = re.search(rf"(?<![\w$.]){re.escape(lhs)}\s*\(|\bnew\s+{re.escape(lhs)}\b", bare)
+        # Used only as a value (`app.use('/todos', todos)`), the module is that value.
+        return Wanted(importer, line, default=lhs if called or not members else None, named=members, commonjs=True)
+    member = re.search(rf"""\brequire\(\s*(['"]){re.escape(spec)}\1\s*\)\.({_IDENT})""", code)
+    if member is not None:
+        return Wanted(importer, _line(code, member.start(), member.end()), named=[member.group(2)], commonjs=True)
+    return None
+
+
+def unexported(wants: Iterable[Wanted], real) -> list[str]:
+    """What `wants` take that `real` (`exports.Exports`) doesn't export: each missing
+    name, and `default` for a default nobody exports. Nothing when a re-export the
+    reader couldn't follow (`export * from`) may hold it."""
+    if real is None or real.star:
+        return []
+    have = {*real.named, *real.types}
+    missing: list[str] = []
+    for want in wants:
+        if want.default and real.default is None and "default" not in missing:
+            missing.append("default")
+        missing += [n for n in want.named if n not in have and n not in missing]
+    return missing
+
+
+def _python_wanted(importer: str, code: str, spec: str) -> Optional[Wanted]:
+    import ast
+
+    level = len(spec) - len(spec.lstrip("."))
+    module = spec[level:] or None
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.level or 0) == level and node.module == module:
+            names = [a.name for a in node.names if a.name != "*"]
+            return Wanted(importer, ast.get_source_segment(code, node) or f"from {spec} import …", named=names)
+    return None
+
+
+def _members(code: str, name: str) -> list[str]:
+    """The names `code` reads off `name`: `anim.fadeIn(…)` -> `fadeIn`."""
+    return list(dict.fromkeys(re.findall(rf"(?<![\w$.]){re.escape(name)}\s*\.\s*({_IDENT})", code)))
+
+
+def _line(code: str, start: int, end: int) -> str:
+    """The statement as written, on one line: an import split over lines reads whole."""
+    head = code.rfind("\n", 0, start) + 1
+    tail = code.find("\n", end)
+    return " ".join(code[head : len(code) if tail < 0 else tail].split())[:300]
+
+
+__all__ = ["Fix", "Wanted", "apply_code_fixes", "importers_of", "mend", "unexported", "wanted"]
