@@ -220,10 +220,42 @@ def test_a_relative_import_is_read_from_the_importer_s_folder_first():
     # The last resort is the one plan file ending in the import's path — never one of two.
     assert _plan_import("main.js", "./models/todo", plan) == "app/models/todo.ts"
     assert _plan_import("lib/x.js", "../user", {"routes/user.js", "app/models/user.js", "lib/x.js"}) is None
-    # A file never imports itself, and a bare name is a package unless a plan file is at it.
-    assert _plan_import("routes/api.js", "./api", plan) is None
+    # A file never imports itself — nor, failing that, the root file of its name.
+    assert _plan_import("routes/api.js", "./api", plan | {"api.js"}) is None
+    # A bare name is a package unless a plan file is at it as written.
     assert _plan_import("main.js", "express", plan) is None
     assert _plan_import("main.js", "user", plan) == "user.js"
+    # A leading `backend/` is the plan's root, placed: written as the placed path, kept.
+    assert _plan_import("main.js", "backend/app/models/user", plan) == "app/models/user.js"
+
+
+def test_a_package_is_never_wired_to_a_plan_file_of_its_name():
+    from app.agents.code_phase import _meant_planned, _plan_import
+
+    plan = {"src/firebase/auth.js", "src/hooks/useAuth.js", "chart.jsx", "app/email/utils.py", "app/main.py", "a/y.py", "a/x.js"}
+    assert _plan_import("src/hooks/useAuth.js", "firebase/auth", plan) is None
+    assert _plan_import("app/main.py", "email.utils", plan) is None
+    assert _plan_import("main.ts", "chart.js", plan) is None
+    assert not _meant_planned("chart.js", {"src", "app"}, python=False)
+    assert not _meant_planned("next/router", {"src", "app"}, python=False)
+    assert _meant_planned("app.models.user", {"src", "app"}, python=True)
+    # A JavaScript import is never a Python file, nor `./x.py` a JavaScript one.
+    assert _plan_import("a/x.js", "./y.js", plan) is None
+    assert _plan_import("a/z.py", "./x.py", plan) is None
+
+
+def test_the_gate_and_normalise_agree_on_placed_paths_and_platform_files():
+    agent = BackendEngineerAgent()
+    files = [{"path": "app/models/todo.js"}, {"path": "app/controllers/t.js", "imports": ["backend/app/models/todo.js"]},
+             {"path": "main.js", "imports": ["backend/app/controllers/t"]}]
+    assert agent.plan_problems({"files": files}, AgentContext(idea="x")) == []
+    out = _normalised(files)
+    assert out["backend/main.js"].imports == ["backend/app/controllers/t.js"]
+    # A file the platform writes is no wiring the gate counts, and its import is recorded.
+    files = [{"path": "main.js", "imports": ["./jest.config.js"]}, {"path": "jest.config.js"}, {"path": "app/x.js"},
+             {"path": "app/y.js"}]
+    assert agent.plan_problems({"files": files}, AgentContext(idea="x"))
+    assert _normalised(files)["backend/main.js"].dropped == ["./jest.config.js"]
 
 
 def test_python_modules_resolve_by_package_and_relative_dots():
@@ -265,3 +297,16 @@ def test_a_plan_whose_imports_all_resolve_nowhere_is_asked_again():
                       {"path": "app/routes/todos.js", "imports": ["../models/gone"]}]}
     [problem] = agent.plan_problems(plan, AgentContext(idea="x"))
     assert "no file lists its `imports`" in problem
+
+
+def test_a_change_s_new_file_keeps_an_import_written_the_javascript_way(monkeypatch):
+    from tests.test_code_phases import SMALL, Scripted, _run
+
+    model = Scripted("Backend Engineer", [{"path": "app/controllers/streak.js", "purpose": "streaks", "imports": ["../models/todo"]}])
+    base = {"summary": "s", "files": [{"path": "backend/app/models/todo.js", "language": "javascript",
+                                        "code": "module.exports = { Todo: 1 };\n"}]}
+    ctx = AgentContext(idea="A todo app", prior_outputs={}, change="Add streaks", base_output=base)
+    result = _run(monkeypatch, "backend_engineer", model, SMALL, ctx)
+    assert "backend/app/controllers/streak.js" in {f["path"] for f in result.output["files"]}
+    ask = next(p for p, w in zip(model.prompts[1:], model.writes) if w == ["backend/app/controllers/streak.js"])
+    assert "Imports: backend/app/models/todo.js" in ask and "module.exports = { Todo: 1 };" in ask
