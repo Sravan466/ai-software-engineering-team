@@ -907,11 +907,12 @@ class _Run:
                 # exports, and what it still doesn't — carried to the checker, not hidden.
                 "new_exports": {
                     path: {
-                        "asked": (self._entry(path).promised or self._entry(path).exports) if self._entry(path) else [],
+                        # What its importers' lines take — never its own names standing in.
+                        "asked": list(dict.fromkeys(label for w in wants for label in w.labels()))[:20],
                         "exported": (real.labels() if real is not None else None),
                         "missing": wiring.unexported(wants, real, self.written[path].code),
                     }
-                    for path, wants in self.wants.items() if wants and path in self.written
+                    for path, wants in self.wants.items() if path in self.written
                     for real in [self.written[path].real_exports()]
                 },
                 # The person's note (#103): "unsent" when the round made no call at all,
@@ -1791,10 +1792,21 @@ class _Run:
             self._person_put = bool(ctx.person_note) and put(
                 "person", f"# What the person asks you to try\n{ctx.person_note.strip()}\n"
             )
+            # What the last round tried and what the checker said (#119): the attempt was
+            # put back, so this one carries none of it.
             # What a fix needs next after the files themselves (#103): what the files
             # around them really export, and the code of what they import. The plan,
             # the idea and the digests get what is left.
             put("written", self._written_index(batch))
+            if ctx.last_try:
+                share = min(len(ctx.last_try), budget // 8, max(left - 200, 0))
+                if share >= min(len(ctx.last_try), 200):  # a heading with nothing under it is no help
+                    put("last", f"# What the last try showed\n{_clip(ctx.last_try, share)}\n")
+            if ctx.fix_round >= 2:
+                # From round 2 (#119): how each file a problem names imports, where this
+                # call doesn't show it whole — the importer of a module it writes, a file
+                # too long to show.
+                put("imports", self._named_imports({p.path for p in batch} | {w.path for w in fixing or []}))
             put("bodies", self._bodies(batch, int(left * 0.5)))
         for compact in (0, 1, 2):
             if put("plan", self._plan_text(batch, compact)):
@@ -1846,9 +1858,9 @@ class _Run:
 
         order = [
             "idea", *[k for k in sections if k.startswith("dep:")], "skills", "rag", "memory",
-            "extra", "change", "feedback", "plan", "written", "bodies",
-            # Next to the ask it is about (#103).
-            "person",
+            "extra", "change", "feedback", "plan", "written", "imports", "bodies",
+            # Next to the ask it is about (#103, #119).
+            "last", "person",
         ]
         parts = [sections[k] for k in order if k in sections]
         parts.append(sections.get("write", ""))
@@ -2059,6 +2071,27 @@ class _Run:
                 line += f". Exports: {', '.join(planned.exports[:12])}"
             lines.append(line)
         return "\n".join(lines) + "\n"
+
+    def _named_imports(self, shown: set[str]) -> str:
+        """The import lines of every file the round's problems name that isn't in
+        `shown` (#119)."""
+        stored_at = {where: stored for stored, where in self.place_of.items()}
+        out: list[str] = []
+        seen: set[str] = set()
+        for p in self.ctx.fixing:
+            where = layout.clean(str(p.get("path") or ""))
+            path = stored_at.get(where, where)
+            w = self.written.get(path)
+            if w is None or path in shown or path in seen:
+                continue
+            seen.add(path)
+            message = " ".join(str(q.get("message") or "") for q in self.ctx.fixing if layout.clean(str(q.get("path") or "")) == where)
+            statements = _import_statements(w.code)
+            # The ones naming a module a problem names first: those are what it's about.
+            statements.sort(key=lambda st: not any(spec and spec in message for spec in _modules_of(st)))
+            if statements:
+                out.append(f"`{path}`:\n" + "\n".join(f"    {st}" for st in statements[:8]))
+        return "# How the other files these problems name import\n" + "\n".join(out) + "\n" if out else ""
 
     def _bodies(self, batch: list[_Planned], room: int) -> str:
         """The code of written files this batch imports, whole, while they fit."""
@@ -2391,6 +2424,54 @@ def _strings(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(v).strip() for v in value if str(v).strip()]
+
+
+#: An import statement from the start of its line, whole and over several lines where it
+#: is written so (#119): ESM, a side-effect import, a re-export, a `require` bound to a
+#: name, and Python's two forms.
+_IMPORT_STATEMENT = re.compile(
+    r"""^[ \t]*(?:import\s+(?:(?!\bimport\b)[^;'"])*?\s*from\s*['"][^'"]+['"]"""
+    r"""|import\s*['"][^'"]+['"]"""
+    r"""|export\s+(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*['"][^'"]+['"]"""
+    r"""|(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"][^'"]+['"]\s*\)"""
+    r"""|from\s+[\w.]+\s+import\s+(?:\([^)]*\)|[^\n]+)|import\s+[\w., \t]+$)""",
+    re.MULTILINE,
+)
+
+
+def _import_statements(code: str) -> list[str]:
+    """Every import in `code`, each on one line: whole statements, then the line of any
+    other import the compile gate's reader finds (`app.use('/x', require('./y'))`). One
+    in a comment or a string isn't one."""
+    from app.build.placeholders import lex
+    from app.build.scaffold import js_imports
+
+    bare = lex(code)[0]
+    out: list[str] = []
+    for m in _IMPORT_STATEMENT.finditer(code):
+        start = m.start() + len(m.group(0)) - len(m.group(0).lstrip())
+        if bare[start : start + 3] == code[start : start + 3]:  # the lexer kept its keyword: code
+            out.append(" ".join(m.group(0).split()))
+    shown = " ".join(out)
+    for spec in dict.fromkeys(js_imports(code)):
+        if f"'{spec}'" in shown or f'"{spec}"' in shown:
+            continue
+        for m in re.finditer(r"""['"]""" + re.escape(spec) + r"""['"]""", code):
+            head = code.rfind("\n", 0, m.start()) + 1
+            first = head + len(code[head:m.start()]) - len(code[head:m.start()].lstrip())
+            # The line's first character survived the lexer: the line is code, not a comment.
+            if first < m.start() and bare[first] == code[first]:
+                tail = code.find("\n", m.end())
+                out.append(" ".join(code[head : len(code) if tail < 0 else tail].split()))
+                break
+    return out
+
+
+def _modules_of(statement: str) -> list[str]:
+    """The modules an import statement names, quoted (`'./x'`) or not (`from app.models import`)."""
+    found = re.findall(r"['\"]([^'\"]+)['\"]", statement)
+    found += re.findall(r"^(?:from|import)\s+([\w.]+)", statement)
+    return found
 
 
 def _language(charter) -> Optional[str]:

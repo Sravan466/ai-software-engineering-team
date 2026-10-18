@@ -923,6 +923,11 @@ class PipelineRunner:
             autofix.settle(t)
         closed = autofix.close_round(t, keys, attempt=row.id, net=True)
         if closed is not None:
+            # What the round tried and what the checker said (#119), for a round after it
+            # that starts from an attempt the loop put back.
+            seen = autofix.learned(row, [p["key"] for p in t["rounds"][-1].get("problems") or []], problems)
+            if seen:
+                t["rounds"][-1]["learned"] = seen
             # What the round ran on, and why (#103): its label says that, not its plan.
             pick = row.model_pick or {}
             basis = pick.get("basis")
@@ -970,7 +975,9 @@ class PipelineRunner:
                 t["stopped"]["kept_best"] = best
                 # Which round made it, for the round a Keep trying sends it to — on the
                 # track, so an episode that settles forgets it (the row keeps its marker).
-                t["kept"] = {"attempt": kept.id, "round": best.get("round")}
+                t["kept"] = {"attempt": kept.id, "round": best.get("round"),
+                             # What a round after it is told it was judged against (#119).
+                             "problems": best.get("problems"), "instead_of": best.get("instead_of")}
             autofix.save(project, data)
             db.commit()
             self._park(db, project, Gate(GateKind.NEEDS_HELP.value, self._help_note(project)))
@@ -985,6 +992,8 @@ class PipelineRunner:
         said, person, decided = autofix.take_person(t)
         one_off = t.pop("one_off", None)
         kept_now = t.get("kept") or {}
+        # What the last round learned, when this attempt isn't the one it left (#119).
+        last = autofix.last_try(t, row.id)
         record = autofix.start_round(
             t, strategy, [row.phase], problems, attempt=row.id,
             # An attempt the loop put back says which round made it (#103).
@@ -1023,12 +1032,13 @@ class PipelineRunner:
             db,
             project,
             row.phase,
-            autofix.code_note(problems, k, snippets, standing, person),
+            autofix.code_note(problems, k, snippets, standing, person, last=last),
             continue_after=True,
             fix_track=name,
             # The person's words get their own place in the fix ask, never clipped away
             # behind the standing note.
-            fix={"problems": autofix.fix_scope(row), "note": standing or "", "person": person or ""} if in_place else None,
+            fix={"problems": autofix.fix_scope(row), "note": standing or "", "person": person or "",
+                 "last": last, "round": k} if in_place else None,
             pin=one_off or (stronger if strategy == remediation.STRATEGY_STRONGER else None),
             pin_basis="asked" if one_off else "escalated",
         )
@@ -2045,6 +2055,8 @@ class PipelineRunner:
                             ctx.fixing = tuple(fix.get("problems") or ())
                             ctx.fix_note = str(fix.get("note") or "")
                             ctx.person_note = str(fix.get("person") or "")
+                            ctx.last_try = str(fix.get("last") or "")
+                            ctx.fix_round = int(fix.get("round") or 0)
                     # Inside the lock, model call and all. This is a read-modify-write:
                     # the patch below is built from the snapshot above, so a write to this
                     # checkpoint in between would be silently overwritten by it. The lock
