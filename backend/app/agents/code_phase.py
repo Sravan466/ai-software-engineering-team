@@ -907,7 +907,8 @@ class _Run:
                 # exports, and what it still doesn't — carried to the checker, not hidden.
                 "new_exports": {
                     path: {
-                        "asked": (self._entry(path).promised or self._entry(path).exports) if self._entry(path) else [],
+                        # What its importers' lines take — never its own names standing in.
+                        "asked": list(dict.fromkeys(label for w in wants for label in w.labels()))[:20],
                         "exported": (real.labels() if real is not None else None),
                         "missing": wiring.unexported(wants, real, self.written[path].code),
                     }
@@ -1795,7 +1796,8 @@ class _Run:
             # put back, so this one carries none of it.
             if ctx.last_try:
                 share = min(len(ctx.last_try), budget // 6, max(left - 200, 0))
-                put("last", f"# What the last try showed\n{_clip(ctx.last_try, share)}\n")
+                if share >= min(len(ctx.last_try), 200):  # a heading with nothing under it is no help
+                    put("last", f"# What the last try showed\n{_clip(ctx.last_try, share)}\n")
             # What a fix needs next after the files themselves (#103): what the files
             # around them really export, and the code of what they import. The plan,
             # the idea and the digests get what is left.
@@ -2075,15 +2077,20 @@ class _Run:
         `shown` (#119)."""
         stored_at = {where: stored for stored, where in self.place_of.items()}
         out: list[str] = []
+        seen: set[str] = set()
         for p in self.ctx.fixing:
             where = layout.clean(str(p.get("path") or ""))
             path = stored_at.get(where, where)
             w = self.written.get(path)
-            if w is None or path in shown or any(o.startswith(f"`{path}`") for o in out):
+            if w is None or path in shown or path in seen:
                 continue
-            lines = [line.strip() for line in w.code.splitlines() if _IMPORT_LINE.match(line)][:8]
-            if lines:
-                out.append(f"`{path}`:\n" + "\n".join(f"    {line}" for line in lines))
+            seen.add(path)
+            message = " ".join(str(q.get("message") or "") for q in self.ctx.fixing if layout.clean(str(q.get("path") or "")) == where)
+            statements = _import_statements(w.code)
+            # The ones naming a module a problem names first: those are what it's about.
+            statements.sort(key=lambda st: not any(spec in message for spec in re.findall(r"['\"]([^'\"]+)['\"]", st)))
+            if statements:
+                out.append(f"`{path}`:\n" + "\n".join(f"    {st}" for st in statements[:8]))
         return "# How the other files these problems name import\n" + "\n".join(out) + "\n" if out else ""
 
     def _bodies(self, batch: list[_Planned], room: int) -> str:
@@ -2419,10 +2426,21 @@ def _strings(value: object) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
-#: A line that imports: ESM, a re-export, `require`, or Python's two forms (#119).
-_IMPORT_LINE = re.compile(
-    r"^\s*(?:import\s|export\s+(?:\*|\{[^}]*\})\s*from\s|(?:const|let|var)\s+[^=]+=\s*require\(|from\s+\S+\s+import\s)"
+#: An import statement, whole and over several lines where it is written so (#119): ESM,
+#: a side-effect import, a re-export, `require`, and Python's two forms.
+_IMPORT_STATEMENT = re.compile(
+    r"""\bimport\s+(?:(?!\bimport\b)[^;'"])*?\s*from\s*['"][^'"]+['"]"""
+    r"""|\bimport\s*['"][^'"]+['"]"""
+    r"""|\bexport\s+(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*['"][^'"]+['"]"""
+    r"""|\b(?:const|let|var)\s+(?:\{[^}]*\}|[\w$]+)\s*=\s*require\(\s*['"][^'"]+['"]\s*\)"""
+    r"""|^[ \t]*from\s+[\w.]+\s+import\s+(?:\([^)]*\)|[^\n]+)|^[ \t]*import\s+[\w., \t]+$""",
+    re.MULTILINE,
 )
+
+
+def _import_statements(code: str) -> list[str]:
+    """Every import statement in `code`, each on one line."""
+    return [" ".join(m.group(0).split()) for m in _IMPORT_STATEMENT.finditer(code)]
 
 
 def _language(charter) -> Optional[str]:

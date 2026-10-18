@@ -781,29 +781,49 @@ def learned(row, sent: Iterable[str], problems: list[dict]) -> Optional[dict]:
 
 
 def last_try(t: dict, attempt: Optional[str]) -> str:
-    """The "last try" a code round is told (#119): what the episode's latest round tried
-    and what the checker then said — when the attempt now being fixed isn't the one it
-    left, because the loop put an earlier one back. Facts, not "do not repeat it"."""
-    last = next(
-        (r for r in reversed(episode(t)) if r.get("fixed") is not None and r.get("learned")), None
-    )
-    if last is None or not attempt or last.get("result") == attempt:
+    """The "last try" a code round is told (#119): when the attempt it fixes is the one
+    the loop put back (`t["kept"]`), what every round after that attempt tried — the
+    work the put-back threw away — and what the checker then said. Facts, not "do not
+    repeat it". Nothing for any other attempt, and nothing once the episode settles."""
+    kept = t.get("kept") or {}
+    if not attempt or kept.get("attempt") != attempt:
         return ""
-    seen = last["learned"]
-    lines = [f"Round {last.get('n')} tried this and was put back, because it left more problems than it fixed:"]
-    for path, e in (seen.get("exports") or {}).items():
-        exported = ", ".join(f"`{n}`" for n in e.get("exported") or []) or "nothing"
-        asked = ", ".join(f"`{n}`" for n in e.get("asked") or [])
-        lines.append(f"- It added `{path}`, exporting {exported}." + (f" Its importers need {asked}." if asked else ""))
-    for path in seen.get("added") or []:
-        if path not in (seen.get("exports") or {}):
-            lines.append(f"- It added `{path}`.")
-    for path in seen.get("changed") or []:
-        lines.append(f"- It changed `{path}`.")
-    for p in seen.get("found") or []:
-        where = f"`{p['where']}`: " if p.get("where") else ""
-        lines.append(f"- The checker then found {where}{p['title']}")
-    return "\n".join(lines)
+    rounds = episode(t)
+    start = int(t.get("episode_start") or 0)
+    made_by = kept.get("round")
+    made_by = int(made_by) if isinstance(made_by, int) else 0
+    # The rounds after the one that made the kept attempt: rounds in the episode are
+    # numbered from 1 within it, and "round 0" is the attempt before any round.
+    thrown = [r for r in rounds if r.get("fixed") is not None and int(r.get("n") or 0) - start > made_by]
+    if not thrown:
+        return ""
+    base = "the attempt before any round" if made_by == 0 else f"round {made_by}'s attempt"
+    had = next((r.get("after") for r in rounds if int(r.get("n") or 0) - start == made_by), None)
+    if had is None and thrown:
+        had = len(thrown[0].get("problems") or [])
+    worst = max((int(r.get("after") or 0) for r in thrown), default=0)
+    head = f"The build went back to {base}" + (f" ({had} problem{'' if had == 1 else 's'}, against {worst} after)" if had is not None else "") + "."
+    checker: list[str] = []
+    tried: list[str] = []
+    for r in thrown:
+        seen = r.get("learned") or {}
+        label = f"Round {int(r.get('n') or 0) - start}"
+        for p in seen.get("found") or []:
+            where = f"`{p['where']}`: " if p.get("where") else ""
+            checker.append(f"- After {label.lower()}, the checker found {where}{p['title']}")
+        for path, e in (seen.get("exports") or {}).items():
+            exported = ", ".join(f"`{n}`" for n in e.get("exported") or []) or "nothing"
+            asked = ", ".join(f"`{n}`" for n in e.get("asked") or [])
+            tried.append(f"- {label} added `{path}`, exporting {exported}." + (f" Its importers need {asked}." if asked else ""))
+        for path in seen.get("added") or []:
+            if path not in (seen.get("exports") or {}):
+                tried.append(f"- {label} added `{path}`.")
+        for path in seen.get("changed") or []:
+            tried.append(f"- {label} changed `{path}`.")
+    if not checker and not tried:
+        return ""
+    # The checker's words first: they are what a clipped section must keep.
+    return "\n".join([head + " What was tried after it, and what the checker said:"] + checker + tried)
 
 
 CODE_NOTE_PREFIX = "Your last deliverable still has problems"
@@ -839,8 +859,8 @@ def code_note(
     # What the last round tried and what the checker said (#119), where it is known;
     # "it didn't work" only where it isn't.
     retry = (
-        f"\n\nThis is fix round {round_number}. {last}\nFix it another way: check that every import "
-        "resolves and every file parses before you return them."
+        f"\n\nThis is fix round {round_number}. {last}\nFix it another way: change the files named above, "
+        "and check that every import resolves and every file parses before you return them."
         if round_number > 1 and last
         else f"\n\nThis is fix round {round_number}. The previous attempt did not fix these. "
         "Do not repeat it: change the files named above, and check that every import "
